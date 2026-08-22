@@ -42,7 +42,17 @@ import {
 import {
   getJobsRoot,
   getEventLogPath,
-  getClusterHosts,
+  // CTL-1785: heartbeat reads (readClusterHeartbeats) are an ENTITLEMENT gate (who
+  // may own/take work), so they hash over the entitled roster. In `off` mode
+  // (default) getEntitledHosts() === getClusterHosts(), so this is behavior-neutral.
+  // reclaimDeadHostWork ALSO uses this, but only to narrow survivor eligibility —
+  // see the EXISTENCE VS ENTITLEMENT note on that function for the full split.
+  getEntitledHosts,
+  // CTL-1785 (code review, chatgpt-codex-connector P1): reclaimDeadHostWork's
+  // victim discovery (the single-host guard, deadHosts, ownedTicketsForHost) must
+  // hash over the EXISTENCE roster, not the entitled one — a shed-but-silent host
+  // must still be found dead and reclaimed. See reclaimDeadHostWork below.
+  getExistenceHosts,
   getHostName,
   getLivenessAnchorIssue,
   getLivenessReadSource, // CTL-1420 (#17): loki|linear cross-host liveness source
@@ -4226,11 +4236,18 @@ export function recoverStartup({ orchDir, exec, statJob, detectCold = detectCold
 //              whatever the file happens to be.
 export const HEARTBEAT_TAIL_MIN_BYTES = 1024 * 1024; // 1 MiB
 export const HEARTBEAT_TAIL_CEILING_BYTES = 1024 * 1024 * 1024; // 1 GiB
+// HEARTBEAT_TAIL_DEFAULT_BYTES — CTL-1550. The shared DEFAULT_TAIL_MAX_BYTES (64 MiB)
+// covers only ~10.3 h at the fleet's worst-case ~6.2 MiB/h (measured 2026-08-19),
+// short of the 12 h HEARTBEAT_TAIL_WINDOW_MS the coverage proof requires — so the
+// heartbeat scan reported covered:false and degraded to the full roster on 100% of
+// ticks. 128 MiB proves ~20.7 h (1.7x headroom). Cost is bounded: one memoized scan
+// per tick, heartbeat-only lineFilter, one-chunk peak memory. Ceiling stays 1 GiB.
+export const HEARTBEAT_TAIL_DEFAULT_BYTES = 128 * 1024 * 1024;
 
 export function resolveHeartbeatTailMaxBytes(
   raw,
   {
-    defaultBytes = DEFAULT_TAIL_MAX_BYTES,
+    defaultBytes = HEARTBEAT_TAIL_DEFAULT_BYTES,
     min = HEARTBEAT_TAIL_MIN_BYTES,
     max = HEARTBEAT_TAIL_CEILING_BYTES,
     onInvalid = null,
@@ -4561,7 +4578,7 @@ export function makeTickHeartbeatReader({ scanLocal = null, ...scanOpts } = {}) 
 // not a whole-file read. Peak transient is one chunk regardless of log size.
 export function readClusterHeartbeats({
   logPath = getEventLogPath(),
-  roster = getClusterHosts(),
+  roster = getEntitledHosts(),
   anchorIssue = getLivenessAnchorIssue(),
   readPeers = defaultReadPeers, // CTL-1420 (#17): loki|linear source-aware peer read
   // CTL-1529 bounded-read seams. `scanLocal` is a zero-arg memo (makeHeartbeatScanMemo)
@@ -5006,6 +5023,19 @@ function writeLocalClusterGeneration(orchDir, ticket, generation) {
 // SINGLE-HOST INSTALLS ARE AN EXACT NO-OP: the function short-circuits immediately
 // when `roster.length <= 1`. Every new behavior is gated on multiHost.
 //
+// EXISTENCE VS ENTITLEMENT (CTL-1785, code review chatgpt-codex-connector P1):
+// `roster` here is the EXISTENCE roster (defaults to getExistenceHosts(), same as
+// the scheduler.mjs call site's own pre-check — see its "EXISTENCE-gated" comment)
+// and drives victim discovery: the single-host guard, deadHosts(), and
+// ownedTicketsForHost(). A host shed from ENTITLEMENT still physically exists, so
+// its work must remain reclaimable — hashing victim discovery over the entitled
+// roster instead would silently drop a shed-and-silent host from `dead` and orphan
+// its in-flight tickets forever (the exact CTL-1760 blind spot this ticket closes).
+// Entitlement only narrows the SURVIVOR set below, via getEntitledHosts({ hosts }):
+// a shed host must never become the new owner of reclaimed work. In `off` mode
+// (default) getEntitledHosts() is the identity function over its `hosts` input, so
+// this narrowing is behavior-neutral until entitlement is actually enforced.
+//
 // All collaborators are injectable for unit tests (no network, fs, or subprocess
 // in tests — they inject fakes for every seam).
 export async function reclaimDeadHostWork(
@@ -5017,7 +5047,10 @@ export async function reclaimDeadHostWork(
     // to the caller's .catch and the sweep is skipped for this tick (conservative:
     // no reclaim on unproven data). Production threads the tick's SHARED reader in.
     readHeartbeats = () => readClusterHeartbeats({ requireGraceWindow: true }),
-    roster = getClusterHosts(),
+    // CTL-1785: EXISTENCE roster for victim discovery — see the EXISTENCE VS
+    // ENTITLEMENT note above. Every current test injects an explicit array here
+    // (never relies on this default), so this default only affects production.
+    roster = getExistenceHosts(),
     self = getHostName(),
     graceMs = HEARTBEAT_GRACE_MS,
     nowMs = Date.now(),
@@ -5053,12 +5086,16 @@ export async function reclaimDeadHostWork(
   const dead = deadHosts({ lastSeen, roster, graceMs, nowMs });
   if (dead.length === 0) return { taken };
 
-  const survivors = survivingRoster(roster, dead);
+  // CTL-1785: survivors narrows the EXISTENCE-alive set down to hosts that are
+  // also currently ENTITLED — a shed survivor must never win HRW ownership of
+  // reclaimed work. getEntitledHosts({ hosts }) is the identity function in `off`
+  // mode (default), so this is behavior-neutral until entitlement is enforced.
+  const survivors = getEntitledHosts({ hosts: survivingRoster(roster, dead) });
 
   for (const deadHost of dead) {
     const tickets = ownedTicketsForHost(deadHost) ?? [];
     for (const ticket of tickets) {
-      // HRW check: are we the new owner over the surviving roster?
+      // HRW check: are we the new owner over the surviving (existence ∩ entitled) roster?
       if (ownerFn(ticket, survivors) !== self) continue;
 
       // Soft-CAS claim: bump generation to take ownership.

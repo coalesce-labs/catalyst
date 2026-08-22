@@ -1,24 +1,44 @@
 #!/usr/bin/env node
-// linear-reply.mjs — post a MACHINE reply on a Linear issue the way Ryan asked (2026-08-17):
-//   • threaded UNDER the human's comment (parentId = the ROOT of that thread; Linear threads are
-//     one level deep, so a reply-to-a-reply must target the root — measured, CTL-1891),
-//   • authored as the APP ACTOR ("Catalyst Cloud"), never as the personal token (a personal-identity
-//     comment reads as the human deciding and clears `needs-human` — CTL-1567 gate),
-//   • tagged with the agent's name via createAsUser (shows as botActor.userDisplayName).
+// linear-reply.mjs — CTL-1958. Post a MACHINE reply on a Linear issue via the cloud write
+// proxy, credential-free:
+//   • threaded UNDER the human's comment (parentId = the ROOT of that thread; Linear threads
+//     are one level deep, so a reply-to-a-reply must target the root — measured, CTL-1891),
+//   • authored as the app actor ("Catalyst Cloud"), never as a personal token (a
+//     personal-identity comment reads as the human deciding and clears `needs-human`),
+//   • the agent tag rendered in the BODY (see the identity note below).
 //
 // Usage:
-//   node linear-reply.mjs <ISSUE-ID> --as <AGENT> --body <markdown> [--parent <commentId>|--top]
+//   node linear-reply.mjs <ISSUE-ID> --as <AGENT> --body <markdown> [--parent <commentId>|--top] [--keep-eyes]
 //   (body may also come from stdin: --body -)
-// Env: LINEAR_SYNC_CLIENT_ID / LINEAR_SYNC_CLIENT_SECRET (direnv catalyst-cloud profile).
-// Without --parent/--top: threads under the ROOT of the most recent comment authored by a HUMAN
-// (non-bot) user on the issue; if none exists, posts top-level.
-// Prints JSON {ok, commentId, parentId, url} on success; non-zero exit + message on failure.
-
+// Without --parent/--top: threads under the ROOT of the most recent comment authored by a
+// HUMAN (non-bot) user on the issue; if none exists, posts top-level.
+// Prints JSON {ok, via, parentId, eyesCleared} on success; non-zero exit + message on failure.
+//
+// ⛔ CTL-1958 — PROXY-OR-REFUSE, NO CREDENTIAL LEFT. This tool used to mint an app-actor
+// token to (a) READ the issue's comments (to find the latest human comment + its reactions)
+// and (b) WRITE the comment directly against the Linear GraphQL API. That mint is the
+// per-host "Catalyst Orchestrator" credential CTL-1889 exists to retire, so it is GONE:
+//   • the READ moves to the local Catalyst-Cloud replica (credential-free) via
+//     readReplyContext / readCommentThreadRoot / readIssueId; a missing/unreadable replica
+//     throws LOUDLY, never a silent "no comment",
+//   • the comment WRITE goes through the CTC-724 cloud `comment` route; any non-`proxy`
+//     resolution REFUSES and posts nothing (AC3),
+//   • the direct comment-create and direct reaction-delete fallbacks are DELETED.
+//
+// ⛔ PER-AGENT IDENTITY IS DROPPED UNTIL CTC-762. The cloud `comment` route accepts only
+// {issueId, body, parentId?} — it has no parameter for the per-agent author name or avatar
+// the old direct mutation passed, so the comment posts as the generic cloud app actor. That
+// is a real reader-UX regression, mitigated by rendering the `--as <AGENT>` tag in the body
+// (below). The AC requires *app-actor* authorship (preserved), not per-agent identity.
+//
+// ⛔ THE EYES-CLEAR IS BEST-EFFORT, INCLUDING UNDER ENFORCE. It runs AFTER the comment has
+// already been posted; refusing there would report FAILURE for a reply that succeeded, and
+// ask.mjs could retry into a DOUBLE-POSTED comment. So a failed clear warns and leaves the
+// exit code 0. (linear-ack is deliberately different: there the reaction IS the whole
+// operation, so refusing is correct — nothing has been written to contradict.)
 import { readFileSync } from "node:fs";
-
-const GQL = "https://api.linear.app/graphql";
-const OAUTH = "https://api.linear.app/oauth/token";
-const SCOPE = "read,write,comments:create,app:assignable,app:mentionable";
+import { readReplyContext, readIssueId, readCommentThreadRoot, isReplicaCurrent } from "./execution-core/replica-comment-read.mjs";
+import { getReplicaDbPath } from "./execution-core/config.mjs";
 
 function arg(name, dflt) {
   const i = process.argv.indexOf(name);
@@ -29,64 +49,64 @@ const asAgent = arg("--as", "COORD");
 let body = arg("--body", "");
 const parentArg = arg("--parent", null);
 const top = process.argv.includes("--top");
+const keepEyes = process.argv.includes("--keep-eyes");
 if (!issueKey || !body) {
-  console.error("usage: linear-reply.mjs <ISSUE-ID> --as <AGENT> --body <markdown|-> [--parent <id>|--top]");
+  console.error("usage: linear-reply.mjs <ISSUE-ID> --as <AGENT> --body <markdown|-> [--parent <id>|--top] [--keep-eyes]");
   process.exit(2);
 }
 if (body === "-") body = readFileSync(0, "utf8");
+// Identity-loss mitigation (see header): the cloud posts as a generic app actor, so keep the
+// agent tag visible in the body itself.
+const postBody = `${body}\n\n— _${asAgent}_`;
 
-const cid = process.env.LINEAR_SYNC_CLIENT_ID, csec = process.env.LINEAR_SYNC_CLIENT_SECRET;
-if (!cid || !csec) { console.error("LINEAR_SYNC_CLIENT_ID/SECRET missing (run under direnv)"); process.exit(2); }
-
-async function mint() {
-  const r = await fetch(OAUTH, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ grant_type: "client_credentials", client_id: cid, client_secret: csec, scope: SCOPE, actor: "app" }),
-  });
-  const j = await r.json();
-  if (!j.access_token) throw new Error("mint failed: " + JSON.stringify(j).slice(0, 200));
-  return j.access_token;
+// Resolve the issue's internal id (needed for the proxy `comment` payload) + the thread
+// parent + the 👀 clear target, all credential-free from the replica. A missing/unreadable
+// replica throws ReplicaUnavailableError (loud) rather than degrading to a silent no-op.
+const DB = getReplicaDbPath();
+// CTL-1958: SURFACE a stale replica rather than silently trusting it (the freshness gate the leaf
+// exports for exactly this). A present-but-stale replica could miss a very-recently-posted human
+// comment → we'd thread top-level or under the wrong root. WARN, don't hard-fail — bounded by the
+// ≤5-min freshness threshold, and the read is still the best answer (eyes-clear is best-effort).
+if (!isReplicaCurrent(DB)) {
+  console.error("linear-reply: WARN — replica may be STALE (cloud-sync writer not fresh); threading/eyes-clear target could be missed.");
 }
-async function gql(token, query, variables) {
-  const r = await fetch(GQL, { method: "POST", headers: { "content-type": "application/json", authorization: token }, body: JSON.stringify({ query, variables }) });
-  const j = await r.json();
-  if (j.errors) throw new Error(JSON.stringify(j.errors).slice(0, 400));
-  return j.data;
-}
-
-const token = await mint();
-const d = await gql(token, `query($k:String!){ issue(id:$k){ id url comments(first:100, orderBy: createdAt){ nodes{ id createdAt parent{ id } user{ id name } botActor{ type userDisplayName } reactions{ id emoji } } } } }`, { k: issueKey });
-const issue = d.issue;
-if (!issue) { console.error("issue not found: " + issueKey); process.exit(1); }
-
+let issueId = null;
 let parentId = null;
-if (parentArg) {
-  const c = issue.comments.nodes.find(n => n.id === parentArg);
-  parentId = c?.parent?.id ?? parentArg; // always the root
-} else if (!top) {
-  const humans = issue.comments.nodes.filter(n => n.user && !n.botActor && n.user.id === (process.env.ASK_HUMAN_ID || "c2a8cc92-cab6-4536-9500-0f24abdf702b")).sort((a,b)=>a.createdAt.localeCompare(b.createdAt)); // API order is newest-first; sort ASC explicitly
-  const last = humans[humans.length - 1];
-  if (last) parentId = last.parent?.id ?? last.id;
+let eyesTarget = null; // comment id whose 👀 we clear (best-effort), or null
+if (top) {
+  issueId = await readIssueId({ dbPath: DB, identifier: issueKey });
+  // eyesTarget stays null on purpose. The clear target is "the comment we replied under"
+  // (plan §Phase 3: the latest-human-comment id from the read, or the --parent root). A
+  // top-level post replies to no one, so there is nothing to clear — deliberately narrower
+  // than the old tool, which always cleared the latest human comment's 👀 even on --top
+  // (clearing an unrelated human's read-receipt for a comment it did not answer).
+} else if (parentArg) {
+  issueId = await readIssueId({ dbPath: DB, identifier: issueKey });
+  parentId = await readCommentThreadRoot({ dbPath: DB, commentId: parentArg }); // always the root
+  eyesTarget = parentId;
+} else {
+  // `|| undefined`: JS default parameters fire on undefined only, not '', so an explicitly-empty
+  // ASK_HUMAN_ID='' would otherwise query author_id='' (matches nothing) → a silent "no comment".
+  const ctx = await readReplyContext({ dbPath: DB, identifier: issueKey, humanId: process.env.ASK_HUMAN_ID || undefined });
+  issueId = ctx.issueId;
+  if (ctx.latest) {
+    parentId = ctx.latest.parentId;
+    eyesTarget = ctx.latest.id;
+  }
 }
-// ── CTL-1961: construct the write proxy once, for the eyes-clear below ──────────────
-// Constructed, NOT fetched via getLinearWriteProxy(): that accessor returns an installed
-// singleton nothing installs in a standalone script, so it answers null every time and the
-// routing would silently never engage. `unavailable` is kept as a REASON rather than
-// collapsed into "off" — see lib/linear-write-path.mjs on why those must never be one answer.
-//
-// ⛔ CTL-2026 — THE LEAF IMPORT BELONGS INSIDE THE GUARD. It used to sit on its own line
-// above the try, so a copy of this file with no sibling directories died with an unhandled
-// module resolution error — before the reply was posted, and before the catch written for
-// exactly that case could run. Measured 2026-08-18 by copying this file alone into an empty
-// directory: `Cannot find module '<dir>/lib/linear-write-path.mjs'`. `~/catalyst/comms/tools/`
-// is that shape, and CTL-2026(b)'s announced sync step is what puts this file there. See
-// linear-ack.mjs for the same fix and the same reasoning.
-//
-// The env-only mode read is likewise BEFORE the guard: `proxyMode` was assigned inside the
-// try, so an unreachable-modules host kept the initialiser `"off"` — the one state where
-// the mode matters was the one state that reported none. Env only (no Layer-2), so an
-// absent variable is reported as UNCONFIRMED rather than as `off`.
+if (!issueId) {
+  console.error(`linear-reply: issue not found in replica: ${issueKey}`);
+  process.exit(1);
+}
+
+// ── CTL-1961: construct the write proxy once ────────────────────────────────────────
+// Constructed, NOT fetched via getLinearWriteProxy() (that accessor returns an installed
+// singleton nothing installs in a standalone script). `unavailable` is a REASON, never
+// collapsed into "off". ⛔ CTL-2026: the leaf imports MUST live inside the guard (an
+// out-of-tree copy cannot resolve them), and the env mode MUST be read BEFORE the guard (an
+// unreachable-modules host must still know it is under enforce and refuse, not fall through
+// with the "off" initialiser). Env only (no Layer-2) here, so an absent variable is
+// UNCONFIRMED, not "off".
 const envMode = ["off", "shadow", "enforce"].includes(process.env.CATALYST_LINEAR_WRITE_PROXY)
   ? process.env.CATALYST_LINEAR_WRITE_PROXY
   : null;
@@ -112,108 +132,58 @@ try {
   proxyMode = envMode ?? "off";
 }
 
-// Ryan (2026-08-18 19:4x): a consistent per-agent avatar next to the createAsUser name. Deterministic from the
-// agent tag so the same agent always renders the same image; Linear's CommentCreateInput has `displayIconUrl`
-// (measured against the live schema). Override the generator with CATALYST_AVATAR_URL_TEMPLATE (use {slug}).
-//
-// ⛔ CARRIED FORWARD VERBATIM from ~/catalyst/comms/tools/linear-reply.mjs, NOT rewritten (CTL-2026).
-// Ryan hand-edited the OUT-OF-TREE copy at 19:46:30 on 2026-08-18; the repo copy was last touched
-// 2026-08-17 (#3484). So CTL-2026's founding measurement — "they are true copies, byte-identical" —
-// was already false six hours after it was written, and option (a) (make the out-of-tree file a thin
-// wrapper that execs THIS file) would have silently DELETED these avatars on every lane's next reply.
-// That is the whole reason the repo copy has to be brought level before (a) lands. Any "improvement"
-// here re-opens the same gap in the other direction, so this is a transcription, not a redesign.
-const avatarSlug = encodeURIComponent(String(asAgent).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""));
-const avatarTemplate = process.env.CATALYST_AVATAR_URL_TEMPLATE || "https://api.dicebear.com/9.x/shapes/svg?seed={slug}";
-const displayIconUrl = avatarTemplate.replace("{slug}", avatarSlug);
-const m = await gql(token, `mutation($in:CommentCreateInput!){ commentCreate(input:$in){ success comment{ id url } } }`, {
-  in: { issueId: issue.id, body, createAsUser: asAgent, displayIconUrl, ...(parentId ? { parentId } : {}) },
+const plan = decideWritePath
+  ? decideWritePath({ mode: proxyMode, proxyReady: proxy != null, unavailableReason: proxyUnavailable })
+  : proxyMode === "enforce"
+    ? { action: "refuse", observe: false, reason: proxyUnavailable ?? "proxy unavailable under enforce" }
+    : {
+        action: "direct",
+        observe: false,
+        reason: `${proxyUnavailable ?? "write-path leaf unreachable"}${envMode ? "" : "; CATALYST_LINEAR_WRITE_PROXY unset, so the mode is UNCONFIRMED (Layer-2 unreadable without the modules)"}`,
+      };
+
+// proxy-or-refuse for the COMMENT WRITE. Unlike the eyes-clear below, refusing here fails the
+// WHOLE operation (nothing posted) — this is the credential-free AC3 gate.
+if (plan.action !== "proxy") {
+  const why =
+    plan.action === "refuse"
+      ? plan.reason
+      : `resolution=${plan.action} but there is no direct app-actor write path anymore (mint removed)`;
+  console.error(
+    `linear-reply: REFUSED — mode=${proxyMode}, no comment posted (${why}). These tools require CATALYST_LINEAR_WRITE_PROXY=enforce + a cloud token.`
+  );
+  process.exit(1);
+}
+
+const res = proxy.send({
+  routeId: "comment",
+  ticket: issueKey,
+  payload: { issueId, body: postBody, ...(parentId ? { parentId } : {}) },
+  caller: "linear-reply",
 });
-// Ryan (2026-08-17): 👀 on the human's LATEST comment means "read, working on it"; it comes OFF once the reply
-// is posted (not at resolution). Clear any eyes reactions on the comment we replied under, unless --keep-eyes.
-//
-// ⛔ CTL-1961 — WHY ONLY THIS WRITE IS ROUTED AND THE COMMENT ABOVE IS NOT.
-// The eyes-clear goes through the CTC-724 `reaction` route. The commentCreate above stays
-// DIRECT, and that is a declared exception with a named blocker, not an oversight: this
-// tool passes `createAsUser: asAgent` — the `--as <AGENT>` flag that makes a reply show as
-// "CTL-INSTALL"/"FLEET" rather than an undifferentiated app actor — and the cloud route
-// `POST /api/v1/agent/issue-comment` accepts only {issueId, body, parentId?, hostId}. It
-// carries no display name (measured: 0 occurrences of createAsUser/displayName/agentName
-// in agent-write-routes.ts at ba3a722; positive control — `parentId` returns 7 in the same
-// file). Routing it today would post the right comment in the right thread with the AUTHOR
-// STRIPPED, on the busiest surface we have, and would look fine while doing it.
-// ⚠️ CTL-2026 makes that blocker BIGGER, not smaller: the input now also carries
-// `displayIconUrl` (the per-agent avatar above), which is a second author-identity field
-// the cloud route has no parameter for. Whoever lands CTC-762 must add BOTH, and the
-// route's acceptance test should name both — adding only `createAsUser` would restore the
-// name and silently drop the avatar, which is the identical failure one field along.
-// Tracked as CTC-762; until it lands, doctor must report this path as a NAMED EXCEPTION
-// rather than passing — a gate that quietly excuses the busiest write path is not a gate.
+if (!res?.handled || res.applied !== true) {
+  console.error(`linear-reply: REFUSED — the proxy did not apply the comment (${res?.reason ?? "unknown"}). Nothing posted.`);
+  process.exit(1);
+}
+
+// 👀 clear on the comment we replied under — BEST-EFFORT. The replica has no reactions table,
+// but the proxy `reaction`/remove is idempotent and deletes every matching reaction
+// server-side (reporting the count), so no pre-read is needed. A failure only warns; it never
+// changes the exit code (the reply is already posted).
 let cleared = 0;
-if (!process.argv.includes("--keep-eyes")) {
-  const target = issue.comments.nodes.filter(n => n.user && !n.botActor && n.user.id === (process.env.ASK_HUMAN_ID || "c2a8cc92-cab6-4536-9500-0f24abdf702b")).sort((a,b)=>a.createdAt.localeCompare(b.createdAt)).slice(-1)[0];
-  const eyes = (target?.reactions ?? []).filter(r => r.emoji === "eyes");
-  if (eyes.length > 0) {
-    // The route's remove mode deletes EVERY matching reaction on the target and reports the
-    // count, which is exactly what the loop below does — so the two paths agree rather than
-    // merely coexisting.
-    // The unreachable-leaf fallback: see linear-ack.mjs. Same strictest-branch restatement,
-    // pinned by the same invariant test. Here `refuse` only SKIPS the clear (below).
-    const plan = decideWritePath
-      ? decideWritePath({ mode: proxyMode, proxyReady: proxy != null, unavailableReason: proxyUnavailable })
-      : proxyMode === "enforce"
-        ? { action: "refuse", observe: false, reason: proxyUnavailable ?? "proxy unavailable under enforce" }
-        : {
-            action: "direct",
-            observe: false,
-            reason: `${proxyUnavailable ?? "write-path leaf unreachable"}${envMode ? "" : "; CATALYST_LINEAR_WRITE_PROXY unset, so the mode is UNCONFIRMED (Layer-2 unreadable without the modules)"}`,
-          };
-    // ⛔ THE EYES-CLEAR IS BEST-EFFORT AND MUST STAY THAT WAY, INCLUDING UNDER ENFORCE.
-    // It runs AFTER the comment above has already been posted. `refuse` here — exiting
-    // non-zero the way linear-ack correctly does — would report FAILURE for a reply that
-    // actually succeeded, and the caller (`ask.mjs:469` invokes this script) could retry
-    // into a DOUBLE-POSTED comment. Both minis run CATALYST_LINEAR_WRITE_PROXY=enforce, so
-    // this is the live path, not a hypothetical one.
-    //
-    // The house rule this restores is already written down elsewhere in this repo: a
-    // cleanup step must never be able to fail the thing it cleans up after. The original
-    // code said the same thing with `try { … } catch {}`; routing must not quietly
-    // upgrade a swallowed cleanup into a fatal one.
-    //
-    // linear-ack is deliberately DIFFERENT: there the reaction IS the whole operation, so
-    // refusing is the correct answer and nothing has been written yet to contradict.
-    if (plan.action === "proxy" || plan.action === "refuse") {
-      if (plan.action === "refuse") {
-        console.error(`linear-reply: 👀 NOT cleared — mode=${proxyMode} and the proxy is unavailable (${plan.reason}). The reply itself was posted.`);
-      } else {
-        let res = null;
-        try {
-          res = proxy.send({
-            routeId: "reaction",
-            ticket: issueKey,
-            payload: { commentId: target.id, emoji: "eyes", mode: "remove" },
-            caller: "linear-reply",
-          });
-        } catch (err) {
-          console.error(`linear-reply: 👀 NOT cleared — proxy threw (${err?.message}). The reply itself was posted.`);
-        }
-        if (res?.handled) cleared = eyes.length;
-        else if (res) console.error(`linear-reply: 👀 NOT cleared — proxy did not handle it (${res?.reason ?? "unknown"}). The reply itself was posted.`);
-      }
-    } else {
-      if (plan.observe) {
-        try {
-          proxy.send({ routeId: "reaction", ticket: issueKey, payload: {}, caller: "linear-reply" });
-        } catch (err) {
-          console.error(`linear-reply: proxy threw in shadow (the direct clear still happens): ${err?.message}`);
-        }
-      } else if (plan.reason) {
-        console.error(`linear-reply: ${plan.reason} — clearing 👀 direct`);
-      }
-      for (const rx of eyes) {
-        try { await gql(token, `mutation($id:String!){ reactionDelete(id:$id){ success } }`, { id: rx.id }); cleared++; } catch {}
-      }
-    }
+if (!keepEyes && eyesTarget) {
+  try {
+    const rx = proxy.send({
+      routeId: "reaction",
+      ticket: issueKey,
+      payload: { commentId: eyesTarget, emoji: "eyes", mode: "remove" },
+      caller: "linear-reply",
+    });
+    if (rx?.handled && rx.applied === true) cleared = 1;
+    else console.error(`linear-reply: 👀 NOT cleared (${rx?.reason ?? "unknown"}). The reply itself was posted.`);
+  } catch (err) {
+    console.error(`linear-reply: 👀 NOT cleared — proxy threw (${err?.message}). The reply itself was posted.`);
   }
 }
-console.log(JSON.stringify({ ok: m.commentCreate.success, commentId: m.commentCreate.comment.id, parentId, url: m.commentCreate.comment.url, eyesCleared: cleared }));
+
+console.log(JSON.stringify({ ok: true, via: "proxy", parentId, eyesCleared: cleared }));

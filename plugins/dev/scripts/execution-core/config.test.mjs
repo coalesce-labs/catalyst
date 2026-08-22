@@ -7,9 +7,9 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test config.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, existsSync, statSync } from "node:fs";
 import { tmpdir, hostname, homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, dirname } from "node:path";
 
 // Mirrors getHostName()'s fallback: strip everything after the FIRST dot, not
 // just a trailing ".local". A naive `.replace(/\.local$/, "")` only agrees with
@@ -68,6 +68,12 @@ import {
   getLayer2ConfigPath,
   log,
   readGovernanceSources,
+  // CTL-1210: split Layer-2 config lifecycle
+  resolveClusterSecretsPath,
+  resolveNodeConfigPath,
+  readLayer2Merged,
+  LAYER2_KEY_CLASS,
+  splitLayer2Config,
 } from "./config.mjs";
 
 const PREV = process.env.CATALYST_WAIT_WATCHER;
@@ -1792,6 +1798,221 @@ describe("readFleetHealthConfig (CTL-1503)", () => {
     expect(readFleetHealthConfig().swapUsedMbClearThreshold).toBe(16384);
     process.env.EXECUTION_CORE_FLEET_SWAP_MB_CLEAR_THRESHOLD = "";
     expect(readFleetHealthConfig().swapUsedMbClearThreshold).toBe(16384);
+  });
+});
+
+// CTL-1210: split Layer-2 config by lifecycle helpers
+// Helpers for the CTL-1210 test suite
+function makeTmpLayer2() {
+  const dir = mkdtempSync(join(tmpdir(), "ctl1210-"));
+  const configPath = join(dir, "config.json");
+  return { dir, configPath };
+}
+function writeLayer2(dir, name, obj) {
+  writeFileSync(join(dir, name), JSON.stringify(obj) + "\n");
+}
+function setLayer2Env(path) {
+  process.env.CATALYST_LAYER2_CONFIG_FILE = path;
+}
+function clearLayer2Env() {
+  delete process.env.CATALYST_LAYER2_CONFIG_FILE;
+}
+function rmTmpDir(dir) {
+  rmSync(dir, { recursive: true, force: true });
+}
+
+describe("resolveClusterSecretsPath / resolveNodeConfigPath (CTL-1210 Phase 1)", () => {
+  let dir;
+  beforeEach(() => {
+    const t = makeTmpLayer2();
+    dir = t.dir;
+    setLayer2Env(t.configPath);
+  });
+  afterEach(() => {
+    clearLayer2Env();
+    rmTmpDir(dir);
+  });
+
+  test("siblings of getLayer2ConfigPath dir", () => {
+    const base = getLayer2ConfigPath();
+    const d = dirname(base);
+    expect(resolveClusterSecretsPath()).toBe(resolve(d, "cluster-secrets.json"));
+    expect(resolveNodeConfigPath()).toBe(resolve(d, "node.json"));
+  });
+
+  test("honors CATALYST_LAYER2_CONFIG_FILE override", () => {
+    expect(resolveClusterSecretsPath()).toContain(dir);
+    expect(resolveNodeConfigPath()).toContain(dir);
+  });
+});
+
+describe("readLayer2Merged (CTL-1210 Phase 1)", () => {
+  let dir;
+  beforeEach(() => {
+    const t = makeTmpLayer2();
+    dir = t.dir;
+    setLayer2Env(t.configPath);
+  });
+  afterEach(() => {
+    clearLayer2Env();
+    rmTmpDir(dir);
+  });
+
+  test("cluster-secrets and node override legacy config.json", () => {
+    writeLayer2(dir, "config.json", { catalyst: { a: 1, host: { name: "old" } } });
+    writeLayer2(dir, "node.json", { catalyst: { host: { name: "n1" }, watchdog: { mode: "enforce" } } });
+    writeLayer2(dir, "cluster-secrets.json", { catalyst: { linear: { bot: { worker: { botUserId: "w" } } } } });
+    const merged = readLayer2Merged();
+    expect(merged.catalyst.host.name).toBe("n1");
+    expect(merged.catalyst.linear.bot.worker.botUserId).toBe("w");
+    expect(merged.catalyst.a).toBe(1);
+  });
+
+  test("only config.json present is byte-equal to legacy single read", () => {
+    const payload = { catalyst: { host: { name: "solo" }, watchdog: { mode: "shadow" } } };
+    writeLayer2(dir, "config.json", payload);
+    const merged = readLayer2Merged();
+    expect(merged).toEqual(payload);
+  });
+
+  test("missing/malformed sibling files fail open to {}", () => {
+    writeLayer2(dir, "config.json", { catalyst: { a: 42 } });
+    writeFileSync(join(dir, "node.json"), "NOT JSON");
+    // cluster-secrets.json absent (ENOENT)
+    const merged = readLayer2Merged();
+    expect(merged.catalyst.a).toBe(42);
+    expect(() => readLayer2Merged()).not.toThrow();
+  });
+
+  test("cluster-secrets wins over node, node wins over legacy (precedence chain)", () => {
+    writeLayer2(dir, "config.json", { catalyst: { x: "legacy", y: "legacy" } });
+    writeLayer2(dir, "node.json", { catalyst: { x: "node" } });
+    writeLayer2(dir, "cluster-secrets.json", { catalyst: { x: "shared" } });
+    const merged = readLayer2Merged();
+    expect(merged.catalyst.x).toBe("shared");
+    expect(merged.catalyst.y).toBe("legacy");
+  });
+});
+
+describe("getHostName reads from merged files (CTL-1210 Phase 1)", () => {
+  let dir;
+  beforeEach(() => {
+    const t = makeTmpLayer2();
+    dir = t.dir;
+    setLayer2Env(t.configPath);
+  });
+  afterEach(() => {
+    clearLayer2Env();
+    rmTmpDir(dir);
+  });
+
+  test("host.name from node.json wins over legacy config.json", () => {
+    writeLayer2(dir, "config.json", { catalyst: { host: { name: "old" } } });
+    writeLayer2(dir, "node.json", { catalyst: { host: { name: "new-from-node" } } });
+    delete process.env.CATALYST_HOST_NAME;
+    expect(getHostName()).toBe("new-from-node");
+  });
+});
+
+describe("LAYER2_KEY_CLASS (CTL-1210 Phase 2)", () => {
+  test("is defined and has shared + node classifications", () => {
+    expect(typeof LAYER2_KEY_CLASS).toBe("object");
+    expect(LAYER2_KEY_CLASS["linear.bot"]).toBe("shared");
+    expect(LAYER2_KEY_CLASS["host.name"]).toBe("node");
+    expect(LAYER2_KEY_CLASS["cluster.livenessAnchorIssue"]).toBe("shared");
+    expect(LAYER2_KEY_CLASS["watchdog"]).toBe("node");
+    expect(LAYER2_KEY_CLASS["layer1Identity"]).toBe("shared");
+  });
+});
+
+describe("splitLayer2Config (CTL-1210 Phase 2)", () => {
+  let dir;
+  beforeEach(() => {
+    const t = makeTmpLayer2();
+    dir = t.dir;
+    setLayer2Env(t.configPath);
+  });
+  afterEach(() => {
+    clearLayer2Env();
+    rmTmpDir(dir);
+  });
+
+  test("shared keys → cluster-secrets.json, per-node → node.json, both mode 0600", () => {
+    writeLayer2(dir, "config.json", {
+      catalyst: {
+        "linear": { bot: { orchestrator: { clientId: "oc", clientSecret: "os" } } },
+        "cluster": { livenessAnchorIssue: "CTL-1217" },
+        "host": { name: "mini" },
+        "watchdog": { mode: "shadow" },
+      },
+    });
+    splitLayer2Config({ configPath: join(dir, "config.json"), sharedPath: join(dir, "cluster-secrets.json"), nodePath: join(dir, "node.json") });
+    const shared = JSON.parse(readFileSync(join(dir, "cluster-secrets.json"), "utf8"));
+    const node = JSON.parse(readFileSync(join(dir, "node.json"), "utf8"));
+    expect(shared.catalyst?.linear?.bot?.orchestrator?.clientId).toBe("oc");
+    expect(shared.catalyst?.cluster?.livenessAnchorIssue).toBe("CTL-1217");
+    expect(node.catalyst?.host?.name).toBe("mini");
+    expect(node.catalyst?.watchdog?.mode).toBe("shadow");
+    const sharedMode = (statSync(join(dir, "cluster-secrets.json")).mode & 0o777).toString(8);
+    const nodeMode = (statSync(join(dir, "node.json")).mode & 0o777).toString(8);
+    expect(sharedMode).toBe("600");
+    expect(nodeMode).toBe("600");
+  });
+
+  test("old keys still resolve after migration via readLayer2Merged", () => {
+    writeLayer2(dir, "config.json", {
+      catalyst: {
+        linear: { bot: { orchestrator: { clientId: "oc" } } },
+        host: { name: "host1" },
+        watchdog: { mode: "enforce" },
+      },
+    });
+    splitLayer2Config({ configPath: join(dir, "config.json"), sharedPath: join(dir, "cluster-secrets.json"), nodePath: join(dir, "node.json") });
+    const merged = readLayer2Merged();
+    expect(merged.catalyst?.linear?.bot?.orchestrator?.clientId).toBe("oc");
+    expect(merged.catalyst?.host?.name).toBe("host1");
+    expect(merged.catalyst?.watchdog?.mode).toBe("enforce");
+  });
+
+  test("idempotent — second run on already-split node is a no-op (config.json trimmed)", () => {
+    const orig = { catalyst: { host: { name: "h" }, watchdog: { mode: "shadow" } } };
+    writeLayer2(dir, "config.json", orig);
+    const opts = { configPath: join(dir, "config.json"), sharedPath: join(dir, "cluster-secrets.json"), nodePath: join(dir, "node.json") };
+    splitLayer2Config(opts);
+    const node1 = readFileSync(join(dir, "node.json"), "utf8");
+    const shared1 = readFileSync(join(dir, "cluster-secrets.json"), "utf8");
+    const cfg1 = readFileSync(join(dir, "config.json"), "utf8");
+    // Second run: config.json is now trimmed (no classified keys) — output files unchanged.
+    splitLayer2Config(opts);
+    const node2 = readFileSync(join(dir, "node.json"), "utf8");
+    const shared2 = readFileSync(join(dir, "cluster-secrets.json"), "utf8");
+    const cfg2 = readFileSync(join(dir, "config.json"), "utf8");
+    expect(node1).toBe(node2);
+    expect(shared1).toBe(shared2);
+    expect(cfg1).toBe(cfg2);
+  });
+
+  test("deterministic serialization (sorted keys) — byte-stable given same input", () => {
+    const orig = { catalyst: { host: { name: "h" }, watchdog: { mode: "shadow" } } };
+    const opts = { configPath: join(dir, "config.json"), sharedPath: join(dir, "cluster-secrets.json"), nodePath: join(dir, "node.json") };
+    // First run.
+    writeLayer2(dir, "config.json", orig);
+    splitLayer2Config(opts);
+    const bytes1 = readFileSync(join(dir, "node.json"), "utf8");
+    // Reset to original state and run again.
+    rmSync(join(dir, "node.json"), { force: true });
+    rmSync(join(dir, "cluster-secrets.json"), { force: true });
+    writeLayer2(dir, "config.json", orig);
+    splitLayer2Config(opts);
+    const bytes2 = readFileSync(join(dir, "node.json"), "utf8");
+    expect(bytes1).toBe(bytes2);
+  });
+
+  test("unclassified key stays in config.json (fail-open, never dropped)", () => {
+    writeLayer2(dir, "config.json", { catalyst: { host: { name: "h" }, unknownKey: { val: 99 } } });
+    splitLayer2Config({ configPath: join(dir, "config.json"), sharedPath: join(dir, "cluster-secrets.json"), nodePath: join(dir, "node.json") });
+    const cfg = JSON.parse(readFileSync(join(dir, "config.json"), "utf8"));
+    expect(cfg.catalyst?.unknownKey?.val).toBe(99);
   });
 });
 

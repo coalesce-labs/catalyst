@@ -250,49 +250,65 @@ export const DEFAULT_TAIL_MAX_BYTES = 64 * 1024 * 1024;
 // of onEvent is leak-free.
 const PROBE_DONE = Symbol("probe-done");
 
-// probeOldestTs — the ts of the FIRST complete event at or after `fromOffset`.
-// `skipFirstLine` (for fromOffset > 0) guarantees that first event is a whole,
-// untruncated line, so a cut line's independently-parseable suffix can never be
-// mistaken for the window's oldest record. Returns null when the window holds no
-// parseable event (⇒ the caller keeps expanding). Bounded: reuses the audited
-// forward primitive and stops at the first hit.
-// NOTE (CTL-1529, Codex P1 — deferred to CTL-1550, deliberately NOT fixed here):
-// this returns the FIRST record after the offset and treats its ts as the window's
-// oldest. That is exact only if the log is monotonic by `ts`, which it is not
-// guaranteed to be — a backfilled record near EOF can overstate how far back the
-// window reaches. The naive hardening (sample the first K records and require the
-// NEWEST of them to predate the target) was implemented and REJECTED: in a normally
-// ordered log those first K records run FORWARD in time, so their newest sits far
-// later than the window's true start, coverage is denied, and the walk expands to
-// the cap — which destroys the bounded-read property this whole module exists for.
-// A sound fix needs an outlier-resistant statistic (median/k-th smallest) with a
-// re-tuned perf budget. See CTL-1550.
-function probeOldestTs({ path, fromOffset, chunkSize, onRead, tsOf }) {
-  let found = null;
+// robustCoverageMs — the outlier-resistant coverage anchor (CTL-1550). Given the
+// epoch-ms timestamps of the first K complete records in a candidate window, return
+// the MEDIAN (upper-middle on ties). Median tolerates a minority of backfilled
+// records whose ts does not reflect their byte position, which is exactly the
+// failure the single-record probe had. Returns null when no finite sample exists.
+export function robustCoverageMs(samplesMs) {
+  const finite = samplesMs.filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
+  if (finite.length === 0) return null;
+  // Upper-middle keeps the anchor from ever being OLDER than the genuine middle,
+  // so coverage is only ever denied a doubling too early — never falsely granted.
+  return finite[Math.floor(finite.length / 2)];
+}
+
+// COVERAGE_PROBE_SAMPLE — how many records the probe samples at the window start
+// before computing the anchor. Small: the samples sit within the first chunk on a
+// normal window, so this adds no meaningful read cost (peak transient stays one
+// chunk). Large enough that a lone backfill cannot swing the median.
+export const COVERAGE_PROBE_SAMPLE = 16;
+
+// probeCoverageTs — the outlier-resistant coverage anchor for a candidate window
+// (CTL-1550). Samples up to COVERAGE_PROBE_SAMPLE records from the window start and
+// returns the ISO string nearest the MEDIAN epoch-ms across those samples.
+// `skipFirstLine` (for fromOffset > 0) guarantees every sample is a whole,
+// untruncated line. Returns null when the window holds no parseable event.
+// Replaces the single-record probeOldestTs; median tolerates a minority of
+// backfilled records whose ts does not reflect their byte position.
+function probeCoverageTs({ path, fromOffset, chunkSize, onRead, tsOf }) {
+  const samples = [];
   try {
     scanEventsChunked({
       path,
       fromOffset,
       chunkSize,
       skipFirstLine: fromOffset > 0,
-      onRead,
       // CTL-1529 (Codex P2): the probe reads to EOF once, so it must see the same
       // record set the forward scan below will. Otherwise a window whose ONLY
       // parseable record is the unterminated final line probes as empty and the
       // walk keeps doubling toward BOF for no reason.
       emitTrailingLine: true,
+      onRead,
       onEvent: (e) => {
         const t = tsOf(e);
         if (typeof t === "string" && t.length > 0) {
-          found = t;
-          throw PROBE_DONE;
+          const ms = Date.parse(t);
+          if (Number.isFinite(ms)) samples.push({ ms, ts: t });
+          if (samples.length >= COVERAGE_PROBE_SAMPLE) throw PROBE_DONE;
         }
       },
     });
   } catch (err) {
     if (err !== PROBE_DONE) throw err;
   }
-  return found;
+  const anchorMs = robustCoverageMs(samples.map((s) => s.ms));
+  if (anchorMs === null) return null;
+  // Return the ISO string of the sample nearest the anchor for display/Date.parse.
+  return samples.reduce(
+    (best, s) => (Math.abs(s.ms - anchorMs) < Math.abs(best.ms - anchorMs) ? s : best),
+    samples[0],
+  ).ts;
 }
 
 // scanEventsSince — read the tail of `path` bounded by WALL-CLOCK TIME rather
@@ -363,7 +379,7 @@ export function scanEventsSince({
   for (;;) {
     fromOffset = Math.max(0, size - window);
     reachedBof = fromOffset === 0;
-    oldestTs = probeOldestTs({ path, fromOffset, chunkSize, onRead, tsOf });
+    oldestTs = probeCoverageTs({ path, fromOffset, chunkSize, onRead, tsOf });
     if (reachedBof) {
       // The window IS the whole file — identical to the whole-file read.
       covered = true;

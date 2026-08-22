@@ -251,9 +251,12 @@ If ticket was extracted from branch:
 ```bash
 # If Linearis CLI is available:
 # 1. Update ticket status to stateMap.inReview from config
-# 2. Add a comment with the PR link
-# Use `linearis issues usage` and `linearis comments usage` for exact syntax.
-# Skip silently if CLI not available.
+#    (use `linearis issues usage` for exact syntax).
+# 2. Add a comment with the PR link — agent-authored, so post it through the app
+#    actor (`linear-reply.mjs --as <role>`, or the `linear-comment-post.sh` helper),
+#    never bare `linearis issues discuss`/`reply` (those post as the human — see the
+#    `linearis` skill's "Comment on a ticket" section).
+# Skip silently if the tooling is not available.
 ```
 
 **Skip the status transition (step 1) when `CATALYST_PHASE` is set** — under a

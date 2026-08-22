@@ -23,6 +23,7 @@ import { coerceExplanation } from "./escalation-explanation.mjs";
 import { DISPOSITIONS } from "./worker-disposition.mjs";
 import { YIELDED_STATUS } from "../lib/phase-yield.mjs"; // CTL-1854
 import { TERMINAL_LABEL_REASONS } from "./label-failure-class.mjs"; // COORD-236: one owner for the terminal set
+import { emitEscalationEvent } from "./escalation-event.mjs"; // CTL-2056
 
 // ─── labelOnce — moved from scheduler.mjs (CTL-585, then CTL-638 re-home) ───
 //
@@ -540,6 +541,9 @@ export function labelNeedsHumanUnlessBeliefOwner(
     log: logArg = null,
     explanation = undefined,
     onOutcome = null,
+    // CTL-2056: injectable emit seam so tests can record escalation events
+    // without real I/O. Defaults to the real emitter (fail-open, never throws).
+    emitEscalation = emitEscalationEvent,
     // CTL-1568 (Codex #2861 P1): treat a pre-existing `.applied` marker as LANDED.
     //
     // labelOnce early-returns false for BOTH `.applied` and `.skipped`, conflating
@@ -599,6 +603,14 @@ export function labelNeedsHumanUnlessBeliefOwner(
     }
     const coerced = coerceExplanation(explanation ?? {}, { ticket, canExecute: false });
     writeExplanationSignal(orchDir, ticket, coerced, { log: logArg });
+    // CTL-2056: emit one ticket.escalated event so the unchanged
+    // catalyst_recovery_escalation_burst PromQL selector counts real escalations.
+    // Fail-open: a throw here must never block the label application.
+    try {
+      emitEscalation(ticket, { site, reason: explanation?.problem ?? null });
+    } catch {
+      /* fail-open: observability must never block the label path */
+    }
   }
   if (typeof onOutcome === "function") {
     onOutcome({ deferred: false, applied, ran, reason, alreadyApplied });

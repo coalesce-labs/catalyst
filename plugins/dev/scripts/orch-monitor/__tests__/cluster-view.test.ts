@@ -51,6 +51,7 @@ function ticket(id: string, overrides: Partial<BoardTicket> = {}): BoardTicket {
     currentPhaseSince: null,
     attention: null,
     attentionSince: null,
+    correlationRole: null, // CAT-170
     // BFF10 stamps host:{name,id} + generation on every BoardTicket. The cluster
     // view groups off ownerHostById (the durable fence projection), not this per-
     // entity host, so these default null (single-host identity no-op) and tests

@@ -20,11 +20,29 @@ import {
   mkdirSync,
   existsSync,
 } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getRegistryPath, log } from "./config.mjs";
 
 const defaultReadLayer1 = (path) => readFileSync(path, "utf8");
+
+const DISPATCH_REV_LADDER = ["refs/remotes/origin/main", "refs/heads/main"];
+
+const defaultShowAtRev = (repoRoot, rev, path, spawn = spawnSync) => {
+  const result = spawn("git", ["show", `${rev}:${path}`], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  });
+  if (result?.error || (result?.status ?? 1) !== 0) return { ok: false, stdout: "" };
+  return { ok: true, stdout: result.stdout ?? "" };
+};
+
+function declaredTeamOf(raw) {
+  const parsed = JSON.parse(raw);
+  const declared = (parsed?.catalyst ?? parsed)?.linear?.teamKey;
+  return typeof declared === "string" && declared.trim() !== "" ? declared : null;
+}
 
 // Compare the registry's team with the team declared by the checkout's Layer-1
 // config. Unknown is deliberately distinct from mismatch: an absent, unreadable,
@@ -42,9 +60,8 @@ export function teamIdentityOf(entry, readLayer1 = defaultReadLayer1) {
   const unknown = { declared: null, matches: null };
   try {
     const raw = readLayer1(join(entry.repoRoot, ".catalyst", "config.json"));
-    const parsed = JSON.parse(raw);
-    const declared = (parsed?.catalyst ?? parsed)?.linear?.teamKey;
-    if (typeof declared !== "string" || declared.trim() === "") return unknown;
+    const declared = declaredTeamOf(raw);
+    if (declared === null) return unknown;
     return {
       declared,
       matches: declared === entry.team,
@@ -52,6 +69,36 @@ export function teamIdentityOf(entry, readLayer1 = defaultReadLayer1) {
   } catch {
     return unknown;
   }
+}
+
+// Resolve the Layer-1 identity a fresh dispatch receives from already-present
+// local refs. This is opt-in because git subprocesses do not belong on the
+// registry's daemon hot path. A resolved ref is authoritative even when its
+// config is malformed; falling through would describe a revision dispatch
+// would not use.
+export function dispatchRevisionIdentityOf(entry, deps = {}) {
+  const {
+    spawn = spawnSync,
+    showAtRev = (root, rev, path) => defaultShowAtRev(root, rev, path, spawn),
+  } = deps;
+  const unknown = { declared: null, matches: null, rev: null };
+  for (const rev of DISPATCH_REV_LADDER) {
+    let result;
+    try {
+      result = showAtRev(entry.repoRoot, rev, ".catalyst/config.json");
+    } catch {
+      return unknown;
+    }
+    if (!result?.ok) continue;
+    try {
+      const declared = declaredTeamOf(result.stdout);
+      if (declared === null) return { ...unknown, rev };
+      return { declared, matches: declared === entry.team, rev };
+    } catch {
+      return { ...unknown, rev };
+    }
+  }
+  return unknown;
 }
 
 // listProjects() — every well-formed entry in the registry. Missing file → [].
@@ -64,6 +111,9 @@ export function listProjects(deps = {}) {
     exists = existsSync,
     readLayer1 = defaultReadLayer1,
     warn = (obj, message) => log.warn(obj, message),
+    withDispatchIdentity = false,
+    spawn = spawnSync,
+    showAtRev,
   } = deps;
   const file = getRegistryPath();
   let parsed;
@@ -83,6 +133,7 @@ export function listProjects(deps = {}) {
       continue;
     }
     let identity = { declared: null, matches: null };
+    let dispatchIdentity = { declared: null, matches: null, rev: null };
     if (!exists(entry.repoRoot)) {
       // CTL-854: a copied/stale registry can carry a repoRoot absent on this host.
       // Keep the entry (behavior unchanged) but flag the misconfiguration so it is
@@ -106,13 +157,18 @@ export function listProjects(deps = {}) {
             "ticket prefix (CAT-52)",
         );
       }
+      if (withDispatchIdentity) {
+        dispatchIdentity = dispatchRevisionIdentityOf(entry, { spawn, showAtRev });
+      }
     }
-    projects.push({
+    const project = {
       team: entry.team,
       repoRoot: entry.repoRoot,
       eligibleQuery: entry.eligibleQuery ?? null,
       identity,
-    });
+    };
+    if (withDispatchIdentity) project.dispatchIdentity = dispatchIdentity;
+    projects.push(project);
   }
   return projects;
 }

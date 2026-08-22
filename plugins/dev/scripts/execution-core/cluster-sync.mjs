@@ -164,9 +164,11 @@ function defaultGit(args) {
 }
 
 // destForSecret — map a secrets/ filename to its ~/.config/catalyst destination.
+// CTL-1210: cluster-bots contains shared bot credentials; route to cluster-secrets.json
+// so it is byte-identical across all cluster nodes and readable via readLayer2Merged().
 function destForSecret(name, configDir) {
   const base = basename(name).replace(/\.sops\.json$/, "");
-  if (base === "cluster-bots") return resolve(configDir, "config.json");
+  if (base === "cluster-bots") return resolve(configDir, "cluster-secrets.json");
   return resolve(configDir, `${base}.json`);
 }
 
@@ -262,10 +264,21 @@ export function syncClusterSecrets(opts = {}) {
   return result;
 }
 
-// Default 0o600 writer for a single bare secret file.
+// Symlink-safe 0o600 writer (CTL-1596 Bug 5): write to a sibling tmp file then
+// renameSync into place. rename swaps the directory entry atomically and REPLACES
+// a symlink at `path` rather than following it to its target — unlike writeFileSync,
+// which opens O_TRUNC through the link. Matches writeClusterSyncState's tmp+rename.
 function defaultWriteFile(path, content) {
-  writeFileSync(path, content, { mode: 0o600 });
-  chmodSync(path, 0o600);
+  const tmp = `${path}.tmp.${process.pid}.${Date.now()}`;
+  try {
+    writeFileSync(tmp, content, { mode: 0o600 });
+    chmodSync(tmp, 0o600); // defensively re-assert (umask can mask the create mode)
+    renameSync(tmp, path);
+  } catch (err) {
+    // Clean up a partial tmp so a failed write never leaves litter behind.
+    try { rmSync(tmp, { force: true }); } catch { /* ignore */ }
+    throw err; // preserve the throw contract: callers push to failed[] on write error
+  }
 }
 
 // syncSecretFiles — decrypt secrets/node-secret-files.sops.json (a { filename:
@@ -398,30 +411,44 @@ export function syncProfileFiles(opts = {}) {
 
   const result = { written: [], failed: [], removed: [], skipped: false, reason: null };
   const src = resolve(clusterDir, "secrets", "profile-files.sops.json");
-  if (!existsSync(src)) {
+
+  // Bug 1 (CTL-1596): normalize the bundle to a map and always fall through to
+  // reconciliation, except on decrypt-failed (bundle content unknown → cannot
+  // infer removals). An absent bundle means "remove all cluster-managed profiles".
+  let map = {};
+  if (existsSync(src)) {
+    try {
+      map = decrypt(src);
+    } catch (err) {
+      logger.warn(
+        `[cluster-sync] decrypt profile-files failed (${err?.message ?? err}); keeping node-local`,
+      );
+      result.skipped = true;
+      result.reason = "decrypt-failed";
+      return result; // bundle content unknown → do NOT infer removals
+    }
+    if (!map || typeof map !== "object") {
+      // decrypt returned null/non-object: genuinely empty bundle → reconcile against {}.
+      map = {};
+      result.reason = "empty";
+    }
+  } else {
+    // An absent bundle is "remove all cluster-managed profiles", NOT a skip.
+    // Fall through to reconciliation with an empty map so managed profiles are cleaned up.
     result.reason = "absent";
-    return result;
   }
-  let map;
-  try {
-    map = decrypt(src);
-  } catch (err) {
-    logger.warn(
-      `[cluster-sync] decrypt profile-files failed (${err?.message ?? err}); keeping node-local`,
-    );
-    result.skipped = true;
-    result.reason = "decrypt-failed";
-    return result;
+
+  // Only create profilesDir when we actually have entries to write; the reconciliation
+  // read below tolerates an absent dir (readFileSync → ENOENT → nothing managed), so the
+  // never-managed absent case stays a pure no-op.
+  if (Object.keys(map).length > 0) {
+    try {
+      mkdirSync(profilesDir, { recursive: true });
+    } catch {
+      /* profilesDir may exist; ignore */
+    }
   }
-  if (!map || typeof map !== "object") {
-    result.reason = "empty";
-    return result;
-  }
-  try {
-    mkdirSync(profilesDir, { recursive: true });
-  } catch {
-    /* profilesDir may exist; ignore */
-  }
+
   for (const [name, content] of Object.entries(map)) {
     // Refuse anything that isn't a bare, non-dotfile basename — no path
     // traversal — AND require the ".env" suffix (Codex R2): `use_profile x`
@@ -453,34 +480,78 @@ export function syncProfileFiles(opts = {}) {
   // credentials must not outlive their rotation. Node-local files (never in
   // the manifest) are untouched. A failed removal joins failed[] so the
   // change-detection marker does not advance over the surviving stale file.
+  //
+  // This region is reached for all non-decrypt-failed paths (present bundle,
+  // empty bundle, absent bundle) — do not add an early return above it.
   const manifestPath = resolve(profilesDir, PROFILES_MANIFEST);
   let prevManaged = [];
+  let manifestReadable = true;
   try {
-    const m = JSON.parse(readFileSync(manifestPath, "utf8"));
-    if (Array.isArray(m)) prevManaged = m.filter((n) => typeof n === "string" && n === basename(n) && !n.startsWith("."));
-  } catch {
-    /* absent/corrupt manifest → nothing previously managed */
-  }
-  const current = new Set(Object.keys(map).filter((n) => typeof n === "string"));
-  for (const name of prevManaged) {
-    if (current.has(name)) continue;
-    try {
-      rmSync(resolve(profilesDir, name), { force: true });
-      result.removed.push(name);
-      logger.warn(`[cluster-sync] removed profile ${name} (deleted from the cluster bundle)`);
-    } catch (err) {
-      logger.warn(`[cluster-sync] remove profile ${name} failed (${err?.message ?? err})`);
-      result.failed.push(name);
+    const raw = readFileSync(manifestPath, "utf8");
+    const m = JSON.parse(raw);
+    if (Array.isArray(m)) {
+      prevManaged = m.filter((n) => typeof n === "string" && n === basename(n) && !n.startsWith("."));
+    }
+  } catch (err) {
+    if (err && err.code === "ENOENT") {
+      // Absent manifest → nothing previously managed. Normal first-sync path.
+    } else {
+      // Bug 3 (CTL-1596): the ownership record EXISTS but is corrupt/unreadable
+      // (parse error, EPERM, EIO). Treating it as empty would skip legitimate
+      // removals and overwrite it with a truncated set, permanently discarding
+      // ownership. Instead: log LOUDLY, skip removal reconciliation, and PRESERVE
+      // the manifest. Self-heals once the manifest reads clean again.
+      manifestReadable = false;
+      result.manifestUnreadable = true;
+      logger?.error?.(
+        `[cluster-sync] profile manifest ${PROFILES_MANIFEST} unreadable ` +
+          `(${err?.message ?? err}) — preserving it and skipping removal reconciliation`,
+      );
     }
   }
-  // Manifest = everything currently materialized + anything we failed to
-  // remove (so the next sync retries the removal). Best-effort.
-  try {
-    const keep = [...new Set([...result.written, ...prevManaged.filter((n) => !current.has(n) && !result.removed.includes(n))])];
-    writeFile(manifestPath, JSON.stringify(keep));
-  } catch {
-    /* best-effort; worst case a later removal is missed until the next full sync */
+
+  if (manifestReadable) {
+    const current = new Set(Object.keys(map).filter((n) => typeof n === "string"));
+    for (const name of prevManaged) {
+      if (current.has(name)) continue;
+      try {
+        rmSync(resolve(profilesDir, name), { force: true });
+        result.removed.push(name);
+        logger.warn(`[cluster-sync] removed profile ${name} (deleted from the cluster bundle)`);
+      } catch (err) {
+        logger.warn(`[cluster-sync] remove profile ${name} failed (${err?.message ?? err})`);
+        result.failed.push(name);
+      }
+    }
+
+    // Manifest = everything currently materialized + anything we failed to remove
+    // (so the next sync retries the removal). Only written when there is meaningful
+    // state to persist (prior managed entries or newly written entries exist).
+    if (prevManaged.length > 0 || result.written.length > 0) {
+      const keep = [
+        ...new Set([
+          ...result.written,
+          ...prevManaged.filter((n) => !current.has(n) && !result.removed.includes(n)),
+        ]),
+      ];
+      try {
+        // Ensure profilesDir exists for the manifest write (may not exist when the
+        // absent-bundle path ran and there were prior managed entries to remove).
+        if (!existsSync(profilesDir)) mkdirSync(profilesDir, { recursive: true });
+        writeFile(manifestPath, JSON.stringify(keep));
+      } catch (err) {
+        // Bug 4 (CTL-1596): a swallowed manifest write silently loses the ownership
+        // record and advances the marker over it. Surface it so assessMaterialization
+        // blocks the marker (retry next tick).
+        logger?.error?.(
+          `[cluster-sync] manifest write ${PROFILES_MANIFEST} failed ` +
+            `(${err?.message ?? err}) — blocking marker`,
+        );
+        result.failed.push(PROFILES_MANIFEST);
+      }
+    }
   }
+
   return result;
 }
 
@@ -948,7 +1019,7 @@ export function refreshClusterSecretsIfChanged(opts = {}) {
 
   const status = {
     changed: false, ok: true, reason: null,
-    fromSha: null, toSha: null, written: [], synced: [], restartRequired: [],
+    fromSha: null, toSha: null, written: [], synced: [], profiles: [], profilesRemoved: [], restartRequired: [],
   };
 
   // 1. Refresh the clone (reuse pullClusterRepo — fail-open; no-op when not a clone).
@@ -1075,6 +1146,7 @@ export function refreshClusterSecretsIfChanged(opts = {}) {
   status.synced = Array.isArray(sync?.synced) ? sync.synced : [];
   status.written = Array.isArray(files?.written) ? files.written : [];
   status.profiles = Array.isArray(profiles?.written) ? profiles.written : [];
+  status.profilesRemoved = Array.isArray(profiles?.removed) ? profiles.removed : [];
   status.hostEnvFiles = hostEnvFiles;
 
   // 7. Advance the marker ONLY on FULL materialization success (Codex-A). A PARTIAL
@@ -1139,13 +1211,27 @@ export function refreshClusterSecretsIfChanged(opts = {}) {
   );
   status.changed = true;
   status.reason = "refreshed";
-  // Emit only on a real change: sha advanced AND something was materialized.
-  if (lastSha !== head && (status.written.length > 0 || status.synced.length > 0 || status.profiles.length > 0)) {
+  // Emit only on a real change: sha advanced AND something was materialized or removed.
+  // Bug 2 (CTL-1596): include profilesRemoved so a removal-only bundle rotation emits.
+  if (
+    lastSha !== head &&
+    (status.written.length > 0 ||
+      status.synced.length > 0 ||
+      status.profiles.length > 0 ||
+      status.profilesRemoved.length > 0)
+  ) {
     emit({
       name: "refreshed",
       node,
       now,
-      payload: { fromSha: lastSha, toSha: head, written: status.written, synced: status.synced, profiles: status.profiles },
+      payload: {
+        fromSha: lastSha,
+        toSha: head,
+        written: status.written,
+        synced: status.synced,
+        profiles: status.profiles,
+        removed: status.profilesRemoved,
+      },
     });
   }
 

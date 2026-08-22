@@ -125,7 +125,10 @@ export const SECRET_REGISTRY = Object.freeze(
       // Sourced into the daemon's boot env by catalyst-execution-core; kept as a REGISTRY
       // ROW (design §2) — not a parallel hand-maintained Set — so cluster-sync's
       // rotation-report source is the registry once PR1-of-the-migration-plan re-points it.
-      rotation: { class: "boot-only" },
+      // CTL-1984: reclassified from boot-only to re-armable/timer — the daemon registers
+      // rearmClaudeAccountsFromFile as the hook (execution-core/claude-accounts-rearm.mjs)
+      // so an account-slot switch takes effect on the next cluster-sync tick with no restart.
+      rotation: { class: "re-armable", trigger: "timer" },
       bootstrapFor: null,
     },
     {
@@ -770,10 +773,19 @@ function resolveConfigJson(row, env, cwd) {
     const viaEnv = resolveEnvAliasOnly(row, env);
     if (viaEnv.value != null) return viaEnv;
   }
-  const path = resolveLayer2Path(env);
-  const raw = readJsonField(path, row.configJsonPath);
-  const resolved = canonicalizeConfigJsonValue(raw);
-  if (resolved != null && meetsRequiredObjectFields(row, raw)) {
+  // CTL-1210: probe cluster-secrets.json first (shared keys land there via cluster-sync),
+  // then fall through to config.json for per-node keys and backward-compat installs.
+  const layer2Path = resolveLayer2Path(env);
+  const clusterSecretsPath = join(dirname(layer2Path), "cluster-secrets.json");
+  let resolved = null;
+  let raw;
+  let path = null;
+  for (const candidate of [clusterSecretsPath, layer2Path]) {
+    raw = readJsonField(candidate, row.configJsonPath);
+    resolved = canonicalizeConfigJsonValue(raw);
+    if (resolved != null && meetsRequiredObjectFields(row, raw)) { path = candidate; break; }
+  }
+  if (path != null) {
     return { value: resolved, source: "config-json", provider: row.delivery, rotation: row.rotation, filePath: path };
   }
   // LEGACY TIERS (CTL-1616 PR4, linear-worker-actor only): tried, in order, ONLY once the

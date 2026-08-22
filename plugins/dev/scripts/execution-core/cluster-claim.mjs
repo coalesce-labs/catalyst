@@ -23,7 +23,17 @@ import {
   resolveAttachmentTransport,
 } from "./cluster-attachment-transport.mjs";
 import { createLinearWriteProxy } from "./linear-write-proxy.mjs";
-import { readLinearWriteProxyConfig } from "./config.mjs";
+import { readLinearWriteProxyConfig, resolveLeaseAuthorityMode } from "./config.mjs";
+// CTL-1786 — the lease-authority client half of CTC-410. The refusable claim path lives beside
+// the attachment soft-CAS here so `runCli`/`defaultTransport` can select it on the env gate with
+// ZERO change to any caller: it returns the same {won, generation} contract.
+import {
+  DEFAULT_WORK_TTL_MS,
+  LeaseAuthorityError,
+  createLeaseAuthorityClient,
+  emitLeaseClaimObservation,
+  ensureEntitled as defaultEnsureEntitled,
+} from "./lease-authority.mjs";
 //
 // ─── The storage mechanism (VERIFIED via live Linear API probe, 2026-06-08) ──
 // Linear has no custom fields and labels can't model a counter, so the claim +
@@ -381,6 +391,141 @@ export async function isFenceCurrent(ticket, generation, { post = defaultPost, t
   return current?.generation === generation;
 }
 
+// ─── lease-authority refusable claim (CTL-1786) ──────────────────────────────
+//
+// The parallel claim path to `claimTicket`, backed by the cloud lease authority instead of the
+// Linear-attachment soft-CAS. It returns the EXACT same public contract — `{won, generation}`,
+// throw-on-terminal-failure — so `runCli` slots it in behind the env gate with no caller change.
+//
+// The whole point is that the store can REFUSE: a `lease_held` refusal is a definitive "a peer
+// won", returned as `{won:false}` with NO retry (silent backoff, AC-1). A `not_entitled` refusal
+// self-heals ONCE — (re-)entitle the node then re-claim — because entitlement lapses on a DO reset
+// and must not fail the phase. A transient transport error is bounded-retried; anything terminal
+// (auth, malformed grant, exhausted retries) THROWS, so `runCli` yields exit 11 (a stall, not a
+// lost race) exactly like the attachment path.
+
+/** Bounded transient-retry cap. The real backoff is the next dispatch sweep; this only rides out a blip. */
+export const LEASE_CLAIM_MAX_RETRIES = 2;
+
+/**
+ * claimViaLease — refusable claim through an injected lease `client`.
+ *
+ * `client` is the `createLeaseAuthorityClient` shape (`{claim, entitle, ...}`), injectable so the
+ * two Gherkin ACs run against a fake single-winner authority with no network. `hostName` is the
+ * node identity the store attributes the lease to (its `node`). Returns `{won, generation}`;
+ * `generation` is the grant nonce on a win (the drop-in fence-guard equality token) and null on a
+ * loss.
+ */
+export async function claimViaLease({
+  ticket,
+  phase,
+  hostName,
+  client,
+  ttlMs = DEFAULT_WORK_TTL_MS,
+  workTtlMs = DEFAULT_WORK_TTL_MS,
+  budgetUsd = null,
+  maxRetries = LEASE_CLAIM_MAX_RETRIES,
+  ensureEntitled = defaultEnsureEntitled,
+}) {
+  if (!client) throw new LeaseAuthorityError("no-lease-client", { retryable: false });
+  let entitleAttempted = false;
+  let transientRetries = 0;
+  for (;;) {
+    let res;
+    try {
+      res = await client.claim({ ticket, phase, node: hostName, ttlMs });
+    } catch (err) {
+      // Only a retryable transport blip is retried, and only up to the cap; a terminal error
+      // (auth, 4xx, malformed grant) is surfaced immediately so the CLI stalls loudly (exit 11).
+      if (err?.retryable && transientRetries < maxRetries) {
+        transientRetries += 1;
+        continue;
+      }
+      throw err;
+    }
+    if (res.won) return { won: true, generation: res.generation };
+    // A `not_entitled` refusal self-heals exactly once: (re-)entitle then re-claim. A second
+    // one (entitlement did not take) falls through to the silent-backoff return below rather
+    // than looping forever.
+    if (res.refusal === "not_entitled" && !entitleAttempted) {
+      entitleAttempted = true;
+      // PR3756 review (P2): a retryable `ensureEntitled` throw used to only bump the counter and
+      // `continue` — which re-ran `client.claim`, NOT `ensureEntitled` — so a transient entitlement
+      // transport blip skipped straight to another claim attempt with `entitleAttempted` already
+      // true. That claim's inevitable second `not_entitled` then fell through to the ordinary
+      // peer-loss return below, silently stalling dispatch on every sweep instead of getting the
+      // bounded retries + loud exhaustion every other transient failure in this loop gets. Retry
+      // `ensureEntitled` itself, sharing the same `transientRetries` budget as the claim retries.
+      for (;;) {
+        try {
+          ensureEntitled({ client, node: hostName, workTtlMs, budgetUsd });
+          break;
+        } catch (err) {
+          if (err?.retryable && transientRetries < maxRetries) {
+            transientRetries += 1;
+            continue;
+          }
+          throw err;
+        }
+      }
+      continue;
+    }
+    // lease_held, a repeat not_entitled, or any other refusal → a peer won. Silent backoff.
+    return { won: false, generation: null, refusal: res.refusal ?? "lease_held" };
+  }
+}
+
+/**
+ * defaultLeaseClient — construct the production lease client from this process's env. Built here
+ * (not read from an install slot) for the same reason `defaultTransport` builds the write proxy
+ * locally: this module runs as a spawnSync child, so any process-wide slot is empty in it.
+ */
+export function defaultLeaseClient(env = process.env) {
+  return createLeaseAuthorityClient({ env });
+}
+
+/**
+ * observeLeaseClaim — the SHADOW-mode side call. Runs the real lease claim purely to record the
+ * would-be verdict; the attachment CAS remains authoritative for the dispatch decision. NEVER
+ * throws — a shadow observation must not fail a dispatch — so a cloud outage in shadow is logged
+ * as a missing observation, not a dropped ticket.
+ */
+export async function observeLeaseClaim({ ticket, phase, hostName, client, append = undefined }) {
+  try {
+    const res = await claimViaLease({ ticket, phase, hostName, client });
+    // PR3756 review (P2): this used to hardcode "lease_held" for every loss. A repeated
+    // `not_entitled` (or any future refusal kind) would then be recorded as ordinary lease
+    // contention, corrupting the shadow telemetry enforce-readiness is judged from. `claimViaLease`
+    // now carries the real refusal through on a loss — use it.
+    emitLeaseClaimObservation(
+      { ticket, phase, node: hostName, won: res.won, generation: res.generation, refusal: res.won ? null : res.refusal },
+      append ? { append } : {},
+    );
+    return res;
+  } catch {
+    // Shadow must never fail the dispatch. The lost observation self-heals next sweep.
+    return null;
+  }
+}
+
+/**
+ * releaseViaLease — hand the lease back on phase-terminal so the slot frees before its TTL (the
+ * lease analogue of emitFenceReleased). Best-effort: a null nonce is a no-op (nothing to release),
+ * and a transport throw is swallowed because the lease expires at TTL regardless. `client` is the
+ * lease client; `nonce` is the grant nonce written into cluster-generation.json at claim-win.
+ */
+export async function releaseViaLease({ ticket, phase, holder, nonce, client }) {
+  if (!client || nonce === null || nonce === undefined || nonce === "") {
+    return { released: false, skipped: true };
+  }
+  try {
+    const res = await client.release({ ticket, phase, holder, nonce });
+    return { released: res?.released !== false, skipped: false };
+  } catch (err) {
+    return { released: false, skipped: false, error: err?.reason ?? String(err?.message ?? err) };
+  }
+}
+
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 // A thin argv shim so the SYNCHRONOUS daemon (scheduler.mjs / monitor.mjs) can
 // drive these async claim/fence functions through spawnSync — the same
@@ -454,20 +599,55 @@ export function defaultTransport({ env = process.env, post = defaultPost } = {})
   return resolveAttachmentTransport({ mode, post, proxy, caller: "cluster-claim" });
 }
 
-export async function runCli(argv, { post = defaultPost, transport = null } = {}) {
+export async function runCli(
+  argv,
+  {
+    post = defaultPost,
+    transport = null,
+    // CTL-1786 lease-authority gate seams. `env` selects the mode; `leaseMode`/`leaseClient`/
+    // `appendLeaseEvent` are test overrides. The env gate is read here (not passed down through
+    // the sync bridge) because the mode rides the inherited env across the spawnSync boundary,
+    // exactly like CATALYST_LINEAR_WRITE_PROXY.
+    env = process.env,
+    leaseMode = null,
+    leaseClient = null,
+    appendLeaseEvent = null,
+  } = {},
+) {
   const t = transport ?? defaultTransport({ post });
   const [cmd, ...rest] = argv;
   switch (cmd) {
     case "claim": {
       const [ticket, hostName, phase, issueIdRaw] = rest;
       const issueId = issueIdRaw != null && issueIdRaw !== "" ? issueIdRaw : null;
+      const mode = leaseMode ?? resolveLeaseAuthorityMode(env);
       // CTL-2033: REPORT the failure instead of only throwing it. The catch is
       // scoped to `claim` alone — every other subcommand keeps the module's
       // top-level catch (stderr + exit 1) byte-for-byte. stdout stays exactly one
       // JSON line either way, so the wrapper's "take the last non-empty line"
       // parse is unchanged; stderr keeps a human line for an operator grep.
       try {
-        const res = await claimTicket(ticket, hostName, phase, { post, transport: t, issueId });
+        let res;
+        if (mode === "enforce") {
+          // CTL-1786: the lease authority IS the claim. A refusal returns {won:false}
+          // (a lost race, exit 0); a terminal failure throws → exit 11 (a stall).
+          const client = leaseClient ?? defaultLeaseClient(env);
+          res = await claimViaLease({ ticket, phase, hostName, client });
+        } else {
+          if (mode === "shadow") {
+            // Observe the real lease claim, emit telemetry, but keep the ATTACHMENT
+            // verdict authoritative. Never throws.
+            const client = leaseClient ?? defaultLeaseClient(env);
+            await observeLeaseClaim({
+              ticket,
+              phase,
+              hostName,
+              client,
+              append: appendLeaseEvent ?? undefined,
+            });
+          }
+          res = await claimTicket(ticket, hostName, phase, { post, transport: t, issueId });
+        }
         process.stdout.write(JSON.stringify(res) + "\n");
         return 0;
       } catch (err) {
@@ -485,6 +665,21 @@ export async function runCli(argv, { post = defaultPost, transport = null } = {}
     }
     case "fence-check": {
       const [ticket, gen] = rest;
+      const mode = leaseMode ?? resolveLeaseAuthorityMode(env);
+      // CTL-1786 (PR3756 review, P1): `enforce` NEVER writes the Linear attachment — claimViaLease
+      // bypasses writeClaim entirely (see the claim case above) — so isFenceCurrent's attachment read
+      // would find no fence record and report `current:false` (stale) on EVERY call, silently
+      // suppressing every guarded external write for a lease-authority winner. There is also no live
+      // "is my generation still current" read on the lease authority yet: re-claiming to check would
+      // itself bump the generation and invalidate the very grant being checked (acquireLease's CAS in
+      // catalyst-cloud advances `generation` on every grant, including a same-holder re-acquire). So
+      // this throws a named, non-stale error rather than fabricating an answer.
+      // `cluster-fence-guard.sh` already treats any non-0/non-10 exit as UNVERIFIED — decline the
+      // side-effect, but say the true thing — instead of a false STALE; that is exactly the posture
+      // this needs, with zero change to the guard.
+      if (mode === "enforce") {
+        throw new LeaseAuthorityError("fence-check-not-implemented-for-lease-authority", { retryable: false });
+      }
       const current = await isFenceCurrent(ticket, Number(gen), { post, transport: t });
       process.stdout.write(JSON.stringify({ current }) + "\n");
       return current ? 0 : FENCE_STALE_EXIT;

@@ -53,6 +53,31 @@ import { DEP_SKEW_RESTART_EVENT, DEP_SKEW_WOULD_RESTART_EVENT } from "../executi
 // CTL-1889 — the Linear write-proxy trio, imported from its owning module so a
 // rename cannot leave a re-typed literal behind that still passes.
 import { PROXY_EVENT_NAMES } from "../execution-core/linear-write-proxy.mjs";
+// CTL-1786 — the lease-authority shadow observation pair, imported from its owning module so a
+// rename cannot leave a re-typed literal behind that still passes.
+import { LEASE_EVENT_NAMES } from "../execution-core/lease-authority.mjs";
+// CTL-2076 — the registry team-identity mismatch (CAT-52) event, imported from its
+// owning module rather than re-typed as a literal (same precedent as CTL-1659/CTL-1889).
+import { CONFIG_TEAM_IDENTITY_MISMATCH } from "../execution-core/config-identity-event.mjs";
+// CTL-1785 — the entitlement shadow/enforce events (would-shed / shed / restored),
+// imported from their owning module so a rename cannot leave this contract asserting
+// over a name nothing emits. The `entitlement.` prefix is UNPROTECTED (a dedicated
+// test below asserts isBrokerProtectedName is false for each).
+import { ENTITLEMENT_EVENT_NAMES } from "../execution-core/entitlement-event.mjs";
+// CTL-2056 — the needs-human escalation event, imported from its owning module so a
+// rename cannot leave a re-typed literal behind that still passes.
+import { ESCALATION_EVENT_NEEDS_HUMAN } from "../execution-core/escalation-event.mjs";
+// CTL-2052 — the label retry-exhausted escalation, imported from its owning module
+// (not a re-typed literal). The `linear.label.` prefix is UNPROTECTED under the
+// namespace contract (a dedicated test below asserts it, alongside the salvage family).
+import { LABEL_RETRY_EXHAUSTED_EVENT } from "../execution-core/label-retry-event.mjs";
+import { FENCE_STANDOFF_EVENT } from "../execution-core/fence-standoff.mjs"; // CAT-173
+// CTL-2011 — the reader-split pair (exec-core env-pin diverges from broker/orch-monitor view),
+// imported from their owning module by import rather than re-typed as literals.
+import {
+  EVENT_READERS_DIVERGED,
+  EVENT_READERS_CONVERGED,
+} from "../execution-core/github-feed-timer.mjs";
 
 // Inline names that don't have a dedicated exported constant; verified against
 // the source file they appear in.
@@ -79,6 +104,8 @@ const INLINE_EVENT_NAMES = [
   "delegate.route-fallback",          // CTL-1609 delegate-first.mjs (enforce mode — queue full / failed)
   "catalyst.replica.writer_idle",     // CAT-21 cloud-sync.mjs (tokenless writer provisioning gap)
   "cloud-feed.would-dispatch",        // CTL-1847 cloud-feed-timer.mjs (shadow mode — would dispatch from the feed)
+  "recovery.escalation.correlated",   // CAT-170 recovery-reasoning.mjs (enforced member pointer)
+  "recovery.escalation.would-correlate", // CAT-170 recovery-reasoning.mjs (shadow group)
 ];
 
 // Build the flat list of all static exec-core event names.
@@ -99,6 +126,14 @@ const EXEC_CORE_EVENT_NAMES = [
   DEP_SKEW_RESTART_EVENT, // CTL-1659 cloud-sync.mjs — the writer restarting to load an installed dep fix
   DEP_SKEW_WOULD_RESTART_EVENT, // CTL-1659 — sustained skew that did NOT act (shadow / budget / undurable ledger)
   ...PROXY_EVENT_NAMES, // CTL-1889 linear-write-proxy.mjs — would-write / applied / failed
+  ...LEASE_EVENT_NAMES, // CTL-1786 lease-authority.mjs — shadow would-grant / would-refuse
+  CONFIG_TEAM_IDENTITY_MISMATCH, // CTL-2076 config-identity-event.mjs — registry team-identity mismatch (CAT-52), boot telemetry
+  ...ENTITLEMENT_EVENT_NAMES, // CTL-1785 entitlement-event.mjs — would-shed / shed / restored (v3 bare-name, host-suffixed)
+  ESCALATION_EVENT_NEEDS_HUMAN, // CTL-2056 escalation-event.mjs — ticket.escalated (entity=ticket/action=escalated)
+  LABEL_RETRY_EXHAUSTED_EVENT, // CTL-2052 label-retry-event.mjs — the "stopped after N and said so" escalation
+  FENCE_STANDOFF_EVENT, // CAT-173 fence-standoff.mjs — mutual fence standoff escalation
+  EVENT_READERS_DIVERGED, // CTL-2011 github-feed-timer.mjs — exec-core env-pin diverges from broker/orch-monitor view
+  EVENT_READERS_CONVERGED, // CTL-2011 github-feed-timer.mjs — readers converged after a prior split
   ...INLINE_EVENT_NAMES,
 ];
 
@@ -121,6 +156,45 @@ describe("exec-core static event names", () => {
           `exec-core event "${name}" has phase slot "${slot}" not in KNOWN_PHASES or exceptions`
         ).toBe(true);
       }
+    }
+  });
+
+  // CTL-1785: the entitlement.* prefix is deliberately UNPROTECTED — it must route
+  // through shouldSkipEvent normally (no isBrokerProtectedName collision), so the
+  // broker's phase-lifecycle router and wait-for subscribers see it like any other
+  // exec-core observability event. Assert both the base names and a host-suffixed
+  // sample are unprotected.
+  test("entitlement.* is unprotected under the namespace contract", () => {
+    for (const base of ENTITLEMENT_EVENT_NAMES) {
+      expect(isBrokerProtectedName(base), `${base} must be unprotected`).toBe(false);
+      expect(
+        isBrokerProtectedName(`${base}.mini-2`),
+        `${base}.mini-2 (host-suffixed) must be unprotected`
+      ).toBe(false);
+      // Not a phase-lifecycle event: no phase slot, so the broker never routes it
+      // as a terminal phase transition.
+      expect(phaseSlotOf(`${base}.mini-2`)).toBe(null);
+    }
+  });
+});
+
+describe("CAT-170 recovery escalation correlation event names", () => {
+  const CORRELATION_EVENT_NAMES = [
+    "recovery.escalation.correlated",
+    "recovery.escalation.would-correlate",
+  ];
+
+  test("both names are registered and outside protected namespaces", () => {
+    expect(
+      INLINE_EVENT_NAMES.filter((name) => CORRELATION_EVENT_NAMES.includes(name))
+    ).toEqual(CORRELATION_EVENT_NAMES);
+
+    for (const name of CORRELATION_EVENT_NAMES) {
+      expect(name.startsWith("filter.")).toBe(false);
+      expect(name.startsWith("broker.daemon")).toBe(false);
+      expect(name).not.toBe("session.heartbeat");
+      expect(isBrokerProtectedName(name)).toBe(false);
+      expect(phaseSlotOf(name)).toBeNull();
     }
   });
 });
@@ -249,5 +323,24 @@ describe("CTL-1639 worktree.salvage.* namespace (unprotected)", () => {
       expect(phaseSlotOf(name), `${name} must not resolve to a phase slot`).toBeNull();
       expect(PHASE_EVENT_PATTERN.test(name)).toBe(false);
     }
+  });
+});
+
+// ── CTL-2052: linear.label.retry-exhausted is UNPROTECTED ─────────────────────
+// The AC3 escalation rides the `linear.label.` prefix, which must NOT collide with
+// any broker-protected namespace and must NOT be a phase slot, so shouldSkipEvent
+// ingests it normally and it is available to wait-for / dashboards. Guards against a
+// future FORBIDDEN_PREFIXES / PROTECTED_EXACT_NAMES change swallowing it.
+describe("CTL-2052 linear.label.retry-exhausted namespace (unprotected)", () => {
+  test("it is not broker-protected", () => {
+    expect(
+      isBrokerProtectedName(LABEL_RETRY_EXHAUSTED_EVENT),
+      `${LABEL_RETRY_EXHAUSTED_EVENT} must not be broker-protected`
+    ).toBe(false);
+  });
+
+  test("it is not a phase slot — the broker never routes it as a terminal transition", () => {
+    expect(phaseSlotOf(LABEL_RETRY_EXHAUSTED_EVENT)).toBeNull();
+    expect(PHASE_EVENT_PATTERN.test(LABEL_RETRY_EXHAUSTED_EVENT)).toBe(false);
   });
 });

@@ -125,6 +125,10 @@ Catalyst maps workflow phases to your Linear workspace states via `stateMap` in
 **Note**: These states must exist in your Linear workspace. The defaults match what Linear provides
 out of the box (plus "In Review" which is commonly added to the Started category).
 
+**Note**: `--status` / workflow-state names are validated **server-side** — a misspelled or unknown
+state returns an **empty set**, not an error. Validate names against the team's real workflow states
+in `stateMap` (linearis Gotcha #4).
+
 ### Key Principle
 
 **Review and alignment happen at the plan stage (not PR stage)** to move faster and avoid rework.
@@ -264,6 +268,19 @@ When referencing thoughts documents, always provide GitHub links:
 
 ### 2. Adding Comments to Existing Tickets
 
+> ⛔ **`linearis issues discuss` posts AS THE HUMAN — do not use it for machine replies.** It
+> authenticates with the personal `lin_api_…` token, so the comment carries the human's identity —
+> and the ask-resolution gate (CTL-1567) reads a human-identity comment as *the human deciding* and
+> clears `needs-human`. An agent commenting that way can silently look like his decision.
+>
+> Post machine replies through the app actor (`Catalyst Cloud`) instead, via
+> `linear-reply.mjs <TICKET-ID> --as <AGENT>` — the canonical copyable invocation is owned by
+> the `linearis` skill's "Comment on a ticket" section; use it from there rather than copying
+> the syntax here.
+> For decision/ask tickets use the `catalyst-dev:ask` skill (`ask.mjs` `create` / `accept`).
+> Use `linearis issues discuss` only when the comment is genuinely the human's. Full syntax and
+> rationale: the `linearis` skill's "Comment on a ticket" section (CTL-1922).
+
 When user wants to add a comment to a ticket:
 
 1. **Determine which ticket:**
@@ -296,7 +313,7 @@ When user wants to add a comment to a ticket:
    - `thoughts/shared/rate_limit_analysis.md` ([GitHub](link))
    ```
 
-5. **Add comment with Linearis** (see `linearis comments usage` for syntax)
+5. **Add comment with Linearis** (see `linearis issues usage` for syntax) — but see the ⛔ note above: use `linear-reply.mjs` for machine replies, not `issues discuss`.
 
 ### 3. Moving Tickets Through Workflow
 
@@ -327,7 +344,7 @@ When moving tickets to a new status:
 
 4. **Manual status updates** — use `linearis issues usage` for update syntax
 
-5. **Add comment explaining the transition** — use `linearis comments usage` for syntax
+5. **Add comment explaining the transition** — use `linearis issues usage` for syntax
 
 ### 4. Searching for Tickets
 
@@ -353,6 +370,8 @@ When user wants to find tickets:
 ## Integration with Other Commands
 
 ### Automatic Ticket Updates
+
+> Note: Automated comments in all phases below go through the app-actor path (`linear-reply.mjs`), not `linearis issues discuss` — see the ⛔ note in §2 above.
 
 When these commands are run, check if there's a related Linear ticket and update it:
 
@@ -412,8 +431,7 @@ When these commands are run, check if there's a related Linear ticket and update
 ### Workflow 2: Quick Ticket Updates
 
 Add a progress comment, move the ticket forward using the state name from `stateMap` config, and
-search for related tickets. Use `linearis issues usage` and `linearis comments usage` for exact
-syntax.
+search for related tickets. Use `linearis issues usage` for exact syntax.
 
 ---
 
@@ -427,6 +445,7 @@ For Linearis CLI syntax, see the `linearis` skill reference. For the Linear read
 - **Status mapping**: Configure `linear.stateMap` to match your Linear workspace states
 - **Automation**: Workflow commands auto-update tickets using state names from `stateMap`
 - **CLI required**: Linearis CLI must be installed and configured with LINEAR_API_TOKEN
+- **Labels overwrite by default**: `linearis issues update --labels` **replaces** every label on the ticket, silently dropping any you did not name. Pass `--label-mode add` to preserve existing labels. If a label name is ambiguous (the workspace has same-named labels on different teams), resolve the UUID by team first — see the `linearis` skill's label section (CTL-1802).
 
 This command integrates seamlessly with the create-plan → implement-plan → validate-plan workflow
 while keeping Linear tickets in sync!

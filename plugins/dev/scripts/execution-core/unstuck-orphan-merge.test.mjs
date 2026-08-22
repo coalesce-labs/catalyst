@@ -4,6 +4,7 @@ import { describe, test, expect } from "bun:test";
 import {
   classifyOrphanMergedReconcile,
   defaultCollectOrphanMergedCandidates,
+  ORPHAN_MERGE_PHASE_ALLOWLIST,
   STALE_WORKER_CUTOFF_MS,
 } from "./unstuck-orphan-merge.mjs";
 
@@ -43,6 +44,34 @@ test("a thenable PR-state reader is reported and remains fail-closed (CAT-47)", 
 // classifyOrphanMergedReconcile — pure classifier
 // ---------------------------------------------------------------------------
 describe("classifyOrphanMergedReconcile — pure classifier (CTL-1064 catC)", () => {
+  test("non-allowlisted phases fail closed before every evidence gate (CAT-124 F2)", () => {
+    expect(classifyOrphanMergedReconcile({ ...BASE, phase: "implement" })).toEqual({
+      action: "skip",
+      reason: "phase-not-allowlisted",
+    });
+    expect(
+      classifyOrphanMergedReconcile({
+        ...BASE,
+        phase: "triage",
+        terminalDoneApplied: true,
+        linearTerminal: true,
+        prState: null,
+      }).reason
+    ).toBe("phase-not-allowlisted");
+    for (const phase of [null, undefined, "", 5, {}]) {
+      expect(classifyOrphanMergedReconcile({ ...BASE, phase })).toEqual({
+        action: "skip",
+        reason: "phase-not-allowlisted",
+      });
+    }
+  });
+
+  test("the shared allowlist preserves both late phases (CAT-124 F2)", () => {
+    expect(ORPHAN_MERGE_PHASE_ALLOWLIST).toEqual(["monitor-merge", "monitor-deploy"]);
+    for (const phase of ORPHAN_MERGE_PHASE_ALLOWLIST) {
+      expect(classifyOrphanMergedReconcile({ ...BASE, phase }).action).toBe("emit-complete");
+    }
+  });
   test("PR MERGED + bg dead + not already emitted + no .terminal-done → emit-complete", () => {
     expect(classifyOrphanMergedReconcile(BASE).action).toBe("emit-complete");
   });

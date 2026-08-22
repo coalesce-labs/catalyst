@@ -19,6 +19,9 @@ export interface ClusterNode {
   maxParallel?: number;
   inFlightCount?: number;
   freeSlots?: number;
+  /** CTL-1864: slot-based occupancy (liveCount + countYieldedOccupancy). Present when activeCount
+   *  is supplied by the capacityReader (a CTL-1864+ daemon); absent for old-daemon peers. */
+  activeCount?: number;
   /** CTL-1095: drain state. Present when drainReader is wired. */
   draining?: boolean;
   /** CTL-1322: admission state from the node.heartbeat block. Present when admissionReader

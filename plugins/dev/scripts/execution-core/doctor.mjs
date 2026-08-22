@@ -58,10 +58,15 @@ import {
 import { defaultReadyPath, readReadyState } from "./github-feed-ready.mjs";
 import {
   getHostName,
-  getClusterHosts,
+  // CTL-1785: doctor's roster reads are diagnostic/audit over the physical
+  // EXISTENCE roster (all members need worker labels, the HRW-partition dry-run
+  // shows the full topology). Entitlement is reported separately by
+  // checkEntitlementConsistency. `off` mode: getExistenceHosts() === getClusterHosts().
+  getExistenceHosts,
   resolveClusterHosts,
   hostMembershipWarning,
   getLivenessAnchorIssue,
+  getLivenessReadSource,
   getExecutor, // CTL-1367 item 9: resolve the phase-worker executor for the sdk-auth gate
   // CTL-1355: class-aware grading — resolveNodeClass selects the rubric, isDraining
   // + getExecutionCoreDir drive the developer/monitor "will NOT pick up work" gate.
@@ -80,6 +85,11 @@ import {
   // do NOT import replica-read.mjs (it pulls bun:sqlite; doctor runs under bare node).
   getReplicaDbPath,
   readLinearReplica,
+  // CTL-2074 (Codex #3738 P2): resolve the write-proxy mode through the SAME
+  // env > Layer-2 > 'off' ladder the live write transport uses, so a host that enables
+  // enforce via Layer-2 (catalyst.linearWriteProxy.mode) without exporting the env var is
+  // not silently skipped by the self-echo cross-check. Node-safe (node:fs only).
+  readLinearWriteProxyConfig,
   resolveNodeCloudTokenEnv,
   // CTL-1659: the cloud-sync loaded-dependency boot record — doctor grades it from
   // another process, so it needs the same path the writer writes.
@@ -93,13 +103,36 @@ import {
   // a second copy of the resolution ladder.
   DEPLOYMENT_MODES,
   resolveDeploymentMode,
+  // CTL-1785: entitlement mode resolver, re-exported from the zero-import leaf
+  // (same pattern as deployment-mode above) — doctor grades it advisory-only.
+  resolveEntitlementMode,
+  // CTL-1210: merged Layer-2 reader — cluster-secrets.json (top) > node.json >
+  // config.json (bottom), each fail-open to {}. Used by layer2HasKey so doctor
+  // grades the same merged view the daemon reads.
+  readLayer2Merged,
+  // CTL-1210 Phase 5: advisory presence checks for the two new Layer-2 sibling files.
+  resolveClusterSecretsPath,
+  resolveNodeConfigPath,
 } from "./config.mjs";
+// CTL-1785: the TTL constants + enum, imported DIRECTLY from the zero-import leaf
+// (node built-ins only — safe under doctor's bare-Node runtime), same pattern as
+// secret-contract.mjs below, not re-exported through config.mjs.
+import {
+  ENTITLEMENT_MODES,
+  ENTITLEMENT_TTL_MS,
+  WORK_LEASE_TTL_MS,
+  // CTL-1785 (code review, chatgpt-codex-connector P2): a malformed JSON config
+  // can supply a non-string mode like {"toString": null} as m.raw — interpolating
+  // that directly throws TypeError instead of producing the advisory WARN. Reuse
+  // the same never-throws renderer getEntitlementMode() already uses for this.
+  printableRaw,
+} from "../lib/entitlement.mjs";
 import { scanEventsSince } from "./event-tail.mjs"; // CTL-1529: bounded event-log scan
 // CTL-1659: the loaded-dependency skew comparator. A zero-import leaf (node:crypto/fs/path
 // only), like lib/secret-contract.mjs — safe under doctor's bare-Node runtime.
 import { evaluateDepSkew, readDepsBreadcrumb } from "./cloud-sync-deps.mjs";
 import { ownedBy } from "./hrw.mjs";
-import { readPeerHeartbeats } from "./cluster-heartbeat.mjs";
+import { readAnchorHealth, readPeerHeartbeats } from "./cluster-heartbeat.mjs";
 // CTL-1616 PR2: the shared secret-contract engine, imported DIRECTLY from the
 // zero-import lib leaf (node:fs/os/path only) — same pattern cluster-sync.mjs
 // already uses (`../lib/secret-contract.mjs`), NOT re-exported through
@@ -152,9 +185,13 @@ import { collectConfigDump } from "./config-dump.mjs";
 // Collects all known Linear bot user UUIDs from both config layers:
 //   1. ~/.config/catalyst/config.json  catalyst.linear.bot.worker.botUserId
 //   2. ~/.config/catalyst/config.json  catalyst.linear.bot.orchestrator.botUserId
-//   3. .catalyst/config.json           catalyst.monitor.linear.botUserId (Layer-1, back-compat)
+//   3. ~/.config/catalyst/config.json  catalyst.linear.bot.cloud.botUserId (CTL-2074,
+//        recognition-only — the cloud-proxy app-actor; kept in lockstep with the daemon)
+//   4. .catalyst/config.json           catalyst.monitor.linear.botUserId (Layer-1, back-compat)
 // Returns a Set<string>. Empty set = no filter (fail-open). Never throws.
-function readLinearBotUserIds(l1Path, l2Path) {
+// Exported so doctor.test.mjs exercises the inline twin directly and it cannot
+// silently drift from the daemon resolver (CTL-2074).
+export function readLinearBotUserIds(l1Path, l2Path) {
   const ids = new Set();
   function addFromPath(path, extractor) {
     if (!path) return;
@@ -169,12 +206,33 @@ function readLinearBotUserIds(l1Path, l2Path) {
       s.add(bot.worker.botUserId);
     if (typeof bot?.orchestrator?.botUserId === "string" && bot.orchestrator.botUserId.length > 0)
       s.add(bot.orchestrator.botUserId);
+    // CTL-2074: cloud-proxy app-actor — recognition-only (never a self-assign id).
+    if (typeof bot?.cloud?.botUserId === "string" && bot.cloud.botUserId.length > 0)
+      s.add(bot.cloud.botUserId);
   });
   addFromPath(l1Path, (p, s) => {
     const uid = p?.catalyst?.monitor?.linear?.botUserId;
     if (typeof uid === "string" && uid.length > 0) s.add(uid);
   });
   return ids;
+}
+
+// CTL-2074 (Codex #3738 P2): the CURRENT cloud-proxy app-actor id, read on its own
+// from Layer-2 catalyst.linear.bot.cloud.botUserId. The self-echo cross-check ties its
+// PASS to THIS specific actor rather than to any member of the full recognition set:
+// under proxy=enforce every daemon state write carries the cloud tenant's app-actor id,
+// so a legacy worker/orchestrator id that changed state before the cutover — and is still
+// in the general set — must NOT mask an unrecognized current cloud writer with a clean
+// PASS. Returns "" when unconfigured/unreadable (never throws) — that IS the CTL-2074
+// silent condition, surfaced as WARN by the caller, not a clean pass.
+export function readCloudBotUserId(l2Path) {
+  if (!l2Path) return "";
+  try {
+    const id = JSON.parse(readFileSync(l2Path, "utf8"))?.catalyst?.linear?.bot?.cloud?.botUserId;
+    return typeof id === "string" ? id : "";
+  } catch {
+    return "";
+  }
 }
 
 // ─── Check model ─────────────────────────────────────────────────────────────
@@ -345,7 +403,7 @@ function layer2Path() {
 
 function layer2HasKey(key) {
   try {
-    let obj = JSON.parse(readFileSync(layer2Path(), "utf8"));
+    let obj = readLayer2Merged();
     for (const part of key.split(".")) {
       if (obj == null || typeof obj !== "object") return false;
       obj = obj[part];
@@ -484,7 +542,7 @@ function defaultListTickets() {
 export async function checkHrwPartition(deps = {}) {
   const {
     getHostName: _getHostName = getHostName,
-    getClusterHosts: _getClusterHosts = getClusterHosts,
+    getClusterHosts: _getClusterHosts = getExistenceHosts,
     listTickets = defaultListTickets,
     ownedBy: _ownedBy = ownedBy,
   } = deps;
@@ -587,7 +645,8 @@ export async function checkPeerUniqueness(deps = {}) {
       mkCheck(
         "peer-uniqueness",
         STATUS.WARN,
-        `peer heartbeats returned empty — cluster may be freshly initialized or anchor is stale`,
+        `peer heartbeats returned empty — cluster may be freshly initialized or anchor is stale ` +
+          `(see the liveness-anchor check for whether the anchor itself resolves)`,
       ),
     ];
   }
@@ -610,6 +669,100 @@ export async function checkPeerUniqueness(deps = {}) {
       `no live peer is using host name "${self}" (${peerKeys.length} peer(s) seen)`,
     ),
   ];
+}
+
+// checkLivenessAnchor — grades the configured Linear attachment anchor without
+// conflating a definitive missing/archived issue with an unknown transport error.
+export async function checkLivenessAnchor(deps = {}) {
+  const {
+    getLivenessAnchorIssue: _getAnchor = getLivenessAnchorIssue,
+    getLivenessReadSource: _getReadSource = getLivenessReadSource,
+    resolveClusterHosts: _resolveClusterHosts = resolveClusterHosts,
+    resolveSecretContract = resolveSecret,
+    hasLinearToken = () => resolveLinearTokenLive(resolveSecretContract) != null,
+    readAnchorHealth: _readAnchorHealth = readAnchorHealth,
+  } = deps;
+  const name = "liveness-anchor";
+
+  let anchor;
+  let source;
+  try {
+    anchor = _getAnchor();
+    source = _getReadSource();
+  } catch (err) {
+    return [mkCheck(name, STATUS.WARN, `could not resolve the liveness anchor config: ${err?.message ?? err}`)];
+  }
+
+  if (!anchor) {
+    const multiHost = _resolveClusterHosts().multiHost;
+    return [mkCheck(
+      name,
+      source === "linear" && multiHost ? STATUS.FAIL : STATUS.INFO,
+      `no liveness anchor issue configured — set CATALYST_LIVENESS_ANCHOR_ISSUE or ` +
+        `catalyst.cluster.livenessAnchorIssue (see 'catalyst-cluster set-anchor <ticket>')` +
+        (source === "linear" && multiHost
+          ? `; this multi-host roster cannot publish cross-host heartbeats without an anchor`
+          : ""),
+    )];
+  }
+  if (source !== "linear") {
+    return [mkCheck(
+      name,
+      STATUS.INFO,
+      `liveness read source is '${source}' — anchor '${anchor}' is configured but not load-bearing`,
+    )];
+  }
+  if (!hasLinearToken()) {
+    return [mkCheck(name, STATUS.WARN, `no Linear API token — cannot verify anchor '${anchor}'`)];
+  }
+
+  let health;
+  try {
+    health = await _readAnchorHealth(anchor);
+  } catch (err) {
+    return [mkCheck(name, STATUS.WARN, `anchor probe failed for '${anchor}': ${err?.message ?? err}`)];
+  }
+
+  if (health.error) {
+    return [mkCheck(name, STATUS.WARN, `could not read anchor '${anchor}': ${health.error}`)];
+  }
+  if (health.found === false) {
+    return [mkCheck(
+      name,
+      STATUS.FAIL,
+      `liveness anchor '${anchor}' does not resolve in Linear (deleted or wrong identifier) — ` +
+        `${health.rawError ? `Linear reported: ${health.rawError}. ` : ""}` +
+        `Every host's heartbeat publish aborts, so cross-host failover is dead. Point ` +
+        `catalyst.cluster.livenessAnchorIssue at a live ticket ('catalyst-cluster set-anchor <ticket>') ` +
+        `and restart the stack on every host.`,
+    )];
+  }
+  if (health.archived) {
+    return [mkCheck(
+      name,
+      STATUS.FAIL,
+      `liveness anchor '${anchor}' is ARCHIVED in Linear — un-archive it, or move the anchor ` +
+        `with 'catalyst-cluster set-anchor <ticket>' on every host. This ticket is fleet ` +
+        `infrastructure and must stay open.`,
+    )];
+  }
+  if (health.closed) {
+    return [mkCheck(
+      name,
+      STATUS.WARN,
+      `liveness anchor '${anchor}' is in a closed state ('${health.stateName ?? health.stateType}') — ` +
+        `Linear still serves its attachments so liveness works today, but a completed issue is ` +
+        `auto-archived eventually and archival DOES break the fleet. Reopen it.`,
+    )];
+  }
+  if (health.found !== true) {
+    return [mkCheck(name, STATUS.WARN, `anchor health for '${anchor}' is indeterminate`)];
+  }
+  return [mkCheck(
+    name,
+    STATUS.PASS,
+    `liveness anchor '${anchor}' is open and resolvable (${health.stateName ?? "state unknown"})`,
+  )];
 }
 
 // ─── Phase 4: Bot-credential identity + Linear connectivity ──────────────────
@@ -793,6 +946,159 @@ export async function checkBotCredentials(deps = {}) {
   }
 
   return checks;
+}
+
+// ─── CTL-2074: self-echo identity ↔ real issue_history cross-check ────────────
+//
+// `botUserIds` is the fleet's answer to "was this Linear change made by us?". Since
+// CTL-1889 both minis write THROUGH the cloud proxy (CATALYST_LINEAR_WRITE_PROXY=
+// enforce), so their writes carry the cloud tenant's app-actor id — and if that id is
+// absent from the recognition set, a proxied write mirrored back reads as "a human
+// replied on the daemon's own output". That is a SILENT failure: nothing errors, and
+// the set is resolved from config + a durable ledger, NEVER from history. This check
+// turns it loud — it verifies the recognition set against who ACTUALLY writes state,
+// from real issue_history rows (the AC's "verified by a query against real
+// issue_history rows, not by reading config"), with a positive control.
+//
+// Advisory (WARN, never FAIL): doctor's exit code is the FAIL count and gates
+// activation; this is "make it loud", not "block a node whose cloud id isn't
+// provisioned yet". Every negative carries a positive control — an undefined read or
+// an empty result is INCONCLUSIVE (WARN), never a clean PASS.
+//
+// defaultRecentStateChangeActors — read the replica via the sqlite3 CLI (an OPTIONAL
+// dependency), the SAME discipline as defaultReadDbTables (CAT-35): doctor runs under
+// bare node and must not import replica-read.mjs (bun:sqlite). This SQL is a twin of
+// replica-read.mjs's RECENT_STATE_CHANGE_ACTORS_SELECT — kept a copy precisely because
+// doctor cannot share the bun: reader. undefined = could-not-look (sqlite3 absent /
+// query failed / db missing); [] = looked-and-found-nothing. The two must stay
+// distinct — an empty read reported as clean is the silent false-clean this ends.
+function defaultRecentStateChangeActors({ dbPath, limit = 50, run = spawnSync } = {}) {
+  if (!dbPath) return undefined;
+  const n = Number.isInteger(limit) && limit > 0 ? limit : 50;
+  const sql =
+    "SELECT h.actor_id AS actorId, u.name AS name, COUNT(*) AS count " +
+    "FROM issue_history h LEFT JOIN users u ON u.id = h.actor_id " +
+    "WHERE h.to_state IS NOT NULL AND h.actor_id IS NOT NULL " +
+    `GROUP BY h.actor_id ORDER BY count DESC LIMIT ${n}`; // n is a validated integer — no injection
+  let r;
+  try {
+    r = run("sqlite3", ["-readonly", "-json", dbPath, sql], { encoding: "utf8", timeout: 10_000 });
+  } catch {
+    return undefined;
+  }
+  if (!r || r.error || r.status !== 0 || typeof r.stdout !== "string") return undefined;
+  const out = r.stdout.trim();
+  if (out === "") return []; // looked, found nothing (positive control failed downstream)
+  try {
+    const rows = JSON.parse(out);
+    if (!Array.isArray(rows)) return undefined;
+    return rows.map((x) => ({ actorId: x.actorId ?? null, name: x.name ?? null, count: Number(x.count) || 0 }));
+  } catch {
+    return undefined;
+  }
+}
+
+export function checkSelfEchoIdentityHistory(deps = {}) {
+  const name = "self-echo-identity-history";
+  const {
+    // Codex #3738 P2: resolve the mode through the write transport's env > Layer-2 >
+    // 'off' ladder, NOT the env var alone — a Layer-2-only enforce host was silently
+    // skipped by the old `process.env.CATALYST_LINEAR_WRITE_PROXY || "off"` default.
+    proxyMode = readLinearWriteProxyConfig().mode,
+    botIds = readLinearBotUserIds(layer1Path(), layer2Path()),
+    // Codex #3738 P2: the current cloud-proxy actor — the PASS is tied to THIS id, not
+    // to any historical member of botIds (see readCloudBotUserId).
+    cloudBotId = readCloudBotUserId(layer2Path()),
+    recentActors = () => defaultRecentStateChangeActors({ dbPath: getReplicaDbPath() }),
+  } = deps;
+
+  const mode = String(proxyMode || "off").toLowerCase();
+  // The guard only bites under enforce — off/shadow proxied writes carry the direct
+  // app-actor id already in the set, so history recognition is N/A.
+  if (mode !== "enforce") {
+    return mkCheck(
+      name,
+      STATUS.INFO,
+      `write proxy not enforcing (CATALYST_LINEAR_WRITE_PROXY=${mode}) — proxied-identity self-echo N/A`,
+    );
+  }
+
+  const actors = typeof recentActors === "function" ? recentActors() : recentActors;
+  // could-not-look — NEVER a clean pass.
+  if (actors === undefined) {
+    return mkCheck(
+      name,
+      STATUS.WARN,
+      "replica unavailable — cannot verify the self-echo identity against issue_history " +
+        "(inconclusive, not a clean pass)",
+    );
+  }
+  // looked, found nothing — the positive control failed, so a "recognized" verdict
+  // would be unfounded. Inconclusive, never PASS.
+  if (!Array.isArray(actors) || actors.length === 0) {
+    return mkCheck(
+      name,
+      STATUS.WARN,
+      "no state changes in the recent window — positive control failed; cannot confirm the " +
+        "self-echo identity against history (inconclusive, not a clean pass)",
+    );
+  }
+
+  // Codex #3738 P2: under enforce every daemon state write carries the CLOUD proxy
+  // app-actor id, so the PASS is tied to THAT specific id — not to any member of the
+  // full recognition set. A legacy worker/orchestrator id that changed state before the
+  // cutover is still in `botIds`, and the old "any recognized member ⇒ PASS" would let it
+  // mask an unrecognized current cloud writer with a clean pass — the exact silent
+  // condition this check exists to expose. (`ids` is retained only for the diagnostic
+  // note below, distinguishing a set the cloud id is genuinely part of.)
+  const candidates = actors
+    .slice(0, 5)
+    .map((a) => `${a.actorId}${a.name ? ` "${a.name}"` : ""} (${a.count})`)
+    .join(", ");
+  const ids = botIds instanceof Set ? botIds : new Set(Array.isArray(botIds) ? botIds : []);
+  const cloudId = typeof cloudBotId === "string" && cloudBotId.length > 0 ? cloudBotId : null;
+
+  // The cloud-proxy identity isn't configured at all — nothing pins the fleet's own
+  // proxied writes, so every one of them reads as a human reply. The CTL-2074 condition.
+  if (!cloudId) {
+    return mkCheck(
+      name,
+      STATUS.WARN,
+      "write proxy=enforce but the cloud-proxy identity is not configured " +
+        "(catalyst.linear.bot.cloud.botUserId) — the fleet's own proxied writes read as human " +
+        "replies. Confirm the cloud-proxy identity AT THE PROXY (users.type is unreliable — never " +
+        "auto-classify) and set it. Recent state-writers: " +
+        candidates,
+    );
+  }
+
+  const cloudWrites = actors.filter((a) => a.actorId === cloudId);
+  if (cloudWrites.length > 0) {
+    const who = cloudWrites.map((a) => a.name || a.actorId).join(", ");
+    const inSet = ids.has(cloudId) ? "" : " (⚠ present in history but ABSENT from the recognition set)";
+    return mkCheck(
+      name,
+      // The cloud id writing state but missing from the recognition set is itself a
+      // misconfiguration — the daemon would treat these writes as human. WARN, not PASS.
+      ids.has(cloudId) ? STATUS.PASS : STATUS.WARN,
+      `write proxy=enforce and the configured cloud-proxy identity writes state: ${who}${inSet} ` +
+        `(${cloudWrites.length} of ${actors.length} recent state-writers)`,
+    );
+  }
+
+  // The cloud id is configured but never appears among the actors who ACTUALLY write
+  // state — either it is the wrong id or a legacy actor is still writing. Either way the
+  // fleet's proxied writes are not recognized. Name the candidates so the operator can
+  // confirm the right one AT THE PROXY (users.type is unreliable — never auto-classify).
+  return mkCheck(
+    name,
+    STATUS.WARN,
+    "write proxy=enforce but the configured cloud-proxy identity " +
+      `(${cloudId}) is NOT among the recent state-writers — the fleet's own proxied writes read ` +
+      "as human replies. Confirm the cloud-proxy identity AT THE PROXY and correct " +
+      "catalyst.linear.bot.cloud.botUserId. Recent state-writers: " +
+      candidates,
+  );
 }
 
 // ─── Phase 5: Connectivity + Secrets hygiene ─────────────────────────────────
@@ -3954,6 +4260,57 @@ export function checkClusterSecretFreshness(deps = {}) {
   return checks;
 }
 
+// checkClusterSecretsPresent — CTL-1210 Phase 5. ADVISORY ONLY (WARN, never FAIL).
+// Reports whether ~/.config/catalyst/cluster-secrets.json exists, which is the
+// migration state indicator: absent on a fresh node (no cluster-sync yet run),
+// present once cluster-sync has written it. No content validation — presence only.
+export function checkClusterSecretsPresent(deps = {}) {
+  const {
+    csPath = resolveClusterSecretsPath(),
+    fileExists = (p) => existsSync(p),
+  } = deps;
+  const NAME = "cluster-secrets-present";
+  if (fileExists(csPath)) {
+    return [mkCheck(NAME, STATUS.PASS, `cluster-secrets.json present at ${csPath}`)];
+  }
+  return [
+    mkCheck(
+      NAME,
+      STATUS.WARN,
+      `cluster-secrets.json absent at ${csPath} — shared keys (bot creds, smeeChannel) ` +
+        "will be read from config.json until a cluster-sync or catalyst-join runs",
+    ),
+  ];
+}
+
+// checkNodeConfigPresent — CTL-1210 Phase 5. ADVISORY ONLY (WARN, never FAIL).
+// Reports whether ~/.config/catalyst/node.json exists and has a non-empty host.name.
+// A missing node.json is fine (new install); a present-but-host-name-less one is the
+// unexpected state worth surfacing.
+export function checkNodeConfigPresent(deps = {}) {
+  const {
+    nodePath = resolveNodeConfigPath(),
+    fileExists = (p) => existsSync(p),
+    readJson = (p) => {
+      try {
+        return JSON.parse(readFileSync(p, "utf8"));
+      } catch {
+        return null;
+      }
+    },
+  } = deps;
+  const NAME = "node-config-present";
+  if (!fileExists(nodePath)) {
+    return [mkCheck(NAME, STATUS.WARN, `node.json absent at ${nodePath} — per-node config (host.name, cloudFeed.mode, …) not split yet; config.json is the fallback`)];
+  }
+  const obj = readJson(nodePath);
+  const hostName = obj?.catalyst?.host?.name ?? obj?.catalyst?.["host.name"];
+  if (!hostName) {
+    return [mkCheck(NAME, STATUS.WARN, `node.json present but catalyst.host.name is unset — run catalyst-join or set it manually`)];
+  }
+  return [mkCheck(NAME, STATUS.PASS, `node.json present, host.name=${hostName}`)];
+}
+
 // checkConfigScopeLeak — CTL-1214. Flags a committed Layer-1 .catalyst/config.json
 // that still carries node/cluster-scoped keys, or a legacy .catalyst/hosts.json
 // roster file. `.catalyst/config.json` is committed per-repo and must carry ONLY
@@ -4328,7 +4685,10 @@ export function checkRegistryTeamIdentity(deps = {}) {
   const { listProjects: readProjects = listProjects } = deps;
   let projects;
   try {
-    projects = readProjects();
+    // CAT-116: revision inspection is deliberately opt-in so listProjects()'s
+    // scheduler/daemon hot path remains free of git subprocesses. Doctor is a
+    // one-shot caller and grades the revision a fresh dispatch would install.
+    projects = readProjects({ withDispatchIdentity: true });
   } catch (err) {
     return mkCheck(
       "registry-team-identity",
@@ -4343,18 +4703,98 @@ export function checkRegistryTeamIdentity(deps = {}) {
       "registry has no projects — nothing to check (the zero-project warning is the daemon's, CTL-854)",
     );
   }
-  const mismatches = projects.filter((project) => project?.identity?.matches === false);
+
+  // Every defect category is classified in ONE pass and reported TOGETHER
+  // (Codex #3232 P2). Precedence is per ENTRY, not per report: an entry whose
+  // dispatch revision mismatches is described only by that (strongest) category,
+  // because what dispatch installs outranks checkout state — create-worktree.sh
+  // restores tracked .catalyst paths from its start revision after copying the
+  // checkout. But precedence must never SUPPRESS a different entry's defect:
+  // returning on the first non-empty category let a multi-project run name one
+  // project while leaving another project's known mismatch undisclosed until the
+  // first was repaired and doctor rerun.
+  const classified = new Set();
+  const claim = (list) => {
+    list.forEach((project) => classified.add(project));
+    return list;
+  };
+  const revisionMismatches = claim(
+    projects.filter((project) => project?.dispatchIdentity?.matches === false),
+  );
+  const drifted = claim(projects.filter((project) =>
+    !classified.has(project) &&
+    typeof project?.identity?.declared === "string" &&
+    typeof project?.dispatchIdentity?.declared === "string" &&
+    project.identity.declared !== project.dispatchIdentity.declared));
+  const mismatches = claim(projects.filter((project) =>
+    !classified.has(project) && project?.identity?.matches === false));
+
+  const findings = [];
+  if (revisionMismatches.length) {
+    const details = revisionMismatches
+      .map((project) =>
+        `${project.team} → ${project.repoRoot} (dispatch revision ` +
+        `${project.dispatchIdentity.rev ?? "unknown"} declares ` +
+        `"${project.dispatchIdentity.declared}")`)
+      .join("; ");
+    findings.push(
+      `${revisionMismatches.length} registry entr${revisionMismatches.length === 1 ? "y" : "ies"} ` +
+        "would receive a DIFFERENT Linear team from the dispatch revision: " +
+        `${details} — a fresh worktree follows that revision (CAT-116)`,
+    );
+  }
+  if (drifted.length) {
+    const details = drifted
+      .map((project) =>
+        `${project.team} → ${project.repoRoot} (checkout declares ` +
+        `"${project.identity.declared}"; fresh worktree follows ` +
+        `"${project.dispatchIdentity.declared}" at ` +
+        `${project.dispatchIdentity.rev ?? "unknown"})`)
+      .join("; ");
+    findings.push(
+      `${drifted.length} registry entr${drifted.length === 1 ? "y has" : "ies have"} ` +
+        `checkout ↔ dispatch-revision team identity drift: ${details} (CAT-116)`,
+    );
+  }
   if (mismatches.length) {
     const details = mismatches
       .map((project) =>
         `${project.team} → ${project.repoRoot} (declares "${project.identity.declared}")`)
       .join("; ");
-    return mkCheck(
-      "registry-team-identity",
-      STATUS.WARN,
+    findings.push(
       `${mismatches.length} registry entr${mismatches.length === 1 ? "y" : "ies"} point at a ` +
         "checkout that declares a DIFFERENT Linear team — worktrees cut from it inherit that " +
         `checkout's Layer-1 catalyst.linear config and ticket prefix: ${details} (CAT-52)`,
+    );
+  }
+  if (findings.length) {
+    return mkCheck("registry-team-identity", STATUS.WARN, findings.join(" | "));
+  }
+  // Preserve the pre-CAT-116 injectable project shape: when no entry carries
+  // dispatchIdentity, grade checkout identity exactly as before. Once any
+  // entry opts into the new arm, every entry must verify both arms for PASS.
+  const hasDispatchArm = projects.some((project) =>
+    Object.prototype.hasOwnProperty.call(project ?? {}, "dispatchIdentity"));
+  if (hasDispatchArm) {
+    const knownBoth = projects.filter((project) =>
+      project?.identity?.matches === true &&
+      project?.dispatchIdentity?.matches === true &&
+      project.identity.declared === project.dispatchIdentity.declared).length;
+    if (knownBoth < projects.length) {
+      const unverified = projects.length - knownBoth;
+      return mkCheck(
+        "registry-team-identity",
+        STATUS.INFO,
+        `${knownBoth}/${projects.length} registry entries verified against both checkout and ` +
+          `dispatch revision; ${unverified} could not be checked on both arms — no mismatch ` +
+          "found, but the dispatch revision contract is unverified (CAT-116)",
+      );
+    }
+    return mkCheck(
+      "registry-team-identity",
+      STATUS.PASS,
+      `${knownBoth}/${projects.length} registry entries verified against both checkout and ` +
+        "dispatch revision; no mismatches or drift (CAT-116)",
     );
   }
   const known = projects.filter((project) => project?.identity?.matches === true).length;
@@ -4393,7 +4833,7 @@ export function checkRegistryTeamIdentity(deps = {}) {
 // sole writer); this check only reports drift and points at the remediation.
 export async function checkWorkerLabels(deps = {}) {
   const {
-    getRoster = getClusterHosts,
+    getRoster = getExistenceHosts,
     // CTL-1616 PR3 cutover (design §9): resolveSecretContract is the LIVE
     // answer now — see resolveLinearTokenLive's docstring for why the PR2
     // shadow comparison this call site carried is retired, not merely muted.
@@ -5014,6 +5454,95 @@ export async function checkDeploymentModeConsistency(deps = {}) {
       );
     }
   }
+
+  return checks;
+}
+
+// checkEntitlementConsistency — CTL-1785 (W13). Advisory report on the entitlement
+// seam: the resolved off/shadow/enforce mode, the active provider (local vs a real
+// lease authority), and whether the load-bearing ordering constraint holds
+// (ENTITLEMENT_TTL_MS > work-lease TTL). ADVISORY ONLY — never emits STATUS.FAIL,
+// so it can never move doctor's exit code or wedge the run (mirrors
+// checkDeploymentModeConsistency's INFO/WARN posture). Fleet-topology-independent
+// (does not consult resolveRoster), wired into checksForClass for every class.
+//
+// Deps injectable so tests (and, later, W12's authority) can point every input at
+// a fixture: `mode` (the resolved entitlement mode), `entitlementTtlMs` /
+// `workLeaseTtlMs` (the ordering pair), and `providerKind` ("local" today;
+// "authority" once CTL-1786's lease store is injected).
+export function checkEntitlementConsistency(deps = {}) {
+  const {
+    mode: m = resolveEntitlementMode(),
+    entitlementTtlMs = ENTITLEMENT_TTL_MS,
+    workLeaseTtlMs = WORK_LEASE_TTL_MS,
+    providerKind = "local",
+  } = deps;
+
+  const checks = [];
+
+  // 1. entitlement-mode — the resolved rollout mode. INFO for a recognized value
+  //    (incl. the inferred `off` default); WARN (never FAIL) for an unrecognized
+  //    typo, which degrades to off (byte-identical to today).
+  if (!m.recognized) {
+    checks.push(
+      mkCheck(
+        "entitlement-mode",
+        STATUS.WARN,
+        `entitlement mode "${printableRaw(m.raw)}" is not one of [${ENTITLEMENT_MODES.join(", ")}] — ` +
+          `treating this node as "${m.mode}" (byte-identical to today); correct or unset ` +
+          `catalyst.entitlement.mode / CATALYST_ENTITLEMENT (source=${m.source})`,
+      ),
+    );
+  } else {
+    checks.push(
+      mkCheck(
+        "entitlement-mode",
+        STATUS.INFO,
+        `entitlement mode="${m.mode}" (source=${m.source}${m.inferred ? ", inferred default" : ""})`,
+      ),
+    );
+  }
+
+  // 2. entitlement-provider — which authority answers "may this host take work?".
+  //    WARN (advisory) when enforce is selected but only the LOCAL fallback is
+  //    wired: the local provider always entitles self (self ∈ its own roster), so
+  //    enforce is byte-identical to today until W12 (CTL-1786) injects a real
+  //    authority. INFO otherwise.
+  if (m.mode === "enforce" && providerKind === "local") {
+    checks.push(
+      mkCheck(
+        "entitlement-provider",
+        STATUS.WARN,
+        `entitlement mode=enforce but no lease authority is injected — the local fallback ` +
+          `provider always entitles self, so enforce is byte-identical to today until the ` +
+          `W12 lease authority (CTL-1786) lands`,
+      ),
+    );
+  } else {
+    checks.push(
+      mkCheck(
+        "entitlement-provider",
+        STATUS.INFO,
+        `entitlement provider=${providerKind}` + (m.mode === "off" ? " (mode=off — provider unused)" : ""),
+      ),
+    );
+  }
+
+  // 3. entitlement-ordering — the load-bearing constraint. INFO when it holds;
+  //    WARN (NEVER FAIL — advisory only) if inverted. The leaf's module-load
+  //    assertEntitlementOrdering() already throws loudly on a real inversion of
+  //    the shipped constants, so a WARN here only surfaces an injected/misconfigured pair.
+  const ordersOk = Number(entitlementTtlMs) > Number(workLeaseTtlMs);
+  checks.push(
+    mkCheck(
+      "entitlement-ordering",
+      ordersOk ? STATUS.INFO : STATUS.WARN,
+      ordersOk
+        ? `entitlement TTL ${entitlementTtlMs}ms > work-lease TTL ${workLeaseTtlMs}ms (ordering constraint holds)`
+        : `entitlement TTL ${entitlementTtlMs}ms must EXCEED work-lease TTL ${workLeaseTtlMs}ms — ` +
+            `an unentitled node would hold work invisible to the reclaim loop (advisory)`,
+    ),
+  );
 
   return checks;
 }
@@ -6005,6 +6534,86 @@ export function checkSkillsDirPlugins(deps = {}) {
   ];
 }
 
+// checkGithubFeedReaderConsistency — CTL-2011 (AC1, AC2). Detects when
+// execution-core.env carries a CATALYST_GITHUB_FEED pin that the broker/orch-monitor
+// don't see, splitting the four readers into two authority regimes. Worker-class only
+// (matches checkWebhookIngestion). Injectable for unit tests.
+//
+// Execution-core view: overlay the env file's exported CATALYST_GITHUB_FEED pin onto
+// the ambient env — identical to what the daemon resolver sees after the launcher
+// sources the file. Broker/monitor view: strip the pin entirely (only Layer-2 applies).
+// Compare the two resolved modes; FAIL on disagreement. PASS on agreement. WARN when
+// the env file is unreadable for a non-ENOENT reason (cannot compute exec-core view).
+export function checkGithubFeedReaderConsistency(deps = {}) {
+  const {
+    resolveGithubFeedModeFn = resolveGithubFeedMode,
+    execCoreEnvPath = defaultExecCoreEnvPath(),
+    readEnvFileFn = (p) => {
+      try {
+        return readFileSync(p, "utf8");
+      } catch (err) {
+        if (err?.code === "ENOENT") return ""; // absent → no pin → valid agree case
+        throw err; // non-ENOENT → INCONCLUSIVE
+      }
+    },
+    env = process.env,
+  } = deps;
+
+  let envFileText;
+  try {
+    envFileText = readEnvFileFn(execCoreEnvPath);
+  } catch (err) {
+    if (err?.code === "ENOENT") {
+      // Absent file → no pin; both views fall through to Layer-2/default. Valid agree case.
+      envFileText = "";
+    } else {
+      return [
+        mkCheck(
+          "github-feed-reader-consistency",
+          STATUS.WARN,
+          `could not read execution-core.env (${err?.message ?? String(err)}) — cannot compare reader resolutions`,
+        ),
+      ];
+    }
+  }
+
+  // Build exec-core effective env: lift the CATALYST_GITHUB_FEED pin from the file
+  // (if any exported assignment is present) and overlay it on the ambient env.
+  const pin = parseEnvFileFlag(
+    envFileText,
+    /^\s*(?:export\s+)?CATALYST_GITHUB_FEED=["']?([^"'\s]+)/m,
+  );
+  const execCoreEnv = pin !== null ? { ...env, CATALYST_GITHUB_FEED: pin } : { ...env };
+  const execCoreResult = resolveGithubFeedModeFn({ env: execCoreEnv });
+
+  // Broker/monitor view: strip the env pin so only Layer-2 (or default) applies.
+  // The broker inherits the ambient env but never sources execution-core.env.
+  const { CATALYST_GITHUB_FEED: _gf, CATALYST_GITHUB_FEED_INTERVAL_SEC: _gfi, ...strippedEnv } =
+    { ...env };
+  const brokerResult = resolveGithubFeedModeFn({ env: strippedEnv });
+
+  if (execCoreResult.mode !== brokerResult.mode) {
+    return [
+      mkCheck(
+        "github-feed-reader-consistency",
+        STATUS.FAIL,
+        `readers disagree: execution-core resolves "${execCoreResult.mode}" ` +
+          `(source=${execCoreResult.source}, from ${execCoreEnvPath}) while ` +
+          `broker/orch-monitor resolve "${brokerResult.mode}" (source=${brokerResult.source}) — ` +
+          `smee is suppressed while the producer emits markers; total loss for suppressible github.* names`,
+      ),
+    ];
+  }
+  return [
+    mkCheck(
+      "github-feed-reader-consistency",
+      STATUS.PASS,
+      `readers agree: both resolve "${execCoreResult.mode}" ` +
+        `(exec-core source=${execCoreResult.source}, broker source=${brokerResult.source})`,
+    ),
+  ];
+}
+
 // ─── Suite selection ─────────────────────────────────────────────────────────
 
 // checksForClass — build the check-thunk suite for a resolved node class. This is
@@ -6047,6 +6656,11 @@ export function checksForClass(nc, opts = {}) {
   // CTL-1523 convention); the strict install-profile escalation branch exists
   // in checkDeploymentModeConsistency but is not wired into any profile yet.
   const deploymentModeCheck = () => checkDeploymentModeConsistency({ resolveRoster });
+  // CTL-1785: entitlement consistency — a fleet-topology fact independent of node
+  // class (like deploymentModeCheck), so it runs for every class. ADVISORY ONLY:
+  // every check it emits is INFO/WARN, never FAIL, so it can never move doctor's
+  // exit code (mirrors the CTL-1523/deployment-mode land-dormant convention).
+  const entitlementCheck = () => checkEntitlementConsistency();
   // #2930 round-2: split-brain Layer-2 path layout is unsupported until the
   // canonical sweep — zero rows on every non-divergent host.
   const layer2PathDivergenceCheck = () => checkLayer2PathDivergence();
@@ -6088,6 +6702,10 @@ export function checksForClass(nc, opts = {}) {
   const skillsDirPluginsThunk = () => checkSkillsDirPlugins({ nodeClass: nc.class });
 
   const replicaThunk = () => checkReadReplicaReachable({ baseUrl: readReplicaBaseUrl, fetch: _fetch });
+  // CTL-2074: verify the self-echo recognition set against who ACTUALLY writes state
+  // in real issue_history (not config). Advisory (never FAIL). Defaults resolve
+  // proxyMode/botIds/replica internally; graded for the classes that write to Linear.
+  const selfEchoIdentityHistoryThunk = () => checkSelfEchoIdentityHistory();
   const wontOwnThunk = () =>
     checkWontOwnWork({
       resolveRoster,
@@ -6129,6 +6747,7 @@ export function checksForClass(nc, opts = {}) {
     return [
       nodeClassCheck,
       deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
+      entitlementCheck, // CTL-1785: entitlement consistency, advisory-only (INFO/WARN, never FAIL), every class
       layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
       secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
       agentToolsWritePathCheck, // CTL-2026: out-of-tree agent tools, graded for every class
@@ -6157,12 +6776,15 @@ export function checksForClass(nc, opts = {}) {
       () => checkCloudTokenEnv(), // advisory
       () => checkClusterSecretFreshness(), // CTL-1393: warn if running on stale rotated secrets (advisory)
       () => checkCloudSync(), // CTL-1394: developer nodes read Linear from the local replica too (advisory)
+      selfEchoIdentityHistoryThunk, // CTL-2074: does the self-echo set name the id the fleet's proxied writes actually carry? (advisory)
       () => checkCloudSyncSkew(), // CTL-1659: is the RUNNING writer serving the lockfile's modules? (advisory)
       () => checkFleetTokenExport(), // CTL-1908: does a login shell spend the FLEET's Claude budget? (advisory)
       () => checkConfigScopeLeak(), // advisory
       () => checkWorkerLabels(), // CTL-1481: worker:<host> label is a best-effort visibility projection, never the claim arbiter — advisory only
       () => checkConfigProvenance(), // CTL-1793: daemon-vs-doctor Layer-1 split + per-host env overrides — advisory only (never FAIL)
       () => checkIndexServingRoot(), // CTL-1935: is this node's catalyst-index serving root the PINNED release? evaluateDepSkew cannot answer it (the indexer is an on-demand CLI with no boot record) — advisory only (never FAIL)
+      () => checkClusterSecretsPresent(), // CTL-1210: cluster-secrets.json present? (advisory — new nodes haven't run cluster-sync yet)
+      () => checkNodeConfigPresent(), // CTL-1210: node.json present + host.name set? (advisory)
     ];
   }
 
@@ -6176,6 +6798,7 @@ export function checksForClass(nc, opts = {}) {
     return [
       nodeClassCheck,
       deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
+      entitlementCheck, // CTL-1785: entitlement consistency, advisory-only (INFO/WARN, never FAIL), every class
       layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
       secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
       agentToolsWritePathCheck, // CTL-2026: out-of-tree agent tools, graded for every class
@@ -6206,6 +6829,7 @@ export function checksForClass(nc, opts = {}) {
   return [
     nodeClassCheck,
     deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
+    entitlementCheck, // CTL-1785: entitlement consistency, advisory-only (INFO/WARN, never FAIL), every class
       layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
     secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
     agentToolsWritePathCheck, // CTL-2026: out-of-tree agent tools, graded for every class
@@ -6213,6 +6837,7 @@ export function checksForClass(nc, opts = {}) {
     () => checkHostIdentity(),
     () => checkHrwPartition(),
     () => checkPeerUniqueness(),
+    () => checkLivenessAnchor(),
     () => checkBotCredentials({ expectedBotUserId }),
     () => checkConnectivity({ seed, otel }),
     () => checkSecretsHygiene(),
@@ -6223,6 +6848,7 @@ export function checksForClass(nc, opts = {}) {
     staleLockThunk, // CTL-1415: a stale plugin-source index.lock silently freezes the broker's pulls
     skillsDirPluginsThunk, // skills-dir migration: catalyst loads in-place via ~/.claude/skills; no marketplace/wrapper residue (FAIL on a worker)
     () => checkWebhookIngestion(), // CTL-1284: multiHost member ingests webhooks; single-host does not
+    () => checkGithubFeedReaderConsistency(), // CTL-2011: execution-core.env pin vs broker/monitor view — FAILs on disagreement
     () => checkThoughts(), // CTL-1293: member thoughts repo provisioned + non-foreign primary
     () => checkClaudeSettings(), // CTL-1231: member settings.json pins host identity + OTLP endpoint
     () => checkReaper(), // CTL-1306: orphan-sweep reaper installed + baked path still exists (not dead-127)
@@ -6232,6 +6858,7 @@ export function checksForClass(nc, opts = {}) {
     () => checkCloudTokenEnv(), // CTL-1307: cluster cloud token decrypted → projected to machine-level env (advisory)
     () => checkClusterSecretFreshness(), // CTL-1393: warn if the node is running on stale rotated secrets (advisory)
     () => checkCloudSync(), // CTL-1394: supervised cloud-sync daemon + read tier on the worker hot path (advisory)
+    selfEchoIdentityHistoryThunk, // CTL-2074: does the self-echo set name the id the fleet's proxied writes actually carry? (advisory)
     () => checkCloudSyncSkew(), // CTL-1659: a merged dependency fix that never reached the running writer (advisory)
     () => checkFleetTokenExport(), // CTL-1908: the login-shell export that stalled the fleet for 7h (advisory)
     () => checkSdkExecutorAuth(), // CTL-1367 item 9: under executor=sdk, subscription auth must be correct (no api-key metering)
@@ -6247,6 +6874,8 @@ export function checksForClass(nc, opts = {}) {
     () => checkLinearWriteBudget(), // CTL-1936: host cloud-write spend / exhaustion — advisory only (never FAIL)
     () => checkConfigProvenance(), // CTL-1793: daemon-vs-doctor Layer-1 split + per-host env overrides — advisory only (never FAIL)
     () => checkIndexServingRoot(), // CTL-1935: is this node's catalyst-index serving root the PINNED release? evaluateDepSkew cannot answer it (the indexer is an on-demand CLI with no boot record) — advisory only (never FAIL)
+    () => checkClusterSecretsPresent(), // CTL-1210: cluster-secrets.json present? (advisory — new nodes haven't run cluster-sync yet)
+    () => checkNodeConfigPresent(), // CTL-1210: node.json present + host.name set? (advisory)
   ];
 }
 

@@ -315,6 +315,8 @@ If a ticket is detected (provided as argument, mentioned in query, or from conte
 
 - **At research start**: Update ticket status to `stateMap.research` from config
   using Linearis CLI (run `linearis issues usage` for syntax).
-- **After document saved**: Add a comment with the document link
-  (run `linearis comments usage` for syntax).
-- If Linearis CLI not available, skip silently and continue research
+- **After document saved**: Add a comment with the document link — this is an agent-authored
+  comment, so post it through the app actor (`linear-reply.mjs --as <role>`, or the
+  `linear-comment-post.sh` helper), never bare `linearis issues discuss`/`reply` (those post as
+  the human — see the `linearis` skill's "Comment on a ticket" section).
+- If the tooling is not available, skip silently and continue research

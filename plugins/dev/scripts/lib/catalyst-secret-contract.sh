@@ -45,11 +45,13 @@ _CSC_CONFIG_JSON_PATH=(
   "groq.apiKey" "catalyst.cloud.tokenEnv" ""
 )
 _CSC_ROTATION_CLASS=(
-  "re-armable" "boot-only" "boot-only" "boot-only" "boot-only" "boot-only" "re-armable" "re-armable"
+  "re-armable" "boot-only" "boot-only" "re-armable" "boot-only" "boot-only" "re-armable" "re-armable"
   "boot-only" "boot-only" "boot-only" "n/a"
+  # index 3 (claude-accounts.env): CTL-1984 reclassified boot-only → re-armable/timer
 )
 _CSC_ROTATION_TRIGGER=(
-  "timer" "" "" "" "" "" "on-401" "on-401" "" "" "" ""
+  "timer" "" "" "timer" "" "" "on-401" "on-401" "" "" "" ""
+  # index 3 (claude-accounts.env): CTL-1984 — timer trigger mirrors github-token wiring
 )
 _CSC_BOOTSTRAP_FOR=(
   "" "" "" "" "" "" "" "" "" "" "cloud" "cluster"
@@ -685,7 +687,15 @@ _csc_resolve_config_json() {
   fi
   _path="$(catalyst_secret_config_json_path "$_id")"
   _l2="$(catalyst_secret_resolve_layer2_path)"
-  _tagged="$(_csc_read_json_string "$_l2" "$_path")"
+  # CTL-1210: probe cluster-secrets.json first (shared keys land there via cluster-sync),
+  # then fall through to config.json for per-node keys and backward-compat installs.
+  local _l2_dir _cs_path
+  _l2_dir="$(dirname "$_l2")"
+  _cs_path="${_l2_dir}/cluster-secrets.json"
+  _tagged="$(_csc_read_json_string "$_cs_path" "$_path")"
+  if ! _csc_config_json_tag_accepted "$_id" "$_tagged"; then
+    _tagged="$(_csc_read_json_string "$_l2" "$_path")"
+  fi
   # ACTOR ROW SHAPE FIX (Codex finding fix): accepts BOTH the "@STR64:" tag (a JSON string —
   # the pre-existing groq-api-key/generic shape) AND the "@OBJ64:" tag (a JSON OBJECT — the
   # catalyst.linear.bot.orchestrator/.worker shape, canonicalized+base64'd by

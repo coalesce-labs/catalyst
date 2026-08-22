@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent for the OUT-OF-FLEET dead-man alarm — CTL-2000.
+
+  Label com.catalyst.dead-man. install.sh substitutes every REPLACE_WITH_*
+  token and copies it into ~/Library/LaunchAgents/.
+
+    bash install.sh --dead-man
+    bash install.sh --dead-man --uninstall
+
+  "You cannot be the thing that notices you are dead." This unit is separate
+  from every fleet role on purpose: it fires when the concierge has no heartbeat
+  AND no channel turn for 30 minutes, pushes the human ONCE, and posts on the
+  channel — the one alarm a 529 wave that took stewards and concierge together
+  cannot silence.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>REPLACE_WITH_LABEL</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>REPLACE_WITH_NODE</string>
+    <string>REPLACE_WITH_CLI</string>
+    <string>dead-man</string>
+    <string>--once</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- StartInterval, not KeepAlive: `--once` runs one tick and exits 0; launchd
+       re-fires every 60 s so a 30-minute death is caught within one interval. -->
+  <key>StartInterval</key>
+  <integer>60</integer>
+
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>REPLACE_WITH_PATH</string>
+    <key>CATALYST_DIR</key>
+    <string>REPLACE_WITH_CATALYST_DIR</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>REPLACE_WITH_CWD</string>
+
+  <key>StandardOutPath</key>
+  <string>REPLACE_WITH_LOG</string>
+
+  <key>StandardErrorPath</key>
+  <string>REPLACE_WITH_LOG</string>
+</dict>
+</plist>

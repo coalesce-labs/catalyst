@@ -61,6 +61,7 @@ CLI_ENTRIES=(
 	"catalyst-hud:catalyst-hud"
 	"catalyst-hud-classic.sh:catalyst-hud-classic"
 	"catalyst-stack:catalyst-stack"
+	"catalyst-enrol.sh:catalyst-enrol"
 	"catalyst-doctor:catalyst-doctor"
 	"catalyst-backup:catalyst-backup"
 	"catalyst-install:catalyst-install"

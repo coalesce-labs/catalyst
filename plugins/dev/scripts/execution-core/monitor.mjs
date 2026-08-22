@@ -50,7 +50,11 @@ import {
   TAILER_POLL_INTERVAL_MS,
   log,
   getHostName, // CTL-862
-  getClusterHosts, // CTL-862
+  // CTL-1785: triage HRW ownership is ENTITLEMENT; the coordination-mirror
+  // watchers below are TOPOLOGY (single-host `.length` no-op gates) and stay
+  // EXISTENCE. `off` mode: getEntitledHosts() === getExistenceHosts() === getClusterHosts().
+  getEntitledHosts, // CTL-862 / CTL-1785
+  getExistenceHosts, // CTL-1785
   hostMembershipWarning, // CTL-1057
   isDraining as isDrainingDefault, // CTL-1095: drain gate
   isInProcessDispatchMode, // CTL-1457 (T2): sdk|codex-exec occupancy gate predicate
@@ -1141,9 +1145,11 @@ function dispatchTriage(
   // TRUE no-op regardless of whether the lone roster entry string-matches the
   // resolved hostName (stale/aliased hosts.json). HRW filtering engages only
   // when roster.length > 1, matching the multiHost gate on the claim below.
-  const roster = hosts ?? getClusterHosts();
+  const roster = hosts ?? getEntitledHosts();
   const self = hostName ?? getHostName();
-  const multiHost = roster.length > 1;
+  // CTL-1785: multiHost (the claim gate + HRW identity short-circuit) stays
+  // EXISTENCE-derived; an injected `hosts` still controls it (test contract).
+  const multiHost = (hosts ?? getExistenceHosts()).length > 1;
   // CTL-1057: loud one-time warning when this host is absent from a multi-host roster.
   const _mw = hostMembershipWarning(roster, self);
   if (_mw && !globalThis.__ctl1057_monitor_warned) {
@@ -1219,6 +1225,14 @@ function dispatchTriage(
         "ctl-1441: triage re-dispatch cap reached — parked needs-human; delete .triage-dispatch-counts/<ticket>.json to re-arm"
       );
     }
+    // CTL-2090: this was the ONE remaining silent exit in triage admission — the
+    // markTriageCapped WARN above fires once per park episode, and every later
+    // sweep returned with no record at any level. On mini-2 (2026-08-20) a capped
+    // ticket that a human had re-queued in Linear was routed here every sweep for
+    // 36h while the scheduler reserved the host's only slot for it, and nothing in
+    // the logs said why — the exact ctl-879 blindness class, one branch over.
+    // Count it like every other skip; the streak escalates to WARN on persistence.
+    noteTriageSkip(identifier, "triage-redispatch-capped", { cap: TRIAGE_DISPATCH_CAP });
     return false;
   }
   if (budget && budget.remaining <= 0) {
@@ -2203,8 +2217,8 @@ export function readNewEvents({ foldOnly = false } = {}) {
 //
 // Exported so tests can drive it deterministically without wiring startTailing.
 export function readNewCoordinationComments({ foldOnly = false } = {}) {
-  // Constraint 5: single-host no-op.
-  if (getClusterHosts().length <= 1) return;
+  // Constraint 5: single-host no-op. CTL-1785: EXISTENCE topology gate.
+  if (getExistenceHosts().length <= 1) return;
 
   const mirrorPath = getCoordinationMirrorPath();
   // Reset cursor on path change (analogous to readNewEvents month-rollover guard).
@@ -2304,7 +2318,8 @@ export function startTailing() {
     readNewEvents();
   });
   // CTL-1655 Phase 3: watch the coordination mirror dir too (multi-host only).
-  if (getClusterHosts().length > 1) {
+  // CTL-1785: EXISTENCE topology gate.
+  if (getExistenceHosts().length > 1) {
     const mirrorPath = getCoordinationMirrorPath();
     const mirrorDir = dirname(mirrorPath);
     const mirrorFile = basename(mirrorPath);

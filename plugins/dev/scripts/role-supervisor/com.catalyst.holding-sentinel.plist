@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent for the OUT-OF-FLEET holding-reply sentinel — CTL-2000.
+
+  Label com.catalyst.holding-sentinel. install.sh substitutes every
+  REPLACE_WITH_* token and copies it into ~/Library/LaunchAgents/.
+
+    bash install.sh --holding-sentinel
+    bash install.sh --holding-sentinel --uninstall
+
+  DELIBERATELY a separate launchd unit from the per-role supervisors: a 529 wave
+  that takes the fleet down (measured twice on 2026-08-18) must not take its
+  backstop with it. At the 15-minute silence mark it posts the tagged
+  "steward/<slug> is being restarted" reply and asks launchd to restart the role.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>REPLACE_WITH_LABEL</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>REPLACE_WITH_NODE</string>
+    <string>REPLACE_WITH_CLI</string>
+    <string>holding-sentinel</string>
+    <string>--once</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- StartInterval, not KeepAlive: `--once` runs one tick and exits 0; launchd
+       re-fires every 60 s so a 15-minute silence is caught within one interval. -->
+  <key>StartInterval</key>
+  <integer>60</integer>
+
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>REPLACE_WITH_PATH</string>
+    <key>CATALYST_DIR</key>
+    <string>REPLACE_WITH_CATALYST_DIR</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>REPLACE_WITH_CWD</string>
+
+  <key>StandardOutPath</key>
+  <string>REPLACE_WITH_LOG</string>
+
+  <key>StandardErrorPath</key>
+  <string>REPLACE_WITH_LOG</string>
+</dict>
+</plist>
