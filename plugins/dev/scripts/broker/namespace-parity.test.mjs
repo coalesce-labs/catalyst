@@ -72,6 +72,12 @@ import { ESCALATION_EVENT_NEEDS_HUMAN } from "../execution-core/escalation-event
 // namespace contract (a dedicated test below asserts it, alongside the salvage family).
 import { LABEL_RETRY_EXHAUSTED_EVENT } from "../execution-core/label-retry-event.mjs";
 import { FENCE_STANDOFF_EVENT } from "../execution-core/fence-standoff.mjs"; // CAT-173
+// CTL-2011 — the reader-split pair (exec-core env-pin diverges from broker/orch-monitor view),
+// imported from their owning module by import rather than re-typed as literals.
+import {
+  EVENT_READERS_DIVERGED,
+  EVENT_READERS_CONVERGED,
+} from "../execution-core/github-feed-timer.mjs";
 
 // Inline names that don't have a dedicated exported constant; verified against
 // the source file they appear in.
@@ -126,6 +132,8 @@ const EXEC_CORE_EVENT_NAMES = [
   ESCALATION_EVENT_NEEDS_HUMAN, // CTL-2056 escalation-event.mjs — ticket.escalated (entity=ticket/action=escalated)
   LABEL_RETRY_EXHAUSTED_EVENT, // CTL-2052 label-retry-event.mjs — the "stopped after N and said so" escalation
   FENCE_STANDOFF_EVENT, // CAT-173 fence-standoff.mjs — mutual fence standoff escalation
+  EVENT_READERS_DIVERGED, // CTL-2011 github-feed-timer.mjs — exec-core env-pin diverges from broker/orch-monitor view
+  EVENT_READERS_CONVERGED, // CTL-2011 github-feed-timer.mjs — readers converged after a prior split
   ...INLINE_EVENT_NAMES,
 ];
 

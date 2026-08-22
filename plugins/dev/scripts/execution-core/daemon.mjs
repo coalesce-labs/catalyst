@@ -55,6 +55,7 @@ import {
   readDelegateRunnerConfig, // CTL-1331: async board-health delegate runner kill-switch
   readCloudFeedConfig, // CTL-1847: cloud-feed dispatch-source mode
   readGithubFeedConfig, // CTL-1929: github-feed dispatch-source mode (SEPARATE knob)
+  resolveGithubFeedLayer2Mode, // CTL-2011 Phase 3: broker/orch-monitor view for the reader-split alarm
   readLinearWriteProxyConfig, // CTL-1889: Linear write-proxy transport mode
   resolveLeaseAuthorityMode, // CTL-1786: lease-authority claim gate (off/shadow/enforce)
   readLinearReplica, // CTL-1340: read-replica tier flag (inert; default off)
@@ -1763,12 +1764,21 @@ export function startDaemon({
     if (githubFeedCfg.mode !== "off") {
       _githubFeedTimer = startGithubFeedTimer({
         mode: githubFeedCfg.mode,
+        source: githubFeedCfg.source,
         intervalSec: githubFeedCfg.intervalSec,
         orchDir,
         dbPath: getReplicaDbPath(),
         eventLogPath: getEventLogPath(),
         appendFn: (path, line) => appendFileSync(path, line),
         logger: log,
+        // CTL-2011 Phase 3: hand the timer the broker/orch-monitor view so it can
+        // edge-detect a reader split (github-feed.readers-diverged/-converged).
+        // Without this the resolver defaults to null and the alarm is inert in
+        // production — the CTL-1644 dead-detector trap. The daemon's own mode
+        // (githubFeedCfg) carries this process's CATALYST_GITHUB_FEED pin;
+        // resolveGithubFeedLayer2Mode strips that pin to reproduce what the broker
+        // (which never sources execution-core.env) resolves.
+        resolveLayer2ModeFn: () => resolveGithubFeedLayer2Mode(),
       });
       log.info(
         {

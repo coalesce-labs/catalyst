@@ -82,6 +82,34 @@ export const resolveAccount = resolveGithubFeedAccount;
 export const EVENT_WOULD_DISPATCH = "github-feed.would-dispatch";
 
 /**
+ * Reader-disagreement events — emitted edge-triggered when the execution-core daemon's
+ * effective mode (possibly pinned via `CATALYST_GITHUB_FEED` in execution-core.env) diverges
+ * from the mode that broker and orch-monitor would resolve (Layer-2 / default only). This is
+ * the alertable signal for the CTL-2011 "host split" condition described in the file header.
+ *
+ * Emitted only when `source="env"` (the daemon has an env-file pin that broker/orch-monitor
+ * never see). Both names are `github-feed.*`, not `github.*`, so they never enter the broker's
+ * dispatch gate or smee suppression logic.
+ */
+export const EVENT_READERS_DIVERGED = "github-feed.readers-diverged";
+export const EVENT_READERS_CONVERGED = "github-feed.readers-converged";
+
+/**
+ * Classify whether the execution-core reader is split from broker/orch-monitor.
+ *
+ * Divergence requires BOTH: (a) the effective mode came from an env pin (`source="env"`), AND
+ * (b) that pinned mode differs from what Layer-2/default returns (`layer2Mode`). A pin that
+ * agrees with Layer-2 is not a split — it is redundant, but harmless.
+ *
+ * @param {{ source: string|null, effectiveMode: string, layer2Mode: string }} opts
+ * @returns {{ diverged: boolean, execMode: string, layer2Mode: string }}
+ */
+export function classifyReaderSplit({ source, effectiveMode, layer2Mode }) {
+  const diverged = source === "env" && effectiveMode !== layer2Mode;
+  return { diverged, execMode: effectiveMode, layer2Mode };
+}
+
+/**
  * The names this producer may emit under their REAL name.
  *
  * ⛔ CTL-2018: THIS USED TO BE `new Set(GITHUB_SUPPRESSIBLE_NAMES)` — a module-level
@@ -409,6 +437,7 @@ export function runGithubFeedTick({
  */
 export function startGithubFeedTimer({
   mode,
+  source = null,
   intervalSec = 30,
   orchDir,
   account = resolveAccount(),
@@ -419,6 +448,16 @@ export function startGithubFeedTimer({
   appendFn,
   logger = null,
   clock = { setInterval, clearInterval },
+  /**
+   * Injectable resolver for the Layer-2/default mode (the view broker and orch-monitor have).
+   * When non-null, the timer emits `github-feed.readers-diverged` / `github-feed.readers-converged`
+   * edge-triggered whenever the effective mode (possibly env-pinned) disagrees with this view.
+   * Default null = opt-in off (no split events emitted), so existing callers are unaffected
+   * until the daemon is updated to pass the real resolver.
+   *
+   * @type {null | (() => { mode: string, intervalSec?: number, source?: string })}
+   */
+  resolveLayer2ModeFn = null,
 } = {}) {
   const resolved = resolveEffectiveMode(mode);
   if (resolved.effective === "off") return null;
@@ -456,7 +495,58 @@ export function startGithubFeedTimer({
     // written while healthy is indistinguishable from a dead process — which is the
     // same failure the staleness bound exists for, arriving one step earlier. The
     // un-ready ticks are the ones whose REASON an operator most needs.
-    writeReadyState(readyFile, { ...state, at: Date.now(), intervalSec }, { logger });
+    writeReadyState(readyFile, { ...state, source, at: Date.now(), intervalSec }, { logger });
+  };
+
+  // CTL-2011 Phase 3: edge-triggered reader-split alarm.
+  // The latch tracks the LAST known divergence state so we emit only on CHANGE.
+  // null = never evaluated (first tick), true = was diverged, false = was converged.
+  let _lastDiverged = null;
+
+  const emitSplitEvent = () => {
+    if (!resolveLayer2ModeFn || source !== "env") return;
+    try {
+      const layer2Result = resolveLayer2ModeFn();
+      const layer2Mode = layer2Result?.mode ?? "off";
+      const split = classifyReaderSplit({ source, effectiveMode: mode, layer2Mode });
+
+      if (split.diverged && _lastDiverged !== true) {
+        _lastDiverged = true;
+        appendEventFn(
+          buildCanonicalEvent({
+            name: EVENT_READERS_DIVERGED,
+            serviceName: "catalyst.execution-core",
+            attributes: {
+              "catalyst.account": account,
+              "catalyst.github_feed.exec_mode": mode,
+              "catalyst.github_feed.layer2_mode": layer2Mode,
+              "catalyst.github_feed.source": source,
+            },
+            payload: { execMode: mode, layer2Mode, source, account },
+          }),
+        );
+      } else if (!split.diverged && _lastDiverged === true) {
+        _lastDiverged = false;
+        appendEventFn(
+          buildCanonicalEvent({
+            name: EVENT_READERS_CONVERGED,
+            serviceName: "catalyst.execution-core",
+            attributes: {
+              "catalyst.account": account,
+              "catalyst.github_feed.exec_mode": mode,
+              "catalyst.github_feed.layer2_mode": layer2Mode,
+              "catalyst.github_feed.source": source,
+            },
+            payload: { execMode: mode, layer2Mode, source, account },
+          }),
+        );
+      } else if (_lastDiverged === null) {
+        // First tick — initialize latch without emitting (no edge to signal).
+        _lastDiverged = split.diverged;
+      }
+    } catch {
+      /* fail-open: split detection must never wedge the daemon tick */
+    }
   };
 
   const tick = () => {
@@ -493,6 +583,9 @@ export function startGithubFeedTimer({
       authority = false;
       publishReady({ ready: false, unready: `tick-threw:${err?.name ?? "unknown"}`, mode: null, coverage: null });
     }
+    // CTL-2011 Phase 3: check for reader split AFTER the tick body (success or failure).
+    // Runs in both paths so the alarm fires even on a tick that threw.
+    emitSplitEvent();
   };
 
   const handle = clock.setInterval(tick, Math.max(5, intervalSec) * 1000);
