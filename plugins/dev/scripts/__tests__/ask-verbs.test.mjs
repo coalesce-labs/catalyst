@@ -13,6 +13,7 @@ import {
   buildAskBody,
   isEntryPoint,
   missingBlocksFrom,
+  blocksRelationIdentifiers,
   parseAskOptions,
   resolveTeamLabelIds,
   teamPrefixMismatch,
@@ -171,23 +172,89 @@ describe("⛔ Codex #3509 P1 — the ask must be on the team we asked for", () =
 });
 
 describe("⛔ Codex #3509 P2 — every requested blocking relation is verified", () => {
+  // ⛔ THE FIXTURE IS THE POINT. These read-backs are Linear's REAL shape
+  // (`relations.nodes[].relatedIssue.identifier`), not a hand-shaped convenience. The
+  // previous version of this suite asserted against `{"relations":["CTL-1"]}` — a body
+  // Linear never returns — and passed while the production check was inert.
+  const readBack = (blocks, { description = "**Why:** w\n\nBlocks: CTL-1, CTL-2" } = {}) =>
+    JSON.stringify({
+      identifier: "CTL-9000",
+      description,
+      relations: {
+        nodes: blocks.map((b) => ({ type: "blocks", relatedIssue: { identifier: b } })),
+      },
+      inverseRelations: { nodes: [] },
+    });
+
   test("relations present in the read-back are not reported missing", () => {
-    expect(missingBlocksFrom(["CTL-1", "CTL-2"], '{"relations":["CTL-1","CTL-2"]}')).toEqual([]);
+    expect(missingBlocksFrom(["CTL-1", "CTL-2"], readBack(["CTL-1", "CTL-2"]))).toEqual([]);
   });
 
   test("the dropped-all-but-last shape is caught and NAMED", () => {
     // linearis keeps only the LAST --blocks on some versions, so the command would exit 0
     // while CTL-1 remained formally unblocked.
-    expect(missingBlocksFrom(["CTL-1", "CTL-2"], '{"relations":["CTL-2"]}')).toEqual(["CTL-1"]);
+    expect(missingBlocksFrom(["CTL-1", "CTL-2"], readBack(["CTL-2"]))).toEqual(["CTL-1"]);
+  });
+
+  test("⛔ THE PRODUCTION SHAPE: the body's `Blocks:` line does NOT count as a relation", () => {
+    // Linear stores the description VERBATIM, and buildAskBody always writes a
+    // `Blocks: <every requested id>` line. A substring check over the read-back JSON
+    // therefore always found the id, `missingBlocks` was always [], and the exit-2
+    // gate could never fire. This is that exact read-back: full body, zero relations.
+    const body = buildAskBody({
+      why: "w",
+      options: ["a", "b"],
+      defaultIfSilent: "a",
+      blocks: ["CTL-1", "CTL-2"],
+    });
+    expect(body).toContain("Blocks: CTL-1, CTL-2"); // the trap is present in the fixture
+    const stored = JSON.stringify({
+      identifier: "CTL-9000",
+      description: body,
+      relations: { nodes: [] },
+    });
+    expect(missingBlocksFrom(["CTL-1", "CTL-2"], stored)).toEqual(["CTL-1", "CTL-2"]);
+  });
+
+  test("an inverse `blocked_by` edge counts — the same fact, recorded from the other side", () => {
+    const stored = JSON.stringify({
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [{ type: "blocked_by", issue: { identifier: "CTL-1" } }] },
+    });
+    expect(missingBlocksFrom(["CTL-1"], stored)).toEqual([]);
+  });
+
+  test("a NON-blocks relation to the same ticket does not satisfy --blocks", () => {
+    const stored = JSON.stringify({
+      relations: { nodes: [{ type: "related", relatedIssue: { identifier: "CTL-1" } }] },
+    });
+    expect(missingBlocksFrom(["CTL-1"], stored)).toEqual(["CTL-1"]);
   });
 
   test("no blocks requested is not a failure", () => {
     expect(missingBlocksFrom([], "{}")).toEqual([]);
   });
 
-  test("an unreadable read-back reports them all missing rather than none", () => {
-    // Fail toward "say something is wrong", not toward a silent all-clear.
-    expect(missingBlocksFrom(["CTL-1"], null)).toEqual(["CTL-1"]);
+  test("⛔ 'could not look' is `null`, distinct from 'nothing missing'", () => {
+    // A read-back with NO relation field cannot answer the question. Reporting []
+    // (the old bug) is a false all-clear; reporting the ids is a false accusation.
+    expect(missingBlocksFrom(["CTL-1"], '{"identifier":"CTL-9000"}')).toBeNull();
+    expect(missingBlocksFrom(["CTL-1"], null)).toBeNull();
+    expect(missingBlocksFrom(["CTL-1"], "not json")).toBeNull();
+    // POSITIVE CONTROL through the same instrument: a present-but-EMPTY relation set
+    // is an answer, and it names them all.
+    expect(missingBlocksFrom(["CTL-1"], '{"relations":{"nodes":[]}}')).toEqual(["CTL-1"]);
+  });
+
+  test("blocksRelationIdentifiers reads edges only, never the description", () => {
+    expect(blocksRelationIdentifiers('{"description":"Blocks: CTL-1","relations":{"nodes":[]}}')).
+      toEqual(new Set());
+    expect(
+      blocksRelationIdentifiers(
+        '{"relations":{"nodes":[{"type":"blocks","relatedIssue":{"identifier":"CTL-1"}}]}}'
+      )
+    ).toEqual(new Set(["CTL-1"]));
+    expect(blocksRelationIdentifiers('{"description":"Blocks: CTL-1"}')).toBeNull();
   });
 });
 
@@ -436,12 +503,20 @@ describe("CTL-2157 — a dropped --blocks relation FAILS the create, it does not
   // the JSON string, so the payload arrives as unparseable JSON carrying real
   // newlines — the read-back then fails for a reason that has nothing to do with the
   // property under test. `%s` passes its argument through untouched.
-  const stubScript = (readBackBlocks) =>
+  //
+  // ⛔ THE READ-BACK IS LINEAR'S REAL SHAPE. Its `description` ALWAYS names every
+  // requested id (that is what buildAskBody writes and what Linear stores verbatim),
+  // while `relations.nodes` carries only what actually landed. A fixture that let the
+  // description stand in for the relation is what made the old check pass while the
+  // production gate was unreachable.
+  const relNodes = (ids) =>
+    ids.map((b) => `{"type":"blocks","relatedIssue":{"identifier":"${b}"}}`).join(",");
+  const stubScript = (recordedBlocks, { omitRelations = false } = {}) =>
     `#!/bin/sh
 case "$1 $2" in
   "labels list") printf '%s\\n' '${LABELS_JSON}' ;;
   "issues create") printf '%s\\n' '{"identifier":"CTL-9000"}' ;;
-  "issues read") printf '%s\\n' '{"identifier":"CTL-9000","description":"**Why:** w\\n\\n**Options:**\\n- a\\n- b\\n\\n**Default if silent:** a\\n\\nBlocks: ${readBackBlocks}","relations":"${readBackBlocks}"}' ;;
+  "issues read") printf '%s\\n' '{"identifier":"CTL-9000","description":"**Why:** w\\n\\n**Options:**\\n- a\\n- b\\n\\n**Default if silent:** a\\n\\nBlocks: CTL-1, CTL-2"${omitRelations ? "" : `,"relations":{"nodes":[${relNodes(recordedBlocks)}]}`}}' ;;
 esac
 `;
   const args = [
@@ -464,7 +539,7 @@ esac
   ];
 
   test("a relation Linear never recorded is exit 2 and NAMED", () => {
-    const r = runCreate(args, { bin: linearisStub(stubScript("CTL-1")) });
+    const r = runCreate(args, { bin: linearisStub(stubScript(["CTL-1"])) });
     expect(r.status).toBe(2);
     expect(r.stderr).toContain("CTL-2");
     expect(r.stderr).toContain("NOT on it");
@@ -476,8 +551,30 @@ esac
   });
 
   test("POSITIVE CONTROL: both relations present ⇒ exit 0", () => {
-    const r = runCreate(args, { bin: linearisStub(stubScript("CTL-1, CTL-2")) });
+    const r = runCreate(args, { bin: linearisStub(stubScript(["CTL-1", "CTL-2"])) });
     expect(r.status).toBe(0);
-    expect(JSON.parse(r.stdout).missingBlocks).toEqual([]);
+    const out = JSON.parse(r.stdout);
+    expect(out.missingBlocks).toEqual([]);
+    expect(out.blocksVerified).toBe(true);
+  });
+
+  test("⛔ ZERO relations recorded is exit 2 — the body's Blocks: line proves nothing", () => {
+    // The read-back's description names CTL-1 AND CTL-2 (ask.mjs wrote it); only the
+    // relation edges are empty. The old substring check exited 0 here.
+    const r = runCreate(args, { bin: linearisStub(stubScript([])) });
+    expect(r.status).toBe(2);
+    const out = JSON.parse(r.stdout);
+    expect(out.missingBlocks).toEqual(["CTL-1", "CTL-2"]);
+    expect(out.blocksVerified).toBe(true); // it WAS answerable — the answer was "none"
+    expect(r.stderr).toContain("NOT on it");
+  });
+
+  test("⛔ a read-back with NO relation field FAILS CLOSED, and says which it is", () => {
+    const r = runCreate(args, { bin: linearisStub(stubScript([], { omitRelations: true })) });
+    expect(r.status).toBe(2);
+    const out = JSON.parse(r.stdout);
+    expect(out.blocksVerified).toBe(false);
+    expect(out.missingBlocks).toEqual([]); // NOT accused — unproven is not absent
+    expect(r.stderr).toContain("NO relation field");
   });
 });

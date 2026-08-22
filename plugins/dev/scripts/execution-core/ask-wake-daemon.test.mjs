@@ -122,6 +122,85 @@ describe("CTL-2157 — a human comment on an ASK wakes the work it blocks", () =
     expect(dispatched).toContainEqual({ ticket: "CTC-842", phase: "research" });
   });
 
+  test("⛔ ONE throwing target does not strand the REST of the fan-out", async () => {
+    // The production call site invokes handleCommentWake WITHOUT awaiting it, so a
+    // rejection escaping here is an UNHANDLED promise rejection, not a logged failure
+    // — and every later ticket the ask blocks stays parked, invisibly. `dispatch` was
+    // the one unwrapped call in wakeParkedTicket; removeLabel/clearStall/forgetIntent
+    // were already guarded.
+    const orch = orchDirOf();
+    writeSignal(orch, "W1", "implement", { status: "needs-input", parkedFrom: "implement" });
+    writeSignal(orch, "W2", "implement", { status: "needs-input", parkedFrom: "implement" });
+    const dispatched = [];
+    await handleCommentWake(
+      { ticket: "ASK-1", body: "answered", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        isManagedTicket: () => true,
+        resolveAskBlocks: asks({ "ASK-1": ["W1", "W2"] }),
+        dispatch: (dir, ticket, phase) => {
+          if (ticket === "W1") throw new Error("dispatch boom");
+          dispatched.push({ ticket, phase });
+          return { code: 0 };
+        },
+        removeLabel: async () => ({ removed: true, wrote: true }),
+      }
+    );
+    // W1 blew up; W2 was still woken.
+    expect(dispatched).toEqual([{ ticket: "W2", phase: "implement" }]);
+  });
+
+  test("POSITIVE CONTROL: with no throw, the same fixture wakes BOTH", async () => {
+    const orch = orchDirOf();
+    writeSignal(orch, "W1", "implement", { status: "needs-input", parkedFrom: "implement" });
+    writeSignal(orch, "W2", "implement", { status: "needs-input", parkedFrom: "implement" });
+    const dispatched = [];
+    await handleCommentWake(
+      { ticket: "ASK-1", body: "answered", authorId: "human-1" },
+      {
+        orchDir: orch,
+        botUserId: "bot-uuid",
+        isManagedTicket: () => true,
+        resolveAskBlocks: asks({ "ASK-1": ["W1", "W2"] }),
+        dispatch: (dir, ticket, phase) => {
+          dispatched.push({ ticket, phase });
+          return { code: 0 };
+        },
+        removeLabel: async () => ({ removed: true, wrote: true }),
+      }
+    );
+    expect(dispatched.map((d) => d.ticket).sort()).toEqual(["W1", "W2"]);
+  });
+
+  test("⛔ handleCommentWake NEVER rejects — the production call site does not await it", async () => {
+    // daemon.mjs's onComment does `handleCommentWake(parsed, {...})` with no await and
+    // no .catch, so any rejection is unhandled. Anything that throws anywhere in a
+    // target's treatment must be absorbed.
+    const orch = orchDirOf();
+    writeSignal(orch, "W1", "implement", { status: "needs-input", parkedFrom: "implement" });
+    const boom = () => {
+      throw new Error("boom");
+    };
+    await expect(
+      handleCommentWake(
+        { ticket: "ASK-1", body: "answered", authorId: "human-1" },
+        {
+          orchDir: orch,
+          botUserId: "bot-uuid",
+          isManagedTicket: () => true,
+          resolveAskBlocks: asks({ "ASK-1": ["W1"] }),
+          dispatch: boom,
+          removeLabel: async () => {
+            throw new Error("linear 500");
+          },
+          appendWorkerTransitionEvent: boom,
+          clearStall: boom,
+        }
+      )
+    ).resolves.toBeUndefined();
+  });
+
   test("the commented ticket is STILL woken when it is itself the parked work ticket", async () => {
     // Regression guard for the pre-existing CTL-549 path — the fan-out is additive.
     const orch = orchDirOf();

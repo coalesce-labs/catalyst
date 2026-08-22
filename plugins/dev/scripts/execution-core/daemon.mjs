@@ -727,9 +727,33 @@ export async function handleCommentWake(
   // The commented ticket keeps its exact legacy treatment; the ask's blocked work
   // is additive. Sequential, not Promise.all: each target does its own Linear
   // writes, and a fan-out of N must not become N concurrent write bursts.
-  await wakeParkedTicket(ticket, perTicket);
+  //
+  // ⛔ PER-TARGET FAULT ISOLATION, and it is not defensive decoration. Every other
+  // step in wakeParkedTicket is individually try/caught; `dispatch` was not, so one
+  // target throwing (a bad worker dir, an executor refusing) took the WHOLE fan-out
+  // down — every LATER ticket the ask blocks stayed parked, invisibly, and the
+  // rejection escaped into the daemon's `onComment` callback, which calls this
+  // function WITHOUT awaiting it (see startDaemon's monitorFn wiring): an unhandled
+  // promise rejection, not a logged failure. Pre-existing for one ticket; the fan-out
+  // made it able to take out UNRELATED tickets. Verified: with the guard, a target
+  // that throws is logged and the next target is still woken.
+  await wakeOneTargetSafely(ticket, perTicket);
   for (const blocked of askBlocked) {
-    await wakeParkedTicket(blocked, { ...perTicket, viaAsk: ticket });
+    await wakeOneTargetSafely(blocked, { ...perTicket, viaAsk: ticket });
+  }
+}
+
+// wakeOneTargetSafely — one target's wake, isolated. Never throws, so a fan-out
+// survives a bad target AND handleCommentWake never rejects into its un-awaited
+// production call site.
+async function wakeOneTargetSafely(ticket, perTicket) {
+  try {
+    await wakeParkedTicket(ticket, perTicket);
+  } catch (err) {
+    log.error(
+      { ticket, ask: perTicket?.viaAsk ?? null, err: err?.message },
+      "handleCommentWake: waking this ticket FAILED — continuing with the rest of the fan-out"
+    );
   }
 }
 
@@ -1109,7 +1133,19 @@ async function wakeParkedTicket(
       }
     }
 
-    dispatch(orchDir, ticket, parkedPhase, { handoffPath, resumeSession });
+    // Guarded like every other step in this function (removeLabel, clearStall,
+    // clearStalledLabel, forgetIntent all are). This was the ONE unwrapped call, so a
+    // throwing executor aborted the remaining phase signals for this ticket as well as
+    // every later ticket in the fan-out. Logged at error — a wake that did not
+    // dispatch is a ticket still parked, which nobody must have to infer from silence.
+    try {
+      dispatch(orchDir, ticket, parkedPhase, { handoffPath, resumeSession });
+    } catch (err) {
+      log.error(
+        { ticket, phase: parkedPhase, ask: viaAsk, err: err?.message },
+        "handleCommentWake: re-dispatch FAILED — the ticket stays parked"
+      );
+    }
   }
 }
 

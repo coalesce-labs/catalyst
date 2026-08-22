@@ -53,6 +53,12 @@ linearis issues create "ASK: <one line>" --team CTL --priority 2 \
   ticket back after a multi-relation write. `ask.mjs create` does this for you and now **exits 2** when
   a requested relation is missing (it used to print a ⚠️ and exit 0, so an automated caller recorded
   "filed" for an ask whose relation to the work never existed).
+- ⛔ **That check reads the read-back's RELATION EDGES, never its body.** Linear stores the description
+  verbatim and `ask.mjs` always writes a `Blocks: <every requested id>` line into it, so a substring
+  search over the read-back JSON finds every id whether or not the relation exists — which is how this
+  guard sat inert. The `blocksVerified` field in the JSON output says whether the question could be
+  answered at all; `blocksVerified: false` is also exit 2, because "I could not prove the relation
+  landed" is not "it landed".
 - File the ticket BEFORE citing its number anywhere; read the identifier back.
 
 

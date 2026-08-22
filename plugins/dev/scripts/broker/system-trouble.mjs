@@ -45,6 +45,50 @@ export const DEFAULT_TROUBLE_WINDOW_MS = 600_000; // 10 min
 // config knob is the single source (config-drives-behavior).
 export const DEFAULT_ACCOUNT_EXHAUSTED_PCT = 100;
 
+// ── which `linear.label.retry-exhausted` reasons are actually a QUOTA ─────────
+//
+// ⛔ MEASURED FALSE POSITIVE (adversarial verification of this commit, 2026-08-21).
+// This rule used to fire for EVERY retry-exhausted event, on the strength of a
+// comment saying "the shared 2500/hr quota is the usual cause". It is not. All 75
+// occurrences in ~/catalyst/events/2026-08.jsonl split
+// `budget:ticket-cap` (47) and `cloud:label-rejected` (28), and ZERO carried a
+// quota/429 reason. Positive control: the same instrument read two distinct
+// populated `reason` values from those 75 rows, so the field is readable and the
+// zero is "not there", not "I could not look". With FILTER_RATE_LIMIT_THRESHOLD=1
+// and PERSISTENCE_MS=0, one such event raised a fleet-wide "rate limit exhausted"
+// on the very next watchdog tick — a hair trigger on a condition that did not exist.
+//
+// The two reasons that ARE a spent budget:
+//   `rate-limited`         — `linear-write.mjs` classifyLabelFailure's HTTP 429 and
+//                            the write proxy's classifyProxyResponse 429. THE quota.
+//   `budget:day-exhausted` — this host's 300-writes-per-UTC-day cloud budget is
+//                            spent, so every Linear write from here is refused
+//                            (CTL-1936). Same operator response as a 429.
+//
+// Everything else is NO OPINION (null), deliberately — never a retraction:
+//   `budget:ticket-cap` / `budget:already-converged` — this host's own PER-TICKET
+//       guard refusing a non-converging caller. One noisy ticket, not a fleet
+//       condition, and the guard working is the system behaving correctly.
+//   `cloud:label-rejected` — a DETERMINISTIC cloud rejection of one label write
+//       (an exclusive-group conflict, most often). Retrying is pointless; the
+//       provider is fine.
+//   `missing-label` / `team-mismatch` / `exclusive-conflict` — terminal, per-ticket.
+//   `unauthorized` — a 403. Throttled-class upstream, but it is a CREDENTIAL
+//       failure, not a spent quota, and paging "rate limit exhausted" for it sends
+//       the operator to the wrong instrument.
+//
+// Pinned against the producer vocabulary in system-trouble.test.mjs, which imports
+// `THROTTLED_LABEL_REASONS` (execution-core/label-failure-class.mjs) and `REASONS`
+// (execution-core/linear-write-budget.mjs) rather than re-typing the literals.
+export const QUOTA_EXHAUSTION_LABEL_REASONS = Object.freeze(
+  new Set(["rate-limited", "budget:day-exhausted"])
+);
+
+/** Is this `linear.label.retry-exhausted` reason a spent API/write quota? */
+export function isQuotaExhaustionLabelReason(reason) {
+  return typeof reason === "string" && QUOTA_EXHAUSTION_LABEL_REASONS.has(reason);
+}
+
 function payloadOf(event) {
   const p = event?.body?.payload;
   return p && typeof p === "object" ? p : {};
@@ -72,6 +116,20 @@ function num(v) {
  * would silently clear a real alert.
  *
  * Adding a producer is a one-line add here plus a case in system-trouble.test.mjs.
+ *
+ * ⚠️ WIRED ≠ PROVEN. Measured against ~/catalyst/events/2026-08.jsonl on 2026-08-21,
+ * two of these inputs have never produced a QUALIFYING event on this host:
+ *   • `linear.write.proxy.budget-exhausted` — 0 occurrences all month. POSITIVE
+ *     CONTROL: the same instrument counted 4997 / 84 / 823 / 1760 / 75 / 22 for the
+ *     other six names, so the zero is real.
+ *   • `account.ratelimit.unsampled` — 1760 occurrences, ALL of them
+ *     `unsampled_reason:"email-unresolvable"` with `status:null` and no
+ *     `ratelimit.unsampled_http_status` at all, so the 429 test returned null for
+ *     every one. Not a defect: catalyst-agent/usage.mjs DOES emit this with status
+ *     429 on a real throttle, so the rule is written against a real — if
+ *     never-yet-exercised — shape.
+ * Read "seven producers wired", not "seven producers proven". `node.capacity.changed`
+ * is a third, stronger case — see its own note below.
  */
 export const TROUBLE_RULES = Object.freeze({
   // ── provider_degraded — 429/529 overload from the model provider ───────────
@@ -96,20 +154,40 @@ export const TROUBLE_RULES = Object.freeze({
   // ── rate_limit_exhausted — an account or API budget is spent ──────────────
   // account.status.changed is EDGE-triggered upstream (orch-monitor's
   // account-status-latch) and carries both directions, so it retracts on its own.
+  //
+  // ⛔ KEYED ON THE EMAIL, NOT THE HANDLE, and the order is load-bearing. Two
+  // producers feed this SAME kind for the SAME accounts: this rule and
+  // `account.ratelimit.sampled`, which only ever carries an email. Keying this one
+  // on `acct1` while the gauge keys on `ryan@rozich.com` made ONE rate-limited
+  // account count as TWO distinct keys — and the level IS the distinct-key count,
+  // the exact number this alert reports. Measured on the month log: 3 of 33
+  // rate_limit_exhausted raises carried both spellings of one account, e.g.
+  // ["account:acct1","account:ryan@rozich.com"], reported as count:3.
+  //
+  // Worse than the count: it broke CROSS-PRODUCER RETRACTION. The gauge falling
+  // back under the limit deletes only the email-keyed twin; the handle-keyed twin
+  // stayed live until its 30-minute window aged out, holding the alert up on an
+  // account that had already recovered.
+  //
+  // The email is present on EVERY real event (84/84 in ~/catalyst/events/2026-08.jsonl
+  // carry both `account.handle` and `account.email`; the payload carries only the
+  // handle). The handle stays as a fallback so an email-less event still keys on
+  // SOMETHING rather than collapsing every account onto "unknown".
   "account.status.changed": (event) => {
     const p = payloadOf(event);
     const status = str(attrOf(event, "account.status")) ?? str(p.status);
     if (!status) return null; // unreadable → no opinion (never a false retraction)
-    const handle =
+    const account =
+      str(attrOf(event, "account.email")) ??
+      str(p.email) ??
       str(attrOf(event, "account.handle")) ??
       str(p.handle) ??
-      str(attrOf(event, "account.email")) ??
       "unknown";
     return {
       kind: ALERT_KIND_RATE_LIMIT_EXHAUSTED,
-      key: `account:${handle}`,
+      key: `account:${account}`,
       active: status === "rejected",
-      reason: `claude account ${handle} ${status === "rejected" ? "rate-limited (rejected)" : "accepting again"}`,
+      reason: `claude account ${account} ${status === "rejected" ? "rate-limited (rejected)" : "accepting again"}`,
     };
   },
 
@@ -155,18 +233,54 @@ export const TROUBLE_RULES = Object.freeze({
     reason: "linear write budget exhausted for this host/day",
   }),
 
-  // Linear label writes gave up after their bounded retry — the shared 2500/hr
-  // quota is the usual cause (execution-core/label-retry-event.mjs).
-  "linear.label.retry-exhausted": () => ({
-    kind: ALERT_KIND_RATE_LIMIT_EXHAUSTED,
-    key: "linear:label-retry",
-    active: true,
-    reason: "linear label write retries exhausted (API quota)",
-  }),
+  // Linear label writes gave up after their bounded retry
+  // (execution-core/label-retry-event.mjs). ⛔ GATED ON `reason`: most retry
+  // exhaustions are NOT a quota — see QUOTA_EXHAUSTION_LABEL_REASONS above for the
+  // measurement (75/75 real events were per-ticket guards or deterministic cloud
+  // rejections). An unreadable or non-quota reason is NO OPINION, never a
+  // retraction: a per-ticket guard firing must not clear a live rate-limit alert
+  // any more than it may raise one.
+  //
+  // Keyed on the HOST rather than a constant, so two hosts out of budget are two
+  // keys under one alert — the same fan-in the ticket-keyed provider rule gets.
+  "linear.label.retry-exhausted": (event) => {
+    const p = payloadOf(event);
+    const why = str(p.reason) ?? str(attrOf(event, "label.retry_reason"));
+    if (!isQuotaExhaustionLabelReason(why)) return null;
+    const host = str(p["host.name"]) ?? str(event?.resource?.["host.name"]) ?? "local";
+    return {
+      kind: ALERT_KIND_RATE_LIMIT_EXHAUSTED,
+      key: `linear:label-retry:${host}`,
+      active: true,
+      reason: `linear label write retries exhausted on ${host} (${why})`,
+    };
+  },
 
   // ── capacity_unavailable — the node has no slot to run anything in ─────────
   // execution-core/capacity-event.mjs emits on every autotune maxParallel change,
   // in BOTH directions, so a restored node retracts its own key.
+  //
+  // ⛔ READ THIS BEFORE TRUSTING THIS KIND. It CANNOT fire on a host that sets
+  // `executionCore.minParallel >= 1`, which every configured host here does.
+  // Measured 2026-08-21: all 16 `return { next }` paths in
+  // execution-core/autotune.mjs run through `clampToBounds(v,{minParallel,…})`
+  // (scheduler.mjs:1893), which RAISES the value to minParallel; the live
+  // `.catalyst/config.json` reads `{maxParallel:4, minParallel:1,
+  // maxParallelCeiling:40}`. So the emitted `new_maxParallel` is floored at 1 and
+  // `next <= 0` is unreachable. The live log agrees: all 22 node.capacity.changed
+  // events this month carry new_maxParallel ∈ {1 (mem-critical ×11), 6
+  // (cold-start-seed ×10), 4 (×1)} — never 0. POSITIVE CONTROL for that zero: the
+  // identical classifier + window + alarm replayed over the same month raised
+  // provider_degraded 35× and rate_limit_exhausted 33×, so the instrument fires.
+  //
+  // The rule is kept, at `<= 0`, because the threshold is the HONEST statement of
+  // the condition ("no slots") and it is reachable by configuration, not never:
+  // `clampToBounds`'s bounds "bite only when present" (CTL-665), so a host that
+  // leaves `minParallel` unset takes a decrement past 1 straight to 0. Treat this
+  // kind as ARMED-BUT-UNPROVEN on a minParallel>=1 fleet, not as capacity coverage.
+  // Do NOT lower the bar to `next <= minParallel` to make it fire — a node clamped
+  // to 1 under memory pressure is still running work, and paging on it would fire
+  // 11 times a month for the system behaving correctly.
   //
   // KNOWN GAP (stated, not papered over): "executor death" has no dedicated
   // producer event on this host today. A dead executor shows up as its service

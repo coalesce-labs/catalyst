@@ -14,8 +14,8 @@
 // same instrument, so "nothing was written" can be told apart from "I could not
 // look".
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { getEventLogPath } from "./config.mjs";
 import {
@@ -27,6 +27,7 @@ import {
   __observeSystemTroubleForTest,
   __troubleWindowCountForTest,
   processEvent,
+  seedLastSeenByService,
 } from "./router.mjs";
 import {
   ALERT_KIND_PROVIDER_DEGRADED,
@@ -322,5 +323,80 @@ describe("kinds are independent, and the live tail feeds the detector (CTL-2156)
     persisted(ALERT_KIND_PROVIDER_DEGRADED);
     runWatchdogTick();
     expect(raisedOf(getEventLogPath(), ALERT_KIND_PROVIDER_DEGRADED)).toHaveLength(1);
+  });
+});
+
+// ── the BOOT SEED path ───────────────────────────────────────────────────────
+//
+// ⛔ WHY THIS BLOCK EXISTS. Adversarial verification of this commit deleted the
+// two-line seed hook from router.mjs `scanLogTailInto` and ran the FULL broker
+// suite: 1075 pass / 1 fail — byte-identical to the unmutated baseline. The
+// commit message's load-bearing claim ("a broker restarting mid-outage re-learns
+// the condition from the log instead of failing open") had ZERO coverage, while
+// every neighbouring property killed its mutation. A claim no test can lose is a
+// claim nobody will notice losing.
+describe("boot seed — a broker restarting mid-outage re-learns from the log (CTL-2156)", () => {
+  const writeLog = (events) => {
+    const p = getEventLogPath();
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, events.map((e) => JSON.stringify(e)).join("\n") + "\n");
+    return p;
+  };
+  const at = (event, iso) => ({ ...event, ts: iso });
+  const isoAgo = (ms) => new Date(Date.now() - ms).toISOString();
+
+  test("overloads sitting in the log tail are in the window BEFORE any live event", () => {
+    const p = writeLog(
+      ["CTL-1", "CTL-2", "CTL-3"].map((t) => at(overloadEvent(t), isoAgo(60_000)))
+    );
+    expect(__troubleWindowCountForTest(ALERT_KIND_PROVIDER_DEGRADED)).toBe(0); // cold
+
+    seedLastSeenByService({ logPath: p });
+
+    expect(__troubleWindowCountForTest(ALERT_KIND_PROVIDER_DEGRADED)).toBe(3);
+  });
+
+  test("the re-learned condition ALERTS on the first tick — it does not fail open", () => {
+    const p = writeLog(
+      ["CTL-1", "CTL-2", "CTL-3", "CTC-9"].map((t) => at(overloadEvent(t), isoAgo(60_000)))
+    );
+    seedLastSeenByService({ logPath: p });
+    persisted(ALERT_KIND_PROVIDER_DEGRADED);
+    runWatchdogTick();
+
+    const raised = raisedOf(getEventLogPath(), ALERT_KIND_PROVIDER_DEGRADED);
+    expect(raised).toHaveLength(1); // ONE, even seeded from four log lines
+    expect(raised[0].body.payload.count).toBe(4);
+  });
+
+  test("NEGATIVE CONTROL: a tail with no trouble seeds nothing", () => {
+    // Same instrument, a log that is real and readable but carries no qualifying
+    // event — so the 0 above is "not in the log", not "the seed cannot read".
+    const p = writeLog([
+      {
+        ts: isoAgo(60_000),
+        id: "hb-1",
+        resource: { "service.name": "catalyst.monitor" },
+        attributes: { "event.name": "session.heartbeat" },
+        body: { payload: {} },
+      },
+    ]);
+    seedLastSeenByService({ logPath: p });
+    expect(__troubleWindowCountForTest(ALERT_KIND_PROVIDER_DEGRADED)).toBe(0);
+  });
+
+  test("a STALE tail entry ages out — the seed timestamps from the EVENT, not now()", () => {
+    // The whole point of `Date.parse(e.ts)` rather than Date.now(): a month-old
+    // outage in the tail must not fake a live condition on boot.
+    const p = writeLog(
+      ["CTL-1", "CTL-2"].map((t) => at(overloadEvent(t), isoAgo(7 * 24 * 3600_000)))
+    );
+    seedLastSeenByService({ logPath: p });
+    expect(__troubleWindowCountForTest(ALERT_KIND_PROVIDER_DEGRADED)).toBe(0);
+
+    // POSITIVE CONTROL through the same instrument: identical events, fresh ts.
+    const p2 = writeLog(["CTL-1", "CTL-2"].map((t) => at(overloadEvent(t), isoAgo(60_000))));
+    seedLastSeenByService({ logPath: p2 });
+    expect(__troubleWindowCountForTest(ALERT_KIND_PROVIDER_DEGRADED)).toBe(2);
   });
 });

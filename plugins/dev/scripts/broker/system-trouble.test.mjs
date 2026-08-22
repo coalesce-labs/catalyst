@@ -8,9 +8,16 @@ import {
   TROUBLE_RULES,
   SYSTEM_TROUBLE_KINDS,
   DEFAULT_TROUBLE_WINDOW_MS,
+  QUOTA_EXHAUSTION_LABEL_REASONS,
+  isQuotaExhaustionLabelReason,
   classifySystemTrouble,
   makeSystemTroubleWindow,
 } from "./system-trouble.mjs";
+// ⛔ Imported, never re-typed: these are the PRODUCER's vocabulary. A literal copy
+// here would keep passing after the producer renamed a reason, which is exactly how
+// the ungated rule survived review in the first place.
+import { THROTTLED_LABEL_REASONS } from "../execution-core/label-failure-class.mjs";
+import { REASONS as LINEAR_WRITE_BUDGET_REASONS } from "../execution-core/linear-write-budget.mjs";
 import {
   ALERT_KIND_PROVIDER_DEGRADED,
   ALERT_KIND_RATE_LIMIT_EXHAUSTED,
@@ -60,22 +67,99 @@ describe("classifySystemTrouble — provider_degraded", () => {
 
 describe("classifySystemTrouble — rate_limit_exhausted", () => {
   test("account.status.changed rejected → active; any other status RETRACTS", () => {
+    // The real envelope carries BOTH fields — measured: 84/84 events this month.
     const bad = classifySystemTrouble(
       ev("account.status.changed", {
-        attributes: { "account.handle": "acct3", "account.status": "rejected" },
+        attributes: {
+          "account.handle": "acct3",
+          "account.email": "ryan.rozich@gmail.com",
+          "account.status": "rejected",
+        },
       })
     );
     expect(bad).toMatchObject({
       kind: ALERT_KIND_RATE_LIMIT_EXHAUSTED,
-      key: "account:acct3",
+      key: "account:ryan.rozich@gmail.com",
       active: true,
     });
     const good = classifySystemTrouble(
       ev("account.status.changed", {
-        attributes: { "account.handle": "acct3", "account.status": "ok" },
+        attributes: {
+          "account.handle": "acct3",
+          "account.email": "ryan.rozich@gmail.com",
+          "account.status": "ok",
+        },
       })
     );
-    expect(good).toMatchObject({ key: "account:acct3", active: false });
+    expect(good).toMatchObject({ key: "account:ryan.rozich@gmail.com", active: false });
+  });
+
+  test("⛔ ONE account is ONE key across BOTH producers — status + gauge agree", () => {
+    // THE DEFECT THIS PINS: status.changed keyed on `acct1` while the gauge keyed on
+    // `ryan@rozich.com`, so ONE rate-limited account counted as TWO. The level IS the
+    // distinct-key count — it is the number the alert reports.
+    const w = makeSystemTroubleWindow();
+    w.observeEvent(
+      ev("account.status.changed", {
+        attributes: {
+          "account.handle": "acct1",
+          "account.email": "ryan@rozich.com",
+          "account.status": "rejected",
+        },
+        payload: { node: "mini", handle: "acct1", status: "rejected" },
+      }),
+      0
+    );
+    w.observeEvent(
+      ev("account.ratelimit.sampled", {
+        payload: { email: "ryan@rozich.com", fiveHourPct: 100 },
+        attributes: { "account.email": "ryan@rozich.com" },
+      }),
+      0
+    );
+    expect(w.count(ALERT_KIND_RATE_LIMIT_EXHAUSTED, 0)).toBe(1); // ← ONE, not 2
+    expect(w.keys(ALERT_KIND_RATE_LIMIT_EXHAUSTED, 0)).toEqual(["account:ryan@rozich.com"]);
+
+    // POSITIVE CONTROL: a DIFFERENT account really does add a second key, so the 1
+    // above is "they collapsed", not "the window cannot count".
+    w.observeEvent(
+      ev("account.ratelimit.sampled", {
+        payload: { email: "ryan@getadva.ai", fiveHourPct: 100 },
+      }),
+      0
+    );
+    expect(w.count(ALERT_KIND_RATE_LIMIT_EXHAUSTED, 0)).toBe(2);
+  });
+
+  test("⛔ the gauge's retraction clears the status-changed key too (cross-producer)", () => {
+    // With split keys the recovering account cleared only its email-keyed twin and
+    // the handle-keyed twin held the alert up until the window aged out.
+    const w = makeSystemTroubleWindow();
+    w.observeEvent(
+      ev("account.status.changed", {
+        attributes: {
+          "account.handle": "acct1",
+          "account.email": "ryan@rozich.com",
+          "account.status": "rejected",
+        },
+      }),
+      0
+    );
+    expect(w.count(ALERT_KIND_RATE_LIMIT_EXHAUSTED, 0)).toBe(1);
+    w.observeEvent(
+      ev("account.ratelimit.sampled", { payload: { email: "ryan@rozich.com", fiveHourPct: 12 } }),
+      0
+    );
+    expect(w.count(ALERT_KIND_RATE_LIMIT_EXHAUSTED, 0)).toBe(0);
+  });
+
+  test("an email-less status event still keys on the handle (degrade, never collapse)", () => {
+    const o = classifySystemTrouble(
+      ev("account.status.changed", {
+        attributes: { "account.handle": "acct9", "account.status": "rejected" },
+      })
+    );
+    expect(o.key).toBe("account:acct9");
   });
 
   test("an UNREADABLE status is no opinion (null), NOT a false retraction", () => {
@@ -132,15 +216,96 @@ describe("classifySystemTrouble — rate_limit_exhausted", () => {
     ).toBeNull();
   });
 
-  test("linear budget/label exhaustion classify as rate_limit_exhausted", () => {
+  test("linear budget exhaustion classifies as rate_limit_exhausted", () => {
     expect(classifySystemTrouble(ev("linear.write.proxy.budget-exhausted"))).toMatchObject({
       kind: ALERT_KIND_RATE_LIMIT_EXHAUSTED,
       active: true,
     });
-    expect(classifySystemTrouble(ev("linear.label.retry-exhausted"))).toMatchObject({
-      kind: ALERT_KIND_RATE_LIMIT_EXHAUSTED,
-      key: "linear:label-retry",
-      active: true,
+  });
+
+  describe("linear.label.retry-exhausted is gated on the REASON (measured false positive)", () => {
+    const retry = (reason) =>
+      ev("linear.label.retry-exhausted", {
+        payload: {
+          "host.name": "mini",
+          ticket: "CTL-1805",
+          label: "needs-human",
+          attempts: 5,
+          reason,
+        },
+      });
+
+    test("a genuine quota reason raises, keyed on the HOST", () => {
+      for (const why of ["rate-limited", "budget:day-exhausted"]) {
+        expect(classifySystemTrouble(retry(why))).toMatchObject({
+          kind: ALERT_KIND_RATE_LIMIT_EXHAUSTED,
+          key: "linear:label-retry:mini",
+          active: true,
+        });
+      }
+    });
+
+    test("⛔ the reasons ACTUALLY seen in the log are NO OPINION, not an alert", () => {
+      // Measured on ~/catalyst/events/2026-08.jsonl: all 75 occurrences carried
+      // `budget:ticket-cap` (47) or `cloud:label-rejected` (28) — a per-ticket write
+      // guard and a deterministic cloud rejection. Neither is a quota, and with
+      // FILTER_RATE_LIMIT_THRESHOLD=1 / PERSISTENCE_MS=0 each one raised a
+      // fleet-wide "rate limit exhausted" on the next watchdog tick.
+      for (const why of [
+        "budget:ticket-cap",
+        "budget:already-converged",
+        "cloud:label-rejected",
+        "missing-label",
+        "team-mismatch",
+        "exclusive-conflict",
+        "transient",
+        "unauthorized", // a 403 is a CREDENTIAL failure, not a spent quota
+      ]) {
+        expect(classifySystemTrouble(retry(why))).toBeNull();
+      }
+    });
+
+    test("a MISSING reason is no opinion — never a blanket raise, never a retraction", () => {
+      expect(classifySystemTrouble(ev("linear.label.retry-exhausted"))).toBeNull();
+      expect(classifySystemTrouble(retry(undefined))).toBeNull();
+    });
+
+    test("a non-quota event cannot RETRACT a live quota alert", () => {
+      const w = makeSystemTroubleWindow();
+      w.observeEvent(retry("rate-limited"), 0);
+      expect(w.count(ALERT_KIND_RATE_LIMIT_EXHAUSTED, 0)).toBe(1);
+      w.observeEvent(retry("budget:ticket-cap"), 0);
+      expect(w.count(ALERT_KIND_RATE_LIMIT_EXHAUSTED, 0)).toBe(1); // still up
+    });
+
+    test("two hosts out of budget are two keys under ONE alert", () => {
+      const w = makeSystemTroubleWindow();
+      const onHost = (host) =>
+        ev("linear.label.retry-exhausted", {
+          payload: { "host.name": host, reason: "budget:day-exhausted" },
+        });
+      w.observeEvent(onHost("mini"), 0);
+      w.observeEvent(onHost("mini2"), 0);
+      expect(w.keys(ALERT_KIND_RATE_LIMIT_EXHAUSTED, 0)).toEqual([
+        "linear:label-retry:mini",
+        "linear:label-retry:mini2",
+      ]);
+    });
+
+    test("the quota set is PINNED to the producer's own vocabulary, not re-typed", () => {
+      // If the producer renames either reason this fails instead of going silently inert.
+      expect(THROTTLED_LABEL_REASONS.has("rate-limited")).toBe(true);
+      expect(QUOTA_EXHAUSTION_LABEL_REASONS.has("rate-limited")).toBe(true);
+      expect(QUOTA_EXHAUSTION_LABEL_REASONS.has(LINEAR_WRITE_BUDGET_REASONS.DAY_EXHAUSTED)).toBe(
+        true
+      );
+      // and the per-ticket guards are deliberately OUT
+      expect(QUOTA_EXHAUSTION_LABEL_REASONS.has(LINEAR_WRITE_BUDGET_REASONS.TICKET_CAP)).toBe(
+        false
+      );
+      expect(QUOTA_EXHAUSTION_LABEL_REASONS.has(LINEAR_WRITE_BUDGET_REASONS.CONVERGED)).toBe(false);
+      expect(isQuotaExhaustionLabelReason(null)).toBe(false);
+      expect(isQuotaExhaustionLabelReason("rate-limited")).toBe(true);
     });
   });
 });
@@ -173,6 +338,35 @@ describe("classifySystemTrouble — capacity_unavailable", () => {
     expect(
       classifySystemTrouble(ev("node.capacity.changed", { payload: { "host.name": "mini" } }))
     ).toBeNull();
+  });
+
+  test("⚠️ ARMED BUT UNPROVEN — the values this host actually emits never raise", () => {
+    // Every autotune result goes through clampToBounds, which RAISES it to
+    // executionCore.minParallel (1 on every configured host here), so `<= 0` is
+    // unreachable in practice. Measured 2026-08-21: all 22 node.capacity.changed
+    // events that month carried 1 (mem-critical ×11), 6 (cold-start-seed ×10) or 4.
+    // This pins the reading so nobody mistakes the rule for capacity COVERAGE.
+    for (const [next, reason] of [
+      [1, "mem-critical"],
+      [4, "cold-start-seed"],
+      [6, "cold-start-seed"],
+    ]) {
+      const o = classifySystemTrouble(
+        ev("node.capacity.changed", {
+          payload: { "host.name": "mini", old_maxParallel: 6, new_maxParallel: next, reason },
+        })
+      );
+      expect(o.active).toBe(false); // a retraction, never a raise
+    }
+    // POSITIVE CONTROL — the rule is not simply dead: an unclamped host (minParallel
+    // unset, so clampToBounds is a no-op — CTL-665) reaching 0 DOES raise.
+    expect(
+      classifySystemTrouble(
+        ev("node.capacity.changed", {
+          payload: { "host.name": "mini", old_maxParallel: 1, new_maxParallel: 0 },
+        })
+      ).active
+    ).toBe(true);
   });
 });
 
@@ -279,7 +473,12 @@ describe("makeSystemTroubleWindow — distinct-key level + auto-clear", () => {
     const w = makeSystemTroubleWindow();
     const now = 0;
     w.observeEvent(overload("A"), now);
-    w.observeEvent(ev("linear.label.retry-exhausted"), now);
+    w.observeEvent(
+      ev("linear.label.retry-exhausted", {
+        payload: { "host.name": "mini", reason: "rate-limited" },
+      }),
+      now
+    );
     expect(w.count(ALERT_KIND_PROVIDER_DEGRADED, now)).toBe(1);
     expect(w.count(ALERT_KIND_RATE_LIMIT_EXHAUSTED, now)).toBe(1);
     expect(w.count(ALERT_KIND_CAPACITY_UNAVAILABLE, now)).toBe(0);
