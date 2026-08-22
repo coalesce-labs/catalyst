@@ -45,6 +45,13 @@ linearis issues create "ASK: <one line>" --team CTL --priority 2 \
 ```
 
 
+## Why a verb, not a documented snippet
+
+Documenting the body shape was not enough. CTC-653 measured that EVERY ask filed by hand on 2026-08-17
+wrote its options inline rather than bulleted. Those parsed to **zero** options, so no reply could ever
+match — structurally undecidable, while looking entirely normal. `ask.mjs create` is the shape.
+
+
 ## Gotchas (write path)
 
 - `linearis issues update --labels` fails with *"LabelIds for incorrect team"* when the label exists on

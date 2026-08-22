@@ -267,6 +267,10 @@ export function deriveAttention({
   // retry loops read it as their STOP. What changed is that it no longer RAISES
   // attention on its own: it records "an escalation was published", which for a
   // SYSTEM stall is a retry in progress, not a question for a person.
+  // Deliberately accepted-and-ignored: callers and tests still pass it, and the
+  // comment above is why it no longer participates. eslint-disable needed here
+  // because varsIgnorePattern:"^_" is scoped to **/*.ts in eslint.config.js.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   escalationMarker = false,
   waitingSince = null,
   escalationSince = null,
