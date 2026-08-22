@@ -1860,6 +1860,14 @@ function promoteNumericAttrs(type, details) {
     // rather than charting a fake zero.
     num("recovery.github.core_remaining", details.githubCoreRemaining);
     num("recovery.github.core_remaining_pct", details.githubCoreRemainingPct);
+    // CTL-2027 Phase 2: promote the Linear write-budget headroom scalars — same
+    // rationale as the GitHub quota pair above (the forwarder drops
+    // body.payload off-host, so an un-promoted detail is unqueryable). `state`
+    // is a bounded enum (ok|warn|capped|unknown, ≤64 chars) so it takes the
+    // `str` path, not `num`.
+    num("recovery.linear_write.remaining", details.linearWriteRemaining);
+    num("recovery.linear_write.remaining_pct", details.linearWriteRemainingPct);
+    str("recovery.linear_write.state", details.linearWriteState);
   }
   return a;
 }

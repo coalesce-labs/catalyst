@@ -440,6 +440,7 @@ import { boardHealthPass, lookupPrStatus } from "./board-health.mjs"; // CTL-129
 import { readStalledPrState } from "./stalled-pr-timer.mjs"; // CTL-1608: aggregate workers/*/stalled-pr.json → Map for board-health
 import { readDelegateClaims } from "./delegate-claims.mjs"; // CTL-1744: orchDir/.delegate-claims/*.json → Map for the dispatch-liveness grace (zero-import leaf: monitor.mjs imports scheduler.mjs, so the reader cannot live there)
 import { readGithubQuota } from "./github-quota-timer.mjs";
+import { readLinearWriteLedgerForBoard } from "./linear-write-ledger-reader.mjs"; // CTL-2027 Phase 2
 import { routeStuckTicketToDelegate } from "./delegate-first.mjs"; // CTL-1609: delegate-first escalation seam
 import {
   getAllTicketDescriptors,
@@ -7302,6 +7303,11 @@ export function schedulerTick(
           getDelegateClaims: _boardHealth.getDelegateClaims ?? (() => readDelegateClaims(orchDir)),
           getGithubQuota: _boardHealth.getGithubQuota ?? (() => readGithubQuota(orchDir)),
           githubQuotaMode: _boardHealth.githubQuotaMode ?? readGithubQuotaBoardHealthConfig().mode,
+          // CTL-2027 Phase 2: host-local Linear write-budget ledger, same
+          // env-driven path the live write-proxy reads/writes
+          // (defaultBudgetPath — not orchDir-scoped, unlike github-quota.json).
+          getLinearWriteLedger:
+            _boardHealth.getLinearWriteLedger ?? (() => readLinearWriteLedgerForBoard(process.env, Date.now())),
           getPeerProductivity:
             _boardHealth.getPeerProductivity ??
             (() => {

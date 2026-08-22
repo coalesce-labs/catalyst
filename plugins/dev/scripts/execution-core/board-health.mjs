@@ -36,6 +36,11 @@
 import { HEARTBEAT_GRACE_MS, isThrottled, RECONCILE_INTERVAL_MS } from "./config.mjs";
 import { defaultEmitEvent } from "./recovery-reasoning.mjs"; // → buildRecoveryEnvelope (CTL-1291 promotes the numbers)
 import { evaluateQuotaHeadroom, GITHUB_QUOTA_DEFAULTS } from "./github-quota.mjs";
+// CTL-2027 Phase 2: Linear write-budget headroom, published "beside slotFree" —
+// same posture as the githubQuota import above (a zero-IO evaluator; the actual
+// ledger read is an injected `getLinearWriteLedger` seam, wired at the
+// scheduler call site, so this file stays fs-free).
+import { evaluateLinearWriteHeadroom, resolveWriteBudgetCaps } from "./linear-write-headroom.mjs";
 
 // ── thresholds + cadence (env-tunable, bounded defaults) ─────────────────────
 const DEFAULT_THRESHOLDS = {
@@ -563,6 +568,23 @@ export function assembleBoardState({
   // shadow (the default) reads and publishes but cannot actuate.
   getGithubQuota = () => null,
   githubQuotaMode = process.env.CATALYST_BH_GH_QUOTA || "shadow",
+  // CTL-2027 Phase 2: host-local Linear write-budget ledger (already rolled to
+  // today by the reader). This is an OBSERVATION only — Phase 2 adds no gate,
+  // so there is no `linearWriteMode` actuation lever mirroring
+  // `githubQuotaMode`. Default null (an unwired daemon / bare unit tick)
+  // evaluates to `unknown` downstream, never a guess.
+  getLinearWriteLedger = () => null,
+  // CTL-2027 Phase 2: resolved ONCE per scan (not read fresh inside the "pure"
+  // publication helper below — that would make buildBoardScanEvent's numbers
+  // depend on whatever CATALYST_LINEAR_WRITE_DAILY_BUDGET happens to be set to
+  // in the CALLING process's env at format time, which is exactly the
+  // hermeticity trap write-budget-health.test.mjs's own header warns about).
+  // Threading it as a board field lets a test override it directly instead of
+  // mutating global process.env. Production leaves this at its default, which
+  // reads the SAME env the live write-proxy in this same daemon process reads
+  // — the "same budget/cap resolution the proxy enforces" the plan calls for.
+  linearWriteCaps = resolveWriteBudgetCaps(process.env),
+
   getPeerProductivity = () => null,
   productivityMode = process.env.CATALYST_BH_PRODUCTIVITY || "shadow",
   now = () => Date.now(),
@@ -701,6 +723,11 @@ export function assembleBoardState({
     stalledPrMap: mode === "off" ? new Map() : safe(() => getStalledPrState(), new Map()),
     githubQuota: mode === "off" || githubQuotaMode === "off" ? null : safe(() => getGithubQuota(), null),
     githubQuotaMode: ["off", "shadow", "enforce"].includes(githubQuotaMode) ? githubQuotaMode : "shadow",
+    // CTL-2027 Phase 2: no off-gate beyond the board's own `mode === "off"` —
+    // there is no `linearWriteMode` (this is observation-only, unlike
+    // githubQuotaMode which also gates Gate 3 actuation).
+    linearWriteLedger: mode === "off" ? null : safe(() => getLinearWriteLedger(), null),
+    linearWriteCaps,
     productivityMode: ["off", "shadow", "enforce"].includes(productivityMode) ? productivityMode : "shadow",
     peerProductivity: mode === "off" || productivityMode === "off" ? null : safe(() => getPeerProductivity(), null),
     // CTL-1744: per-ticket delegate-claim timestamps for the dispatch-liveness
@@ -1857,6 +1884,24 @@ function quotaForPublication(board) {
   };
 }
 
+// CTL-2027 Phase 2: same shape as quotaForPublication (a null-collapsing
+// wrapper over the pure evaluator) so the board-scan emit block can treat both
+// quota sources uniformly. `board.linearWriteCaps` is resolved once per scan
+// (assembleBoardState's `resolveWriteBudgetCaps(process.env)` default) — the
+// SAME resolver the live write-proxy uses (CTL-2027's Desired End State #2:
+// "the same budget/cap resolution the proxy enforces"), threaded through the
+// board rather than read fresh here so this stays a pure function of its input.
+function linearWriteHeadroomForPublication(board) {
+  if (!board?.linearWriteLedger) return null;
+  const h = evaluateLinearWriteHeadroom({
+    ledger: board.linearWriteLedger,
+    caps: board.linearWriteCaps,
+    now: board.now,
+  });
+  if (h.state === "unknown") return null;
+  return { state: h.state, remaining: h.remaining, remainingPct: h.remainingPct };
+}
+
 // ── (5) buildBoardContext — PURE. The whole-board brief the dispatched delegate
 // gets injected into recovery-pass.json (today it gets NONE).
 export function buildBoardContext(boardState, invariants) {
@@ -1948,6 +1993,7 @@ export function buildBoardContext(boardState, invariants) {
 // chartable attributes); rosters/move arrays stay in details → body.payload.
 export function buildBoardScanEvent({ mode, invariants, decision, act = null, board = null }) {
   const githubQuota = quotaForPublication(board);
+  const linearWriteHeadroom = linearWriteHeadroomForPublication(board);
   const owns = board == null ? null : makeOwnsFilter(board, { scope: "dispatch" });
   const totalMoves = decision.proposed.tier1 + decision.proposed.tier2 + decision.proposed.tier3;
   // CTL-1435 (C1): the actuation OUTCOME of this scan. Without it the journal shows
@@ -2029,6 +2075,13 @@ export function buildBoardScanEvent({ mode, invariants, decision, act = null, bo
       unproductiveNodeCount: invariants.nodeProductivity?.flagged?.length ?? 0,
       githubCoreRemaining: githubQuota?.remaining ?? null,
       githubCoreRemainingPct: githubQuota?.remainingPct ?? null,
+      // CTL-2027 Phase 2: Linear write-budget headroom, published beside
+      // githubCoreRemaining — "the same place free slots are posted" (Ask 2).
+      // `linearWriteRemaining`/`Pct` are null and `linearWriteState` is
+      // "unknown" when the ledger is absent/unusable/stale — never a guess.
+      linearWriteRemaining: linearWriteHeadroom?.remaining ?? null,
+      linearWriteRemainingPct: linearWriteHeadroom?.remainingPct ?? null,
+      linearWriteState: linearWriteHeadroom?.state ?? "unknown",
       invariants: Object.fromEntries(
         Object.entries(invariants).map(([k, v]) => [k, { ok: v.ok, failed: v.failed, observable: v.observable }]),
       ),
@@ -2094,6 +2147,11 @@ export function boardHealthPass({
   getDelegateClaims,
   getGithubQuota,
   githubQuotaMode,
+  // CTL-2027 Phase 2: host-local Linear write-budget ledger seam. Daemon-bound
+  // below (readLinearWriteLedgerForBoard); a bare tick passes none →
+  // assembleBoardState's `() => null` default keeps linearWriteState
+  // "unknown" (shadow-safe, observation-only, no gate to disarm).
+  getLinearWriteLedger,
   getPeerProductivity,
   productivityMode,
   deadHosts, // CTL-1157: provably-dead host set (daemon-computed)
@@ -2127,6 +2185,7 @@ export function boardHealthPass({
     getDelegateClaims, // CTL-1744: delegate-lands claim seam (empty-Map default if unbound)
     getGithubQuota,
     githubQuotaMode,
+    getLinearWriteLedger, // CTL-2027 Phase 2
     getPeerProductivity,
     productivityMode,
     // CTL-1649: thread the daemon-injected triage artifact seam (undefined → default inert).

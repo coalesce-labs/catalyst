@@ -1361,6 +1361,8 @@ jobs:
             linear-write-proxy-wiring.test.mjs \
             linear-write-proxy-resolve.test.mjs \
             __tests__/config-linear-write-proxy.test.mjs \
+            linear-write-headroom.test.mjs \
+            linear-write-ledger-reader.test.mjs \
             memory-event.test.mjs \
             memory-sampler-signal.test.mjs \
             memory-sampler.test.mjs \
@@ -1415,6 +1417,7 @@ jobs:
             worktree-refresh-timer.test.mjs \
             worktree-safety.test.mjs \
             worktree.test.mjs \
+            write-budget-health.test.mjs \
             recovery-reasoning.test.mjs \
             recovery-fix-backoff.test.mjs \
             infra-class-reasons.test.mjs \

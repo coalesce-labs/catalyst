@@ -96,6 +96,15 @@ function mkBoard(o = {}) {
     stalledPrMap: o.stalledPrMap ?? new Map(),
     githubQuota: o.githubQuota ?? null,
     githubQuotaMode: o.githubQuotaMode ?? "shadow",
+    // CTL-2027 Phase 2: host-local Linear write-budget ledger (already rolled
+    // to `now`'s UTC day). Default null ⇒ linearWriteState stays "unknown",
+    // exactly like an unwired board.
+    linearWriteLedger: o.linearWriteLedger ?? null,
+    // Hermetic default — NOT resolveWriteBudgetCaps(process.env). This suite
+    // must not depend on whatever CATALYST_LINEAR_WRITE_DAILY_BUDGET happens to
+    // be set to in the runner's shell (write-budget-health.test.mjs's own
+    // header names this exact trap).
+    linearWriteCaps: o.linearWriteCaps ?? { dailyBudget: 300, perTicketCap: 50 },
     peerProductivity: o.peerProductivity ?? null,
     productivityMode: o.productivityMode ?? "shadow",
     ring: {
@@ -1135,6 +1144,48 @@ describe("buildBoardScanEvent", () => {
     const attrs = buildRecoveryEnvelope(flat, { now: () => "2026-06-20T11:59:00Z" }).attributes;
     expect(attrs).not.toHaveProperty("recovery.github.core_remaining");
     expect(attrs).not.toHaveProperty("recovery.github.core_remaining_pct");
+  });
+
+  // ── CTL-2027 Phase 2 — Linear write-budget headroom, published beside slotFree ──
+  test("publishes Linear write-budget headroom numerics + state beside githubCoreRemaining", () => {
+    const board = mkBoard({ linearWriteLedger: { day: "2026-06-20", total: 4, byTicket: {} } });
+    const invs = evaluateInvariants(board);
+    const ev = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision: decideBoardHealth(invs, board), board });
+    expect(ev.details.linearWriteRemaining).toBe(296);
+    expect(ev.details.linearWriteRemainingPct).toBeCloseTo((296 / 300) * 100);
+    expect(ev.details.linearWriteState).toBe("ok");
+  });
+
+  test("Linear write scalars are promoted into OTel attributes, not just details", () => {
+    const board = mkBoard({ linearWriteLedger: { day: "2026-06-20", total: 300, byTicket: {} } });
+    const invs = evaluateInvariants(board);
+    const flat = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision: decideBoardHealth(invs, board), board });
+    const attrs = buildRecoveryEnvelope(flat, { now: () => "2026-06-20T11:59:00Z" }).attributes;
+    expect(attrs["recovery.linear_write.remaining"]).toBe(0);
+    expect(attrs["recovery.linear_write.remaining_pct"]).toBe(0);
+    expect(attrs["recovery.linear_write.state"]).toBe("capped");
+  });
+
+  test("an absent ledger reports linearWriteState 'unknown' and promotes NO numeric attributes (never a fake zero)", () => {
+    const board = mkBoard(); // linearWriteLedger defaults to null
+    const invs = evaluateInvariants(board);
+    const flat = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision: decideBoardHealth(invs, board), board });
+    expect(flat.details.linearWriteState).toBe("unknown");
+    expect(flat.details.linearWriteRemaining).toBeNull();
+    const attrs = buildRecoveryEnvelope(flat, { now: () => "2026-06-20T11:59:00Z" }).attributes;
+    expect(attrs).not.toHaveProperty("recovery.linear_write.remaining");
+    expect(attrs).not.toHaveProperty("recovery.linear_write.remaining_pct");
+    // The bounded enum itself IS promoted even when unknown — an operator
+    // dashboard can chart "how often is this host's headroom unobservable".
+    expect(attrs["recovery.linear_write.state"]).toBe("unknown");
+  });
+
+  test("a per-ticket cap breach reports 'capped' even with plenty of daily headroom left (the live CTL-2015 shape)", () => {
+    const board = mkBoard({ linearWriteLedger: { day: "2026-06-20", total: 60, byTicket: { "CTL-2015": 50 } } });
+    const invs = evaluateInvariants(board);
+    const ev = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision: decideBoardHealth(invs, board), board });
+    expect(ev.details.linearWriteState).toBe("capped");
+    expect(ev.details.linearWriteRemaining).toBe(0);
   });
 
   test("type/ticket/scalars at top of details; rosters as arrays; mode echoed", () => {
