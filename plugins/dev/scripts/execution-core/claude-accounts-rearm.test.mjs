@@ -5,7 +5,15 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test claude-accounts-rearm.test.mjs
 
 import { describe, test, expect } from "bun:test";
-import { rearmClaudeAccountsFromFile, parseActiveOauthToken } from "./claude-accounts-rearm.mjs";
+import { EventEmitter } from "node:events";
+import {
+  rearmClaudeAccountsFromFile,
+  parseActiveOauthToken,
+  parseActiveOauthTokenDetailed,
+  rearmEventEnvelope,
+  makeRearmSignalHandler,
+  wireRearmSighup,
+} from "./claude-accounts-rearm.mjs";
 import {
   registerRearmHook,
   clearRearmHook,
@@ -21,9 +29,19 @@ const TOKEN_C = "sk-ant-oat01-FAKE-THIRD-TOKEN-CCCCCCCCCCCCCCCCCCCCCCCCCC";
 // Default file path the hook uses when CLAUDE_ACCOUNTS_ENV is unset.
 const DEFAULT_PATH = `${process.env.HOME}/.config/catalyst/claude-accounts.env`;
 
+// silentLog — a no-op logger for tests that don't assert on log output.
+const silentLog = { info: () => {}, warn: () => {}, error: () => {} };
+
 // rearmWith — the test harness. Builds a readFile stub from a path→content map and
 // calls rearmClaudeAccountsFromFile with the injected env and a no-op log.
-function rearmWith({ files = {}, env = {} } = {}) {
+//
+// CTL-2147: also injects a no-op `emit` and a fixed `host` by default. Without this,
+// every one of the tests below (none of which care about the event envelope) would
+// fall through to rearmClaudeAccountsFromFile's real default `emit` — appending to
+// THIS machine's actual ~/catalyst/events/YYYY-MM.jsonl on every test run, which
+// breaks the file's own "FULLY OFFLINE" guarantee (top-of-file comment). Tests that
+// DO care about emission (below) override `emit` explicitly.
+function rearmWith({ files = {}, env = {}, emit = () => true, host = "test-host" } = {}) {
   return rearmClaudeAccountsFromFile({
     env,
     readFile: (p) => {
@@ -36,6 +54,8 @@ function rearmWith({ files = {}, env = {} } = {}) {
       throw err;
     },
     log: null, // silence hook logs in test output
+    emit,
+    host,
   });
 }
 
@@ -146,6 +166,38 @@ describe("parseActiveOauthToken", () => {
   });
 });
 
+describe("parseActiveOauthTokenDetailed (CTL-2147)", () => {
+  test("returns the selector's handle alongside the token", () => {
+    const text = [
+      "CLAUDE_TOKEN_acct1='tok-one'",
+      "CLAUDE_TOKEN_acct2='tok-two'",
+      '_catalyst_active_token="$CLAUDE_TOKEN_acct2"',
+    ].join("\n");
+    expect(parseActiveOauthTokenDetailed(text)).toEqual({ token: "tok-two", handle: "acct2" });
+  });
+
+  test("returns handle:null for the direct-literal path (no selector to name)", () => {
+    const text = "export CLAUDE_CODE_OAUTH_TOKEN='tok-direct'";
+    expect(parseActiveOauthTokenDetailed(text)).toEqual({ token: "tok-direct", handle: null });
+  });
+
+  test("returns handle for the implicit single-account file", () => {
+    expect(parseActiveOauthTokenDetailed("CLAUDE_TOKEN_acct7='solo'"))
+      .toEqual({ token: "solo", handle: "acct7" });
+  });
+
+  test("returns {token:null,handle:null} on a placeholder-only file", () => {
+    expect(parseActiveOauthTokenDetailed("CLAUDE_TOKEN_acct1='PASTE_TOKEN_HERE'"))
+      .toEqual({ token: null, handle: null });
+  });
+
+  // Back-compat: the existing exported shape must not change for existing callers.
+  test("parseActiveOauthToken still returns the bare token string", () => {
+    expect(parseActiveOauthToken('CLAUDE_TOKEN_acct2=\'t2\'\n_catalyst_active_token="$CLAUDE_TOKEN_acct2"'))
+      .toBe("t2");
+  });
+});
+
 // ── rearmClaudeAccountsFromFile integration tests ────────────────────────────
 
 describe("rearmClaudeAccountsFromFile", () => {
@@ -157,7 +209,7 @@ describe("rearmClaudeAccountsFromFile", () => {
     ].join("\n");
     const env = { CLAUDE_CODE_OAUTH_TOKEN: TOKEN_A };
     const result = rearmWith({ files: { [DEFAULT_PATH]: fileContent }, env });
-    expect(result).toEqual({ rearmed: true, reason: "rotated" });
+    expect(result).toEqual({ rearmed: true, reason: "rotated", handle: "acct2" });
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe(TOKEN_B);
     expect(env.CATALYST_CLAUDE_ACCOUNTS_SOURCE).toBe("shared-file-resynced");
   });
@@ -169,7 +221,7 @@ describe("rearmClaudeAccountsFromFile", () => {
     ].join("\n");
     const env = { CLAUDE_CODE_OAUTH_TOKEN: TOKEN_A };
     const result = rearmWith({ files: { [DEFAULT_PATH]: fileContent }, env });
-    expect(result).toEqual({ rearmed: false, reason: "unchanged" });
+    expect(result).toEqual({ rearmed: false, reason: "unchanged", handle: null });
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe(TOKEN_A);
     expect(env.CATALYST_CLAUDE_ACCOUNTS_SOURCE).toBeUndefined();
   });
@@ -186,18 +238,18 @@ describe("rearmClaudeAccountsFromFile", () => {
 
     // acct2 is active → unchanged
     let r = rearmWith({ files: { [DEFAULT_PATH]: mkFile("acct2") }, env });
-    expect(r).toEqual({ rearmed: false, reason: "unchanged" });
+    expect(r).toEqual({ rearmed: false, reason: "unchanged", handle: null });
 
     // flip to acct1 → rotated
     r = rearmWith({ files: { [DEFAULT_PATH]: mkFile("acct1") }, env });
-    expect(r).toEqual({ rearmed: true, reason: "rotated" });
+    expect(r).toEqual({ rearmed: true, reason: "rotated", handle: "acct1" });
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe(TOKEN_A);
   });
 
   test("absent file (readFile throws ENOENT for every candidate) → rearmed:false, reason:absent", () => {
     const env = { CLAUDE_CODE_OAUTH_TOKEN: TOKEN_A };
     const result = rearmWith({ files: {}, env });
-    expect(result).toEqual({ rearmed: false, reason: "absent" });
+    expect(result).toEqual({ rearmed: false, reason: "absent", handle: null });
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe(TOKEN_A);
   });
 
@@ -215,7 +267,7 @@ describe("rearmClaudeAccountsFromFile", () => {
       },
       env,
     });
-    expect(result).toEqual({ rearmed: true, reason: "rotated" });
+    expect(result).toEqual({ rearmed: true, reason: "rotated", handle: "custom" });
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe(TOKEN_C);
   });
 
@@ -223,11 +275,11 @@ describe("rearmClaudeAccountsFromFile", () => {
     const env = { CLAUDE_CODE_OAUTH_TOKEN: TOKEN_A };
     // Placeholder only
     let r = rearmWith({ files: { [DEFAULT_PATH]: "CLAUDE_TOKEN_acct1='PASTE_TOKEN_HERE'" }, env });
-    expect(r).toEqual({ rearmed: false, reason: "empty" });
+    expect(r).toEqual({ rearmed: false, reason: "empty", handle: null });
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe(TOKEN_A);
     // Whitespace only
     r = rearmWith({ files: { [DEFAULT_PATH]: "   \n  " }, env });
-    expect(r).toEqual({ rearmed: false, reason: "empty" });
+    expect(r).toEqual({ rearmed: false, reason: "empty", handle: null });
   });
 
   test("CTL-1984 review regression: unprovisioned active slot → reason:empty, env NOT set to a $-reference", () => {
@@ -244,7 +296,7 @@ describe("rearmClaudeAccountsFromFile", () => {
       `export CLAUDE_CODE_OAUTH_TOKEN="$_catalyst_active_token"`,
     ].join("\n");
     const r = rearmWith({ files: { [DEFAULT_PATH]: fileContent }, env });
-    expect(r).toEqual({ rearmed: false, reason: "empty" });
+    expect(r).toEqual({ rearmed: false, reason: "empty", handle: null });
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe(TOKEN_C);
     expect(env.CATALYST_CLAUDE_ACCOUNTS_SOURCE).toBeUndefined();
   });
@@ -336,5 +388,149 @@ describe("hook-path integration: armSecret uses registered hook for claude-accou
 
     clearRearmHook("claude-accounts.env");
     resetArmState("claude-accounts.env");
+  });
+});
+
+// ── Event emission (CTL-2147 Phase 1) ────────────────────────────────────────
+
+describe("rearmClaudeAccountsFromFile emits (CTL-2147)", () => {
+  const FILE = "CLAUDE_TOKEN_acct2='new-tok'\n_catalyst_active_token=\"$CLAUDE_TOKEN_acct2\"";
+
+  test("emits account.rearm.applied ONCE on a rotation, carrying the handle", () => {
+    const emitted = [];
+    const env = { CLAUDE_CODE_OAUTH_TOKEN: "old-tok" };
+    const r = rearmClaudeAccountsFromFile({
+      env, readFile: () => FILE, log: silentLog, emit: (e) => { emitted.push(e); return true; },
+    });
+    expect(r).toEqual({ rearmed: true, reason: "rotated", handle: "acct2" });
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0].attributes["event.name"]).toBe("account.rearm.applied");
+    expect(emitted[0].attributes["account.handle"]).toBe("acct2");
+  });
+
+  test("NEVER puts a token value anywhere in the envelope", () => {
+    const emitted = [];
+    rearmClaudeAccountsFromFile({
+      env: { CLAUDE_CODE_OAUTH_TOKEN: "old-tok" }, readFile: () => FILE,
+      log: silentLog, emit: (e) => { emitted.push(e); return true; },
+    });
+    expect(JSON.stringify(emitted[0])).not.toContain("new-tok");
+    expect(JSON.stringify(emitted[0])).not.toContain("old-tok");
+  });
+
+  test("does NOT emit when the token is unchanged", () => {
+    const emitted = [];
+    const r = rearmClaudeAccountsFromFile({
+      env: { CLAUDE_CODE_OAUTH_TOKEN: "new-tok" }, readFile: () => FILE,
+      log: silentLog, emit: (e) => { emitted.push(e); return true; },
+    });
+    expect(r.rearmed).toBe(false);
+    expect(r.reason).toBe("unchanged");
+    expect(emitted).toHaveLength(0);
+  });
+
+  test("does NOT emit on absent/empty/error, and still never throws", () => {
+    const emitted = [];
+    const push = (e) => { emitted.push(e); return true; };
+    expect(rearmClaudeAccountsFromFile({ env: {}, readFile: () => { throw Object.assign(new Error("x"), { code: "ENOENT" }); }, log: silentLog, emit: push }).reason).toBe("absent");
+    expect(rearmClaudeAccountsFromFile({ env: {}, readFile: () => "# comment only\n", log: silentLog, emit: push }).reason).toBe("empty");
+    expect(emitted).toHaveLength(0);
+  });
+
+  // FAIL-OPEN: the rearm is the load-bearing act; telemetry must never break it.
+  test("still rearms when emit throws", () => {
+    const env = { CLAUDE_CODE_OAUTH_TOKEN: "old-tok" };
+    const r = rearmClaudeAccountsFromFile({
+      env, readFile: () => FILE, log: silentLog, emit: () => { throw new Error("log full"); },
+    });
+    expect(r.rearmed).toBe(true);
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe("new-tok");
+  });
+});
+
+describe("rearmEventEnvelope (CTL-2147)", () => {
+  test("builds a v2 envelope with event.name + account.handle + node.name", () => {
+    const env = rearmEventEnvelope({ handle: "acct2", host: "mini", ts: "2026-08-21T23:00:00Z" });
+    expect(env.attributes["event.name"]).toBe("account.rearm.applied");
+    expect(env.attributes["account.handle"]).toBe("acct2");
+    expect(env.attributes["node.name"]).toBe("mini");
+    expect(env.severityText).toBe("INFO");
+    expect(env.body?.payload?.handle).toBe("acct2");
+  });
+
+  test("tolerates a null handle (direct-literal file) without inventing one", () => {
+    expect(rearmEventEnvelope({ handle: null, host: "mini" }).attributes["account.handle"]).toBeNull();
+  });
+});
+
+describe("handleRearmSignal (CTL-2147)", () => {
+  test("invokes armSecret for claude-accounts.env exactly once per signal", () => {
+    const calls = [];
+    const h = makeRearmSignalHandler({ armSecret: (id, o) => { calls.push(id); return { armed: true }; }, log: silentLog });
+    h();
+    expect(calls).toEqual(["claude-accounts.env"]);
+  });
+
+  test("does NOT arm github-token or run cluster-sync (narrow by design)", () => {
+    const calls = [];
+    const h = makeRearmSignalHandler({ armSecret: (id) => { calls.push(id); return {}; }, log: silentLog });
+    h();
+    expect(calls).not.toContain("github-token");
+  });
+
+  test("never throws when armSecret throws (a signal must not kill the daemon)", () => {
+    const h = makeRearmSignalHandler({ armSecret: () => { throw new Error("boom"); }, log: silentLog });
+    expect(() => h()).not.toThrow();
+  });
+
+  test("is re-entrant-safe: N signals produce N arms, no accumulated state", () => {
+    let n = 0;
+    const h = makeRearmSignalHandler({ armSecret: () => { n += 1; return {}; }, log: silentLog });
+    h(); h(); h();
+    expect(n).toBe(3);
+  });
+});
+
+// wireRearmSighup — CTL-2147. The daemon's ACTUAL production wiring (main() calls
+// this, not an inline process.on). daemon-signals.test.mjs additionally source-scans
+// daemon.mjs to prove this function is really called there with the real armSecret;
+// these tests prove the function itself correctly registers a SIGHUP listener that
+// invokes armSecret when fired — main() itself is never called from a test (it boots
+// real timers/fs.watch/child processes), so this is the closest a test gets to
+// firing the real signal path without booting the whole daemon.
+describe("wireRearmSighup (CTL-2147)", () => {
+  test("registers exactly one SIGHUP listener on the given emitter", () => {
+    const proc = new EventEmitter();
+    wireRearmSighup(proc, { armSecret: () => ({ armed: true }), log: silentLog });
+    expect(proc.listenerCount("SIGHUP")).toBe(1);
+  });
+
+  test("firing SIGHUP invokes armSecret for claude-accounts.env", () => {
+    const proc = new EventEmitter();
+    const calls = [];
+    wireRearmSighup(proc, { armSecret: (id) => { calls.push(id); return { armed: true }; }, log: silentLog });
+    proc.emit("SIGHUP");
+    expect(calls).toEqual(["claude-accounts.env"]);
+  });
+
+  test("does NOT register on SIGINT/SIGTERM (narrow by design — not a shutdown path)", () => {
+    const proc = new EventEmitter();
+    wireRearmSighup(proc, { armSecret: () => ({ armed: true }), log: silentLog });
+    expect(proc.listenerCount("SIGINT")).toBe(0);
+    expect(proc.listenerCount("SIGTERM")).toBe(0);
+  });
+
+  test("returns the registered handler so a caller can also invoke it directly", () => {
+    const proc = new EventEmitter();
+    const calls = [];
+    const handler = wireRearmSighup(proc, { armSecret: (id) => { calls.push(id); return {}; }, log: silentLog });
+    handler();
+    expect(calls).toEqual(["claude-accounts.env"]);
+  });
+
+  test("a throwing armSecret does not propagate out of the emitted signal (daemon survives)", () => {
+    const proc = new EventEmitter();
+    wireRearmSighup(proc, { armSecret: () => { throw new Error("boom"); }, log: silentLog });
+    expect(() => proc.emit("SIGHUP")).not.toThrow();
   });
 });
