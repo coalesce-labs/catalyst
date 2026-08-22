@@ -16,6 +16,7 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 
 import { STATUS, mkCheck } from "./doctor-status.mjs";
+import { readDaemonRuntimeEnv } from "./config.mjs"; // CTL-2073: pid-gated boot-time snapshot — the same CTL-1678 mechanism checkDrainDisabled already prefers over a mutable env-file read
 import { parseEnvAssignments } from "./execution-core-env-drift-health.mjs";
 import {
   DEFAULT_DAILY_BUDGET,
@@ -35,9 +36,25 @@ import { defaultBudgetPath } from "./linear-write-proxy.mjs";
 // budget) rather than the quiet one. Same defect class as CTL-2068/CTL-2071: resolving
 // configuration from a process that isn't the one being graded.
 //
-// Returns { value, confirmed }. `confirmed:false` means neither the env FILE nor
-// doctor's own env carried the var, so `value` is DEFAULT_* — a guess, not a read.
-function resolveDaemonBudget(varName, fallback, { env, execCoreEnvPath, envFileExists, envFileRead }) {
+// CTL-2073 (Codex P1 round 2): the FILE read above is itself only a guess about a
+// LIVE daemon. `execution-core.env` is mutable at any time, but the running daemon's
+// enforced budget was fixed once, at ITS boot (linear-write-proxy.mjs's
+// resolveWriteBudgetCaps reads process.env exactly once, inside createLinearWriteProxy)
+// — an edit between that boot and the next restart describes the NEXT daemon, not
+// this one. So when a live daemon's pid-gated runtime snapshot is available
+// (daemon.mjs records its OWN resolved caps into daemon-runtime-env.json at boot,
+// same mechanism CTL-1678 already uses for drainDisabled/bootDrained), it is
+// authoritative over the file — exactly the posture resolveDrainStateForRead
+// documents: the file is the correct answer only for "what the NEXT daemon would
+// do", which is right when there's no live daemon to disagree with it.
+//
+// Returns { value, confirmed }. `confirmed:false` means neither the runtime
+// snapshot, the env FILE, nor doctor's own env carried the var, so `value` is
+// DEFAULT_* — a guess, not a read.
+function resolveDaemonBudget(varName, fallback, { env, execCoreEnvPath, envFileExists, envFileRead, runtimeCaps }) {
+  if (runtimeCaps && Number.isFinite(runtimeCaps[varName]) && runtimeCaps[varName] > 0) {
+    return { value: runtimeCaps[varName], confirmed: true };
+  }
   if (envFileExists(execCoreEnvPath)) {
     try {
       const raw = parseEnvAssignments(envFileRead(execCoreEnvPath, "utf8")).get(varName);
@@ -81,17 +98,28 @@ export function checkLinearWriteBudget(deps = {}) {
     // pid-file merely means "be more cautious," never "FAIL".
     pidFilePath = resolve(env.CATALYST_DIR || `${homedir()}/catalyst`, "execution-core", "daemon.pid"),
     pidFileExists = existsSync,
+    // CTL-2073: same orchDir a live daemon's boot writes daemon-runtime-env.json
+    // into (getExecutionCoreDir()) — matches pidFilePath's base dir above, built
+    // from the same env.CATALYST_DIR seam so tests can inject a fake one.
+    orchDir = resolve(env.CATALYST_DIR || `${homedir()}/catalyst`, "execution-core"),
+    readRuntimeEnv = readDaemonRuntimeEnv,
+    // Only trusted when the pid-gated snapshot both exists AND belongs to a live
+    // daemon that actually ran a write-proxy (readDaemonRuntimeEnv already returns
+    // null for a dead/mismatched pid — see config.mjs).
+    runtimeCaps = readRuntimeEnv(orchDir)?.writeBudget ?? null,
     dailyBudgetR = resolveDaemonBudget("CATALYST_LINEAR_WRITE_DAILY_BUDGET", DEFAULT_DAILY_BUDGET, {
       env,
       execCoreEnvPath,
       envFileExists,
       envFileRead,
+      runtimeCaps,
     }),
     perTicketCapR = resolveDaemonBudget("CATALYST_LINEAR_WRITE_TICKET_CAP", DEFAULT_PER_TICKET_CAP, {
       env,
       execCoreEnvPath,
       envFileExists,
       envFileRead,
+      runtimeCaps,
     }),
   } = deps;
   const dailyBudget = dailyBudgetR.value;

@@ -785,6 +785,34 @@ function defaultAppendEvent(line) {
  * is a positive allow-list, so a garbage mode that got past the resolver also installs
  * nothing.
  */
+// CTL-2073: pulled out of createLinearWriteProxy so the daemon's OWN boot-time
+// snapshot (daemon.mjs → config.mjs's writeDaemonRuntimeEnv, the pid-gated
+// mechanism CTL-1678 already uses for drain state) can record the SAME validated
+// values a live proxy would enforce, rather than a second, drifting re-implementation.
+// `write-budget-health.mjs` (`catalyst doctor`) reads that snapshot when a live
+// daemon exists, so this is the one place the "finite positive integer" rule (Codex
+// #3505 P2) is allowed to live — a doctor-side re-validation would only be able to
+// agree with this by accident.
+export function resolveWriteBudgetCaps(env = process.env, log = null) {
+  const resolveCap = (name, fallback) => {
+    const raw = env[name];
+    if (raw === undefined || raw === null || String(raw).trim() === "") return fallback;
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n <= 0) {
+      log?.warn?.(
+        { env_var: name, value: String(raw), using: fallback },
+        "linear-write-proxy: write-budget limit must be a finite positive integer — IGNORING the configured value"
+      );
+      return fallback;
+    }
+    return n;
+  };
+  return {
+    dailyBudget: resolveCap("CATALYST_LINEAR_WRITE_DAILY_BUDGET", DEFAULT_DAILY_BUDGET),
+    perTicketCap: resolveCap("CATALYST_LINEAR_WRITE_TICKET_CAP", DEFAULT_PER_TICKET_CAP),
+  };
+}
+
 export function createLinearWriteProxy({
   mode = "off",
   env = process.env,
@@ -828,21 +856,7 @@ export function createLinearWriteProxy({
   // quiet. A limit is only accepted when it is a finite positive integer; anything else
   // falls back to the default and SAYS so, because a silently-ignored limit is how an
   // operator ends up believing a cap is in force that never was.
-  const resolveCap = (name, fallback) => {
-    const raw = env[name];
-    if (raw === undefined || raw === null || String(raw).trim() === "") return fallback;
-    const n = Number(raw);
-    if (!Number.isInteger(n) || n <= 0) {
-      log?.warn?.(
-        { env_var: name, value: String(raw), using: fallback },
-        "linear-write-proxy: write-budget limit must be a finite positive integer — IGNORING the configured value"
-      );
-      return fallback;
-    }
-    return n;
-  };
-  const dailyBudget = resolveCap("CATALYST_LINEAR_WRITE_DAILY_BUDGET", DEFAULT_DAILY_BUDGET);
-  const perTicketCap = resolveCap("CATALYST_LINEAR_WRITE_TICKET_CAP", DEFAULT_PER_TICKET_CAP);
+  const { dailyBudget, perTicketCap } = resolveWriteBudgetCaps(env, log);
 
   /**
    * loadLedger — read, then roll to today.

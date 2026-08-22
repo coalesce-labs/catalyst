@@ -36,6 +36,12 @@ const check = (ledger, over = {}) =>
     // case (pidFileExists false) unless a test below deliberately overrides this.
     envFileExists: () => false,
     pidFileExists: () => false,
+    // CTL-2073: same hermeticity concern for the new pid-gated runtime snapshot —
+    // without this stub, every test would fall through to the REAL
+    // daemon-runtime-env.json on whatever host runs the suite (a live fleet host
+    // has one). Absent by default; tests below override to exercise the live-daemon
+    // path deliberately.
+    readRuntimeEnv: () => null,
     ...over,
   });
 
@@ -197,5 +203,43 @@ describe("checkLinearWriteBudget", () => {
     expect(r.status).toBe("info");
     expect(r.detail).not.toContain("per-ticket cap");
     expect(r.detail).toContain("cannot verify");
+  });
+
+  // CTL-2073 (Codex P1 round 2): execution-core.env is mutable at any time, but a
+  // LIVE daemon's actually-enforced budget was fixed once, at ITS boot. A daemon
+  // that booted under 300, with the file since edited to 2000, is still refusing
+  // writes at 300 — the file describes the NEXT daemon, not this one. The pid-gated
+  // runtime snapshot (the same CTL-1678 mechanism drain-disabled uses) must win.
+  test("⭐ a live daemon's boot-time runtime snapshot wins over a since-edited execution-core.env", () => {
+    const r = check(spendSpread(emptyLedger(DAY), 684), {
+      readRuntimeEnv: () => ({
+        pid: 4242,
+        writeBudget: { CATALYST_LINEAR_WRITE_DAILY_BUDGET: 300, CATALYST_LINEAR_WRITE_TICKET_CAP: 50 },
+      }),
+      // The file now says 2000 — edited after this daemon's boot — but must NOT win.
+      envFileExists: () => true,
+      envFileRead: () => "CATALYST_LINEAR_WRITE_DAILY_BUDGET=2000\n",
+    });
+    expect(r.status).toBe("warn");
+    expect(r.detail).toContain("WRITE-EXHAUSTED");
+    expect(r.detail).toContain("684/300");
+  });
+
+  test("no live runtime snapshot (daemon not running, or never wrote one) falls back to the file as before", () => {
+    const r = check(spend(emptyLedger(DAY), "CTL-1", 4), {
+      readRuntimeEnv: () => null,
+      envFileExists: () => true,
+      envFileRead: () => "CATALYST_LINEAR_WRITE_DAILY_BUDGET=2000\n",
+    });
+    expect(r.detail).toContain("4/2000");
+  });
+
+  test("a live daemon that never armed a write-proxy (writeBudget:null in its snapshot) falls back to the file", () => {
+    const r = check(spend(emptyLedger(DAY), "CTL-1", 4), {
+      readRuntimeEnv: () => ({ pid: 4242, writeBudget: null }),
+      envFileExists: () => true,
+      envFileRead: () => "CATALYST_LINEAR_WRITE_DAILY_BUDGET=2000\n",
+    });
+    expect(r.detail).toContain("4/2000");
   });
 });
