@@ -199,19 +199,24 @@ export function clearStalledLabel(
         // CTL-2098: only disarm the re-application markers when a real write
         // happened, or for the loose/undefined confirmed-removal shapes existing
         // callers/tests rely on. Two signals mean "this was a no-op, label was
-        // ALREADY absent" (removed out-of-band by a steward or operator) and both
-        // must retain the markers:
+        // ALREADY absent" (removed out-of-band by a steward or operator):
         //   - { wrote:false } — the DIRECT (non-proxy) path's shape.
         //   - { converged:true } — the enforce cloud-proxy path's ADDITIVE
         //     equivalent (Ryan's decision 2026-08-21, HIGH finding fix). Enforce
         //     hosts (production mini/mini-2) short-circuit before the direct-path
         //     read that produces wrote:false, so wrote:false is UNREACHABLE there
         //     — converged:true is the only signal that ever fires in production.
-        // Deleting the markers on either signal lets the terminal sweep re-apply
-        // needs-human on the next tick (the re-flap). Keep them so labelOnce stays
-        // a no-op. The daemon's human-reply path (clearNeedsHumanMarkers) remains
-        // the authoritative re-arm and is unchanged.
-        if (r === undefined || (r?.wrote !== false && r?.converged !== true)) {
+        //
+        // ⛔ Codex round-1 P1: retention on EITHER signal must be scoped to the
+        // STICKY `needs-human` label only. `clearStalledLabel` is also called
+        // generically (scheduler.mjs:3054, convergeStartedHeldLabels) for the
+        // tick-converged dispositions (queued/blocked/needs-input/waiting), which
+        // are NOT apply-once-forever — they are supposed to complete their
+        // retraction every time. Retaining THEIR markers on a converged/no-op
+        // result would strand them in `budget:already-converged` refusals forever
+        // instead of ever finishing. Only needs-human (labelOnce, apply-once) needs
+        // the marker kept so it doesn't re-flap; every other label always disarms.
+        if (r === undefined || label !== "needs-human" || (r?.wrote !== false && r?.converged !== true)) {
           for (const suffix of [".applied", ".skipped"]) {
             const p = `${base}${suffix}`;
             if (existsSync(p)) {

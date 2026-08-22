@@ -575,6 +575,22 @@ describe("clearStalledLabel", () => {
     expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(false);
   });
 
+  test("Codex round-1 P1: a NON-sticky label (e.g. 'blocked') always disarms, even on converged:true", () => {
+    // clearStalledLabel is also called generically for the tick-converged
+    // dispositions (scheduler.mjs:3054, convergeStartedHeldLabels) — those must
+    // complete their retraction every time, or they strand in
+    // budget:already-converged refusals forever instead of finishing. Only
+    // needs-human (labelOnce, apply-once) needs the marker kept.
+    const workerDir = join(orchDir, "workers", "CTL-2098-I");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, ".linear-label-blocked.applied"), "");
+    const ws = { removeLabel: () => ({ removed: true, wrote: true, converged: true }) };
+
+    clearStalledLabel(orchDir, "CTL-2098-I", "blocked", ws);
+
+    expect(existsSync(join(workerDir, ".linear-label-blocked.applied"))).toBe(false);
+  });
+
   test("no-reflap on the enforce shape: apply → out-of-band-clear(converged:true) → labelOnce stays no-op", () => {
     // The end-to-end regression this ticket exists for, reproduced with the
     // shape production enforce hosts actually return (mini/mini-2), not the

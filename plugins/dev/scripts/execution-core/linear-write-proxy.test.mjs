@@ -374,10 +374,16 @@ describe("enforce — the proxy IS the write", () => {
   // layer the review's "root-cause premise unverified" finding named directly
   // (linear-write-proxy.mjs — the file the finding cited by line number).
   test("⭐ CTL-2098: an already-absent label removal reports converged:true, additively", () => {
+    // Codex round-1 P2: isolate this test's budget ledger. Without a per-test
+    // budgetPath, this persists to the shared default ledger; a second run (CI
+    // re-run, or a dev re-running the suite) finds the convergence key already
+    // recorded and gets refused locally as budget:already-converged BEFORE the
+    // HTTP recorder is ever invoked, failing the assertion below.
+    const dir = mkdtempSync(join(tmpdir(), "wp-converged-"));
     const body = JSON.stringify({ outcome: "succeeded", results: [{ outcome: "already-absent" }] });
     const http = recorder({ code: 0, stdout: `${body}
 200` });
-    const p = createLinearWriteProxy({ mode: "enforce", env: envWithKey(), httpFn: http, appendEvent: eventSink(), log: silentLog });
+    const p = createLinearWriteProxy({ mode: "enforce", env: envWithKey(), httpFn: http, appendEvent: eventSink(), log: silentLog, budgetPath: join(dir, "budget.json") });
     const r = p.send({ routeId: "label", ticket: "CTL-2098-live", payload: { labelIds: ["x"], mode: "remove" } });
     expect(r).toEqual({ handled: true, applied: true, reason: null, status: 200, converged: true });
   });
@@ -388,13 +394,14 @@ describe("enforce — the proxy IS the write", () => {
     // convergence would silently mask a real change from the daemon's dedup
     // consumer, which is the "changes wrote's semantics for every caller" risk
     // Ryan's decision explicitly ruled out.
+    const dir = mkdtempSync(join(tmpdir(), "wp-mixed-"));
     const body = JSON.stringify({
       outcome: "succeeded",
       results: [{ outcome: "already-absent" }, { outcome: "removed" }],
     });
     const http = recorder({ code: 0, stdout: `${body}
 200` });
-    const p = createLinearWriteProxy({ mode: "enforce", env: envWithKey(), httpFn: http, appendEvent: eventSink(), log: silentLog });
+    const p = createLinearWriteProxy({ mode: "enforce", env: envWithKey(), httpFn: http, appendEvent: eventSink(), log: silentLog, budgetPath: join(dir, "budget.json") });
     const r = p.send({ routeId: "label", ticket: "CTL-2098-mixed", payload: { labelIds: ["x", "y"], mode: "remove" } });
     expect(r).toEqual({ handled: true, applied: true, reason: null, status: 200 });
     expect(r).not.toHaveProperty("converged");
