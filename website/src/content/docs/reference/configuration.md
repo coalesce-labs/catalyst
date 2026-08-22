@@ -1109,6 +1109,36 @@ Observable events (all safe for a LogQL filter
 - `linear.write.proxy.applied.<TICKET>` — enforce hit, the cloud accepted the write
 - `linear.write.proxy.failed.<TICKET>` — enforce hit, NOT written (ERROR; `reason` attached)
 
+### Linear write-budget backpressure (`CATALYST_LINEAR_WRITE_BACKPRESSURE`, CTL-2027)
+
+CTL-1936's host write-budget ledger (`CATALYST_LINEAR_WRITE_DAILY_BUDGET` / `CATALYST_LINEAR_WRITE_TICKET_CAP`,
+enforced inside the write proxy above) refuses a write LOCALLY once a ticket or the host is over
+budget — free, since a refusal here costs nothing where a refusal at the cloud costs a spend unit.
+But nothing stopped the CALLER from re-issuing the same doomed write on every tick: three rounds of
+per-caller backpressure (`applyLabel` → COORD-236, `removeLabel` → CTL-2083) each stopped one
+caller's storm and left the next uncovered — a `comment`-route caller (`recovery-reasoning`) climbed
+to 1,096 refusals/hour with neither converger able to reach it. This flag moves backpressure to the
+**chokepoint** every write crosses (`linear-write-proxy.mjs`'s `send`/`sendAsync`) instead of
+fitting a fourth per-caller patch.
+
+On a budget-class refusal (`budget:*` — matches `CATALYST_LINEAR_WRITE_DAILY_BUDGET`/`_TICKET_CAP`'s
+own reason prefix; a cloud rejection or a validation error like `no-cloud-token` does **not** arm
+this) the proxy records a `(ticket, route)` cool-down marker under `.write-cooldowns/` (a sibling of
+`.label-cooldowns/`, keyed differently) and consults it on the NEXT call for that same pair —
+short-circuiting before the ledger is even read, so the flood of refusal events/ledger reads a
+storming caller produces drops to roughly one per window instead of one per tick.
+
+| Key                                            | Default | Notes                                                                                                                                                                                                                                                                                                    |
+| ----------------------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CATALYST_LINEAR_WRITE_BACKPRESSURE` _(env var)_ | `off`   | `off` (byte-identical to before this ticket — no marker directory, no new events, no behavior change), `shadow` (evaluate + emit `linear.write.proxy.would-backoff.<TICKET>` when a cooled-down pair is hit, but refuse nothing — the write still proceeds through the normal budget gate), `enforce` (a cooled-down pair is refused with `reason: "backpressure:cooldown"`, reported as a normal `linear.write.proxy.failed.<TICKET>`, before the ledger is read). Garbage values fall back to `off`. |
+| `CATALYST_LINEAR_WRITE_COOLDOWN_MS` _(env var)_  | `60000` | The cool-down window. Deliberately defaults to the SAME value as the scheduler's own converger-side `(ticket,label)` cool-down (`SCHEDULER_LABEL_COOLDOWN_MS`) — a longer proxy-side window would let a `label`-route write whose converger-side cool-down had already elapsed immediately re-hit a still-armed proxy-side one, stranding the label for up to 2× the intended wait.                                                                                     |
+
+The window is never permanent — CTL-2027 does not add a retry-cap/escalation on top of it (that
+remains the converger-side `SCHEDULER_LABEL_RETRY_CAP`/`_EXHAUSTED_MS` mechanism, CTL-2052, which
+still owns the operator-facing "this label is stuck" signal for the routes it can reach). A
+budget-refused write on **any** route arms this backpressure; only the `budget:*` prefix does, so a
+transient/cloud-side failure that needs a fast retry is never slowed down by it.
+
 ### Lease-authority claim (`CATALYST_LEASE_AUTHORITY`, CTL-1786)
 
 Selects the cross-host `(ticket, phase)` claim mechanism. The default (`off`) is the

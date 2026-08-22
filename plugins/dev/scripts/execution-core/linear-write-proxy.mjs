@@ -88,8 +88,8 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { appendFileSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { resolveSecret } from "../lib/secret-contract.mjs";
 import {
   DEFAULT_DAILY_BUDGET,
@@ -109,6 +109,11 @@ import {
 } from "./linear-write-budget.mjs";
 import { getEventLogPath, log as defaultLog } from "./config.mjs";
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
+// CTL-2027 Phase 3: only the PREFIX rule is reused (see isBudgetRefusalReason
+// below) — not the whole shouldCoolDownLabel predicate, whose TERMINAL /
+// cloud-label-rejection classes are label-specific concepts that do not apply
+// to a comment/session write's reason space.
+import { BUDGET_REASON_PREFIX } from "./label-failure-class.mjs";
 
 /** The three modes, house convention (cf. CLOUD_FEED_MODES / DELEGATE_FIRST_MODES). */
 export const LINEAR_WRITE_PROXY_MODES = Object.freeze(new Set(["off", "shadow", "enforce"]));
@@ -693,12 +698,95 @@ export const EVENT_APPLIED = "linear.write.proxy.applied";
 export const EVENT_FAILED = "linear.write.proxy.failed";
 /** CTL-1936 / AC5 — raised ONCE per exhaustion episode, never once per refused write. */
 export const EVENT_EXHAUSTED = "linear.write.proxy.budget-exhausted";
-export const PROXY_EVENT_NAMES = Object.freeze([EVENT_WOULD_WRITE, EVENT_APPLIED, EVENT_FAILED, EVENT_EXHAUSTED]);
+/**
+ * CTL-2027 Phase 3 — SHADOW's dry-run signal: "backpressure would have refused
+ * this write, but shadow never refuses". Deliberately a DIFFERENT name from
+ * EVENT_FAILED: an actual enforce-mode block is a genuine refusal and is
+ * reported as EVENT_FAILED (reason "backpressure:cooldown"), matching every
+ * other refusal this proxy already reports through that one name.
+ */
+export const EVENT_WOULD_BACKOFF = "linear.write.proxy.would-backoff";
+export const PROXY_EVENT_NAMES = Object.freeze([
+  EVENT_WOULD_WRITE,
+  EVENT_APPLIED,
+  EVENT_FAILED,
+  EVENT_EXHAUSTED,
+  EVENT_WOULD_BACKOFF,
+]);
 
 /** Default ledger location. One file per host; the daemon and any CLI share it. */
 export function defaultBudgetPath(env = process.env) {
   const home = env.HOME || "";
   return `${env.CATALYST_DIR || `${home}/catalyst`}/linear-write-budget.json`;
+}
+
+// ── CTL-2027 Phase 3 — proxy-side (ticket, route) backpressure ───────────────
+//
+// The relocation sequence this phase closes: applyLabel (COORD-236) →
+// removeLabel (CTL-2083) → comment/recovery-reasoning (1,096/hr and climbing at
+// the time of writing). Each fix correctly stopped ITS caller's storm and each
+// left the NEXT caller uncovered, because backpressure was fitted at the
+// CALLER (the scheduler's convergers) rather than at the CHOKEPOINT every
+// caller crosses. This is that fix, generalized.
+//
+// Ships behind `CATALYST_LINEAR_WRITE_BACKPRESSURE` ∈ off (default) | shadow |
+// enforce — off is a byte-identical no-op (see the wiring in `send`/`sendAsync`
+// below: every new code path is gated on `backpressureMode !== "off"`).
+
+export const LINEAR_WRITE_BACKPRESSURE_MODES = Object.freeze(new Set(["off", "shadow", "enforce"]));
+
+export function resolveLinearWriteBackpressureMode(env = process.env) {
+  const v = env.CATALYST_LINEAR_WRITE_BACKPRESSURE;
+  return typeof v === "string" && LINEAR_WRITE_BACKPRESSURE_MODES.has(v) ? v : "off";
+}
+
+/**
+ * Same default window CTL-834/CTL-2083 use for the converger-side
+ * (ticket,label) cool-down — deliberately, not independently chosen. If this
+ * window were LONGER than the converger's own, a label whose converger-side
+ * cool-down had already elapsed would immediately re-hit this STILL-ARMED
+ * proxy-side one, stranding the label for up to 2× the intended wait (test 5,
+ * "the label path does not double-back-off").
+ */
+export const DEFAULT_WRITE_COOLDOWN_MS = Number(process.env.CATALYST_LINEAR_WRITE_COOLDOWN_MS) || 60_000;
+
+/** `.write-cooldowns/` sits beside the ledger (same CATALYST_DIR root), a
+ *  SIBLING of `.label-cooldowns/` — a different key space, `(ticket, route)`
+ *  rather than `(ticket, label)`, so the two directories can never collide. */
+export function defaultWriteCooldownDir(env = process.env) {
+  const home = env.HOME || "";
+  return `${env.CATALYST_DIR || `${home}/catalyst`}/.write-cooldowns`;
+}
+
+export function writeCooldownMarkerPath(dir, ticket, routeId) {
+  return join(dir, `${ticket}-${routeId}.json`);
+}
+
+function defaultReadWriteCooldownMarker(dir, ticket, routeId) {
+  try {
+    return JSON.parse(readFileSync(writeCooldownMarkerPath(dir, ticket, routeId), "utf8"));
+  } catch {
+    return null; // absent/malformed — no cool-down, matching the label-cooldown reader's convention
+  }
+}
+
+function defaultRecordWriteCooldown(dir, ticket, routeId, now) {
+  const p = writeCooldownMarkerPath(dir, ticket, routeId);
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ failedAt: now }));
+}
+
+/**
+ * isBudgetRefusalReason — ONLY the prefix rule from label-failure-class.mjs's
+ * shouldCoolDownLabel is reused (test 4). A `cloud:*` rejection or a
+ * validation error (no-cloud-token, body-too-large, spawn-failed) needs
+ * RETRY, not backoff — those reasons never reach this predicate anyway, since
+ * they arise downstream of the local budget gate this is wired into (see
+ * `send`/`sendAsync` below), but the explicit narrow check is what a future
+ * refactor moving the call site cannot silently widen.
+ */
+function isBudgetRefusalReason(reason) {
+  return typeof reason === "string" && reason.startsWith(BUDGET_REASON_PREFIX);
 }
 
 /**
@@ -826,6 +914,12 @@ export function createLinearWriteProxy({
   nowFn = () => Date.now(),
   readLedgerFn = readLedger,
   writeLedgerFn = writeLedger,
+  // CTL-2027 Phase 3. Same DI shape as the ledger seams above.
+  backpressureMode = resolveLinearWriteBackpressureMode(env),
+  writeCooldownDir = null,
+  writeCooldownMs = DEFAULT_WRITE_COOLDOWN_MS,
+  readWriteCooldownMarkerFn = defaultReadWriteCooldownMarker,
+  recordWriteCooldownFn = defaultRecordWriteCooldown,
 } = {}) {
   if (mode !== "shadow" && mode !== "enforce") return null;
 
@@ -898,6 +992,29 @@ export function createLinearWriteProxy({
     }
   };
 
+  // ── CTL-2027 Phase 3: proxy-side (ticket, route) backpressure ──
+  // Resolved ONCE per proxy instance, mirroring ledgerPath above.
+  const cooldownDir = writeCooldownDir ?? defaultWriteCooldownDir(env);
+
+  const inWriteCooldown = (ticket, routeId) => {
+    if (!ticket) return false; // no ticket → no key to check (matches the ledger's own no-op)
+    const marker = readWriteCooldownMarkerFn(cooldownDir, ticket, routeId);
+    return marker != null && typeof marker.failedAt === "number" && nowFn() - marker.failedAt < writeCooldownMs;
+  };
+
+  // Arms the cooldown ONLY on a fresh, budget-class refusal from the local
+  // gate (never on the cooldown short-circuit itself — re-arming there would
+  // let a storm perpetually extend its own window, defeating the time-boxed,
+  // self-healing design CTL-834/CTL-2083 already established).
+  const armWriteCooldown = (ticket, routeId, reason) => {
+    if (!ticket || !isBudgetRefusalReason(reason)) return;
+    try {
+      recordWriteCooldownFn(cooldownDir, ticket, routeId, nowFn());
+    } catch (err) {
+      log?.warn?.({ err: scrub(err?.message ?? "") }, "linear-write-proxy: write-cooldown marker write failed");
+    }
+  };
+
   return {
     mode,
     baseUrl,
@@ -942,6 +1059,23 @@ export function createLinearWriteProxy({
         return { handled: true, applied: false, reason, ...(detail ? { detail } : {}) };
       };
 
+      // ── CTL-2027 Phase 3: proxy-side backpressure — consult BEFORE the ledger
+      // read, so a cooled-down (ticket,route) short-circuits without even
+      // touching the ledger. `enforce` refuses; `shadow` only observes (falls
+      // through to the normal path below, which may still allow the write).
+      if (backpressureMode !== "off" && inWriteCooldown(ticket, routeId)) {
+        if (backpressureMode === "enforce") {
+          counts.refused += 1;
+          emit(EVENT_FAILED, { ticket, routeId, reason: "backpressure:cooldown", status: null, applied: false, caller, labels });
+          log?.warn?.(
+            { ticket, route: routeId, caller, labels },
+            "linear-write-proxy: write refused by proxy-side backpressure — not sent to the cloud"
+          );
+          return { handled: true, applied: false, reason: "backpressure:cooldown" };
+        }
+        emit(EVENT_WOULD_BACKOFF, { ticket, routeId, reason: "backpressure:cooldown", status: null, applied: false, caller, labels });
+      }
+
       // ── CTL-1936 / AC2 + AC3: refuse LOCALLY, before any cloud call ──
       // The runaway spent 302 of 307 writes on one ticket. A refusal here costs nothing,
       // where a refusal at the cloud costs a budget unit — which is how the whole day's
@@ -957,6 +1091,10 @@ export function createLinearWriteProxy({
             { ticket, route: routeId, caller, labels, reason: gate.reason, spentForTicket: gate.spentForTicket, total: gate.total },
             "linear-write-proxy: write refused by the HOST budget — not sent to the cloud"
           );
+          // CTL-2027 Phase 3: arm proxy-side backpressure on a BUDGET-CLASS
+          // refusal only (test 4) — a cloud rejection or validation error needs
+          // retry, not backoff, and never reaches this branch regardless.
+          if (backpressureMode !== "off") armWriteCooldown(ticket, routeId, gate.reason);
           return { handled: true, applied: false, reason: gate.reason };
         }
       }
@@ -1162,6 +1300,19 @@ export function createLinearWriteProxy({
         return { handled: true, dispatched: false, reason };
       };
 
+      // CTL-2027 Phase 3: same proxy-side backpressure check as `send`, before
+      // the ledger read. `session` (this method's one production route) is
+      // exactly one of the two routes the label convergers cannot reach.
+      if (backpressureMode !== "off" && inWriteCooldown(ticket, routeId)) {
+        if (backpressureMode === "enforce") {
+          counts.refused += 1;
+          emit(EVENT_FAILED, { ticket, routeId, reason: "backpressure:cooldown", status: null, applied: false, caller, labels });
+          log?.warn?.({ ...ctx }, "linear-write-proxy: narration refused by proxy-side backpressure — not sent to the cloud");
+          return { handled: true, dispatched: false, reason: "backpressure:cooldown" };
+        }
+        emit(EVENT_WOULD_BACKOFF, { ticket, routeId, reason: "backpressure:cooldown", status: null, applied: false, caller, labels });
+      }
+
       // Same local budget gate as `send`, and for the same reason: a refusal here costs
       // nothing, where a refusal at the cloud costs a budget unit.
       const { ledger: ledgerBefore, degraded: ledgerDegraded } = loadLedger();
@@ -1172,6 +1323,8 @@ export function createLinearWriteProxy({
           emit(EVENT_FAILED, { ticket, routeId, reason: gate.reason, status: null, applied: false, caller, labels });
           log?.warn?.({ ...ctx, reason: gate.reason, total: gate.total },
             "linear-write-proxy: narration refused by the HOST budget — not sent to the cloud");
+          // CTL-2027 Phase 3: arm on a BUDGET-CLASS refusal only.
+          if (backpressureMode !== "off") armWriteCooldown(ticket, routeId, gate.reason);
           return { handled: true, dispatched: false, reason: gate.reason };
         }
       }
