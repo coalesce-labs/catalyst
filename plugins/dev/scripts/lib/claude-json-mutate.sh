@@ -67,19 +67,64 @@ _cjm_acquire() {
       return 0
     fi
     if _cjm_lock_is_stale; then
-      rm -rf "$_CJM_LOCK_DIR" 2>/dev/null || true
-      # Immediately try to claim the vacated slot rather than looping back via
-      # `continue`. This tightens the stale-reaper TOCTOU window: a concurrent
-      # waiter that also observed the stale owner and whose rm+mkdir completes
-      # before this mkdir will cause this mkdir to fail, and we fall through to
-      # sleep. With the former `continue`, the additional instructions before the
-      # next mkdir widened the window during which a concurrent rm -rf could
-      # delete our newly-acquired lock dir.
-      if mkdir "$_CJM_LOCK_DIR" 2>/dev/null; then
-        _cjm_mark_held
-        return 0
+      # Single-winner reap gate (CTL-1890 P1 review finding): multiple waiters
+      # can observe the SAME dead owner in the same turn. Racing them straight
+      # into `rm -rf` + `mkdir` on the real lock let waiter B's
+      # authorized-but-stale `rm -rf` delete waiter A's freshly-live lock right
+      # after A reclaimed it, so both proceeded to believe they held the lock
+      # and mutated concurrently (lost updates).
+      #
+      # `${_CJM_LOCK_DIR}.reap` is a separate, disposable arbitration marker —
+      # never the real lock directory itself — so contesting it can never
+      # delete or rename a live lock out from under its true owner. (An
+      # earlier version of this fix tried renaming the real lock directory via
+      # `mv` to pick a single winner; that still lost the race in stress
+      # testing because a bare rename can't tell "the stale dir I saw" apart
+      # from "a brand-new live one another waiter just created at that path,"
+      # and happily steals whichever one is currently there.) `mkdir` is
+      # atomic, so exactly one waiter wins this gate; every other waiter's
+      # `mkdir` fails and it falls straight through to the ordinary
+      # sleep/retry below, never touching the real lock. The gate itself is
+      # held only across the syscalls below, so a crash inside that window
+      # (leaking `${_CJM_LOCK_DIR}.reap` forever) is the same class of
+      # narrow, accepted risk as the pre-existing ownerless-lock window
+      # (P2 review finding) — not addressed here.
+      #
+      # Winning the gate is not enough by itself: the `_cjm_lock_is_stale`
+      # call above can read a genuinely-live owner and still reach a stale
+      # verdict, because under real contention (many bash/jq/mkdir/cat
+      # forks) a waiter can be descheduled by the OS for tens of
+      # milliseconds between reading the owner pid and acting on it — long
+      # enough for that owner to finish and release NORMALLY and a brand
+      # new, live owner to acquire the same path in between. Stress testing
+      # reproduced exactly this: a waiter's stale verdict, computed against
+      # an already-superseded owner, won the gate and destroyed a different,
+      # live waiter's freshly-acquired lock. So re-validate with a FRESH
+      # staleness read immediately before the destructive step, once we are
+      # the sole gate-holder — this shrinks the read-then-act window from
+      # "however long the OS chooses to deschedule us" down to the handful
+      # of syscalls between this check and the `rm -rf`.
+      local reap_gate="${_CJM_LOCK_DIR}.reap"
+      if mkdir "$reap_gate" 2>/dev/null; then
+        if _cjm_lock_is_stale; then
+          rm -rf "$_CJM_LOCK_DIR" 2>/dev/null || true
+          if mkdir "$_CJM_LOCK_DIR" 2>/dev/null; then
+            _cjm_mark_held
+            rm -rf "$reap_gate" 2>/dev/null || true
+            return 0
+          fi
+          # A fresh mkdir from another waiter won the vacated slot in the gap
+          # between our rm and our mkdir — normal contention.
+          rm -rf "$reap_gate" 2>/dev/null || true
+        else
+          # Fresh recheck says the lock is live after all — some other
+          # waiter legitimately acquired it while we were reaching this
+          # point. Release the gate untouched; never touch the real lock.
+          rm -rf "$reap_gate" 2>/dev/null || true
+        fi
       fi
-      # Another waiter claimed the slot — treat as normal contention.
+      # Gate already held by another waiter, or we lost the real-lock mkdir
+      # race after winning the gate — normal contention either way.
     fi
     sleep "$_CJM_LOCK_SLEEP"
     waited=$((waited + 1))
