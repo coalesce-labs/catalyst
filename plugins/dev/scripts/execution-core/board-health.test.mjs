@@ -11,6 +11,7 @@
 import { describe, test, expect } from "bun:test";
 import {
   assembleBoardState,
+  deriveRing, // CTL-1563
   evaluateInvariants,
   decideBoardHealth,
   proposeMoves,
@@ -98,6 +99,11 @@ function mkBoard(o = {}) {
     githubQuotaMode: o.githubQuotaMode ?? "shadow",
     peerProductivity: o.peerProductivity ?? null,
     productivityMode: o.productivityMode ?? "shadow",
+    // CTL-1563 (AC4): shadow by default, so every pre-existing test exercises
+    // exactly the pre-CTL-1563 behavior (the invariant stays non-actuating).
+    overloadAttributionMode: o.overloadAttributionMode ?? "shadow",
+    // CTL-1563 (AC4): overload attribution posture; shadow is the default.
+    overloadAttributionMode: o.overloadAttributionMode ?? "shadow",
     ring: {
       recentDispatchTs: null,
       cacheReconcile: null,
@@ -3171,5 +3177,258 @@ describe("CAT-57 nodeProductivity invariant", () => {
     let called = 0;
     expect(() => assembleBoardState({ mode: "off", productivityMode: "enforce", getPeerProductivity: () => { called += 1; throw new Error("must not run"); } })).not.toThrow();
     expect(called).toBe(0);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CTL-1563 (AC4) — attribute a wedge to a provider-overload burst rather than
+// to the tickets. Read-only, shadow-by-default, escalate-only.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("overload attribution (CTL-1563 AC4)", () => {
+  // The event the SDK launch verb already writes on overload exhaustion. It has
+  // been on the unified log since CTL-1367 and NO invariant has ever read it.
+  const overloadEvent = (tsMs, { exhausted = true, ticket = "CTL-1" } = {}) => ({
+    ts: new Date(tsMs).toISOString(),
+    attributes: { "event.name": "execution-core.sdk.overloaded" },
+    body: { payload: { ticket, phase: "implement", exhausted, status: 529 } },
+  });
+
+  describe("deriveRing — the burst is distilled from the event tail", () => {
+    test("counts only EXHAUSTED overloads, and records the newest timestamp", () => {
+      const t = NOW - 60_000;
+      const ring = deriveRing(
+        [
+          overloadEvent(t - 3000, { exhausted: false }), // a retried overload — not a death
+          overloadEvent(t - 2000, { ticket: "CTL-1" }),
+          overloadEvent(t - 1000, { ticket: "CTL-2" }),
+          overloadEvent(t, { ticket: "CTL-3" }),
+        ],
+        NOW,
+        "mini",
+      );
+      expect(ring.overloadBurst).not.toBeNull();
+      expect(ring.overloadBurst.exhaustedCount).toBe(3);
+      expect(ring.overloadBurst.tickets.sort()).toEqual(["CTL-1", "CTL-2", "CTL-3"]);
+      expect(ring.overloadBurst.lastTsMs).toBe(t);
+    });
+
+    test("a retried-but-recovered overload alone produces NO burst evidence", () => {
+      // exhausted:false means the retry succeeded — no worker died, so there is
+      // nothing to attribute. Counting it would attribute a wedge to an outage
+      // that never killed anything.
+      const ring = deriveRing([overloadEvent(NOW - 1000, { exhausted: false })], NOW, "mini");
+      expect(ring.overloadBurst).toBeNull();
+    });
+
+    test("an event tail with no overload events leaves the field null (unobservable)", () => {
+      expect(deriveRing([], NOW, "mini").overloadBurst).toBeNull();
+      expect(deriveRing(null, NOW, "mini").overloadBurst).toBeNull();
+    });
+
+    test("de-duplicates repeated deaths of the SAME ticket in the ticket roll-up", () => {
+      // One ticket retried and exhausted twice is one affected ticket, not two —
+      // the attribution answers "how much of the board is this outage", so a
+      // single ticket must not inflate the blast radius.
+      const ring = deriveRing(
+        [overloadEvent(NOW - 2000, { ticket: "CTL-9" }), overloadEvent(NOW - 1000, { ticket: "CTL-9" })],
+        NOW,
+        "mini",
+      );
+      expect(ring.overloadBurst.exhaustedCount).toBe(2);
+      expect(ring.overloadBurst.tickets).toEqual(["CTL-9"]);
+    });
+  });
+
+  describe("checkOverloadAttribution — the invariant", () => {
+    const boardWithBurst = (overrides = {}) =>
+      mkBoard({
+        ring: {
+          overloadBurst: {
+            exhaustedCount: 5,
+            tickets: ["CTL-1", "CTL-2", "CTL-3", "CTL-4", "CTL-5"],
+            lastTsMs: NOW - 60_000,
+          },
+        },
+        mode: "shadow",
+        ...overrides,
+      });
+
+    test("is NOT observable when the ring carries no burst evidence", () => {
+      const inv = evaluateInvariants(mkBoard({ mode: "shadow" })).overloadAttribution;
+      expect(inv).toBeDefined();
+      expect(inv.observable).toBe(false);
+      expect(inv.ok).toBe(true);
+    });
+
+    test("SHADOW (the default) reports the burst but never fails the invariant", () => {
+      const inv = evaluateInvariants(boardWithBurst()).overloadAttribution;
+      expect(inv.ok).toBe(true); // shadow must not change any grade
+      expect(inv.observable).toBe(false); // …and must not become readable to Gate 3
+      // …but it MUST still report what it saw (the CAT-57 Codex P1 lesson: a
+      // shadow that erases its own findings defeats the observation period).
+      expect(inv.flagged).toEqual(["CTL-1", "CTL-2", "CTL-3", "CTL-4", "CTL-5"]);
+      expect(inv.overload.exhaustedCount).toBe(5);
+      expect(inv.note).toMatch(/shadow/);
+    });
+
+    test("ENFORCE fails the invariant on a burst at or above the threshold", () => {
+      const inv = evaluateInvariants(
+        boardWithBurst({ overloadAttributionMode: "enforce" }),
+      ).overloadAttribution;
+      expect(inv.observable).toBe(true);
+      expect(inv.ok).toBe(false);
+      expect(inv.failed).toBe(5);
+    });
+
+    test("ENFORCE stays green below the threshold (one flaky overload is not a burst)", () => {
+      const inv = evaluateInvariants(
+        mkBoard({
+          mode: "shadow",
+          overloadAttributionMode: "enforce",
+          ring: { overloadBurst: { exhaustedCount: 1, tickets: ["CTL-1"], lastTsMs: NOW - 1000 } },
+        }),
+      ).overloadAttribution;
+      expect(inv.observable).toBe(true);
+      expect(inv.ok).toBe(true);
+    });
+
+    test("a STALE burst is not attributed to the current wedge", () => {
+      // An outage that ended hours ago explains nothing about the board right now.
+      const inv = evaluateInvariants(
+        mkBoard({
+          mode: "shadow",
+          overloadAttributionMode: "enforce",
+          ring: {
+            overloadBurst: {
+              exhaustedCount: 9,
+              tickets: ["CTL-1", "CTL-2", "CTL-3"],
+              lastTsMs: NOW - 25 * 3_600_000,
+            },
+          },
+        }),
+      ).overloadAttribution;
+      expect(inv.ok).toBe(true);
+    });
+
+    test("OFF mode omits the invariant entirely (the off set stays byte-identical)", () => {
+      const invariants = evaluateInvariants(mkBoard({ mode: "off" }));
+      expect(invariants.overloadAttribution).toBeUndefined();
+    });
+
+    test("never throws on a malformed burst record", () => {
+      for (const bad of [{}, { exhaustedCount: "many" }, { tickets: "CTL-1" }, { lastTsMs: "soon" }]) {
+        const inv = evaluateInvariants(
+          mkBoard({ mode: "shadow", overloadAttributionMode: "enforce", ring: { overloadBurst: bad } }),
+        ).overloadAttribution;
+        expect(inv.ok).toBe(true); // fail-open — never fabricate an attribution
+      }
+    });
+  });
+
+  describe("actuation posture — read-only, escalate-only", () => {
+    const burstBoard = (mode) =>
+      mkBoard({
+        mode,
+        overloadAttributionMode: "enforce",
+        ring: {
+          overloadBurst: {
+            exhaustedCount: 5,
+            tickets: ["CTL-1", "CTL-2", "CTL-3", "CTL-4", "CTL-5"],
+            lastTsMs: NOW - 60_000,
+          },
+        },
+      });
+
+    test("proposes NO tier-1/tier-2 move — it never dispatches a recovery delegate", () => {
+      const b = burstBoard("enforce");
+      const moves = proposeMoves(evaluateInvariants(b), b);
+      const isOverloadMove = (m) => String(m?.move ?? "").includes("overload");
+      expect(moves.tier1.filter(isOverloadMove)).toEqual([]);
+      expect(moves.tier2.filter(isOverloadMove)).toEqual([]);
+    });
+
+    test("proposes an escalate-only tier-3 move naming the outage as the cause", () => {
+      const b = burstBoard("enforce");
+      const moves = proposeMoves(evaluateInvariants(b), b);
+      const move = moves.tier3.find((m) => String(m?.move ?? "").includes("overload"));
+      expect(move).toBeDefined();
+      expect(move.escalateOnly).toBe(true);
+    });
+
+    test("SHADOW attribution proposes NOTHING at any tier", () => {
+      // The posture gate is the invariant's OWN mode, not the board's: shadow keeps
+      // ok:true, and every tier gates on !ok. (Board mode is a separate, downstream
+      // gate — a shadow board takes no mutating action regardless of what is
+      // proposed, which is the module's asserted safety property.)
+      const b = mkBoard({
+        mode: "enforce",
+        overloadAttributionMode: "shadow",
+        ring: {
+          overloadBurst: {
+            exhaustedCount: 5,
+            tickets: ["CTL-1", "CTL-2", "CTL-3", "CTL-4", "CTL-5"],
+            lastTsMs: NOW - 60_000,
+          },
+        },
+      });
+      const moves = proposeMoves(evaluateInvariants(b), b);
+      const isOverloadMove = (m) => String(m?.move ?? "").includes("overload");
+      expect([...moves.tier1, ...moves.tier2, ...moves.tier3].filter(isOverloadMove)).toEqual([]);
+    });
+
+    test("the tier-3 move is NEVER anchorable — it cannot become a dispatched delegate", () => {
+      // tier3 is contractually escalate-only. selectAnchor picks from the
+      // anchorable tiers, so an outage can never consume recovery capacity.
+      const b = burstBoard("enforce");
+      const invariants = evaluateInvariants(b);
+      const moves = proposeMoves(invariants, b);
+      const anchor = selectAnchor(moves, b);
+      const overloadTickets = new Set(invariants.overloadAttribution.flagged);
+      expect(anchor == null || !overloadTickets.has(anchor.ticket)).toBe(true);
+    });
+  });
+
+  describe("the annotation reaches the operator surfaces", () => {
+    const b = () =>
+      mkBoard({
+        mode: "shadow",
+        ring: {
+          overloadBurst: {
+            exhaustedCount: 5,
+            tickets: ["CTL-1", "CTL-2", "CTL-3", "CTL-4", "CTL-5"],
+            lastTsMs: NOW - 60_000,
+          },
+        },
+      });
+
+    test("buildBoardContext carries an overloadAttribution block", () => {
+      const board = b();
+      const ctx = buildBoardContext(board, evaluateInvariants(board));
+      expect(ctx.overloadAttribution).toBeDefined();
+      expect(ctx.overloadAttribution.exhaustedCount).toBe(5);
+      expect(ctx.overloadAttribution.tickets).toEqual(["CTL-1", "CTL-2", "CTL-3", "CTL-4", "CTL-5"]);
+    });
+
+    test("buildBoardScanEvent promotes the burst COUNT as a chartable scalar", () => {
+      // otel-forward ships only attributes/details off-host — a count left in a
+      // nested object is invisible to the dashboard that would show the outage.
+      const board = b();
+      const invariants = evaluateInvariants(board);
+      const ev = buildBoardScanEvent({
+        mode: "shadow",
+        invariants,
+        decision: decideBoardHealth(invariants, board),
+        board,
+      });
+      const d = ev?.details ?? ev?.body?.payload?.details ?? {};
+      expect(d.overloadExhaustedCount).toBe(5);
+    });
+
+    test("a board with NO burst annotates nothing (absent, not a zero)", () => {
+      const board = mkBoard({ mode: "shadow" });
+      const ctx = buildBoardContext(board, evaluateInvariants(board));
+      expect(ctx.overloadAttribution ?? null).toBeNull();
+    });
   });
 });

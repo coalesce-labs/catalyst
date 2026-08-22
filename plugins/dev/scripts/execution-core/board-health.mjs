@@ -72,6 +72,14 @@ const DEFAULT_THRESHOLDS = {
   // CAT-57: 24h is already past any legitimate inter-phase gap while staying
   // well inside "a human would call this stuck".
   unproductiveNodeMs: Number(process.env.CATALYST_BH_UNPRODUCTIVE_MS) || 24 * 3_600_000,
+  // CTL-1563 (AC4): how many EXHAUSTED provider-overload deaths inside the event
+  // tail constitute a "burst" worth attributing a wedge to. One flaky 529 is not an
+  // outage — the value the incident is drawn from killed every in-flight worker at
+  // once, so the bar is a small cohort rather than a single death.
+  overloadBurstMin: Number(process.env.CATALYST_BH_OVERLOAD_BURST_MIN) || 3,
+  // …and how recent the burst must be. An outage that ended hours ago explains
+  // nothing about the board right now, so a stale burst is never attributed.
+  overloadBurstWindowMs: Number(process.env.CATALYST_BH_OVERLOAD_WINDOW_MS) || 2 * 3_600_000,
   // CTL-1608: stalled-PR staleness thresholds (review-latency / CI-health /
   // no-push), independent of worker liveness. Conservative defaults — longer
   // than orphanedPrAgeMs (48h) to avoid false positives on normal review cadence.
@@ -385,14 +393,22 @@ function extractBlockers(descriptor) {
 // deriveRing — distill the bounded recent-event tail into the few out-of-band
 // signals the invariants need. Best-effort: an event class that isn't present
 // yields null/empty, and the dependent invariant degrades to observable:false.
-function deriveRing(events, nowMs, self) {
+export function deriveRing(events, nowMs, self) {
   const ring = {
     recentDispatchTs: null,
     cacheReconcile: null,
     accountRatelimit: null,
     reconcileFailing: new Set(),
     boardScans: [], // CTL-1435 (C2): per-scan actuation outcomes, chronological
+    // CTL-1563 (AC4): the provider-overload burst. NULL means "no evidence in the
+    // tail" — deliberately not a zero, so the invariant can report UNOBSERVABLE
+    // rather than a clean pass it never actually measured.
+    overloadBurst: null,
   };
+  // CTL-1563: accumulate across the tail; folded into ring.overloadBurst at the end.
+  let overloadExhausted = 0;
+  const overloadTickets = new Set();
+  let overloadLastTsMs = null;
   for (const ev of events ?? []) {
     const name = ev?.attributes?.["event.name"] ?? ev?.["event.name"] ?? ev?.type ?? "";
     const payload = ev?.body?.payload ?? ev?.payload ?? {};
@@ -417,6 +433,22 @@ function deriveRing(events, nowMs, self) {
       // Anthropic subscription telemetry only. GitHub core quota arrives through
       // the dedicated githubQuota snapshot seam below, never through this ring.
       ring.accountRatelimit = { ...payload };
+    } else if (name === "execution-core.sdk.overloaded") {
+      // CTL-1563 (AC4). Only an EXHAUSTED overload counts: `exhausted:true` is the
+      // arm that gives up and kills the worker (sdk-run-phase-agent's backstop),
+      // while a plain overload event is a retry that RECOVERED — no worker died, so
+      // there is nothing to attribute. Matched on the exact name rather than a
+      // regex so a future `execution-core.sdk.overloaded-something` cannot silently
+      // widen the count.
+      if (payload.exhausted === true) {
+        overloadExhausted += 1;
+        if (typeof payload.ticket === "string" && payload.ticket !== "") {
+          overloadTickets.add(payload.ticket);
+        }
+        if (Number.isFinite(tsMs)) {
+          overloadLastTsMs = Math.max(overloadLastTsMs ?? -Infinity, tsMs);
+        }
+      }
     } else if (/reconcile\.failing/i.test(name)) {
       const team = payload.team ?? name.split(".").pop();
       if (team) ring.reconcileFailing.add(team);
@@ -446,6 +478,18 @@ function deriveRing(events, nowMs, self) {
   // guard against a stale dispatch ts in the future / absurd past
   if (ring.recentDispatchTs != null && (ring.recentDispatchTs > nowMs + 60_000)) {
     ring.recentDispatchTs = nowMs;
+  }
+  // CTL-1563 (AC4): fold the accumulator. Absent evidence stays NULL so the
+  // invariant reports "not observable" instead of a zero it never measured.
+  if (overloadExhausted > 0) {
+    ring.overloadBurst = {
+      exhaustedCount: overloadExhausted,
+      // The blast radius: DISTINCT tickets. One ticket that exhausted twice is one
+      // affected ticket, not two — inflating it would overstate how much of the
+      // board the outage explains.
+      tickets: [...overloadTickets],
+      lastTsMs: overloadLastTsMs,
+    };
   }
   return ring;
 }
@@ -565,6 +609,9 @@ export function assembleBoardState({
   githubQuotaMode = process.env.CATALYST_BH_GH_QUOTA || "shadow",
   getPeerProductivity = () => null,
   productivityMode = process.env.CATALYST_BH_PRODUCTIVITY || "shadow",
+  // CTL-1563 (AC4): shadow-by-default, exactly like the two modes above. An
+  // operator opts into enforce only after the shadow observation period.
+  overloadAttributionMode = process.env.CATALYST_BH_OVERLOAD_ATTRIBUTION || "shadow",
   now = () => Date.now(),
   // CTL-1649: does a triage.json artifact exist for a given ticket? Injected so
   // board-health.mjs stays fs-free (no fs import). Default () => true is
@@ -702,6 +749,12 @@ export function assembleBoardState({
     githubQuota: mode === "off" || githubQuotaMode === "off" ? null : safe(() => getGithubQuota(), null),
     githubQuotaMode: ["off", "shadow", "enforce"].includes(githubQuotaMode) ? githubQuotaMode : "shadow",
     productivityMode: ["off", "shadow", "enforce"].includes(productivityMode) ? productivityMode : "shadow",
+    // CTL-1563 (AC4): an unrecognized value degrades to `shadow`, never to `off` —
+    // degrading toward observe-only is safe, degrading toward silence is not (the
+    // CAT-170 resolveCorrelationMode ruling, applied to the same class of knob).
+    overloadAttributionMode: ["off", "shadow", "enforce"].includes(overloadAttributionMode)
+      ? overloadAttributionMode
+      : "shadow",
     peerProductivity: mode === "off" || productivityMode === "off" ? null : safe(() => getPeerProductivity(), null),
     // CTL-1744: per-ticket delegate-claim timestamps for the dispatch-liveness
     // grace. `safe()` collapses a throwing/absent reader to the empty Map, which
@@ -775,6 +828,11 @@ export function evaluateInvariants(boardState, { thresholds = DEFAULT_THRESHOLDS
       // gated like its siblings so the off set stays byte-identical.
       stalledPr: () => checkStalledPr(boardState, thresholds),
       nodeProductivity: () => checkNodeProductivity(boardState, thresholds),
+      // CTL-1563 (AC4): attribute a wedge to a provider-overload burst rather than
+      // to the tickets, so a scan does not read a transient infra cliff as stuck
+      // work. Cohort-gated like its siblings, so the `off` invariant set stays
+      // byte-identical to origin/main.
+      overloadAttribution: () => checkOverloadAttribution(boardState, thresholds),
     });
   }
   const out = {};
@@ -1056,6 +1114,62 @@ function checkNodeProductivity(b, t) {
   // true here (observable:false likewise keeps Gate 3 from reading it).
   if (mode !== "enforce") return invariant(true, 0, false, flagged, `${mode}: ${note}`, { unproductive: details });
   return invariant(flagged.length === 0, flagged.length, true, flagged, note, { unproductive: details });
+}
+
+// CTL-1563 (AC4) — checkOverloadAttribution. A provider-overload burst
+// (Anthropic 429/529) kills every in-flight worker at once. The board then looks
+// exactly like a wedge, and every ticket-shaped invariant blames the TICKETS. This
+// one names the real cause, so an operator reading the scan sees "the provider was
+// down" rather than N independently-stuck items.
+//
+// Deliberately READ-ONLY and ESCALATE-ONLY: it annotates and, in enforce, proposes
+// a tier-3 escalate. It never dispatches a recovery delegate — the correct response
+// to an outage is to wait for it to clear (which the CTL-1563 exemption in
+// recovery-reasoning.mjs already makes safe), not to spend recovery capacity on it.
+//
+// Shadow by default, mirroring nodeProductivity's posture. Fail-open throughout: a
+// missing or malformed burst record yields ok:true, because fabricating an
+// attribution is strictly worse than not offering one.
+function checkOverloadAttribution(b, t) {
+  const mode = b?.overloadAttributionMode ?? "shadow";
+  const burst = b?.ring?.overloadBurst;
+  if (!burst || typeof burst !== "object") {
+    return invariant(true, 0, false, [], "no overload evidence in the event tail → not observable");
+  }
+  const count = Number(burst.exhaustedCount);
+  const tickets = Array.isArray(burst.tickets) ? burst.tickets.filter((x) => typeof x === "string") : [];
+  if (!Number.isFinite(count) || count <= 0) {
+    return invariant(true, 0, false, [], "overload record unreadable → not observable");
+  }
+  // Recency gate. A burst with no usable timestamp cannot be shown to be current,
+  // so it is NOT attributed — "could not tell when" is not "it is happening now".
+  const lastTsMs = Number(burst.lastTsMs);
+  const ageMs = Number.isFinite(lastTsMs) && Number.isFinite(b?.now) ? b.now - lastTsMs : null;
+  const fresh = ageMs !== null && ageMs >= 0 && ageMs <= t.overloadBurstWindowMs;
+  const burstNow = fresh && count >= t.overloadBurstMin;
+  const detail = {
+    overload: {
+      exhaustedCount: count,
+      tickets,
+      lastTsMs: Number.isFinite(lastTsMs) ? lastTsMs : null,
+      ageMs,
+      fresh,
+    },
+  };
+  const note = burstNow
+    ? `provider-overload burst: ${count} exhausted worker death(s) across ${tickets.length} ticket(s) — ` +
+      "the board's stalled work is attributable to the outage, not to the tickets"
+    : fresh
+      ? `${count} overload death(s) — below the ${t.overloadBurstMin}-death burst bar`
+      : "overload evidence is stale → not attributed to the current board";
+  // Shadow must still REPORT what it found (CAT-57 Codex P1: a shadow that erases
+  // its own findings defeats the observation period it ships behind), while staying
+  // non-actuating — observable:false keeps Gate 3 from reading it and proposeMoves
+  // gates the tier-3 move on !ok, which stays true here.
+  if (mode !== "enforce") {
+    return invariant(true, 0, false, burstNow ? tickets : [], `${mode}: ${note}`, detail);
+  }
+  return invariant(!burstNow, burstNow ? count : 0, true, burstNow ? tickets : [], note, detail);
 }
 
 // CTL-1435 (C2): the skippedReason values that mean "the delegate proceeded with
@@ -1753,6 +1867,24 @@ export function proposeMoves(invariants, _b) {
   for (const p of invariants.projectSilence?.flagged ?? []) {
     if (!invariants.projectSilence.ok) tier3.push({ project: p, move: "escalate-project-silence", rationale: "no movement in expected cadence" });
   }
+  // CTL-1563 (AC4): ONE escalate-only move for the WHOLE burst — an outage is a
+  // single incident, not N independent operator decisions (the CAT-170 correlation
+  // lesson: duplicates split one decision's urgency across many rows). Tier 3 is
+  // "never anchorable", which is the point: the right response to a provider outage
+  // is to let it clear — the recovery-reasoning exemption already makes the affected
+  // tickets retry safely — not to spend recovery capacity dispatching against it.
+  if (invariants.overloadAttribution && !invariants.overloadAttribution.ok) {
+    const o = invariants.overloadAttribution.overload ?? {};
+    tier3.push({
+      move: "escalate-provider-overload",
+      escalateOnly: true,
+      tickets: invariants.overloadAttribution.flagged ?? [],
+      rationale:
+        `provider-overload burst (${o.exhaustedCount ?? "?"} exhausted worker deaths across ` +
+        `${(invariants.overloadAttribution.flagged ?? []).length} ticket(s)) — the board's stalled ` +
+        "work is attributable to the outage, not to the tickets",
+    });
+  }
   return { tier1, tier2, tier3 };
 }
 
@@ -1937,6 +2069,39 @@ export function buildBoardContext(boardState, invariants) {
       ageMs: invariants.nodeProductivity?.unproductive?.[host]?.ageMs ?? null,
       ownedTickets: invariants.nodeProductivity?.unproductive?.[host]?.ownedTickets ?? [],
     })),
+    // CTL-1563 (AC4): present ONLY when there is real burst evidence. Absent — not
+    // a zeroed block — so a reader can tell "no outage" from "never measured"; a
+    // zero here would read as a positive finding of health the scan never made.
+    ...(invariants.overloadAttribution?.overload
+      ? {
+          overloadAttribution: {
+            exhaustedCount: invariants.overloadAttribution.overload.exhaustedCount ?? null,
+            tickets: invariants.overloadAttribution.overload.tickets ?? [],
+            lastTsMs: invariants.overloadAttribution.overload.lastTsMs ?? null,
+            ageMs: invariants.overloadAttribution.overload.ageMs ?? null,
+            fresh: invariants.overloadAttribution.overload.fresh ?? false,
+            attributed: invariants.overloadAttribution.ok === false,
+            note: invariants.overloadAttribution.note ?? null,
+          },
+        }
+      : {}),
+    // CTL-1563 (AC4): name the OUTAGE, so the delegate reading this context does not
+    // read a transient provider cliff as N independently-stuck tickets. Omitted
+    // entirely (not zero-filled) when there is no evidence — absence of a burst and
+    // a measured burst of zero are different claims, and only one of them is
+    // something this scan actually observed.
+    ...(invariants.overloadAttribution?.overload
+      ? {
+          overloadAttribution: {
+            exhaustedCount: invariants.overloadAttribution.overload.exhaustedCount,
+            tickets: invariants.overloadAttribution.overload.tickets ?? [],
+            lastTsMs: invariants.overloadAttribution.overload.lastTsMs ?? null,
+            ageMs: invariants.overloadAttribution.overload.ageMs ?? null,
+            fresh: invariants.overloadAttribution.overload.fresh === true,
+            attributed: invariants.overloadAttribution.ok === false,
+          },
+        }
+      : {}),
     invariants: Object.fromEntries(
       Object.entries(invariants).map(([k, v]) => [k, { ok: v.ok, failed: v.failed }]),
     ),
@@ -1949,7 +2114,13 @@ export function buildBoardContext(boardState, invariants) {
 export function buildBoardScanEvent({ mode, invariants, decision, act = null, board = null }) {
   const githubQuota = quotaForPublication(board);
   const owns = board == null ? null : makeOwnsFilter(board, { scope: "dispatch" });
-  const totalMoves = decision.proposed.tier1 + decision.proposed.tier2 + decision.proposed.tier3;
+  // A caller may hand in a decision that never reached the proposal stage (an
+  // early gate hold, or a scan that bailed). Reading `.proposed.tier1` off it threw
+  // a TypeError and took down the whole scan-event build — losing the telemetry for
+  // exactly the degraded scan an operator most needs to see. Default to zero moves.
+  const proposed = decision?.proposed ?? {};
+  const totalMoves =
+    (Number(proposed.tier1) || 0) + (Number(proposed.tier2) || 0) + (Number(proposed.tier3) || 0);
   // CTL-1435 (C1): the actuation OUTCOME of this scan. Without it the journal shows
   // proposedMoves but never whether anything was dispatched — the blind spot behind
   // the propose-forever/dispatch-never incident. shadow/off never actuate → the
@@ -2027,6 +2198,17 @@ export function buildBoardScanEvent({ mode, invariants, decision, act = null, bo
       slotFree,
       eligibleOwnedDepth: board == null ? null : board.eligible.filter((e) => owns(e.id)).length,
       unproductiveNodeCount: invariants.nodeProductivity?.flagged?.length ?? 0,
+      // CTL-1563 (AC4): a top-level SCALAR, because CTL-1291 promotes only the
+      // scalars at this level to chartable attributes and otel-forward strips
+      // `body.payload` off-machine — a count nested inside an object would be
+      // invisible to the very dashboard that would show the outage.
+      overloadExhaustedCount: invariants.overloadAttribution?.overload?.exhaustedCount ?? null,
+      overloadTicketCount: invariants.overloadAttribution?.overload?.tickets?.length ?? null,
+      // CTL-1563 (AC4): otel-forward ships only attributes/details off-host, so a
+      // count left nested is invisible to the dashboard that would show the outage.
+      // NULL (not 0) when there is no evidence — "we did not observe a burst" and
+      // "we observed zero deaths" are different claims.
+      overloadExhaustedCount: invariants.overloadAttribution?.overload?.exhaustedCount ?? null,
       githubCoreRemaining: githubQuota?.remaining ?? null,
       githubCoreRemainingPct: githubQuota?.remainingPct ?? null,
       invariants: Object.fromEntries(

@@ -35,6 +35,7 @@ import {
   renameSync,
   unlinkSync,
   rmSync,
+  statSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
 // CTL-1568: read-only predicate — is the belief engine the needs-human owner?
@@ -76,6 +77,20 @@ import {
   RECOVERY_CORRELATION_MIN_GROUP,
   RECOVERY_CORRELATION_WINDOW_MS,
 } from "./escalation-correlation.mjs";
+// CTL-1563: the transient-infra exemption. The classifier is a zero-import leaf;
+// the reason RESOLUTION deliberately composes two existing halves rather than
+// authoring a third key ladder — see resolveTicketDeathReason below.
+import {
+  isTransientInfraReason,
+  resolveTransientInfraReasons,
+} from "./transient-infra.mjs";
+import { readAllPhaseSignals } from "./signal-reader.mjs";
+import { resolveSignalReason } from "./escalation-explanation.mjs";
+
+// CTL-1563: the transient exemption's OWN recovery-fix-backoff class. Deliberately
+// not the ticket's real fix_class — a provider outage must not consume the budget
+// that a genuine bounded-llm/seam fix failure is metered against, and vice versa.
+export const TRANSIENT_INFRA_FIX_CLASS = "transient-infra";
 
 // Wrap defaultLog to ensure it's a function (config.mjs may export an object)
 const defaultLogFn = typeof defaultLog === "function" ? defaultLog : (msg) => {
@@ -1765,6 +1780,21 @@ function promoteNumericAttrs(type, details) {
     num("recovery.ledger_skipped", details.ledgerSkipped?.length);
     num("recovery.terminal_skipped", details.terminalSkipped?.length);
     str("recovery.mode", details.mode);
+  } else if (type === "recovery.transient-defer") {
+    // CTL-1563. otel-forward ships ONLY `attributes` off-machine (`body.payload` is
+    // stripped), so every field an operator needs to attribute an overload burst
+    // must be promoted here. Un-promoted, this event would reach Loki/Grafana as a
+    // bare name — the CAT-170 shadow-event failure, repeated.
+    str("recovery.transient_reason", details.transientReason);
+    num("recovery.attempts_before", details.attemptsBefore);
+    num("recovery.attempts_after", details.attemptsAfter);
+    // Booleans need their own promoter: `num`/`str` both reject them, so a plain
+    // pass-through would silently drop the two fields that distinguish a refunding
+    // defer from a throttled one — the whole point of the backoff being observable.
+    if (typeof details.refunded === "boolean") a["recovery.refunded"] = details.refunded;
+    if (typeof details.backoffBlocked === "boolean") {
+      a["recovery.backoff_blocked"] = details.backoffBlocked;
+    }
   } else if (type === "recovery.decision") {
     num("recovery.rule", details.rule);
     str("recovery.decision", details.decision);
@@ -3053,6 +3083,88 @@ export function clearCorrelationPointer(orchDir, ticket) {
   }
 }
 
+// resolveTicketDeathReason — CTL-1563. The death reason recorded by a ticket's
+// MOST RECENT worker phase signal, or null when there is nothing to read.
+//
+// ⚠️ THIS FUNCTION AUTHORS NO KEY LADDER, AND THAT IS THE POINT. Two existing
+// halves already own the halves of this question, and both traps below have
+// already been paid for once:
+//
+//   1. WHICH SIGNAL — signal-reader.mjs's readAllPhaseSignals(orchDir), the wider
+//      per-file observation set (every workers/<T>/phase-<p>.json, artifacts and
+//      CTL-702 yield tombstones excluded), not the one-row-per-ticket active-phase
+//      projection.
+//   2. WHICH KEY — escalation-explanation.mjs's exported resolveSignalReason(signal),
+//      whose three-key ladder (stalledReason → failureReason → attentionReason) is
+//      strictly stronger than scheduler.mjs's two-key readDispatchFailureReason, and
+//      whose three-valued return (named / absent / unreadable) never throws.
+//
+// ⚠️ The signal object is passed through UNMODIFIED. parseSignal returns a
+// PROJECTION that lifts only ticket/layout/phase/status/liveness/updatedAt/pr/
+// worktreePath/host to the top level — `attentionReason`, the exact field the
+// overload backstop writes, survives ONLY under `.raw`. resolveSignalReason reads
+// both levels for precisely this reason; flattening `.raw` first, or hand-rolling
+// a ladder against the on-disk shape, produces a resolver that is GREEN against an
+// on-disk-shaped fixture and INERT in production. That is not hypothetical — it is
+// Codex #3699 P1, where an operator card read empty 41 times out of 41. The
+// anti-inert control in recovery-reasoning.test.mjs asserts the projection path.
+//
+// FAIL-CLOSED: only a `named` reason is returned. An absent worker dir, an
+// unparseable signal, a signal recording no reason, and a throw all answer null —
+// and null is not transient, so "could not look" escalates exactly as it does
+// today. A resolver that cannot distinguish "no reason" from "could not read"
+// must never be the thing that buys a retry.
+//
+// @param {string} orchDir the orchestrator dir holding workers/
+// @param {string} ticket the ticket id
+// @returns {string|null} the trimmed reason, or null
+export function resolveTicketDeathReason(orchDir, ticket, opts = {}) {
+  if (!orchDir || typeof ticket !== "string" || ticket.trim() === "") return null;
+  const { readSignals = readAllPhaseSignals, resolveReason = resolveSignalReason } = opts;
+  try {
+    const mine = readSignals(orchDir).filter((s) => s?.ticket === ticket);
+    if (mine.length === 0) return null;
+    // Newest wins. `updatedAt` is the authoritative recency stamp and every writer
+    // sets it; mtime is only the fallback for a pre-CTL signal that predates the
+    // field, and a stamped signal always outranks an unstamped one so the two
+    // clocks are never compared against each other.
+    let newest = null;
+    let newestRank = null;
+    for (const signal of mine) {
+      const parsed = Date.parse(signal.updatedAt ?? signal.raw?.updatedAt ?? "");
+      const rank = Number.isFinite(parsed)
+        ? { stamped: 1, at: parsed }
+        : { stamped: 0, at: signalMtimeMs(signal.signalPath) };
+      if (
+        newestRank === null ||
+        rank.stamped > newestRank.stamped ||
+        (rank.stamped === newestRank.stamped && rank.at > newestRank.at)
+      ) {
+        newest = signal;
+        newestRank = rank;
+      }
+    }
+    // Deliberately NO fallback to an older phase's reason. The freshest signal is
+    // the ticket's current state; reaching backwards would let a long-resolved
+    // overload exempt a ticket whose CURRENT death is structural.
+    const resolved = resolveReason(newest);
+    return resolved?.status === "named" ? resolved.reason : null;
+  } catch {
+    return null; // never throw on the escalation path
+  }
+}
+
+// Recency fallback for a signal with no parseable `updatedAt`. Returns -Infinity
+// on any read failure so an unreadable file can never outrank a readable one.
+function signalMtimeMs(signalPath) {
+  if (typeof signalPath !== "string" || signalPath === "") return -Infinity;
+  try {
+    return statSync(signalPath).mtimeMs;
+  } catch {
+    return -Infinity;
+  }
+}
+
 // escalateExhaustedIntents — CTL-1440 (P0b): the terminal-state policy sweep.
 // An intent whose fix attempts are exhausted (attempts >= max) WITHOUT a verdict
 // must escalate LOUDLY — ledger escalated:true (B1's 7-day TTL then ages it out
@@ -3110,6 +3222,15 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
     // cached terminal/merged check; default keeps the function pure/hermetic.
     isActive = () => true,
     log = defaultLogFn,
+    // ── CTL-1563: the transient-infra exemption seams ────────────────────────
+    // Production defaults live here (the scheduler call site needs no change).
+    // Each is injectable so a test can drive the branch without a real overload.
+    resolveDeathReason = (t) => resolveTicketDeathReason(orchDir, t),
+    isTransientReason = (r) => isTransientInfraReason(r, resolveTransientInfraReasons()),
+    inTransientBackoff = (t, nowMs) =>
+      inFixBackoff(orchDir, t, TRANSIENT_INFRA_FIX_CLASS, nowMs),
+    recordTransientDefer = (dir, t, fixClass, reason, nowMs) =>
+      recordFixFailure(dir, t, fixClass, reason, nowMs),
     correlationMode: correlationModeOpt = RECOVERY_CORRELATION_MODE(),
     correlationWindowMs = RECOVERY_CORRELATION_WINDOW_MS,
     correlationMinGroup = RECOVERY_CORRELATION_MIN_GROUP,
@@ -3148,6 +3269,140 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
     }
     if (!active) continue;
     if (readEscalationDeferrals(orchDir, ticket) >= maxDeferrals) continue;
+
+    // ── CTL-1563: transient-infra deaths are RETRYABLE, not spent attempts ───
+    //
+    // `attempts` is incremented EAGERLY at dispatch, before the worker runs. A
+    // worker killed by a provider-overload burst exits BEFORE recording a
+    // verdict, so each death reads here as one more "dispatch without a recorded
+    // verdict" — and at the cap this sweep latches a terminal needs-human that
+    // survives 7 days. On 2026-07-29 one burst falsely escalated ~6 healthy
+    // tickets a delegate had to un-stick by hand. The cause was infrastructure,
+    // not the ticket's work, and it cleared on its own.
+    //
+    // Placed HERE, before `candidates.push`, deliberately: an exempted ticket
+    // must never reach correlation grouping either. A transient ticket promoted
+    // to a group ANCHOR would raise one full operator decision covering the whole
+    // cohort — the same escalation, through the side door.
+    //
+    // Fail-closed in BOTH directions that matter:
+    //   • a throwing/absent resolver yields null, and null is not transient, so
+    //     "could not look" escalates exactly as it does today;
+    //   • the backoff read decides only whether to REFUND (i.e. whether to make
+    //     the ticket dispatch-eligible again), never whether a human is paged —
+    //     an unreadable window still exempts.
+    let deathReason = null;
+    try {
+      deathReason = resolveDeathReason(ticket);
+    } catch {
+      deathReason = null; // unreadable → not transient → escalate as today
+    }
+    let transient = false;
+    try {
+      transient = isTransientReason(deathReason) === true;
+    } catch {
+      transient = false;
+    }
+    if (transient) {
+      // AC3 — throttle the REDISPATCH, not the exemption. The REFUND below is what
+      // makes the ticket dispatch-eligible again, so it is the thing the exponential
+      // window gates. A blocked window still DEFERS and still never escalates.
+      //
+      // ⚠️ This read decides REFUND-OR-NOT, never PAGE-OR-NOT. It therefore fails
+      // toward refunding: the other direction would let a disk error turn an
+      // infrastructure outage into an operator escalation, which is the exact
+      // defect this ticket removes.
+      let blocked = false;
+      try {
+        blocked = inTransientBackoff(ticket, now())?.blocked === true;
+      } catch {
+        blocked = false; // unreadable window → refund; the window NEVER escalates
+      }
+
+      // AC1 — refund the eagerly-counted transient death, mirroring the
+      // recordVerdict("leave-alone") precedent (attempts: max(prior-1, 0)). Net
+      // effect: a transient death costs zero against the cap.
+      //
+      // AC3 — the refund is what makes the ticket dispatch-eligible again, so it
+      // is the thing the exponential window throttles. While blocked we still
+      // DEFER (never escalate) but PIN the attempts: a sustained outage stops
+      // buying fresh retries without ever becoming a human's problem.
+      //
+      // Either way the write flips the entry to decision:"defer", which is not in
+      // the sweepable set — so this is idempotent and the sweep does not re-do the
+      // work (or re-emit) on every tick of a long outage. The event is therefore
+      // once per dispatch→death cycle, not once per tick.
+      //
+      // AC2 — no verdict and no `escalated`: a defer is cooldown-only and never
+      // latches, so the ticket re-enters the funnel normally.
+      //
+      // ⚠️ fix_class is PRESERVED, never defaulted. Writing "board-health" here
+      // would select the ticket into readDeferredBoardHealthIntents' queue as a
+      // side effect of an unrelated exemption.
+      const priorAttempts = typeof data.attempts === "number" ? data.attempts : 0;
+      const attemptsAfter = blocked ? priorAttempts : Math.max(priorAttempts - 1, 0);
+      try {
+        recordIntent(ticket, {
+          type: "recovery-pass",
+          decision: "defer",
+          fix_class: data.fix_class ?? null,
+          attempts: attemptsAfter,
+        });
+      } catch (err) {
+        // The ledger write is the exemption. If it fails, leave the entry
+        // untouched and retry next tick — never fall through to escalation,
+        // which would page a human for an infrastructure outage.
+        log(`recovery-reasoning: ${ticket} transient-defer ledger write failed: ${err.message}`);
+        continue;
+      }
+      // Advance the window on EVERY transient defer, blocked or not: a sustained
+      // outage must keep the window closed rather than let it lapse mid-burst.
+      // Growth is bounded — inFixBackoff caps the span at
+      // RECOVERY_FIX_BACKOFF_MAX_MS — and each increment costs a full
+      // dispatch→death cycle, not a tick. Keyed on its OWN fix class so a provider
+      // outage never consumes the budget a genuine bounded-llm/seam fix failure is
+      // metered against. Fail-open: a failed write only costs a wider retry window,
+      // never the exemption itself.
+      try {
+        recordTransientDefer(orchDir, ticket, TRANSIENT_INFRA_FIX_CLASS, deathReason, now());
+      } catch (err) {
+        log(`recovery-reasoning: ${ticket} transient-defer backoff write failed: ${err.message}`);
+      }
+      // Observability: a burst must be attributable. The name is BARE (no ticket
+      // suffix) to match every other event this function emits — the ticket rides
+      // as `event.label` via buildRecoveryEnvelope, which is what the board reader
+      // keys on. Every detail below is ALSO promoted to an attribute
+      // (promoteNumericAttrs), because otel-forward strips `body.payload`
+      // off-machine: a detail left un-promoted is invisible to the dashboards this
+      // event exists to feed. That is the CAT-170 lesson, where a shadow event
+      // shipped carrying nothing but its own name and a null ticket.
+      try {
+        emitEvent({
+          type: "recovery.transient-defer",
+          ticket,
+          fix_class: data.fix_class ?? null,
+          reason: deathReason,
+          details: {
+            transientReason: deathReason,
+            attemptsBefore: priorAttempts,
+            attemptsAfter,
+            refunded: !blocked,
+            backoffBlocked: blocked,
+          },
+        });
+      } catch {
+        /* observability is best-effort — never block the exemption */
+      }
+      log(
+        `recovery-reasoning: ${ticket} transient death (${deathReason}) — deferred, NOT escalated; ` +
+          (blocked
+            ? `attempt NOT refunded (backoff window open, attempts pinned at ${priorAttempts})`
+            : `attempt refunded (${priorAttempts} → ${attemptsAfter})`) +
+          " (CTL-1563)",
+      );
+      continue;
+    }
+
     candidates.push({
       ticket,
       file: f,
