@@ -6,7 +6,8 @@
 # re-bootstrapped, so the latest plist always wins.
 #
 #   bash install.sh --role steward-p13 --scope "P13 · Coordination SOP" \
-#                   --skill catalyst-dev:steward --cwd ~/code-repos/github/coalesce-labs/catalyst
+#                   --skill catalyst-dev:steward --cwd ~/code-repos/github/coalesce-labs/catalyst \
+#                   --scope-keys "<linear-project-id>[,<id>...]"   # CTL-2129: page target registry
 #   bash install.sh --role steward-p13 --uninstall
 #
 # CTL-2000 fleet-wide singleton units (one per fleet, NOT per role):
@@ -19,11 +20,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-ROLE="" SCOPE="" SKILL="catalyst-dev:steward" CWD="" BRIEF="" UNINSTALL=0 DRY_RUN=0 FLEET_UNIT=""
+ROLE="" SCOPE="" SKILL="catalyst-dev:steward" CWD="" BRIEF="" UNINSTALL=0 DRY_RUN=0 FLEET_UNIT="" SCOPE_KEYS=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
   --role) ROLE="${2:?--role needs a name}"; shift ;;
   --scope) SCOPE="${2:?--scope needs a value}"; shift ;;
+  # CTL-2129: the machine scope key(s) — a CSV of Linear project ids this steward
+  # owns — populated into manifest.scopeKeys so an instrument can page it.
+  --scope-keys) SCOPE_KEYS="${2:?--scope-keys needs a csv}"; shift ;;
   --skill) SKILL="${2:?--skill needs a value}"; shift ;;
   --cwd) CWD="${2:?--cwd needs a dir}"; shift ;;
   --brief) BRIEF="${2:?--brief needs a file}"; shift ;;
@@ -164,6 +168,20 @@ JSON
   echo "role-supervisor: wrote ${ROLE_DIR}/manifest.json"
 else
   echo "role-supervisor: kept existing ${ROLE_DIR}/manifest.json"
+fi
+
+# CTL-2129: populate manifest.scopeKeys via the unit-tested JS writer, so it lands
+# on BOTH a freshly-created and an already-existing (kept) manifest — a merge, not
+# a clobber. This is what makes escalation-router.resolveSteward return this role
+# for a stalled item in one of its projects (instead of falling through to the
+# concierge). Fail-open: a failed set never blocks the install.
+if [[ -n "${SCOPE_KEYS}" ]]; then
+  if [[ $DRY_RUN -eq 1 ]]; then
+    echo "role-supervisor: [dry-run] would set scopeKeys='${SCOPE_KEYS}' on ${ROLE}"
+  else
+    CATALYST_DIR="${CATALYST_DIR_VAL}" "$NODE_BIN" "${SCRIPT_DIR}/cli.mjs" set-scope-keys "$ROLE" "$SCOPE_KEYS" \
+      || echo "role-supervisor/install.sh: set-scope-keys failed (continuing)" >&2
+  fi
 fi
 
 PATH_VAL="${HOME}/.catalyst/bin:${HOME}/.local/node/bin:${HOME}/.local/bin:${HOME}/.bun/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
