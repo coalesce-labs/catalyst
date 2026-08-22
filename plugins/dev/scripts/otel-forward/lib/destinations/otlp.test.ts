@@ -777,6 +777,111 @@ describe("OtlpSender Phase 3 — status classification + age-partition", () => {
     rmSync(dir, { recursive: true });
   });
 
+  // CTL-2084: the failure cause must survive off-machine as queryable attributes on
+  // forward_failed (previously it lived only in body.payload, which buildOtlpPayload strips).
+  function readFailed(eventLogPath: string): CanonicalEvent[] {
+    if (!existsSync(eventLogPath)) return [];
+    return readFileSync(eventLogPath, "utf8").trim().split("\n").filter(Boolean)
+      .map((l) => JSON.parse(l) as CanonicalEvent)
+      .filter((e) => e.attributes["event.name"] === "catalyst.observability.forward_failed");
+  }
+
+  test("forward_failed carries failure_category + forward_err + http_status (503)", async () => {
+    global.fetch = mock(() =>
+      Promise.resolve(new Response(null, { status: 503 }))
+    ) as unknown as typeof fetch;
+
+    const { OtlpSender } = await import("./otlp.ts");
+    const eventLogPath = join(dir, "events-503-attrs.jsonl");
+    const sender = new OtlpSender({
+      endpoint: "http://127.0.0.1:4318",
+      dlqPath: join(dir, "dlq-503-attrs.jsonl"),
+      eventLogPath,
+      httpRetryPolicy: { maxElapsedMs: 0 },
+      lokiAcceptWindowMs: Number.MAX_SAFE_INTEGER,
+    });
+    await sender.flush([makeEvent({ ts: new Date().toISOString() })]);
+    const failed = readFailed(eventLogPath);
+    expect(failed.length).toBe(1);
+    const a = failed[0].attributes as unknown as Record<string, unknown>;
+    expect(a["catalyst.observability.failure_category"]).toBe("http_5xx");
+    expect(a["catalyst.observability.http_status"]).toBe(503);
+    expect(typeof a["catalyst.observability.forward_err"]).toBe("string");
+    // payload unchanged (backward-compat)
+    const payload = failed[0].body?.payload as Record<string, unknown>;
+    expect(payload.err).toBeDefined();
+    expect(payload.batchSize as number).toBeGreaterThan(0);
+    rmSync(dir, { recursive: true });
+  });
+
+  test("forward_failed 429 → failure_category http_429 + http_status", async () => {
+    global.fetch = mock(() =>
+      Promise.resolve(new Response(null, { status: 429 }))
+    ) as unknown as typeof fetch;
+
+    const { OtlpSender } = await import("./otlp.ts");
+    const eventLogPath = join(dir, "events-429-attrs.jsonl");
+    const sender = new OtlpSender({
+      endpoint: "http://127.0.0.1:4318",
+      dlqPath: join(dir, "dlq-429-attrs.jsonl"),
+      eventLogPath,
+      httpRetryPolicy: { maxElapsedMs: 0 },
+      lokiAcceptWindowMs: Number.MAX_SAFE_INTEGER,
+    });
+    await sender.flush([makeEvent({ ts: new Date().toISOString() })]);
+    const a = readFailed(eventLogPath)[0].attributes as unknown as Record<string, unknown>;
+    expect(a["catalyst.observability.failure_category"]).toBe("http_429");
+    expect(a["catalyst.observability.http_status"]).toBe(429);
+    rmSync(dir, { recursive: true });
+  });
+
+  test("forward_failed network error → failure_category network, NO http_status", async () => {
+    // realistic node-fetch shape: TypeError("fetch failed"); classifier maps it to `network`.
+    global.fetch = mock(() =>
+      Promise.reject(new TypeError("fetch failed"))
+    ) as unknown as typeof fetch;
+
+    const { OtlpSender } = await import("./otlp.ts");
+    const eventLogPath = join(dir, "events-net-attrs.jsonl");
+    const sender = new OtlpSender({
+      endpoint: "http://127.0.0.1:1",
+      dlqPath: join(dir, "dlq-net-attrs.jsonl"),
+      eventLogPath,
+      httpRetryPolicy: { maxElapsedMs: 0 },
+      lokiAcceptWindowMs: Number.MAX_SAFE_INTEGER,
+    });
+    await sender.flush([makeEvent({ ts: new Date().toISOString() })]);
+    const a = readFailed(eventLogPath)[0].attributes as unknown as Record<string, unknown>;
+    expect(a["catalyst.observability.failure_category"]).toBe("network");
+    expect("catalyst.observability.http_status" in a).toBe(false);
+    rmSync(dir, { recursive: true });
+  });
+
+  test("forward_failed failure_category survives buildOtlpPayload (off-machine)", async () => {
+    const { buildOtlpPayload: build } = await import("./otlp.ts");
+    // observability attribute keys are runtime-only (undeclared in Attributes, like drop_reason);
+    // double-cast the literal, matching this file's existing `as unknown as CanonicalEvent` pattern.
+    const ev = {
+      ...SAMPLE_EVENT,
+      severityText: "ERROR",
+      severityNumber: 17,
+      attributes: {
+        "event.name": "catalyst.observability.forward_failed",
+        "catalyst.observability.failure_category": "http_5xx",
+        "catalyst.observability.forward_err": "OTLP HTTP 503",
+        "catalyst.observability.http_status": 503,
+      },
+      body: { message: "catalyst.observability.forward_failed", payload: { batchSize: 3, err: "OTLP HTTP 503" } },
+    } as unknown as CanonicalEvent;
+    const payload = build([ev]) as any;
+    const attrs: Array<{ key: string; value: any }> =
+      payload.resourceLogs[0].scopeLogs[0].logRecords[0].attributes;
+    const get = (k: string) => attrs.find((a) => a.key === k)?.value;
+    expect(get("catalyst.observability.failure_category")?.stringValue).toBe("http_5xx");
+    expect(get("catalyst.observability.forward_err")?.stringValue).toBe("OTLP HTTP 503");
+    expect(get("catalyst.observability.http_status")).toEqual({ intValue: 503 });
+  });
+
   test("mixed aged+fresh batch — only fresh POSTed, aged dropped-with-counter, no DLQ", async () => {
     const requestBodies: unknown[] = [];
     global.fetch = mock(async (url: string, init: RequestInit) => {
