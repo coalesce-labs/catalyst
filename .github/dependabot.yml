@@ -1,0 +1,53 @@
+version: 2
+
+updates:
+  # Root bun workspace — covers the root package.json plus every workspace
+  # under plugins/dev/scripts/* (execution-core, broker, orch-monitor, ...).
+  - package-ecosystem: "bun"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 8
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+    # @anthropic-ai/claude-agent-sdk is deliberately NOT ignored here.
+    # It drove every fleet phase-agent dispatch on a Claude generation that
+    # was 44 patch releases stale (pinned 0.3.195 while 0.3.239 was current)
+    # because nothing was watching it. The fix for "nobody bumped it" is a
+    # weekly PR nagging for review, not suppression — so it gets tracked
+    # like every other dependency and reviewed like any bump that touches
+    # execution-core's usage.
+
+  # website/ has its own committed lockfile (package-lock.json) and its
+  # package.json is not part of the root bun workspace, so it needs its
+  # own npm entry — otherwise its dependencies drift with no Dependabot PRs.
+  - package-ecosystem: "npm"
+    directory: "/website"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 8
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
