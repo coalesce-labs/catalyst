@@ -16,6 +16,9 @@
 #   restart    Stop then start
 #   probe      Exit 0 if the daemon is running, non-zero otherwise (silent)
 #   status     Print running/stopped + pid
+#   rearm      SIGHUP the daemon — re-arm claude-accounts.env now (CTL-2147),
+#              instead of waiting out the 5-minute cluster-sync tick. Exits
+#              non-zero when the daemon is not running.
 
 set -uo pipefail
 
@@ -404,6 +407,25 @@ cmd_probe() {
 	read_pid >/dev/null 2>&1
 }
 
+# cmd_rearm — CTL-2147. Send SIGHUP to the running daemon, which triggers the
+# CTL-1984 claude-accounts.env rearm immediately instead of waiting out the
+# 5-minute cluster-sync tick. This is the on-demand trigger `catalyst-stack
+# claude-account switch/sync --soft` signals before verifying the rotation.
+# Exits non-zero when the daemon is not running, so a soft switch can
+# distinguish "signalled" from "nothing to signal" rather than failing open.
+cmd_rearm() {
+	local pid
+	if ! pid=$(read_pid); then
+		echo "catalyst-execution-core not running — nothing to rearm" >&2
+		return 1
+	fi
+	kill -HUP "$pid" 2>/dev/null || {
+		echo "catalyst-execution-core: failed to signal pid ${pid}" >&2
+		return 1
+	}
+	echo "catalyst-execution-core: SIGHUP sent (pid ${pid}) — requesting claude-accounts rearm"
+}
+
 cmd_status() {
 	# CTL-649 devex finding #5: `daemon status --json` (and the top-level `status`
 	# alias) emit a machine-readable object so a headless agent can branch on
@@ -557,8 +579,9 @@ dispatch_daemon() {
 	restart) cmd_restart ;;
 	probe) cmd_probe ;;
 	status) cmd_status "$@" ;;
+	rearm) cmd_rearm ;;
 	*)
-		echo "Usage: catalyst-execution-core daemon {start|stop|restart|probe|status}" >&2
+		echo "Usage: catalyst-execution-core daemon {start|stop|restart|probe|status|rearm}" >&2
 		exit 1
 		;;
 	esac
@@ -625,7 +648,10 @@ catalyst-execution-core — manage the execution-core daemon and audit/clean its
 Usage: catalyst-execution-core <command> [args]
 
 Commands:
-  daemon      manage the long-lived execution-core daemon (start|stop|restart|probe|status)
+  daemon      manage the long-lived execution-core daemon (start|stop|restart|probe|status|rearm)
+              rearm signals the running daemon (SIGHUP) to re-arm claude-accounts.env
+              immediately instead of waiting out the 5-minute cluster-sync tick.
+              Backcompat top-level alias: `catalyst-execution-core rearm`.
   register    enroll a project in the execution-core registry
               Usage: catalyst-execution-core register --team <TEAM> [--repo-root <path>] [--eligible-query JSON]
               Resolves repo root from --repo-root, $CATALYST_REPO_ROOT, or git rev-parse --show-toplevel.
@@ -674,7 +700,7 @@ if ! (return 0 2>/dev/null); then
 		;;
 	# Backcompat aliases — operator muscle memory for the daemon verbs. Trailing
 	# flags (e.g. top-level `status --json`) pass through to the daemon handler.
-	start | stop | restart | probe | status) dispatch_daemon "$@" ;;
+	start | stop | restart | probe | status | rearm) dispatch_daemon "$@" ;;
 	daemon)
 		shift
 		dispatch_daemon "$@"

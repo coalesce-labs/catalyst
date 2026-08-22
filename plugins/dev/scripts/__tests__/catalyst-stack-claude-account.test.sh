@@ -506,6 +506,153 @@ t_daemon_default_matches_writer_default() {
 }
 check "execution-core daemon default matches CA_ACCOUNTS_ENV_DEFAULT" t_daemon_default_matches_writer_default
 
+# ── N. --soft flag parsing (CTL-2147) ────────────────────────────────────────
+t_soft_flag_recognized_switch() {
+  # _ca_parse_mode is the extracted pure helper both commands share.
+  [[ "$(_ca_parse_mode --soft)" == "soft" ]]
+}
+check "switch/sync accept --soft" t_soft_flag_recognized_switch
+
+t_default_mode_is_restart() {
+  [[ "$(_ca_parse_mode)" == "restart" ]]
+}
+check "default (no flag) stays restart — opt-in, not a behavior flip" t_default_mode_is_restart
+
+t_soft_and_yes_compose() {
+  [[ "$(_ca_parse_mode --soft --yes)" == "soft" ]]
+}
+check "--soft composes with --yes" t_soft_and_yes_compose
+
+t_unknown_flag_still_rejected() {
+  ! _ca_parse_mode --sofT >/dev/null 2>&1
+}
+check "a near-miss flag is rejected, not silently treated as restart" t_unknown_flag_still_rejected
+
+# ── N+1. soft verification must NOT be the file-sourced check (CTL-2147) ─────
+t_soft_verify_is_distinct_fn() {
+  # Guards the false-green trap: _ca_verify_active proves the FILE, not the daemon.
+  declare -f _ca_verify_soft_rearm >/dev/null 2>&1 &&
+    ! declare -f _ca_verify_soft_rearm | grep -q '_ca_verify_active'
+}
+check "soft mode has its own daemon-observing verification" t_soft_verify_is_distinct_fn
+
+t_soft_verify_fails_when_no_event() {
+  # Point the event-log resolver at an empty scratch log: absence must FAIL, not pass.
+  : > "${SCRATCH}/empty.jsonl"
+  ! CATALYST_EVENT_LOG="${SCRATCH}/empty.jsonl" _ca_verify_soft_rearm acct2 1 >/dev/null 2>&1
+}
+check "soft verify FAILS on no rearm event (fail-closed, never a silent pass)" t_soft_verify_fails_when_no_event
+
+t_soft_verify_rejects_wrong_handle() {
+  printf '%s\n' '{"ts":"2026-08-21T23:00:00Z","attributes":{"event.name":"account.rearm.applied","account.handle":"acct1"}}' > "${SCRATCH}/wrong.jsonl"
+  ! CATALYST_EVENT_LOG="${SCRATCH}/wrong.jsonl" _ca_verify_soft_rearm acct2 1 >/dev/null 2>&1
+}
+check "soft verify rejects a rearm event naming a DIFFERENT handle" t_soft_verify_rejects_wrong_handle
+
+t_soft_verify_accepts_matching_handle() {
+  printf '%s\n' '{"ts":"2026-08-21T23:00:00Z","attributes":{"event.name":"account.rearm.applied","account.handle":"acct2"}}' > "${SCRATCH}/right.jsonl"
+  CATALYST_EVENT_LOG="${SCRATCH}/right.jsonl" _ca_verify_soft_rearm acct2 1 >/dev/null 2>&1
+}
+check "soft verify passes on a matching-handle rearm event" t_soft_verify_accepts_matching_handle
+
+# ── N+2. freshness fencepost (CTL-2147, security-review follow-up) ──────────
+# A small handle pool + fleets legitimately revisiting the same handle within a
+# month means an unbounded scan would accept a STALE same-handle event as proof
+# that THIS rearm request landed. SINCE_TS (3rd arg) closes that gap.
+t_soft_verify_since_ts_rejects_stale_event() {
+  printf '%s\n' '{"ts":"2020-01-01T00:00:00Z","attributes":{"event.name":"account.rearm.applied","account.handle":"acct2"}}' > "${SCRATCH}/stale.jsonl"
+  ! CATALYST_EVENT_LOG="${SCRATCH}/stale.jsonl" _ca_verify_soft_rearm acct2 1 "2026-08-21T23:00:00Z" >/dev/null 2>&1
+}
+check "SINCE_TS rejects an event older than the fencepost" t_soft_verify_since_ts_rejects_stale_event
+
+t_soft_verify_since_ts_accepts_fresh_event() {
+  printf '%s\n' '{"ts":"2026-08-21T23:59:00Z","attributes":{"event.name":"account.rearm.applied","account.handle":"acct2"}}' > "${SCRATCH}/fresh.jsonl"
+  CATALYST_EVENT_LOG="${SCRATCH}/fresh.jsonl" _ca_verify_soft_rearm acct2 1 "2026-08-21T23:00:00Z" >/dev/null 2>&1
+}
+check "SINCE_TS accepts an event at/after the fencepost" t_soft_verify_since_ts_accepts_fresh_event
+
+t_soft_verify_no_since_ts_still_matches_any_age() {
+  # Omitting SINCE_TS (the shell-test callers above) must stay backward compatible.
+  printf '%s\n' '{"ts":"2020-01-01T00:00:00Z","attributes":{"event.name":"account.rearm.applied","account.handle":"acct2"}}' > "${SCRATCH}/nofence.jsonl"
+  CATALYST_EVENT_LOG="${SCRATCH}/nofence.jsonl" _ca_verify_soft_rearm acct2 1 >/dev/null 2>&1
+}
+check "omitting SINCE_TS matches an event of any age (back-compat default)" t_soft_verify_no_since_ts_still_matches_any_age
+
+# ── N+3. executor guard (CTL-2147) ───────────────────────────────────────────
+t_soft_refuses_non_sdk_executor() {
+  ! CATALYST_EXECUTOR=bg _ca_soft_supported >/dev/null 2>&1
+}
+check "--soft refuses under executor=bg (rearm does not cross the claude --bg RPC)" t_soft_refuses_non_sdk_executor
+
+t_soft_allowed_under_sdk() {
+  CATALYST_EXECUTOR=sdk _ca_soft_supported >/dev/null 2>&1
+}
+check "--soft allowed under executor=sdk" t_soft_allowed_under_sdk
+
+# ── N+4. _ca_apply_rotation dispatches to the correct tail (CTL-2147, ─────────
+# test-coverage-review follow-up). Neither cmd_claude_account_switch nor
+# cmd_claude_account_sync is otherwise driven past their early guards anywhere in
+# this suite (both real flows need a working sops/git/probe chain), so without this
+# section the mode branch itself — the actual "does --soft skip the restart" logic
+# — was untested: an inverted `if`, a typo'd mode string, or a dropped
+# _ca_soft_supported call could pass every other check here. Stubs cmd_restart /
+# catalyst-execution-core / _ca_verify_soft_rearm / _ca_verify_active as plain shell
+# functions (bash resolves a defined function before a same-named PATH command) so
+# the dispatch is observed directly, without needing a real daemon/sops/git. Every
+# invocation runs inside `$(...)` — _ca_apply_rotation calls `fail`, which `exit`s,
+# and this test file sources $STACK directly into the CURRENT shell (not a
+# subprocess), so an uncontained `exit` here would kill the whole test run.
+_ROT_CALLS="${SCRATCH}/rotation-calls.log"
+_rot_verify_soft_rc=0
+_rot_verify_active_rc=0
+cmd_restart() { printf 'cmd_restart %s\n' "$*" >> "$_ROT_CALLS"; }
+catalyst-execution-core() { printf 'catalyst-execution-core %s\n' "$*" >> "$_ROT_CALLS"; return 0; }
+_ca_verify_soft_rearm() { printf '_ca_verify_soft_rearm %s\n' "$*" >> "$_ROT_CALLS"; return "$_rot_verify_soft_rc"; }
+_ca_verify_active() { printf '_ca_verify_active %s\n' "$*" >> "$_ROT_CALLS"; return "$_rot_verify_active_rc"; }
+
+t_apply_rotation_soft_signals_daemon_not_restart() {
+  : > "$_ROT_CALLS"; _rot_verify_soft_rc=0; _rot_verify_active_rc=0
+  local rc; ( _ca_apply_rotation soft acct2 no switch >/dev/null 2>&1 ); rc=$?
+  [[ $rc -eq 0 ]] &&
+    grep -q '^catalyst-execution-core rearm$' "$_ROT_CALLS" &&
+    grep -q '^_ca_verify_soft_rearm acct2 ' "$_ROT_CALLS" &&
+    grep -q '^_ca_verify_active acct2$' "$_ROT_CALLS" &&
+    ! grep -q '^cmd_restart' "$_ROT_CALLS"
+}
+check "--soft mode signals the daemon and verifies, never calling cmd_restart" t_apply_rotation_soft_signals_daemon_not_restart
+
+t_apply_rotation_restart_calls_cmd_restart_not_soft_path() {
+  : > "$_ROT_CALLS"; _rot_verify_soft_rc=0; _rot_verify_active_rc=0
+  local rc; ( _ca_apply_rotation restart acct2 no switch >/dev/null 2>&1 ); rc=$?
+  [[ $rc -eq 0 ]] &&
+    grep -q '^cmd_restart[[:space:]]*$' "$_ROT_CALLS" &&
+    grep -q '^_ca_verify_active acct2$' "$_ROT_CALLS" &&
+    ! grep -q '^catalyst-execution-core' "$_ROT_CALLS" &&
+    ! grep -q '^_ca_verify_soft_rearm' "$_ROT_CALLS"
+}
+check "default (restart) mode calls cmd_restart, never signals the daemon (regression coverage)" t_apply_rotation_restart_calls_cmd_restart_not_soft_path
+
+t_apply_rotation_restart_yes_passes_through() {
+  : > "$_ROT_CALLS"; _rot_verify_soft_rc=0; _rot_verify_active_rc=0
+  ( _ca_apply_rotation restart acct2 yes switch >/dev/null 2>&1 )
+  grep -q '^cmd_restart --yes$' "$_ROT_CALLS"
+}
+check "restart mode with assume_yes=yes calls cmd_restart --yes" t_apply_rotation_restart_yes_passes_through
+
+t_apply_rotation_soft_fails_closed_when_daemon_never_rearms() {
+  : > "$_ROT_CALLS"; _rot_verify_soft_rc=1; _rot_verify_active_rc=0
+  local rc; ( _ca_apply_rotation soft acct2 no switch >/dev/null 2>&1 ); rc=$?
+  [[ $rc -ne 0 ]]
+}
+check "--soft mode fails closed when the daemon never reports re-arming" t_apply_rotation_soft_fails_closed_when_daemon_never_rearms
+
+t_apply_rotation_soft_fails_closed_when_file_verify_fails() {
+  : > "$_ROT_CALLS"; _rot_verify_soft_rc=0; _rot_verify_active_rc=1
+  local rc; ( _ca_apply_rotation soft acct2 no switch >/dev/null 2>&1 ); rc=$?
+  [[ $rc -ne 0 ]]
+}
+check "--soft mode fails closed when the post-switch file check fails too" t_apply_rotation_soft_fails_closed_when_file_verify_fails
+
 echo ""
 TOTAL=$((PASSES + FAILURES))
 echo "catalyst-stack-claude-account: $PASSES/$TOTAL passed, $FAILURES failed"
