@@ -175,6 +175,11 @@ export function collectEventLog({
       ...(initialWindow === undefined ? {} : { initialWindow }),
       lineFilter: (line) => line.includes("recovery."),
       onEvent: (evt) => {
+        // CTL-1550 (P2): scanEventsSince bounds the byte range to approximately
+        // cover the window, but individual records with backfilled or near-boundary
+        // timestamps can still slip through. Enforce the window per event.
+        const evtMs = typeof evt?.ts === "string" ? Date.parse(evt.ts) : NaN;
+        if (!Number.isFinite(evtMs) || evtMs < nowMs - windowMs) return;
         const name = evt?.attributes?.["event.name"] || "";
         if (!/^recovery\.(escalated|would-escalate)$/.test(name)) return;
         const ticket = evt?.body?.payload?.ticket || evt?.attributes?.["event.label"] || "";

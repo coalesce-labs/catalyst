@@ -178,11 +178,15 @@ export async function scanFileLinesAsync(
  *   • `stream-reader.ts` — same shape, 32 KiB, against a per-session stream log.
  *
  * The read starts at `max(0, size - maxBytes)`. When that offset is > 0 the
- * first line is a FRAGMENT (the window cut mid-record), so it is dropped —
- * every caller splits on "\n" and JSON.parses, and a truncated line's suffix
+ * first line is USUALLY a FRAGMENT (the window cut mid-record), so it is dropped
+ * — every caller splits on "\n" and JSON.parses, and a truncated line's suffix
  * can otherwise parse into a bogus record (the same discipline as
- * `probeOldestTs`'s `skipFirstLine` in execution-core/event-tail.mjs). A file
- * smaller than `maxBytes` is returned in full, byte-identical to the
+ * `probeOldestTs`'s `skipFirstLine` in execution-core/event-tail.mjs). CTL-1550:
+ * to avoid dropping a COMPLETE first record when the window happens to begin
+ * exactly on a record boundary, one byte immediately before the window is read
+ * (a 1-byte peek): if it is "\n" the window starts on a boundary and the first
+ * line is kept. That peek makes the bounded read at most `maxBytes + 1` bytes. A
+ * file smaller than `maxBytes` is returned in full, byte-identical to the
  * `readFileSync` it replaces.
  *
  * A `StringDecoder` is NOT needed: the whole window is decoded in one pass. The
@@ -212,6 +216,13 @@ export function readTailUtf8(path: string, maxBytes: number): string {
     }
     const text = buf.toString("utf8", 0, got);
     if (from === 0) return text;
+    // CTL-1550 (Codex P2): inspect the byte immediately before `from`. If it is a
+    // newline, the window begins exactly on a record boundary and the first buffered
+    // line is a COMPLETE record, not a fragment — keep it. Only drop the first line
+    // when the window truly starts mid-record (the byte before `from` is NOT `\n`).
+    const prev = Buffer.allocUnsafe(1);
+    const pn = readSync(fd, prev, 0, 1, from - 1);
+    if (pn === 1 && prev[0] === 0x0a /* \n */) return text;
     const nl = text.indexOf("\n");
     return nl === -1 ? "" : text.slice(nl + 1);
   } catch {

@@ -7,7 +7,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { fenceGuard, readClusterGeneration, readSignalGeneration } from "./fence-guard.mjs";
+import {
+  fenceGuard,
+  FENCE_SUPPRESS_REASONS,
+  readClusterGeneration,
+  readSignalGeneration,
+} from "./fence-guard.mjs";
 
 // A helper to build a `readFence` seam that returns a fixed projection row.
 const fenceRow = (over = {}) => ({
@@ -18,12 +23,105 @@ const fenceRow = (over = {}) => ({
   ...over,
 });
 
+describe("fenceGuard — discriminated suppression verdict (CAT-173)", () => {
+  const base = { ticket: "PROJ-1", orchDir: "/tmp/x", multiHost: true, self: "hostA" };
+  const silent = { warn() {}, debug() {} };
+
+  test("confirmed-stale authoritative read reports SUPERSEDED", () => {
+    const seen = [];
+    const ok = fenceGuard(base, {
+      readGen: () => 7,
+      escalate: () => ({ current: false, stale: true }),
+      onSuppress: (v) => seen.push(v),
+      logger: silent,
+    });
+    expect(ok).toBe(false);
+    expect(seen).toEqual([
+      { ticket: "PROJ-1", reason: FENCE_SUPPRESS_REASONS.SUPERSEDED, generation: 7 },
+    ]);
+  });
+
+  test("indeterminate authoritative read reports UNVERIFIABLE — distinct from SUPERSEDED", () => {
+    const seen = [];
+    fenceGuard(base, {
+      readGen: () => 7,
+      escalate: () => ({ current: false, stale: false }),
+      onSuppress: (v) => seen.push(v),
+      logger: silent,
+    });
+    expect(seen[0].reason).toBe(FENCE_SUPPRESS_REASONS.UNVERIFIABLE);
+    expect(FENCE_SUPPRESS_REASONS.UNVERIFIABLE).not.toBe(FENCE_SUPPRESS_REASONS.SUPERSEDED);
+  });
+
+  test("known-foreign owner reports FOREIGN_OWNER", () => {
+    const seen = [];
+    fenceGuard({ ...base, gateway: {} }, {
+      readGen: () => null,
+      readFence: () => ({ ownerHost: "hostB", generation: 3 }),
+      proceedOnMissingGeneration: true,
+      onSuppress: (v) => seen.push(v),
+      logger: silent,
+    });
+    expect(seen[0].reason).toBe(FENCE_SUPPRESS_REASONS.FOREIGN_OWNER);
+  });
+
+  test("missing generation at a MUTATING site reports MISSING_GENERATION", () => {
+    const seen = [];
+    fenceGuard(base, { readGen: () => null, onSuppress: (v) => seen.push(v), logger: silent });
+    expect(seen[0].reason).toBe(FENCE_SUPPRESS_REASONS.MISSING_GENERATION);
+  });
+
+  test("a throwing escalate reports THREW", () => {
+    const seen = [];
+    fenceGuard(base, {
+      readGen: () => 7,
+      escalate: () => { throw new Error("boom"); },
+      onSuppress: (v) => seen.push(v),
+      logger: silent,
+    });
+    expect(seen[0].reason).toBe(FENCE_SUPPRESS_REASONS.THREW);
+  });
+
+  test("onSuppress NEVER fires on a PASS, and a throwing hook cannot flip the verdict", () => {
+    const seen = [];
+    expect(fenceGuard(base, {
+      readGen: () => 7,
+      escalate: () => ({ current: true, stale: false }),
+      onSuppress: (v) => seen.push(v),
+      logger: silent,
+    })).toBe(true);
+    expect(seen).toEqual([]);
+
+    expect(fenceGuard(base, {
+      readGen: () => null,
+      proceedOnMissingGeneration: true,
+      onSuppress: () => { throw new Error("hook exploded"); },
+      logger: silent,
+    })).toBe(true);
+  });
+
+  test("single-host (multiHost:false) never fires the hook", () => {
+    const seen = [];
+    expect(fenceGuard({ ...base, multiHost: false }, {
+      readGen: () => 1,
+      onSuppress: (v) => seen.push(v),
+      logger: silent,
+    })).toBe(true);
+    expect(seen).toEqual([]);
+  });
+
+  test("omitting onSuppress leaves every path byte-identical (default no-op)", () => {
+    expect(fenceGuard(base, { readGen: () => 7, escalate: () => ({ current: false, stale: true }), logger: silent })).toBe(false);
+    expect(fenceGuard(base, { readGen: () => 7, escalate: () => ({ current: true }), logger: silent })).toBe(true);
+  });
+});
+
 describe("fenceGuard — N=1 single-host gate (spec §C1)", () => {
   test("roster==1 (multiHost:false) trusts local unconditionally, no read at all", () => {
     let escalated = false;
     let fenceRead = false;
     const result = fenceGuard(
-      { ticket: "CTL-1", orchDir: "/o", multiHost: false, gateway: {}, self: "mini" },
+      { ticket: "PROJ-1", orchDir: "/o", multiHost: false, gateway: {}, self: "mini" },
       {
         escalate: () => { escalated = true; return { current: true }; },
         readFence: () => { fenceRead = true; return null; },
@@ -38,7 +136,7 @@ describe("fenceGuard — N=1 single-host gate (spec §C1)", () => {
 describe("fenceGuard — multi-host default (Stage 0, readSource=linear → escalate)", () => {
   test("current generation via authoritative read → passes", () => {
     const result = fenceGuard(
-      { ticket: "CTL-1", orchDir: "/o", multiHost: true, self: "mini" },
+      { ticket: "PROJ-1", orchDir: "/o", multiHost: true, self: "mini" },
       { readGen: () => 5, escalate: () => ({ current: true }), readSource: "linear" },
     );
     expect(result).toBe(true);
@@ -46,7 +144,7 @@ describe("fenceGuard — multi-host default (Stage 0, readSource=linear → esca
 
   test("stale generation via authoritative read → blocks", () => {
     const result = fenceGuard(
-      { ticket: "CTL-1", orchDir: "/o", multiHost: true, self: "mini" },
+      { ticket: "PROJ-1", orchDir: "/o", multiHost: true, self: "mini" },
       { readGen: () => 5, escalate: () => ({ current: false }), readSource: "linear" },
     );
     expect(result).toBe(false);
@@ -54,7 +152,7 @@ describe("fenceGuard — multi-host default (Stage 0, readSource=linear → esca
 
   test("missing generation (null) → fail-closed", () => {
     const result = fenceGuard(
-      { ticket: "CTL-1", orchDir: "/o", multiHost: true, self: "mini" },
+      { ticket: "PROJ-1", orchDir: "/o", multiHost: true, self: "mini" },
       { readGen: () => null, escalate: () => ({ current: true }), readSource: "linear" },
     );
     expect(result).toBe(false);
@@ -62,7 +160,7 @@ describe("fenceGuard — multi-host default (Stage 0, readSource=linear → esca
 
   test("NaN generation → fail-closed", () => {
     const result = fenceGuard(
-      { ticket: "CTL-1", orchDir: "/o", multiHost: true, self: "mini" },
+      { ticket: "PROJ-1", orchDir: "/o", multiHost: true, self: "mini" },
       { readGen: () => NaN, escalate: () => ({ current: true }), readSource: "linear" },
     );
     expect(result).toBe(false);
@@ -70,7 +168,7 @@ describe("fenceGuard — multi-host default (Stage 0, readSource=linear → esca
 
   test("escalate throws → fail-closed", () => {
     const result = fenceGuard(
-      { ticket: "CTL-1", orchDir: "/o", multiHost: true, self: "mini" },
+      { ticket: "PROJ-1", orchDir: "/o", multiHost: true, self: "mini" },
       { readGen: () => 3, escalate: () => { throw new Error("spawn failed"); }, readSource: "linear" },
     );
     expect(result).toBe(false);
@@ -78,7 +176,7 @@ describe("fenceGuard — multi-host default (Stage 0, readSource=linear → esca
 
   test("readGen throws → fail-closed", () => {
     const result = fenceGuard(
-      { ticket: "CTL-1", orchDir: "/o", multiHost: true, self: "mini" },
+      { ticket: "PROJ-1", orchDir: "/o", multiHost: true, self: "mini" },
       { readGen: () => { throw new Error("ENOENT"); }, escalate: () => ({ current: true }), readSource: "linear" },
     );
     expect(result).toBe(false);
@@ -87,10 +185,10 @@ describe("fenceGuard — multi-host default (Stage 0, readSource=linear → esca
   test("passes the correct ticket+generation to the authoritative read", () => {
     let captured = null;
     fenceGuard(
-      { ticket: "CTL-999", orchDir: "/o", multiHost: true, self: "mini" },
+      { ticket: "PROJ-999", orchDir: "/o", multiHost: true, self: "mini" },
       { readGen: () => 42, escalate: (args) => { captured = args; return { current: true }; }, readSource: "linear" },
     );
-    expect(captured).toEqual({ ticket: "CTL-999", generation: 42 });
+    expect(captured).toEqual({ ticket: "PROJ-999", generation: 42 });
   });
 
   test("Stage-0 default NEVER trusts the local projection — a fresh self-owned row still escalates", () => {
@@ -100,7 +198,7 @@ describe("fenceGuard — multi-host default (Stage 0, readSource=linear → esca
     let escalated = false;
     let fenceRead = false;
     const result = fenceGuard(
-      { ticket: "CTL-1", orchDir: "/o", multiHost: true, gateway: {}, self: "mini" },
+      { ticket: "PROJ-1", orchDir: "/o", multiHost: true, gateway: {}, self: "mini" },
       {
         readGen: () => 5,
         readFence: () => { fenceRead = true; return fenceRow(); },
@@ -115,7 +213,7 @@ describe("fenceGuard — multi-host default (Stage 0, readSource=linear → esca
 });
 
 describe("fenceGuard — multi-host projection-first (Stage 1 opt-in, marker-gated)", () => {
-  const base = { ticket: "CTL-1", orchDir: "/o", multiHost: true, gateway: {}, self: "mini" };
+  const base = { ticket: "PROJ-1", orchDir: "/o", multiHost: true, gateway: {}, self: "mini" };
   // The N>1 guardrail hard-refuses projection-first on a multi-host roster unless
   // the Stage-1 capability marker is present; these tests exercise the Stage-1
   // projection LOGIC, so they arm the marker.
@@ -136,6 +234,7 @@ describe("fenceGuard — multi-host projection-first (Stage 1 opt-in, marker-gat
   });
 
   test("fresh row showing a FOREIGN owner → suppress (the partitioned-zombie catch)", () => {
+    const seen = [];
     const result = fenceGuard(base, {
       readGen: () => 5,
       readFence: () => fenceRow({ ownerHost: "laptop", generation: 6 }), // peer took over
@@ -143,11 +242,14 @@ describe("fenceGuard — multi-host projection-first (Stage 1 opt-in, marker-gat
       escalate: () => ({ current: true }), // even if Linear lied, we must not reach it
       readSource: "projection-first",
       env: STAGE1,
+      onSuppress: (verdict) => seen.push(verdict),
     });
     expect(result).toBe(false);
+    expect(seen[0].reason).toBe(FENCE_SUPPRESS_REASONS.FOREIGN_OWNER);
   });
 
   test("fresh self-owned row at a HIGHER generation → suppress", () => {
+    const seen = [];
     const result = fenceGuard(base, {
       readGen: () => 5,
       readFence: () => fenceRow({ ownerHost: "mini", generation: 6 }),
@@ -155,8 +257,10 @@ describe("fenceGuard — multi-host projection-first (Stage 1 opt-in, marker-gat
       escalate: () => ({ current: true }),
       readSource: "projection-first",
       env: STAGE1,
+      onSuppress: (verdict) => seen.push(verdict),
     });
     expect(result).toBe(false);
+    expect(seen[0].reason).toBe(FENCE_SUPPRESS_REASONS.SUPERSEDED);
   });
 
   test("STALE self-owned row → escalates (does NOT trust local; regression guard for findings 1/2/7)", () => {
@@ -260,7 +364,7 @@ describe("fenceGuard — escalation-site fail-open on missing generation (watch 
   test("proceedOnMissingGeneration:true + null generation → PROCEED (write) + loud warn, never a silent drop", () => {
     const warns = [];
     const result = fenceGuard(
-      { ticket: "CTL-1", orchDir: "/o", multiHost: true, self: "mini" },
+      { ticket: "PROJ-1", orchDir: "/o", multiHost: true, self: "mini" },
       {
         readGen: () => null,
         escalate: () => ({ current: false }),
@@ -275,7 +379,7 @@ describe("fenceGuard — escalation-site fail-open on missing generation (watch 
 
   test("default (proceedOnMissingGeneration:false) + null generation → fail-closed (mutating write sites unchanged)", () => {
     const result = fenceGuard(
-      { ticket: "CTL-1", orchDir: "/o", multiHost: true, self: "mini" },
+      { ticket: "PROJ-1", orchDir: "/o", multiHost: true, self: "mini" },
       { readGen: () => null, escalate: () => ({ current: true }), readSource: "linear" },
     );
     expect(result).toBe(false);
@@ -283,7 +387,7 @@ describe("fenceGuard — escalation-site fail-open on missing generation (watch 
 
   test("proceedOnMissingGeneration does NOT loosen a readable-but-superseded generation (still suppresses)", () => {
     const result = fenceGuard(
-      { ticket: "CTL-1", orchDir: "/o", multiHost: true, self: "mini" },
+      { ticket: "PROJ-1", orchDir: "/o", multiHost: true, self: "mini" },
       {
         readGen: () => 5, // generation IS readable
         escalate: () => ({ current: false }), // authoritative says superseded
@@ -305,7 +409,7 @@ describe("fenceGuard — escalation sites stay fail-CLOSED on a KNOWN-foreign ow
     let escalated = false;
     const warns = [];
     const result = fenceGuard(
-      { ticket: "CTL-1", orchDir: "/o", multiHost: true, gateway: {}, self: "mini" },
+      { ticket: "PROJ-1", orchDir: "/o", multiHost: true, gateway: {}, self: "mini" },
       {
         readGen: () => null, // this host's cluster-generation.json is gone
         readFence: () => fenceRow({ ownerHost: "mini-2", generation: 9 }), // a peer owns it NOW
@@ -323,7 +427,7 @@ describe("fenceGuard — escalation sites stay fail-CLOSED on a KNOWN-foreign ow
   test("a foreign owner suppresses BEFORE onMissingGeneration fires (the call site's own fail-closed path arms its cooldown)", () => {
     let hookFired = false;
     const result = fenceGuard(
-      { ticket: "CTL-1", orchDir: "/o", multiHost: true, gateway: {}, self: "mini" },
+      { ticket: "PROJ-1", orchDir: "/o", multiHost: true, gateway: {}, self: "mini" },
       {
         readGen: () => null,
         readFence: () => fenceRow({ ownerHost: "mini-2", generation: 9 }),
@@ -342,7 +446,7 @@ describe("fenceGuard — escalation sites stay fail-CLOSED on a KNOWN-foreign ow
     for (const row of [null, fenceRow({ ownerHost: null }), fenceRow({ ownerHost: "" })]) {
       let hookFired = false;
       const result = fenceGuard(
-        { ticket: "CTL-1", orchDir: "/o", multiHost: true, gateway: {}, self: "mini" },
+        { ticket: "PROJ-1", orchDir: "/o", multiHost: true, gateway: {}, self: "mini" },
         {
           readGen: () => null,
           readFence: () => row,
@@ -359,7 +463,7 @@ describe("fenceGuard — escalation sites stay fail-CLOSED on a KNOWN-foreign ow
 
   test("a throwing projection read is UNKNOWN, not foreign → still fails open at an escalation site", () => {
     const result = fenceGuard(
-      { ticket: "CTL-1", orchDir: "/o", multiHost: true, gateway: {}, self: "mini" },
+      { ticket: "PROJ-1", orchDir: "/o", multiHost: true, gateway: {}, self: "mini" },
       {
         readGen: () => null,
         readFence: () => { throw new Error("sqlite is down"); },
@@ -374,7 +478,7 @@ describe("fenceGuard — escalation sites stay fail-CLOSED on a KNOWN-foreign ow
   test("SELF-owned projection is unaffected — still borrows the generation and escalates", () => {
     let captured = null;
     const result = fenceGuard(
-      { ticket: "CTL-1", orchDir: "/o", multiHost: true, gateway: {}, self: "mini" },
+      { ticket: "PROJ-1", orchDir: "/o", multiHost: true, gateway: {}, self: "mini" },
       {
         readGen: () => null,
         readFence: () => fenceRow({ ownerHost: "mini", generation: 9 }),
@@ -383,7 +487,7 @@ describe("fenceGuard — escalation sites stay fail-CLOSED on a KNOWN-foreign ow
         proceedOnMissingGeneration: true,
       },
     );
-    expect(captured).toEqual({ ticket: "CTL-1", generation: 9 });
+    expect(captured).toEqual({ ticket: "PROJ-1", generation: 9 });
     expect(result).toBe(true);
   });
 });
@@ -409,7 +513,7 @@ describe("fenceGuard — generation SOURCE wiring (CTL-1157 A1 regression)", () 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "fence-src-"));
     orchDir = dir;
-    ticket = "CTL-1423";
+    ticket = "PROJ-1423";
     wdir = join(orchDir, "workers", ticket);
     mkdirSync(wdir, { recursive: true });
   });
