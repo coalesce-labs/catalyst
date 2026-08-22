@@ -106,6 +106,7 @@ const INLINE_EVENT_NAMES = [
   "cloud-feed.would-dispatch",        // CTL-1847 cloud-feed-timer.mjs (shadow mode — would dispatch from the feed)
   "recovery.escalation.correlated",   // CAT-170 recovery-reasoning.mjs (enforced member pointer)
   "recovery.escalation.would-correlate", // CAT-170 recovery-reasoning.mjs (shadow group)
+  "recovery.transient-defer",         // CTL-1563 recovery-reasoning.mjs (transient-infra exemption)
 ];
 
 // Build the flat list of all static exec-core event names.

@@ -41,6 +41,7 @@ import {
   writeCorrelationPointer, // CAT-170
   resolveTicketDeathReason, // CTL-1563
 } from "./recovery-reasoning.mjs";
+import { inFixBackoff, RECOVERY_FIX_BACKOFF_THRESHOLD } from "./recovery-fix-backoff.mjs";
 import { readAllPhaseSignals } from "./signal-reader.mjs";
 import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join as pathJoin } from "node:path";
@@ -4160,5 +4161,396 @@ describe("resolveTicketDeathReason (CTL-1563)", () => {
       attentionReason: "sdk-overloaded-exhausted",
     });
     expect(resolveTicketDeathReason(orchDir, "CTL-TWO")).toBeNull();
+  });
+});
+
+
+describe("escalateExhaustedIntents — transient-infra exemption (CTL-1563)", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(pathJoin(tmpdir(), "rec-transient-"));
+  });
+  afterEach(() => {
+    try {
+      rmSync(orchDir, { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
+  });
+
+  const readLedger = (t) =>
+    JSON.parse(readFileSync(pathJoin(orchDir, ".recovery-intents", `${t}.json`), "utf8"));
+
+  // An at-cap, verdict-less ledger entry: exactly what the sweep escalates today.
+  const seedExhausted = (ticket, t0, attempts = RECOVERY_MAX_ATTEMPTS) =>
+    defaultRecordIntent(
+      ticket,
+      { decision: "dispatched", fix_class: "board-health", attempts },
+      { orchDir, now: () => t0 },
+    );
+
+  // The dead worker's phase signal, in the ON-DISK shape the backstop writes.
+  const seedSignal = (ticket, body, phase = "implement") => {
+    const dir = pathJoin(orchDir, "workers", ticket);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(pathJoin(dir, `phase-${phase}.json`), JSON.stringify({ ticket, phase, ...body }));
+  };
+
+  const overloadSignal = (ticket) =>
+    seedSignal(ticket, {
+      status: "stalled",
+      attentionReason: "sdk-overloaded-exhausted",
+      assertedBy: "sdk-backstop",
+      updatedAt: "2026-07-29T12:00:00Z",
+    });
+
+  const run = (t0, extra = {}) => {
+    const events = [];
+    const comments = [];
+    const labels = [];
+    const signals = [];
+    const out = escalateExhaustedIntents(orchDir, {
+      now: () => t0,
+      emitEvent: (e) => events.push(e),
+      postComment: (t, body) => comments.push({ t, body }),
+      labelNeedsHuman: (dir, t) => {
+        labels.push(t);
+        return true;
+      },
+      writeSignal: (t, payload) => signals.push({ t, payload }),
+      ...extra,
+    });
+    return { out, events, comments, labels, signals };
+  };
+
+  test("AC1 — a transient death is NOT escalated, and the eager attempt is REFUNDED", () => {
+    const t0 = 1_000_000_000_000;
+    seedExhausted("CTL-OL", t0);
+    overloadSignal("CTL-OL");
+    const { out, events, comments, labels, signals } = run(t0 + 1);
+
+    // Nothing operator-facing happened.
+    expect(out).toEqual([]);
+    expect(labels).toEqual([]);
+    expect(comments).toEqual([]);
+    expect(signals).toEqual([]);
+    expect(events.filter((e) => e.type === "recovery.escalated")).toEqual([]);
+
+    // The ledger deferred and refunded, and did NOT latch.
+    const led = readLedger("CTL-OL");
+    expect(led.decision).toBe("defer");
+    expect(led.escalated).toBe(false);
+    expect(led.attempts).toBe(RECOVERY_MAX_ATTEMPTS - 1);
+    expect(led.attempts).toBeLessThan(RECOVERY_MAX_ATTEMPTS);
+  });
+
+  test("AC1 — the refund is observable as a recovery.transient-defer event naming the reason", () => {
+    const t0 = 1_000_000_000_000;
+    seedExhausted("CTL-OL", t0);
+    overloadSignal("CTL-OL");
+    const { events } = run(t0 + 1);
+    const ev = events.find((e) => e.type === "recovery.transient-defer");
+    expect(ev).toBeDefined();
+    expect(ev.ticket).toBe("CTL-OL");
+    expect(ev.details.transientReason).toBe("sdk-overloaded-exhausted");
+    expect(ev.details.attemptsBefore).toBe(RECOVERY_MAX_ATTEMPTS);
+    expect(ev.details.attemptsAfter).toBe(RECOVERY_MAX_ATTEMPTS - 1);
+    expect(ev.details.refunded).toBe(true);
+
+    // …and it survives the envelope: the forwarder ships ONLY attributes off-host,
+    // so a detail left un-promoted is invisible to Loki/Grafana.
+    const env = buildRecoveryEnvelope(ev, { now: () => "2026-07-29T12:00:00Z" });
+    expect(env.attributes["event.name"]).toBe("recovery.transient-defer");
+    expect(env.attributes["event.label"]).toBe("CTL-OL");
+    expect(env.attributes["recovery.transient_reason"]).toBe("sdk-overloaded-exhausted");
+    expect(env.attributes["recovery.attempts_after"]).toBe(RECOVERY_MAX_ATTEMPTS - 1);
+  });
+
+  test("AC2 — an over-cap transient death defers regardless of how many attempts were burned", () => {
+    const t0 = 1_000_000_000_000;
+    seedExhausted("CTL-DEEP", t0, 5);
+    overloadSignal("CTL-DEEP");
+    const { out, labels } = run(t0 + 1);
+    expect(out).toEqual([]);
+    expect(labels).toEqual([]);
+    const led = readLedger("CTL-DEEP");
+    expect(led.decision).toBe("defer");
+    expect(led.escalated).toBe(false);
+    expect(led.attempts).toBe(4);
+  });
+
+  test("AC3 — a BURST escalates ZERO of its cohort", () => {
+    const t0 = 1_000_000_000_000;
+    const cohort = ["CTL-B1", "CTL-B2", "CTL-B3", "CTL-B4", "CTL-B5"];
+    for (const t of cohort) {
+      seedExhausted(t, t0);
+      overloadSignal(t);
+    }
+    const { out, events, comments, labels, signals } = run(t0 + 1);
+
+    expect(out).toEqual([]);
+    expect(labels).toEqual([]); // ZERO needs-human labels across the whole cohort
+    expect(comments).toEqual([]);
+    expect(signals).toEqual([]);
+    expect(events.filter((e) => e.type === "recovery.escalated")).toEqual([]);
+    expect(events.filter((e) => e.type === "recovery.transient-defer").length).toBe(cohort.length);
+    for (const t of cohort) {
+      const led = readLedger(t);
+      expect(led.decision).toBe("defer");
+      expect(led.escalated).toBe(false);
+      expect(led.attempts).toBeLessThan(RECOVERY_MAX_ATTEMPTS);
+    }
+  });
+
+  test("CONTROL — a NON-transient death still escalates byte-identically to today", () => {
+    // The positive control. Without it, a bug that made isTransientReason always
+    // true would read as a clean AC1/AC2/AC3 pass while silently suppressing every
+    // escalation the sweep exists to raise.
+    const t0 = 1_000_000_000_000;
+    seedExhausted("CTL-STRUCT", t0);
+    seedSignal("CTL-STRUCT", {
+      status: "failed",
+      failureReason: "empty_branch",
+      updatedAt: "2026-07-29T12:00:00Z",
+    });
+    const { out, events, comments, labels, signals } = run(t0 + 1);
+    expect(out).toEqual(["CTL-STRUCT"]);
+    expect(labels).toEqual(["CTL-STRUCT"]);
+    expect(comments.length).toBe(1);
+    expect(signals.length).toBe(1);
+    expect(events.some((e) => e.type === "recovery.escalated")).toBe(true);
+    expect(events.some((e) => e.type === "recovery.transient-defer")).toBe(false);
+    expect(readLedger("CTL-STRUCT").escalated).toBe(true);
+  });
+
+  test("CONTROL — a ticket with NO signal at all still escalates (fail-closed)", () => {
+    const t0 = 1_000_000_000_000;
+    seedExhausted("CTL-NOSIG", t0);
+    const { out, labels } = run(t0 + 1);
+    expect(out).toEqual(["CTL-NOSIG"]);
+    expect(labels).toEqual(["CTL-NOSIG"]);
+    expect(readLedger("CTL-NOSIG").escalated).toBe(true);
+  });
+
+  test("CONTROL — a THROWING reason resolver escalates (fail-closed), never suppresses", () => {
+    const t0 = 1_000_000_000_000;
+    seedExhausted("CTL-THROWS", t0);
+    overloadSignal("CTL-THROWS");
+    const { out, labels } = run(t0 + 1, {
+      resolveDeathReason: () => {
+        throw new Error("signal read exploded");
+      },
+    });
+    expect(out).toEqual(["CTL-THROWS"]);
+    expect(labels).toEqual(["CTL-THROWS"]);
+  });
+
+  test("a mixed tick exempts ONLY the transient tickets", () => {
+    const t0 = 1_000_000_000_000;
+    seedExhausted("CTL-T", t0);
+    overloadSignal("CTL-T");
+    seedExhausted("CTL-S", t0);
+    seedSignal("CTL-S", { status: "failed", failureReason: "empty_branch" });
+    const { out, labels, events } = run(t0 + 1);
+    expect(out).toEqual(["CTL-S"]);
+    expect(labels).toEqual(["CTL-S"]);
+    expect(events.filter((e) => e.type === "recovery.transient-defer").map((e) => e.ticket)).toEqual(["CTL-T"]);
+    expect(readLedger("CTL-T").escalated).toBe(false);
+    expect(readLedger("CTL-S").escalated).toBe(true);
+  });
+
+  test("the exemption is IDEMPOTENT — a deferred entry is no longer sweepable", () => {
+    // `sweepable` is decision ∈ {dispatched, fix}. Writing `defer` drops the entry
+    // out of the sweep entirely until a new dispatch re-marks it, which is what
+    // bounds this to ONE transient-defer per dispatch cycle instead of one per
+    // tick (the CTL-1440 RC3 defer-storm shape).
+    const t0 = 1_000_000_000_000;
+    seedExhausted("CTL-ONCE", t0);
+    overloadSignal("CTL-ONCE");
+    const first = run(t0 + 1);
+    expect(first.events.filter((e) => e.type === "recovery.transient-defer").length).toBe(1);
+    const second = run(t0 + 2);
+    expect(second.events).toEqual([]);
+    expect(second.out).toEqual([]);
+  });
+
+  test("BACKOFF — repeated transient defers accrue, and a blocked window STOPS refunding (never escalates)", () => {
+    const t0 = 1_000_000_000_000;
+    // Drive the ticket through repeated dispatch→transient-death cycles. Each cycle
+    // re-marks the ledger "dispatched" (making it sweepable again) and the sweep
+    // records one transient failure into the backoff window.
+    overloadSignal("CTL-SUSTAINED");
+    let seen = 0;
+    for (let cycle = 0; cycle < RECOVERY_FIX_BACKOFF_THRESHOLD + 1; cycle++) {
+      seedExhausted("CTL-SUSTAINED", t0 + cycle);
+      const { out, labels, events } = run(t0 + cycle + 1);
+      // The invariant that must hold on EVERY cycle, blocked or not:
+      expect(out).toEqual([]);
+      expect(labels).toEqual([]);
+      seen += events.filter((e) => e.type === "recovery.transient-defer").length;
+      expect(readLedger("CTL-SUSTAINED").escalated).toBe(false);
+    }
+    expect(seen).toBe(RECOVERY_FIX_BACKOFF_THRESHOLD + 1);
+    // The window is now armed and blocking.
+    const state = inFixBackoff(orchDir, "CTL-SUSTAINED", "transient-infra", t0 + 99);
+    expect(state.count).toBe(RECOVERY_FIX_BACKOFF_THRESHOLD + 1);
+    expect(state.blocked).toBe(true);
+    expect(state.lastReason).toBe("sdk-overloaded-exhausted");
+
+    // While blocked, the attempt is NO LONGER refunded — a sustained outage stops
+    // buying fresh retries — but the ticket still never escalates.
+    seedExhausted("CTL-SUSTAINED", t0 + 100);
+    const { out, labels, events } = run(t0 + 101);
+    expect(out).toEqual([]);
+    expect(labels).toEqual([]);
+    const ev = events.find((e) => e.type === "recovery.transient-defer");
+    expect(ev.details.backoffBlocked).toBe(true);
+    expect(ev.details.refunded).toBe(false);
+    expect(ev.details.attemptsAfter).toBe(RECOVERY_MAX_ATTEMPTS);
+    expect(readLedger("CTL-SUSTAINED").attempts).toBe(RECOVERY_MAX_ATTEMPTS);
+  });
+
+  test("the backoff write failing does not break the exemption (fail-open)", () => {
+    const t0 = 1_000_000_000_000;
+    seedExhausted("CTL-BOFAIL", t0);
+    overloadSignal("CTL-BOFAIL");
+    const { out, labels, events } = run(t0 + 1, {
+      recordTransientFailure: () => {
+        throw new Error("disk full");
+      },
+    });
+    expect(out).toEqual([]);
+    expect(labels).toEqual([]);
+    expect(events.some((e) => e.type === "recovery.transient-defer")).toBe(true);
+    expect(readLedger("CTL-BOFAIL").decision).toBe("defer");
+  });
+
+  test("an env-declared extra reason is honored through the production seam", () => {
+    const t0 = 1_000_000_000_000;
+    seedExhausted("CTL-EXTRA", t0);
+    seedSignal("CTL-EXTRA", { status: "stalled", attentionReason: "novel-provider-park" });
+    // Default set → NOT transient → escalates.
+    expect(run(t0 + 1).out).toEqual(["CTL-EXTRA"]);
+
+    // Same reason, with the operator's extension in play → exempted.
+    const prior = process.env.CATALYST_TRANSIENT_INFRA_EXTRA_REASONS;
+    process.env.CATALYST_TRANSIENT_INFRA_EXTRA_REASONS = "novel-provider-park";
+    try {
+      seedExhausted("CTL-EXTRA2", t0);
+      seedSignal("CTL-EXTRA2", { status: "stalled", attentionReason: "novel-provider-park" });
+      const { out, labels } = run(t0 + 2);
+      expect(out).toEqual([]);
+      expect(labels).toEqual([]);
+      expect(readLedger("CTL-EXTRA2").decision).toBe("defer");
+    } finally {
+      if (prior === undefined) delete process.env.CATALYST_TRANSIENT_INFRA_EXTRA_REASONS;
+      else process.env.CATALYST_TRANSIENT_INFRA_EXTRA_REASONS = prior;
+    }
+  });
+
+  test("the refund FLOORS at zero — a transient exemption never writes a negative attempt count", () => {
+    const t0 = 1_000_000_000_000;
+    // maxAttempts:1 makes a 1-attempt ledger sweepable, so the refund arithmetic
+    // (max(1-1,0)) is exercised at its boundary rather than asserted in the abstract.
+    seedExhausted("CTL-FLOOR", t0, 1);
+    overloadSignal("CTL-FLOOR");
+    const { out } = run(t0 + 1, { maxAttempts: 1 });
+    expect(out).toEqual([]);
+    expect(readLedger("CTL-FLOOR").attempts).toBe(0);
+  });
+
+  test("an exempted ticket is kept OUT of correlation grouping entirely", () => {
+    // A transient ticket promoted to a group ANCHOR would raise one full operator
+    // decision covering the whole cohort — the same escalation, through the side
+    // door. The exemption must therefore run BEFORE candidates are grouped.
+    const t0 = 1_000_000_000_000;
+    for (const t of ["CTL-C1", "CTL-C2", "CTL-C3"]) {
+      seedExhausted(t, t0);
+      overloadSignal(t);
+    }
+    const { out, events, labels } = run(t0 + 1, { correlationMode: "enforce" });
+    expect(out).toEqual([]);
+    expect(labels).toEqual([]);
+    expect(events.some((e) => e.type === "recovery.escalation.correlated")).toBe(false);
+    expect(events.some((e) => e.type === "recovery.escalation.would-correlate")).toBe(false);
+  });
+
+  test("the exemption never FABRICATES a fix_class (the board-health defer queue stays clean)", () => {
+    // decision:"defer" + fix_class:"board-health" is exactly what
+    // readDeferredBoardHealthIntents selects on. Defaulting an unclassified ticket
+    // to "board-health" would inject it into that consumer's queue as a side effect
+    // of an unrelated exemption.
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent(
+      "CTL-FC",
+      { decision: "fix", fix_class: "bounded-llm", attempts: RECOVERY_MAX_ATTEMPTS },
+      { orchDir, now: () => t0 },
+    );
+    overloadSignal("CTL-FC");
+    run(t0 + 1);
+    const led = readLedger("CTL-FC");
+    expect(led.decision).toBe("defer");
+    expect(led.fix_class).toBe("bounded-llm"); // preserved, not rewritten
+    expect(led.deferredSince).toBeUndefined(); // NOT a board-health defer
+    expect(readDeferredBoardHealthIntents(orchDir, { now: () => t0 + 10_000_000 })).toEqual([]);
+  });
+
+  test("the backoff key is the exemption's OWN class, never the ticket's fix_class", () => {
+    // A provider outage must not consume the budget a genuine bounded-llm fix
+    // failure is metered against, and vice versa.
+    const t0 = 1_000_000_000_000;
+    const recorded = [];
+    seedExhausted("CTL-KEY", t0);
+    overloadSignal("CTL-KEY");
+    run(t0 + 1, { recordTransientDefer: (...args) => recorded.push(args) });
+    expect(recorded.length).toBe(1);
+    const [dir, ticket, fixClass, reason] = recorded[0];
+    expect(dir).toBe(orchDir);
+    expect(ticket).toBe("CTL-KEY");
+    expect(fixClass).toBe("transient-infra");
+    expect(reason).toBe("sdk-overloaded-exhausted");
+  });
+
+  test("a THROWING backoff READ fails toward the exemption, never toward escalation", () => {
+    // The window throttles REDISPATCH; it does not decide whether a human is
+    // paged. An unreadable window must still exempt.
+    const t0 = 1_000_000_000_000;
+    seedExhausted("CTL-BRFAIL", t0);
+    overloadSignal("CTL-BRFAIL");
+    const { out, labels } = run(t0 + 1, {
+      inTransientBackoff: () => {
+        throw new Error("unreadable window");
+      },
+    });
+    expect(out).toEqual([]);
+    expect(labels).toEqual([]);
+    expect(readLedger("CTL-BRFAIL").decision).toBe("defer");
+  });
+
+  test("a failing ledger write leaves the entry sweepable and does NOT fall through to escalation", () => {
+    // The ledger write IS the exemption. If it throws, retry next tick — never
+    // page a human for an infrastructure outage because a disk hiccuped.
+    const t0 = 1_000_000_000_000;
+    seedExhausted("CTL-LWFAIL", t0);
+    overloadSignal("CTL-LWFAIL");
+    const { out, labels, comments, signals } = run(t0 + 1, {
+      recordIntent: () => {
+        throw new Error("disk full");
+      },
+    });
+    expect(out).toEqual([]);
+    expect(labels).toEqual([]);
+    expect(comments).toEqual([]);
+    expect(signals).toEqual([]);
+    expect(readLedger("CTL-LWFAIL").decision).toBe("dispatched"); // untouched → retried
+  });
+
+  test("a terminal ticket is never swept — the isActive gate still runs before the exemption", () => {
+    const t0 = 1_000_000_000_000;
+    seedExhausted("CTL-DONE2", t0);
+    overloadSignal("CTL-DONE2");
+    const { events } = run(t0 + 1, { isActive: () => false });
+    expect(readLedger("CTL-DONE2").decision).toBe("dispatched"); // untouched
+    expect(events).toEqual([]);
   });
 });
