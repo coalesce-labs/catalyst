@@ -20,6 +20,8 @@ import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileS
 import { dirname, join } from "node:path";
 import { log } from "./config.mjs";
 import { coerceExplanation } from "./escalation-explanation.mjs";
+import { postLinearCommentAsSpawnResult } from "./linear-comment-write.mjs";
+import { formatAskComment, ASK_OPERATOR_DEFAULT } from "./needs-human-ask.mjs";
 import { DISPOSITIONS } from "./worker-disposition.mjs";
 import { YIELDED_STATUS } from "../lib/phase-yield.mjs"; // CTL-1854
 import { TERMINAL_LABEL_REASONS } from "./label-failure-class.mjs"; // COORD-236: one owner for the terminal set
@@ -227,6 +229,19 @@ export function clearStalledLabel(
               }
             }
           }
+        }
+        // CTL-1871: on a confirmed needs-human removal, also clear the
+        // stale-needs-human sibling label markers + the ASK comment marker.
+        if (label === "needs-human") {
+          try {
+            const stalBase = labelMarkerBase(orchDir, ticket, "stale-needs-human");
+            for (const suffix of [".applied", ".skipped"]) {
+              const p = `${stalBase}${suffix}`;
+              if (existsSync(p)) unlinkSync(p);
+            }
+            const askM = askMarkerPath(orchDir, ticket);
+            if (existsSync(askM)) unlinkSync(askM);
+          } catch { /* best-effort */ }
         }
         // CTL-1045 Bug 4: run the caller's confirmed-removal hook ONLY when
         // removal is confirmed — e.g. the J3 once-marker write. A failed removal
@@ -520,6 +535,87 @@ export function beliefOwnsNeedsHuman(env = process.env) {
   return (env ?? process.env).CATALYST_INTENTS_ENFORCE === "1";
 }
 
+// ─── CTL-1871 COORD-29: ASK comment atomicity ────────────────────────────────
+//
+// Every needs-human label application must carry a stated ask so the operator
+// opening the ticket knows what to decide. This block implements the contract:
+//
+//  off:     label applied regardless; no comment attempted.
+//  shadow:  comment attempted; label applied even if comment fails.
+//  enforce: comment MUST succeed; label is withheld if comment fails.
+//
+// Default mode: shadow. Enforce is an operator rollout step.
+//
+// The ASK marker (.needs-human-ask.applied) de-duplicates so a comment is never
+// posted twice for the same ticket, even across daemon restarts or seam conversions.
+
+/** Event names emitted by the ASK gate — import this instead of re-typing. */
+export const NEEDS_HUMAN_ASK_EVENTS = Object.freeze(["escalation.ask-post-failed"]);
+
+/** Both labels in the needs-human family (needs-human + stale sweep label). */
+export const NEEDS_HUMAN_LABEL_FAMILY = Object.freeze(["needs-human", "stale-needs-human"]);
+
+function askMarkerPath(orchDir, ticket) {
+  if (!orchDir || !ticket) return null;
+  return join(orchDir, "workers", ticket, ".needs-human-ask.applied");
+}
+
+function readNeedsHumanAskMode(env) {
+  const m = (env ?? process.env).CATALYST_NEEDS_HUMAN_ASK;
+  if (m === "off" || m === "shadow" || m === "enforce") return m;
+  return "shadow";
+}
+
+// ensureAskCommentPosted — attempt to post the ASK comment idempotently.
+// Returns true when the comment is already posted OR was just posted successfully.
+// Returns false when the post failed (the caller decides whether to block the label).
+function ensureAskCommentPosted(
+  ticket,
+  coercedExplanation,
+  { orchDir, log: logArg = null, postAskComment = null } = {}
+) {
+  const markerPath = askMarkerPath(orchDir, ticket);
+  if (markerPath && existsSync(markerPath)) return true; // already posted this daemon lifetime
+
+  const warnFn =
+    typeof logArg?.warn === "function" ? logArg.warn.bind(logArg) : log.warn.bind(log);
+  const body = formatAskComment(coercedExplanation, { operator: ASK_OPERATOR_DEFAULT });
+  const poster = typeof postAskComment === "function"
+    ? postAskComment
+    : postLinearCommentAsSpawnResult;
+
+  let posted = false;
+  try {
+    const res = poster(ticket, body);
+    posted = (res?.status === 0);
+    if (!posted) {
+      const detail = String(res?.stderr || "").trim().split("\n").pop() ?? "";
+      warnFn(
+        { ticket, event: "escalation.ask-post-failed", status: res?.status, detail: detail.slice(0, 200) },
+        "label-guard: ASK comment post failed (CTL-1871)"
+      );
+    }
+  } catch (err) {
+    warnFn(
+      { ticket, event: "escalation.ask-post-failed", err: err?.message },
+      "label-guard: ASK comment post threw (CTL-1871)"
+    );
+  }
+
+  if (posted && markerPath) {
+    try {
+      mkdirSync(dirname(markerPath), { recursive: true });
+      writeFileSync(markerPath, "");
+    } catch (mkErr) {
+      warnFn(
+        { ticket, err: mkErr?.message },
+        "label-guard: ASK marker write failed after successful post (CTL-1871)"
+      );
+    }
+  }
+  return posted;
+}
+
 // labelNeedsHumanUnlessBeliefOwner — the shared gate used by every non-belief
 // needs-human producer. Either defers to executeEscalations (enforcement ON) or
 // calls labelOnce exactly as before (enforcement OFF / default).
@@ -578,6 +674,10 @@ export function labelNeedsHumanUnlessBeliefOwner(
     // comment withheld, deferral counter burned — even though the label is right
     // there on the ticket. `.skipped` still counts as failure either way.
     treatAlreadyAppliedAsLanded = false,
+    // CTL-1871 COORD-29: injectable seam for posting the ASK comment.
+    // Default: postLinearCommentAsSpawnResult (the canonical CTL-1889 gate).
+    // Injected in tests so they never touch the network.
+    postAskComment = null,
   } = {}
 ) {
   if (beliefOwnsNeedsHuman(env)) {
@@ -589,6 +689,40 @@ export function labelNeedsHumanUnlessBeliefOwner(
     }
     return false;
   }
+
+  // CTL-1871 COORD-29: coerce explanation BEFORE the label so the ASK comment
+  // body is ready, and so an explanation is always present on the write path.
+  const warnFn =
+    typeof logArg?.warn === "function" ? logArg.warn.bind(logArg) : log.warn.bind(log);
+  // The escalation.explanation-absent warning fires in the `applied` branch below
+  // (the only path that mutates Linear); there is no early emission here.
+  const coerced = coerceExplanation(explanation ?? {}, { ticket, canExecute: false });
+
+  // CTL-1871 COORD-29: ASK comment — attempt before the label in `enforce` mode
+  // (soft atomicity: comment first, withhold label on failure).
+  const askMode = readNeedsHumanAskMode(env);
+  const _postAskComment = postAskComment ?? ((t, body) =>
+    postLinearCommentAsSpawnResult(t, body, { caller: "label-guard" })
+  );
+
+  // CTL-1871 COORD-29 enforce: comment BEFORE label, withhold label if comment fails.
+  // Shadow mode posts AFTER the label (see post-label block below) so a failed label
+  // write never leaks a standalone comment — preserving CTL-1568's label⇄comment pairing.
+  if (askMode === "enforce") {
+    const askPosted = ensureAskCommentPosted(ticket, coerced, {
+      env,
+      orchDir,
+      log: logArg,
+      postAskComment: _postAskComment,
+    });
+    if (!askPosted) {
+      if (typeof onOutcome === "function") {
+        onOutcome({ deferred: false, applied: false, ran: false, reason: "ask-post-failed" });
+      }
+      return false;
+    }
+  }
+
   // Enforcement OFF (default): call labelOnce exactly as before. CTL-764 finding C:
   // return whether the label was CONFIRMED applied, not merely attempted — labelOnce's
   // boolean is true for any first write attempt (including outcomes where the label never
@@ -608,22 +742,17 @@ export function labelNeedsHumanUnlessBeliefOwner(
       reason = r.reason ?? null;
     },
   });
-  // CTL-1609 Gap 2: on a confirmed apply, coerce the explanation and persist it to
-  // the board-readable phase-recovery-pass.json so the operator inbox renders a real
+  // CTL-1609 Gap 2: on a confirmed apply, persist the explanation to the
+  // board-readable phase-recovery-pass.json so the operator inbox renders a real
   // "What's needed now" card. Gated on `applied` (CTL-764 finding C) so a failed or
   // marker-guarded no-op never manufactures a spurious explanation signal.
   if (applied) {
-    // Use the injected log's warn if available; fall back to the module-level log
-    // so existing callers that only inject { info } don't break (warn is new).
-    const warnFn =
-      typeof logArg?.warn === "function" ? logArg.warn.bind(logArg) : log.warn.bind(log);
     if (explanation === undefined || explanation === null) {
       warnFn(
         { ticket, site, event: "escalation.explanation-absent" },
         "label-guard: needs-human applied without an explanation — coercing (CTL-1609)"
       );
     }
-    const coerced = coerceExplanation(explanation ?? {}, { ticket, canExecute: false });
     writeExplanationSignal(orchDir, ticket, coerced, { log: logArg });
     // CTL-2056: emit one ticket.escalated event so the unchanged
     // catalyst_recovery_escalation_burst PromQL selector counts real escalations.
@@ -632,6 +761,17 @@ export function labelNeedsHumanUnlessBeliefOwner(
       emitEscalation(ticket, { site, reason: explanation?.problem ?? null });
     } catch {
       /* fail-open: observability must never block the label path */
+    }
+    // CTL-1871 COORD-29 shadow: post ASK comment AFTER label succeeds.
+    // Conditional on `applied` so a failed label write withholds the comment
+    // (CTL-1568 guarantee: comment never arrives without the label).
+    if (askMode === "shadow") {
+      ensureAskCommentPosted(ticket, coerced, {
+        env,
+        orchDir,
+        log: logArg,
+        postAskComment: _postAskComment,
+      });
     }
   }
   if (typeof onOutcome === "function") {
@@ -642,6 +782,28 @@ export function labelNeedsHumanUnlessBeliefOwner(
   // needs to know. Opt-in only; the default keeps CTL-764's strict semantics.
   if (treatAlreadyAppliedAsLanded && !applied && !ran && alreadyApplied) return true;
   return applied;
+}
+
+// ─── CTL-1871: clearNeedsHumanMarkers ────────────────────────────────────────
+//
+// Removes ALL local markers associated with a `needs-human` application:
+//   - .linear-label-needs-human.{applied,skipped}   (labelOnce once-markers)
+//   - .linear-label-stale-needs-human.{applied,skipped} (Phase 4 sweep label)
+//   - .needs-human-ask.applied                        (CTL-1871 ASK comment marker)
+//
+// Called from clearStalledLabel's confirmed-removal branch (below) so the full
+// family is cleared in one place. Best-effort; never throws.
+export function clearNeedsHumanMarkers(orchDir, ticket) {
+  const paths = [
+    ...["applied", "skipped"].map((s) => `${labelMarkerBase(orchDir, ticket, "needs-human")}.${s}`),
+    ...["applied", "skipped"].map((s) => `${labelMarkerBase(orchDir, ticket, "stale-needs-human")}.${s}`),
+    askMarkerPath(orchDir, ticket),
+  ];
+  for (const p of paths) {
+    try {
+      if (existsSync(p)) unlinkSync(p);
+    } catch { /* best-effort */ }
+  }
 }
 
 // ─── CTL-1605: the worker-status label group (Axis 2) — single source of truth. ───

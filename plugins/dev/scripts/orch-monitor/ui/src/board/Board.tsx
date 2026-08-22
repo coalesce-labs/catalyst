@@ -170,6 +170,8 @@ const HELD_LABEL_WAITING = "queued";
 export type { ColorBy } from "./board-accent";
 import { PHASE_C, accentFor, type ColorBy } from "./board-accent";
 export { accentFor };
+// CTL-1871 COORD-41: plain-language glossary — used for AttentionBadge and status text.
+import { glossFor } from "~catalyst-lib/state-vocabulary";
 // CTL-909 / SURF1: a stable per-node accent so the "group by Node" columns +
 // the host chip on each worker card carry a consistent color. Hashed from the
 // host name (the unattributed bucket reads dim) — deterministic, no palette
@@ -496,11 +498,13 @@ export function AttentionBadge({
   attention?: "waiting-on-you" | "needs-human" | null;
 }) {
   if (attention !== "waiting-on-you" && attention !== "needs-human") return null;
+  // CTL-1871 COORD-41: derive plain-language label + tooltip from the vocabulary glossary.
+  const nhGloss = glossFor("needs-human");
   const label =
-    attention === "needs-human" ? "⚑ escalated — needs human" : "⏸ waiting on your answer";
+    attention === "needs-human" ? `⚑ ${nhGloss.plainLabel}` : "⏸ waiting on your answer";
   const tip =
     attention === "needs-human"
-      ? "Escalated to you — a human must act (watchdog / needs-human)"
+      ? `${nhGloss.whatsNext} ${nhGloss.ifNobody}`
       : "Paused waiting for your answer (a permission grant or prompt)";
   return (
     <Tooltip>

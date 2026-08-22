@@ -17,6 +17,10 @@
 
 const VALID_TYPES = new Set(["manual", "authorization", "decision"]);
 
+/** Default `default_if_silent` value — used when the caller supplies none. */
+export const DEFAULT_IF_SILENT =
+  "No automated action is taken; this escalation stays open until you respond.";
+
 // Common required string fields (every type)
 const REQUIRED_COMMON = ["problem", "call_to_action"];
 
@@ -39,11 +43,13 @@ const DEFER_RE =
 const RISK_VAGUE_RE =
   /^(involves?\s+trade-?offs?|no\s+single\s+(automated\s+)?fix\s+path.*|requires?\s+human\s+judg?ment.*|no\s+actionable\s+diagnosis\s+available)$/i;
 
+/** normOneLine — collapse whitespace to single spaces; preserve case. */
+export function normOneLine(s) {
+  return String(s ?? "").trim().replace(/\s+/g, " ");
+}
+
 function norm(s) {
-  return String(s ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, " ");
+  return normOneLine(s).toLowerCase();
 }
 
 // Derives could_higher_tier_resolve from tier history or model ceiling.
@@ -85,6 +91,14 @@ export function validateExplanation(e, ctx = {}) {
     if (q === norm(e.problem)) {
       errors.push("call_to_action: merely restates problem");
     }
+  }
+
+  // Optional default_if_silent — if present must be a non-empty string
+  if (
+    "default_if_silent" in e &&
+    (typeof e.default_if_silent !== "string" || e.default_if_silent.trim() === "")
+  ) {
+    errors.push("default_if_silent: if present, must be a non-empty string");
   }
 
   // Per-type required fields — only run when type is valid (D3: accumulate all errors)
@@ -171,7 +185,12 @@ export function buildExplanation(fields) {
 export function coerceExplanation(fields, ctx = {}) {
   const e = normalizeShape(fields);
   const { valid } = validateExplanation(e, ctx);
-  if (valid) return Object.freeze(e);
+  if (valid) {
+    if (!e.default_if_silent || e.default_if_silent.trim() === "") {
+      e.default_if_silent = DEFAULT_IF_SILENT;
+    }
+    return Object.freeze(e);
+  }
 
   // Degrade: never manual. Authorization iff canExecute confirmed, else decision.
   const type = ctx.canExecute === true ? "authorization" : "decision";
@@ -255,6 +274,11 @@ export function coerceExplanation(fields, ctx = {}) {
   }
   if (Array.isArray(fields.attempts)) degraded.attempts = fields.attempts;
 
+  degraded.default_if_silent =
+    typeof fields.default_if_silent === "string" && fields.default_if_silent.trim()
+      ? fields.default_if_silent
+      : DEFAULT_IF_SILENT;
+
   degraded.degraded = true;
   return Object.freeze(degraded);
 }
@@ -329,6 +353,9 @@ function normalizeShape(f = {}) {
     base.observed = f.observed;
   }
   if (Array.isArray(f.attempts)) base.attempts = f.attempts;
+  if (typeof f.default_if_silent === "string" && f.default_if_silent.trim()) {
+    base.default_if_silent = f.default_if_silent;
+  }
 
   // Per-type fields
   if (type === "manual") {

@@ -26,6 +26,7 @@ describe("CTL-1110: deriveExplanation", () => {
       why_you: "Fixes need judgment.",
       why_not_auto: "3 attempts failed.",
       what_to_do: "Review why fixes failed.",
+      default_if_silent: null,
     });
   });
 
@@ -42,6 +43,7 @@ describe("CTL-1110: deriveExplanation", () => {
     expect(deriveExplanation(sigs)).toEqual({
       call_to_action: "Decide.", outcome: null, problem: null,
       why_you: null, why_not_auto: null, what_to_do: "Pick an option.",
+      default_if_silent: null,
     });
   });
 
@@ -60,6 +62,7 @@ describe("CTL-1110: deriveExplanation", () => {
     expect(deriveExplanation(sigs)).toEqual({
       call_to_action: null, outcome: "ok", problem: null,
       why_you: null, why_not_auto: null, what_to_do: null,
+      default_if_silent: null,
     });
   });
 });

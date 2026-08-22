@@ -58,6 +58,7 @@ import { recordFullRead, scanFileLines } from "./event-log-reader.ts"; // CTL-15
 import { isLinearTerminal } from "../../execution-core/terminal-state.mjs";
 import { readDurableEscalations } from "../../execution-core/durable-escalation.mjs"; // CTL-1643: GC-surviving escalation store
 import { readClusterProjects } from "./cluster-roster.ts";
+import { glossFor } from "../../lib/state-vocabulary.mjs"; // CTL-1871 COORD-41: plain-language glossary
 
 const execFileP = promisify(execFile);
 
@@ -1106,6 +1107,7 @@ const EXPLANATION_RENDER_FIELDS = [
   "why_you",
   "why_not_auto",
   "what_to_do",
+  "default_if_silent", // CTL-1871 COORD-41: "what happens if nobody acts"
 ];
 
 /** CTL-1110: extract the six extended explanation fields from the most-recent
@@ -1484,11 +1486,11 @@ export function synthesizeParkedNeedsHumanTickets(
     if (seen.has(p.ticket)) continue; // already carded (worker-dir / queued / orphan) — never double-count
     seen.add(p.ticket);
     const labels = Array.isArray(p.labels) ? p.labels : [];
-    // needs-input reads as "waiting on your input"; needs-human as a generic escalation.
+    // CTL-1871 COORD-41: use the vocabulary glossary for human-facing parked reasons.
     const reason =
       labels.includes(ATTENTION_LABEL_NEEDS_INPUT) && !labels.includes(ATTENTION_LABEL_NEEDS_HUMAN)
-        ? "Parked — waiting on your input (needs-input)."
-        : "Parked — escalated for a human (needs-human).";
+        ? `Parked — ${glossFor("needs-input").whatsNext}`
+        : `Parked — ${glossFor("needs-human").whatsNext} ${glossFor("needs-human").ifNobody}`;
     const replicaTitle =
       typeof replicaTitles?.[p.ticket] === "string" && replicaTitles[p.ticket].length > 0
         ? replicaTitles[p.ticket]
