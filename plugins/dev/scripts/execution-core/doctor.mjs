@@ -6534,6 +6534,86 @@ export function checkSkillsDirPlugins(deps = {}) {
   ];
 }
 
+// checkGithubFeedReaderConsistency — CTL-2011 (AC1, AC2). Detects when
+// execution-core.env carries a CATALYST_GITHUB_FEED pin that the broker/orch-monitor
+// don't see, splitting the four readers into two authority regimes. Worker-class only
+// (matches checkWebhookIngestion). Injectable for unit tests.
+//
+// Execution-core view: overlay the env file's exported CATALYST_GITHUB_FEED pin onto
+// the ambient env — identical to what the daemon resolver sees after the launcher
+// sources the file. Broker/monitor view: strip the pin entirely (only Layer-2 applies).
+// Compare the two resolved modes; FAIL on disagreement. PASS on agreement. WARN when
+// the env file is unreadable for a non-ENOENT reason (cannot compute exec-core view).
+export function checkGithubFeedReaderConsistency(deps = {}) {
+  const {
+    resolveGithubFeedModeFn = resolveGithubFeedMode,
+    execCoreEnvPath = defaultExecCoreEnvPath(),
+    readEnvFileFn = (p) => {
+      try {
+        return readFileSync(p, "utf8");
+      } catch (err) {
+        if (err?.code === "ENOENT") return ""; // absent → no pin → valid agree case
+        throw err; // non-ENOENT → INCONCLUSIVE
+      }
+    },
+    env = process.env,
+  } = deps;
+
+  let envFileText;
+  try {
+    envFileText = readEnvFileFn(execCoreEnvPath);
+  } catch (err) {
+    if (err?.code === "ENOENT") {
+      // Absent file → no pin; both views fall through to Layer-2/default. Valid agree case.
+      envFileText = "";
+    } else {
+      return [
+        mkCheck(
+          "github-feed-reader-consistency",
+          STATUS.WARN,
+          `could not read execution-core.env (${err?.message ?? String(err)}) — cannot compare reader resolutions`,
+        ),
+      ];
+    }
+  }
+
+  // Build exec-core effective env: lift the CATALYST_GITHUB_FEED pin from the file
+  // (if any exported assignment is present) and overlay it on the ambient env.
+  const pin = parseEnvFileFlag(
+    envFileText,
+    /^\s*(?:export\s+)?CATALYST_GITHUB_FEED=["']?([^"'\s]+)/m,
+  );
+  const execCoreEnv = pin !== null ? { ...env, CATALYST_GITHUB_FEED: pin } : { ...env };
+  const execCoreResult = resolveGithubFeedModeFn({ env: execCoreEnv });
+
+  // Broker/monitor view: strip the env pin so only Layer-2 (or default) applies.
+  // The broker inherits the ambient env but never sources execution-core.env.
+  const { CATALYST_GITHUB_FEED: _gf, CATALYST_GITHUB_FEED_INTERVAL_SEC: _gfi, ...strippedEnv } =
+    { ...env };
+  const brokerResult = resolveGithubFeedModeFn({ env: strippedEnv });
+
+  if (execCoreResult.mode !== brokerResult.mode) {
+    return [
+      mkCheck(
+        "github-feed-reader-consistency",
+        STATUS.FAIL,
+        `readers disagree: execution-core resolves "${execCoreResult.mode}" ` +
+          `(source=${execCoreResult.source}, from ${execCoreEnvPath}) while ` +
+          `broker/orch-monitor resolve "${brokerResult.mode}" (source=${brokerResult.source}) — ` +
+          `smee is suppressed while the producer emits markers; total loss for suppressible github.* names`,
+      ),
+    ];
+  }
+  return [
+    mkCheck(
+      "github-feed-reader-consistency",
+      STATUS.PASS,
+      `readers agree: both resolve "${execCoreResult.mode}" ` +
+        `(exec-core source=${execCoreResult.source}, broker source=${brokerResult.source})`,
+    ),
+  ];
+}
+
 // ─── Suite selection ─────────────────────────────────────────────────────────
 
 // checksForClass — build the check-thunk suite for a resolved node class. This is
@@ -6768,6 +6848,7 @@ export function checksForClass(nc, opts = {}) {
     staleLockThunk, // CTL-1415: a stale plugin-source index.lock silently freezes the broker's pulls
     skillsDirPluginsThunk, // skills-dir migration: catalyst loads in-place via ~/.claude/skills; no marketplace/wrapper residue (FAIL on a worker)
     () => checkWebhookIngestion(), // CTL-1284: multiHost member ingests webhooks; single-host does not
+    () => checkGithubFeedReaderConsistency(), // CTL-2011: execution-core.env pin vs broker/monitor view — FAILs on disagreement
     () => checkThoughts(), // CTL-1293: member thoughts repo provisioned + non-foreign primary
     () => checkClaudeSettings(), // CTL-1231: member settings.json pins host identity + OTLP endpoint
     () => checkReaper(), // CTL-1306: orphan-sweep reaper installed + baked path still exists (not dead-127)
