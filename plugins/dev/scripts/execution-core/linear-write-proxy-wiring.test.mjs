@@ -443,6 +443,40 @@ describe("removeLabel — the proxied removal runs BEFORE the credentialed read"
     expect(proxy.sends[0].payload).toEqual({ issueId: ISSUE_ID, labelIds: [LABEL_ID], mode: "remove" });
   });
 
+  // CTL-2098: proves routeThroughProxy + removeLabel actually THREAD `converged`
+  // rather than only a stub asserting it — the review's "root-cause premise
+  // unverified" gap. `fakeProxy`'s send() result is the shape the REAL
+  // linear-write-proxy.mjs send() now returns for an already-absent label
+  // (proven separately in linear-write-proxy.test.mjs); this test proves the
+  // WIRING between that return value and removeLabel's output carries it
+  // through, unchanged in `wrote`, additive in `converged`.
+  test("⭐ enforce: an already-absent removal carries converged:true through, `wrote` unchanged", async () => {
+    const proxy = fakeProxy("enforce", { handled: true, applied: true, reason: null, status: 200, converged: true });
+    setLinearWriteProxyResolver(fakeResolver());
+    const r = await removeLabel("CTL-9", "needs-human", {
+      exec: () => { throw new Error("must not exec — proxy handled it"); },
+      readLabels: () => { throw new Error("must not read — proxy short-circuits before it"); },
+      proxy,
+    });
+    expect(r).toEqual({ removed: true, wrote: true, converged: true });
+  });
+
+  test("NEGATIVE CONTROL: a real (non-converged) removal carries no converged key at all", async () => {
+    // Proves the assertion above is about the flag's presence, not merely that
+    // toEqual tolerates an extra key — a genuine removal must NOT report
+    // converged:true, or label-guard's gate would wrongly retain markers on
+    // every real clear.
+    const proxy = fakeProxy("enforce"); // default result: {handled:true, applied:true, reason:null, status:200} — no converged
+    setLinearWriteProxyResolver(fakeResolver());
+    const r = await removeLabel("CTL-10", "needs-human", {
+      exec: () => { throw new Error("must not exec — proxy handled it"); },
+      readLabels: () => { throw new Error("must not read — proxy short-circuits before it"); },
+      proxy,
+    });
+    expect(r).toEqual({ removed: true, wrote: true });
+    expect(r).not.toHaveProperty("converged");
+  });
+
   test("enforce: a proxy failure is a named non-removal, with no direct-write fall-back", async () => {
     const calls = [];
     const r = await removeLabel("CTL-7", "needs-human", {
