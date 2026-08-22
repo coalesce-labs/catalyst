@@ -232,6 +232,12 @@ if [[ -n "$EXISTING_PR_NUMBER" ]]; then
       --phase "$PHASE" --ticket "$TICKET" --status failed \
       --reason "push_safety_gate_blocked"
     exit 1
+  elif [[ "$PUSH_VERIFY_RC" -eq 5 ]]; then
+    echo "phase-pr: push denied — configured remote does not grant push permission" >&2
+    "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
+      --phase "$PHASE" --ticket "$TICKET" --status failed \
+      --reason "push_denied_no_permission"
+    exit 1
   elif [[ "$PUSH_VERIFY_RC" -ne 0 ]]; then
     echo "phase-pr: push-verify failed for #${EXISTING_PR_NUMBER} (stale ref)" >&2
     "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
@@ -329,6 +335,12 @@ itself.
      "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
        --phase "$PHASE" --ticket "$TICKET" --status failed \
        --reason "push_safety_gate_blocked"
+     exit 1
+   elif [[ "$PUSH_VERIFY_RC" -eq 5 ]]; then
+     echo "phase-pr: push denied — configured remote does not grant push permission" >&2
+     "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
+       --phase "$PHASE" --ticket "$TICKET" --status failed \
+       --reason "push_denied_no_permission"
      exit 1
    elif [[ "$PUSH_VERIFY_RC" -ne 0 ]]; then
      echo "phase-pr: post-create-pr push-verify failed (stale ref)" >&2
