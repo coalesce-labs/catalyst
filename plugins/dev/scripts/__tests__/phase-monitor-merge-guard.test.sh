@@ -47,7 +47,12 @@ echo ""
 echo "CTL-1119: merge path uses gh pr merge (REST), not git push"
 
 if [[ -f "$SKILL" ]]; then
-  if echo "$BODY" | grep -q 'gh pr merge .*--squash'; then
+  # Bash regex match, not `echo "$BODY" | grep -q`: BODY is the whole skill body (SKILL.md +
+  # every references/*.md concatenated) and can exceed a pipe buffer. grep -q exits the moment
+  # it finds a match, which can SIGPIPE the still-writing `echo` before it finishes — with
+  # `pipefail` (set above) that turns a genuine match into a reported failure ("Broken pipe"),
+  # nondeterministically depending on body size and scheduling. `=~` never opens a pipe.
+  if [[ "$BODY" =~ gh\ pr\ merge\ .*--squash ]]; then
     pass "merge path uses gh pr merge (REST) — 'workflow' OAuth scope not required for merge"
   else
     fail "merge path should use 'gh pr merge --squash' (REST API, no workflow scope needed)"
