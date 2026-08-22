@@ -197,15 +197,21 @@ export function clearStalledLabel(
         // Success: clear the failure counter.
         clearRemovalFailures(orchDir, ticket, label);
         // CTL-2098: only disarm the re-application markers when a real write
-        // happened (wrote:true), or for the loose/undefined confirmed-removal
-        // shapes existing callers/tests rely on. An explicit { wrote:false }
-        // means the label was ALREADY absent (removed out-of-band by a steward
-        // or operator) — deleting the markers here lets the terminal sweep
-        // re-apply needs-human on the next tick (the re-flap). Keep the markers
-        // so labelOnce stays a no-op. The daemon's human-reply path
-        // (clearNeedsHumanMarkers) remains the authoritative re-arm and is
-        // unchanged.
-        if (r === undefined || r?.wrote !== false) {
+        // happened, or for the loose/undefined confirmed-removal shapes existing
+        // callers/tests rely on. Two signals mean "this was a no-op, label was
+        // ALREADY absent" (removed out-of-band by a steward or operator) and both
+        // must retain the markers:
+        //   - { wrote:false } — the DIRECT (non-proxy) path's shape.
+        //   - { converged:true } — the enforce cloud-proxy path's ADDITIVE
+        //     equivalent (Ryan's decision 2026-08-21, HIGH finding fix). Enforce
+        //     hosts (production mini/mini-2) short-circuit before the direct-path
+        //     read that produces wrote:false, so wrote:false is UNREACHABLE there
+        //     — converged:true is the only signal that ever fires in production.
+        // Deleting the markers on either signal lets the terminal sweep re-apply
+        // needs-human on the next tick (the re-flap). Keep them so labelOnce stays
+        // a no-op. The daemon's human-reply path (clearNeedsHumanMarkers) remains
+        // the authoritative re-arm and is unchanged.
+        if (r === undefined || (r?.wrote !== false && r?.converged !== true)) {
           for (const suffix of [".applied", ".skipped"]) {
             const p = `${base}${suffix}`;
             if (existsSync(p)) {

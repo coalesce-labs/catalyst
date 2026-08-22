@@ -362,6 +362,42 @@ describe("enforce — the proxy IS the write", () => {
     expect(http.calls[0].token).toBe(TOKEN);
     expect(emit.names()).toEqual([`${EVENT_APPLIED}.CTL-2`]);
     expect(p.counts()).toMatchObject({ applied: 1, failed: 0, wouldWrite: 0 });
+    // NEGATIVE CONTROL for the two tests below: a real success with no `results`
+    // array at all carries no `converged` key — the flag's absence here is a
+    // decision (nothing to derive convergence from), not a broken wire.
+    expect(r).not.toHaveProperty("converged");
+  });
+
+  // CTL-2098: the real HTTP body → classifyProxyResponse → send() chain, proving
+  // `converged` reaches the caller from an ACTUAL response shape (CTC-674's
+  // already-absent outcome), not merely a hand-built stub. This is the transport
+  // layer the review's "root-cause premise unverified" finding named directly
+  // (linear-write-proxy.mjs — the file the finding cited by line number).
+  test("⭐ CTL-2098: an already-absent label removal reports converged:true, additively", () => {
+    const body = JSON.stringify({ outcome: "succeeded", results: [{ outcome: "already-absent" }] });
+    const http = recorder({ code: 0, stdout: `${body}
+200` });
+    const p = createLinearWriteProxy({ mode: "enforce", env: envWithKey(), httpFn: http, appendEvent: eventSink(), log: silentLog });
+    const r = p.send({ routeId: "label", ticket: "CTL-2098-live", payload: { labelIds: ["x"], mode: "remove" } });
+    expect(r).toEqual({ handled: true, applied: true, reason: null, status: 200, converged: true });
+  });
+
+  test("a MIXED results batch (one already-absent, one real removal) is NOT converged", () => {
+    // Boundary the production code actually draws: `.every()`, not `.some()`. A
+    // batch that did SOME real work must disarm markers normally — calling that
+    // convergence would silently mask a real change from the daemon's dedup
+    // consumer, which is the "changes wrote's semantics for every caller" risk
+    // Ryan's decision explicitly ruled out.
+    const body = JSON.stringify({
+      outcome: "succeeded",
+      results: [{ outcome: "already-absent" }, { outcome: "removed" }],
+    });
+    const http = recorder({ code: 0, stdout: `${body}
+200` });
+    const p = createLinearWriteProxy({ mode: "enforce", env: envWithKey(), httpFn: http, appendEvent: eventSink(), log: silentLog });
+    const r = p.send({ routeId: "label", ticket: "CTL-2098-mixed", payload: { labelIds: ["x", "y"], mode: "remove" } });
+    expect(r).toEqual({ handled: true, applied: true, reason: null, status: 200 });
+    expect(r).not.toHaveProperty("converged");
   });
 
   test("⭐ THE LOUD NO-CREDENTIAL REFUSAL: no per-host key → named reason, no HTTP, no silent degrade", () => {
