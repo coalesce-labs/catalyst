@@ -180,15 +180,15 @@ A `stale fence` burst means a zombie host is doing ghost work. Each suppressed w
 |---|---|
 | `terminalDoneOnce` | Writing the terminal **Done** state to Linear (final close-out). |
 | `reconcileTerminalBackstop` | Re-forcing **Done** when a shipped ticket drifted back to non-terminal (CTL-758 backstop). |
-| `labelOnce` (dependency-cycle) | Applying the **needs-human** label to a ticket stuck in a dependency **cycle**. |
+| `labelOnce` (dependency-cycle) | Publishing an **escalation** for a ticket stuck in a dependency **cycle** (CTL-2161: now an ASK ticket). |
 | `applyBlockedByRelation` (triage-deps) | Writing a durable **blocked-by dependency edge** found during triage. |
 | `applyEstimate` | Writing the reference-class **story-point estimate** on triage→research. |
 | `applyPhaseStatus` (preemption-resume) | Writing the Linear **phase status** when resuming a preempted ticket. |
 | `applyBlockedByRelation` (sequencing) | Writing a **blocked-by sequencing edge** (CTL-925 hard-dep ordering). |
-| `labelOnce` (failed-or-stalled) | Applying **needs-human** in the terminal sweep when a phase is **stalled/failed**. |
-| held-label retraction (CTL-1068) | **Removing/retracting a held label** (needs-human/cycle) from an in-flight ticket. |
+| `labelOnce` (failed-or-stalled) | Publishing an **escalation** in the terminal sweep when a phase is **stalled/failed**. |
+| held-label retraction (CTL-1068) | **Removing/retracting a held label** from an in-flight ticket. |
 | `postReclaimMirror` | Posting the **"Phase Reclaim" comment** after a work-done-despite-dead-bg reclaim. |
-| stale-pr-rescue `labelOnce` | Applying the **needs-human label** from the stale-PR-rescue escalation path. |
+| stale-pr-rescue `labelOnce` | Publishing the **escalation** from the stale-PR-rescue path. |
 
 ### Recipes
 
@@ -285,14 +285,14 @@ sum by (host_name, event_label, severity_text) (count_over_time({service_name=`c
      or sum by (host_name, event_label, severity_text) (count_over_time({service_name=`catalyst.broker`} | event_entity=`alert` | event_action=`raised` [20m])) * 0)
 ```
 ⚠️ This alert stream filters on **`host_name`** (an OTel host attr), **NOT** `catalyst_node_name` —
-the alert events don't carry the node tag. Observed live (pre-CTL-2156): only `needs_human_pileup`;
+the alert events don't carry the node tag. Observed live (pre-CTL-2156): only the retired pile-up kind;
 `system_down` is built-for but unverified; **no `cleared` event has ever been seen** (the 20m window
 is the de-facto resolve). The richer spec payload (`kind/reason/source/count/threshold`) is **not**
 in Loki — only `event_label` / `host_name` / `severity_text` / timestamp are queryable.
 
-⚠️ **CTL-2156 changed the kinds this stream carries.** `needs_human_pileup` is RETIRED; the
+⚠️ **CTL-2156 changed the kinds this stream carries.** the pile-up kind is RETIRED; the
 `event_label` values to expect now are `system_down`, `provider_degraded`, `rate_limit_exhausted`
-and `capacity_unavailable`. Any saved alert rule or dashboard still keyed on `needs_human_pileup`
+and `capacity_unavailable`. Any saved alert rule or dashboard still keyed on the retired pile-up kind
 matches nothing — silently. The new kinds DO emit a paired `cleared` (they auto-clear), so the
 "no cleared event ever seen" observation above should be re-measured rather than assumed.
 
@@ -403,7 +403,7 @@ deliberately want pino-structured daemons (broker / execution-core / otel-forwar
 ## Things to flag before relying on them
 
 1. **Alert LogQL (h)** filters on `host_name`, not `catalyst_node_name`; the pre-CTL-2156 kind
-   `needs_human_pileup` is retired (rules keyed on it now match nothing); the rich payload is not
+   the pile-up kind is retired (rules keyed on it now match nothing); the rich payload is not
    in Loki. Whether the CTL-2156 kinds and their `cleared` events actually reach Loki/dash0 and
    route to a channel is **unverified end-to-end** — the broker emits INTENT only.
 2. **`system_*` / `catalyst_*` gauges** confirmed as series names but not live-confirmed populated

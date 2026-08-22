@@ -24,10 +24,11 @@ import { join, dirname, basename } from "node:path";
 import { promisify } from "node:util";
 import {
   readLinearCache,
-  readParkedNeedsHumanTickets,
+  readParkedAttentionTickets,
   readReplicaTitles,
   readReplicaHumanHolds,
 } from "./linear-cache-reader.mjs";
+import { readFleetAlerts } from "./fleet-alerts.mjs";
 import { fillEstimateFallback, getEstimationMethodAsync } from "./linear-estimate-fallback.mjs";
 // CTL-1046: supplemental Linear-title fallback for cross-team (e.g. ADV) records.
 // CTL records carry their title via the eligible projection (eligible/CTL.json),
@@ -212,40 +213,63 @@ export function heldFor(labels) {
   return null;
 }
 
-// ── CTL-729: the single "needs attention" bucket (operator-approved 2026-06-11) ─
-// ONE yellow board accent + ONE Inbox "Needs you" section merge the two ways a
+// ── CTL-729 / CTL-2161: the single "needs attention" bucket ────────────────
+// ONE yellow board accent + ONE Inbox "Needs you" section merge the ways a
 // ticket can need the OPERATOR's hand:
 //   • 'waiting-on-you' — a LIVE worker's durable bg job is "blocked" (Claude Code
 //     paused for a permission grant / interactive prompt) → isBgJobWaitingOnUser.
-//   • 'needs-human'    — the progress watchdog / a phase escalated the ticket: a
-//     `needs-human` or `needs-input` Linear label (the broker's webhook fold,
-//     CTL-1031), OR the host-local workers/<T>/.linear-label-needs-human.applied
-//     marker (the daemon's labelOnce guard writes this before the Linear label
-//     lands — a host-local fallback so the board lights up immediately).
+//   • 'ask'            — a genuine human question is on the table: an ASK ticket
+//     (`catalyst-ask` / `ask/decision`, the CTL-2157 path), the `needs-input`
+//     worker-paused label (CTL-768), a stuck PR, or a terminal failed phase.
 // This is DISTINCT from `held` (the admission-gate blocked/waiting pair): held is
 // the scheduler holding a ticket BEFORE pickup; attention is an in-flight ticket
 // asking the operator to act. They never collapse into one another.
 //
-// The escalation labels the watchdog / phase agents apply. `needs-human` is the
-// flat label cleared by respond-ticket.mjs (NEEDS_HUMAN_LABEL); `needs-input` is
-// the worker-paused variant (CTL-768). Either means "a human must act".
-export const ATTENTION_LABEL_NEEDS_HUMAN = "needs-human";
+// ⛔ CTL-2161 — WHAT CHANGED AND WHY IT IS NOT A RENAME. The bucket used to be
+// called `needs-human` and its dominant source was the Linear label of the same
+// name. That label is being deleted (CTL-2155 epic): measured on 86 items flagged
+// as waiting on a human, 3 genuinely were and 41 were the model provider being
+// overloaded, escalated one ticket at a time. SYSTEM trouble now raises exactly
+// ONE fleet alert (CTL-2156) with ZERO per-ticket artifacts, and a genuine human
+// question is ONE ask ticket carrying `blocks` to the work it holds (CTL-2157).
+// So the board's Needs-You section is the ASK section: it must not be fed by a
+// label that fired for outages. The bucket keeps its OTHER, still-honest sources
+// (needs-input, PR-stuck, failed phase) — dropping those would silently blank
+// rows this phase is not about.
+//
+// The ask labels. A SECOND COPY of ask.mjs's ASK_LABEL_NAMES / ask-wake.mjs's,
+// deliberately (importing across the execution-core boundary would run ask.mjs's
+// CLI self-execution guard) — and pinned by a parity test, the same discipline
+// linear-cache-reader's taxonomy copy is held to.
+export const ATTENTION_LABELS_ASK = Object.freeze(["catalyst-ask", "ask/decision"]);
 export const ATTENTION_LABEL_NEEDS_INPUT = "needs-input";
 
+/** True when `labels` carries an ask label. Pure; exported for the parity test. */
+export function hasAskLabel(labels) {
+  const set = new Set(Array.isArray(labels) ? labels : []);
+  return ATTENTION_LABELS_ASK.some((l) => set.has(l));
+}
+
 // deriveAttention — PURE classifier for the single needs-attention bucket. Takes
-// the three already-read signals + the candidate anchor timestamps and returns
-// { attention: 'waiting-on-you' | 'needs-human' | null, attentionSince: ISO|null }.
-//   needs-human WINS over waiting-on-you when both fire (the operator decision):
-//   an escalation is the more urgent ask. The anchor follows the WINNING reason —
-//   needsHumanSince for needs-human, waitingSince for waiting-on-you — and is null
+// the already-read signals + the candidate anchor timestamps and returns
+// { attention: 'waiting-on-you' | 'ask' | null, attentionSince: ISO|null }.
+//   ask WINS over waiting-on-you when both fire (the operator decision): an open
+//   question is the more urgent ask. The anchor follows the WINNING reason —
+//   escalationSince for ask, waitingSince for waiting-on-you — and is null
 //   (honest, never fabricated) when that reason carries no durable stamp.
 // Exported so the derivation is unit-testable without shelling out / reading fs.
 export function deriveAttention({
   waitingOnUser = false,
   labels,
-  needsHumanMarker = false,
+  // CTL-2161: the host-local once-marker. Its FILENAME is unchanged on purpose —
+  // it is live on-disk state with three readers (boot-resume's auto-resume
+  // suppression among them), and CTL-2159 kept writing it precisely because five
+  // retry loops read it as their STOP. What changed is that it no longer RAISES
+  // attention on its own: it records "an escalation was published", which for a
+  // SYSTEM stall is a retry in progress, not a question for a person.
+  escalationMarker = false,
   waitingSince = null,
-  needsHumanSince = null,
+  escalationSince = null,
   prStuck = false, // CTL-1158: PR in a real-blocker merge state ≥ 300 s
   prStuckSince = null,
   phaseFailed = false, // CTL-1180: a terminal failed/stalled phase, ticket NOT pipeline-done
@@ -255,26 +279,23 @@ export function deriveAttention({
 } = {}) {
   // CTL-1239: a ticket terminal in Linear (Done/Canceled) is finished regardless of
   // any stale failed/stalled phase-*.json left on disk. Short-circuit BEFORE the
-  // needs-human/waiting computation so a stale signal can never re-raise attention.
+  // ask/waiting computation so a stale signal can never re-raise attention.
   if (linearTerminal === true) {
     return { attention: null, attentionSince: null, escalationType: null, correlationRole: null };
   }
   const set = new Set(Array.isArray(labels) ? labels : []);
-  const labelNeedsHuman =
-    set.has(ATTENTION_LABEL_NEEDS_HUMAN) || set.has(ATTENTION_LABEL_NEEDS_INPUT);
-  const needsHuman =
-    labelNeedsHuman || needsHumanMarker === true || prStuck === true || phaseFailed === true;
-  if (needsHuman) {
-    // Label/marker stamp is the more authoritative anchor when present; the
-    // PR-stuck anchor is the fallback. needs-human (any source) outranks
-    // waiting-on-you.
+  const labelAsk = hasAskLabel(labels) || set.has(ATTENTION_LABEL_NEEDS_INPUT);
+  const ask = labelAsk || prStuck === true || phaseFailed === true;
+  if (ask) {
+    // Label stamp is the more authoritative anchor when present; the PR-stuck
+    // anchor is the fallback. ask (any source) outranks waiting-on-you.
     return {
-      attention: "needs-human",
-      attentionSince: needsHumanSince ?? (prStuck ? prStuckSince : null),
+      attention: "ask",
+      attentionSince: escalationSince ?? (prStuck ? prStuckSince : null),
       escalationType: escalationType ?? null, // CTL-1180 passthrough; null when not a failed-phase source
-      // CAT-170: only the needs-human branch carries the correlation role — that is
-      // the one branch the notification projector acts on, so a member's alert can
-      // be suppressed in favour of its anchor's single correlated alert.
+      // CAT-170: only the ask branch carries the correlation role — that is the
+      // one branch the notification projector acts on, so a member's alert can be
+      // suppressed in favour of its anchor's single correlated alert.
       correlationRole: correlationRole ?? null,
     };
   }
@@ -364,12 +385,12 @@ export function synthesizeQueuedTicket(
     held: heldFor(li.labels),
     // CTL-764 (verify CTL764-VER-3): expose the raw Linear labels so deriveStatusCounts
     // can distinguish the needs-input Axis-2 disposition (which deriveAttention folds
-    // into attention:'needs-human'). Honest [] when the cache carried none.
+    // into attention:'ask'). Honest [] when the cache carried none.
     labels: Array.isArray(li.labels) ? li.labels : [],
     // CTL-729: a queued (Todo) ticket has no live worker, so waiting-on-you is
-    // impossible — but it CAN carry a needs-human/needs-input escalation label.
+    // impossible — but it CAN carry an ask / needs-input attention label.
     // attentionSince has no durable label-applied stamp here → null (honest).
-    ...deriveAttention({ waitingOnUser: false, labels: li.labels, needsHumanMarker: false }),
+    ...deriveAttention({ waitingOnUser: false, labels: li.labels, escalationMarker: false }),
     // CTL-1020: a queued ticket has no triage.json, but its Linear blocked-by/blocks
     // relations (carried on the eligible projection) ARE projected here so the dep
     // graph can draw its edges. Empty when the ticket has no relation in the cache.
@@ -696,36 +717,33 @@ export function deriveCapacity(workers, maxParallel) {
 }
 
 // deriveStatusCounts — CTL-764 Phase 7: PURE per-disposition ticket counts.
-// Precedence: needs-human > needs-input > blocked > queued. Tickets owned by a
+// Precedence: ask > needs-input > blocked > queued. Tickets owned by a
 // live worker (in inFlightTicketIds) are excluded to avoid double-counting
 // against the deck. `tickets` is the board tickets array; `inFlightTicketIds`
 // is a Set<string> of ticket ids that have live workers.
 export function deriveStatusCounts(tickets, inFlightTicketIds) {
-  const counts = { queued: 0, blocked: 0, needsInput: 0, needsHuman: 0 };
+  const counts = { queued: 0, blocked: 0, needsInput: 0, ask: 0 };
   for (const t of Array.isArray(tickets) ? tickets : []) {
     if (inFlightTicketIds?.has?.(t.id)) continue;
     // CTL-1175: orphan-PR cards (type:"orphan-pr") are synthetic Needs-You rows
     // synthesizeOrphanTickets documents as having "no capacity/queue impact" — skip
-    // them here so they don't inflate the needsHuman count the deck/badges derive from.
+    // them here so they don't inflate the ask count the deck/badges derive from.
     if (t.type === "orphan-pr") continue;
     const labels = Array.isArray(t.labels) ? t.labels : [];
     const attn = t.attention ?? null;
     // CTL-764 (verify CTL764-VER-3): deriveAttention FOLDS the needs-input label
-    // into attention:'needs-human' (line ~260), so `attn` alone cannot tell the two
-    // Axis-2 dispositions apart. Detect the needs-input label EXPLICITLY and route it
-    // to needsInput BEFORE the needs-human short-circuit — otherwise every needs-input
-    // ticket is miscounted as needs-human and the Axis-2 distinction the Phase-8
-    // buckets exist to show collapses. Precedence needs-human > needs-input: a ticket
-    // carrying BOTH labels stays needs-human (mirrors the parked-card reason at ~1426).
-    if (
-      labels.includes(ATTENTION_LABEL_NEEDS_INPUT) &&
-      !labels.includes(ATTENTION_LABEL_NEEDS_HUMAN)
-    ) {
+    // into attention:'ask', so `attn` alone cannot tell the two Axis-2 dispositions
+    // apart. Detect the needs-input label EXPLICITLY and route it to needsInput
+    // BEFORE the ask short-circuit — otherwise every needs-input ticket is
+    // miscounted as ask and the Axis-2 distinction the Phase-8 buckets exist to
+    // show collapses. Precedence ask > needs-input: a ticket carrying BOTH an ask
+    // label and needs-input stays ask (mirrors the parked-card reason below).
+    if (labels.includes(ATTENTION_LABEL_NEEDS_INPUT) && !hasAskLabel(labels)) {
       counts.needsInput++;
       continue;
     }
-    if (attn === "needs-human") {
-      counts.needsHuman++;
+    if (attn === "ask") {
+      counts.ask++;
       continue;
     }
     // Check worker-status disposition first (set by daemon), then the already-resolved
@@ -735,8 +753,8 @@ export function deriveStatusCounts(tickets, inFlightTicketIds) {
     // have no per-ticket `.labels` in the pre-passthrough boards), so reading `.held`
     // here is what makes the queued/blocked capacity buckets non-zero for the deck.
     const ws = t.workerStatus ?? t.held ?? heldFor(labels);
-    if (ws === "needs-human") {
-      counts.needsHuman++;
+    if (ws === "ask") {
+      counts.ask++;
       continue;
     }
     if (ws === "needs-input") {
@@ -1054,7 +1072,7 @@ export function deriveEscalationType(phaseSigs) {
  *
  *  Returns "anchor" | "member" | null. This is the projection the notification
  *  path needs to collapse a multi-ticket incident into ONE operator alert: every
- *  correlated member still earns its own needs-human label and signal (the
+ *  correlated member still earns its own escalation signal (the
  *  operator can open any of them), but only the anchor is allowed to notify. */
 export function deriveCorrelationRole(phaseSigs) {
   for (let i = phaseSigs.length - 1; i >= 0; i--) {
@@ -1083,10 +1101,10 @@ export function deriveHumanQuestion(phaseSigs) {
   return null;
 }
 
-/** CTL-1131: the durable needs-human age anchor — the newest phase signal's
- *  needsHumanSince stamp (written at status-flip time). null when none carries
+/** CTL-1131: the durable escalation age anchor — the newest phase signal's
+ *  `needsHumanSince` stamp (written at status-flip time). null when none carries
  *  it (the duration cell renders unavailable, never fabricated). */
-export function deriveNeedsHumanSince(phaseSigs) {
+export function deriveEscalationSince(phaseSigs) {
   for (let i = phaseSigs.length - 1; i >= 0; i--) {
     const sig = phaseSigs[i];
     if (!sig || typeof sig !== "object") continue;
@@ -1432,7 +1450,7 @@ export function synthesizeOrphanTickets(orphanState, now) {
         heldSince: null,
         currentPhaseSince: null,
         // CTL-1175: surface as a Needs-You row, reusing CTL-1158 inbox derivation.
-        attention: "needs-human",
+        attention: "ask",
         attentionSince: e.firstSeenAt ?? e.notifiedAt ?? null,
         humanQuestion: reason,
         explanation: null,
@@ -1453,23 +1471,23 @@ export function synthesizeOrphanTickets(orphanState, now) {
     });
 }
 
-// synthesizeParkedNeedsHumanTickets — pure helper: one attention card per PARKED
-// needs-human/needs-input ticket that has NO worker-dir / queued / orphan card.
-// The board's ticket set is built from LIVE worker dirs, so a needs-human ticket
+// synthesizeParkedAttentionTickets — pure helper: one attention card per PARKED
+// ask / needs-input ticket that has NO worker-dir / queued / orphan card.
+// The board's ticket set is built from LIVE worker dirs, so a parked ticket
 // whose worker dir was torn down is in none of those sets and never reached the
 // inbox — even though deriveAttention already supports the label. This mirrors
 // synthesizeOrphanTickets: it turns the cache-sourced parked descriptors
-// (readParkedNeedsHumanTickets — non-removed, non-terminal, needs-human-labelled)
+// (readParkedAttentionTickets — non-removed, non-terminal, ask/needs-input-labelled)
 // into BoardTicket cards that classifyTicket buckets into the inbox "Needs you"
 // (attention) section. `existingIds` is every id ALREADY carded (worker-dir
 // live/between/done + queued + orphan) so a ticket with a real card is NEVER
 // duplicated; a duplicate descriptor within the input is also deduped. Exported so
 // unit tests exercise it without the DB read; `now` is injected for the same reason.
 // CTL-1372: `replicaTitles` ({id→title} from the CTC replica) is the FIX for the
-// bare-id parked card — the parked descriptor (readParkedNeedsHumanTickets) carries
+// bare-id parked card — the parked descriptor (readParkedAttentionTickets) carries
 // NO title, so without the replica these cards rendered as "CTL-1214". Replica miss
 // → p.title (always absent here) → the bare ticket id (honest last resort).
-export function synthesizeParkedNeedsHumanTickets(
+export function synthesizeParkedAttentionTickets(
   parked,
   existingIds,
   now,
@@ -1484,11 +1502,10 @@ export function synthesizeParkedNeedsHumanTickets(
     if (seen.has(p.ticket)) continue; // already carded (worker-dir / queued / orphan) — never double-count
     seen.add(p.ticket);
     const labels = Array.isArray(p.labels) ? p.labels : [];
-    // needs-input reads as "waiting on your input"; needs-human as a generic escalation.
-    const reason =
-      labels.includes(ATTENTION_LABEL_NEEDS_INPUT) && !labels.includes(ATTENTION_LABEL_NEEDS_HUMAN)
-        ? "Parked — waiting on your input (needs-input)."
-        : "Parked — escalated for a human (needs-human).";
+    // needs-input reads as "waiting on your input"; an ask label as an open question.
+    const reason = hasAskLabel(labels)
+      ? "Parked — an ask is open on this ticket."
+      : "Parked — waiting on your input (needs-input).";
     const replicaTitle =
       typeof replicaTitles?.[p.ticket] === "string" && replicaTitles[p.ticket].length > 0
         ? replicaTitles[p.ticket]
@@ -1503,7 +1520,7 @@ export function synthesizeParkedNeedsHumanTickets(
     cards.push({
       id: p.ticket,
       title: replicaTitle || linfoTitle || p.title || p.ticket,
-      type: "parked-needs-human",
+      type: "parked-ask",
       repo: repoFor(p.ticket),
       team: teamFor(p.ticket),
       // No worker dir / phase signal — these are off-board parked tickets. phase
@@ -1523,12 +1540,12 @@ export function synthesizeParkedNeedsHumanTickets(
       held: heldFor(labels),
       // CTL-764 (verify CTL764-VER-3): expose raw labels so deriveStatusCounts can
       // route a needs-input parked card to needsInput (this card hardcodes attention
-      // to "needs-human" for the inbox, which alone would miscount needs-input).
+      // to "ask" for the inbox, which alone would miscount needs-input).
       labels,
       heldSince: null,
       currentPhaseSince: null,
       // surface as a Needs-You row, reusing the CTL-1158 inbox derivation.
-      attention: "needs-human",
+      attention: "ask",
       // "how long has it needed you" anchor — the descriptor's last-updated stamp
       // from the cache (honest null when the cache carried none).
       attentionSince: p.updatedAt ?? null,
@@ -1557,14 +1574,14 @@ export function synthesizeParkedNeedsHumanTickets(
 // synthesizeDurableEscalations, which by design DROPS a durable record whose ticket
 // already has a card (id dedupe). That dedupe is right for the terminal-sweep case:
 // such a ticket has a live failed/stalled signal, so deriveAttention's phaseFailed
-// path already renders it needs-human and a second card would double-list it.
+// path already renders it as `ask` and a second card would double-list it.
 //
 // It is WRONG for a record whose existing card carries no attention at all. The
 // concrete hole: a fence-suppressed break-glass on a BEHIND PR whose rescue budget
 // is exhausted. The rescue timer only reaches that point via an existing worker
 // directory, so the ticket always has a card; BEHIND is deliberately excluded from
 // PR_BLOCKER_STATES (the pipeline may auto-rebase it); and the fence suppressed the
-// needs-human label, so nothing else marks it. The record was then deduped away —
+// escalation artifact, so nothing else marks it. The record was then deduped away —
 // leaving the break-glass on no operator surface at all, including the push bridge,
 // which projects only board tickets.
 //
@@ -1590,7 +1607,7 @@ export function mergeDurableEscalationsIntoCards(
     // Terminal-aware, matching the synthesis path: never page on a Done/Canceled ticket.
     if (terminal.has(rec.ticket) || isLinearTerminal(linfo?.[rec.ticket]?.linearState)) continue;
     if (card.attention) continue; // already surfaced — keep the live reason
-    card.attention = "needs-human";
+    card.attention = "ask";
     card.attentionSince = rec.escalatedAt ?? card.attentionSince ?? null;
     card.humanQuestion =
       typeof rec.reason === "string" && rec.reason.length > 0
@@ -1602,7 +1619,7 @@ export function mergeDurableEscalationsIntoCards(
 
 // synthesizeDurableEscalations — CTL-1643: surface durable escalation records on
 // the board even when the worker dir has been GC'd (Hole 2) and even when the
-// needs-human label never confirmed in Linear (Hole 1). Mirrors the parked-synthesis
+// escalation artifact never confirmed in Linear (Hole 1). Mirrors the parked-synthesis
 // pattern: one attention card per durable record, deduped against every existing
 // card id. Terminal-aware: tickets at Done/Canceled are excluded via `linfo`
 // (linearState) or an explicit `terminalIds` Set injected by the caller. The
@@ -1661,7 +1678,7 @@ export function synthesizeDurableEscalations(
       labels: [],
       heldSince: null,
       currentPhaseSince: null,
-      attention: "needs-human",
+      attention: "ask",
       // attentionSince is anchored to the ORIGINAL escalatedAt — preserved through
       // retry ticks so the operator sees "how long has it needed you" from the first
       // escalation, not the most recent label-retry attempt.
@@ -1869,10 +1886,10 @@ async function readTicketArtifacts(id) {
       ancillarySigs: [],
       triage: null,
       prSigs: [],
-      needsHumanMarker: false,
+      escalationMarker: false,
     };
   }
-  const [phaseSigs, ancillarySigs, triage, prSigs, needsHumanMarker] = await Promise.all([
+  const [phaseSigs, ancillarySigs, triage, prSigs, escalationMarker] = await Promise.all([
     Promise.all(PHASE_ORDER.map((p) => readJSON(join(dir, `phase-${p}.json`)))),
     // CTL-1239: ancillary signals in run order (remediate, recovery-pass). Each
     // fail-opens to null via readJSON on a missing/corrupt file.
@@ -1883,8 +1900,8 @@ async function readTicketArtifacts(id) {
         readJSON(join(dir, f))
       )
     ),
-    // CTL-729: the host-local needs-human marker the daemon's labelOnce guard
-    // writes (before the Linear label round-trips) → the attention 'needs-human'
+    // CTL-2161: the host-local escalation once-marker (filename unchanged — it is
+    // live on-disk state with three readers). Read, but no longer an attention
     // fallback so the board lights up immediately without waiting on the webhook.
     exists(join(dir, ".linear-label-needs-human.applied")),
   ]);
@@ -1892,7 +1909,7 @@ async function readTicketArtifacts(id) {
   // (CTL-972 phase overlay); it is ALSO included in ancillarySigs for the
   // explanation scan. ANCILLARY_EXPLANATION_PHASES[0] === REMEDIATE_PHASE.
   const remediateSig = ancillarySigs[0] ?? null;
-  return { phaseSigs, remediateSig, ancillarySigs, triage, prSigs, needsHumanMarker };
+  return { phaseSigs, remediateSig, ancillarySigs, triage, prSigs, escalationMarker };
 }
 
 // CTL-922 (BFF10): read a single worker's own phase signal, positioned into a
@@ -1954,7 +1971,7 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
     mp,
     catalystSessByUuid,
     cooldowns,
-    parkedNeedsHuman,
+    parkedAttention,
   ] = await Promise.all([
     liveAgents(),
     costByTicket(),
@@ -1964,7 +1981,7 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
     maxParallel(),
     catalystSessionByCcUuid(),
     loadDispatchCooldowns(Date.now()),
-    readParkedNeedsHumanTickets(),
+    readParkedAttentionTickets(),
   ]);
   const eligibleIndex = Object.fromEntries(eligible.map((e) => [e.id, e]));
 
@@ -2103,7 +2120,7 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
   // missing/unreadable replica → {} and the existing title chain (triage.title →
   // linfo/eligible → on-demand fetch → id) is preserved unchanged.
   const replicaTitles = await readReplicaTitles({
-    ids: [...cardTicketIds, ...eligible.map((e) => e.id), ...parkedNeedsHuman.map((p) => p.ticket)],
+    ids: [...cardTicketIds, ...eligible.map((e) => e.id), ...parkedAttention.map((p) => p.ticket)],
   });
 
   // CTL-974: supplemental estimate fallback — tickets whose durable-cache estimate
@@ -2188,14 +2205,14 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
   // the Linear title for ALL teams. A ticket genuinely missing a Linear title still
   // resolves to null here, so ticketTitle()'s honest summary/key fallback still runs.
   await (async () => {
-    // CTL-1378 (#2421 edge): include parkedNeedsHuman IDs so a PARKED needs-human card
+    // CTL-1378 (#2421 edge): include parkedAttention IDs so a PARKED attention card
     // with a replica MISS still gets the on-demand live-title last resort — its title is
-    // then read from linfo by synthesizeParkedNeedsHumanTickets. Without this the parked
+    // then read from linfo by synthesizeParkedAttentionTickets. Without this the parked
     // fallback only saw worker-dir ∪ eligible IDs, so a parked replica-miss showed the bare id.
     const allBoardIds = [
       ...[...cardTicketIds],
       ...eligible.map((e) => e.id),
-      ...parkedNeedsHuman.map((p) => p.ticket),
+      ...parkedAttention.map((p) => p.ticket),
     ];
     // Only fetch titles for IDs that have NO title from any source the title
     // resolver consults (durable linfo cache OR the eligible projection OR the CTC
@@ -2213,7 +2230,7 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
 
   let tickets = await Promise.all(
     [...cardTicketIds].map(async (id) => {
-      const { phaseSigs, remediateSig, ancillarySigs, triage, prSigs, needsHumanMarker } =
+      const { phaseSigs, remediateSig, ancillarySigs, triage, prSigs, escalationMarker } =
         await readTicketArtifacts(id);
       // CTL-1239: the explanation-derivation scan = canonical PHASE_ORDER signals
       // FIRST, then ancillary signals (remediate, then recovery-pass) appended as
@@ -2234,39 +2251,39 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
       const prStatus = getPrStatus && prNumber != null ? getPrStatus(repoFor(id), prNumber) : null;
       const prStuck = isPrStuck(prStatus, prPhaseStartedAt, now);
       const prReason = prStuck ? prStuckReason(prStatus?.mergeStateStatus, prNumber) : null;
-      // CTL-1180: a terminal failed/stalled phase surfaces needs-human — UNLESS the
+      // CTL-1180: a terminal failed/stalled phase surfaces attention — UNLESS the
       // pipeline genuinely shipped (cur.phase collapses to PIPELINE_DONE_PHASE). The
       // explanation.escalation_type rides along for the reading pane.
       const phaseFailed =
         cur.phase !== PIPELINE_DONE_PHASE && phaseSigs.some((s) => TERMINAL_FAILURE.has(s?.status));
       // CTL-1180 / CTL-1239: the escalation_type passthrough for the reading pane.
       // Scan the FULL explanation array (incl. recovery-pass + remediate) so a
-      // recovery-pass escalation — which lands needs-human via the marker/label,
-      // NOT a failed canonical phase — still carries its escalation_type. Only the
-      // needs-human attention branch surfaces it (deriveAttention), so it is safe
+      // recovery-pass escalation — which lands via the escalation marker, NOT a
+      // failed canonical phase — still carries its escalation_type. Only the
+      // `ask` attention branch surfaces it (deriveAttention), so it is safe
       // to derive unconditionally here.
       const escalationType = deriveEscalationType(explSigs);
       const failedEscalationType = phaseFailed ? deriveEscalationType(phaseSigs) : null;
       // CTL-1239: live Linear terminal state (Done/Canceled) from the webhook cache —
       // dominates any stale on-disk failed/stalled phase signal.
       const linearTerminal = isLinearTerminal(linfo[id]?.linearState);
-      // CTL-729: the single needs-attention bucket (waiting-on-you ∪ needs-human),
-      // merging the live worker's blocked-bg-job flag, the needs-human/needs-input
-      // Linear labels (CTL-1031 webhook fold), the host-local needs-human marker,
-      // and the CTL-1158 PR-stuck signal. The waiting-on-you anchor is the worker's
-      // current-phase start; the needs-human anchor falls back to heldSince downstream.
+      // CTL-729: the single needs-attention bucket (waiting-on-you ∪ ask), merging
+      // the live worker's blocked-bg-job flag, the ask / needs-input Linear labels
+      // (CTL-1031 webhook fold) and the CTL-1158 PR-stuck signal. The waiting-on-you
+      // anchor is the worker's current-phase start; the ask anchor falls back to
+      // heldSince downstream.
       const attn = deriveAttention({
         waitingOnUser: live?.waitingOnUser ?? false,
         labels: linfo[id]?.labels,
-        needsHumanMarker,
+        escalationMarker,
         waitingSince: cur.startedAt ?? null,
-        needsHumanSince: deriveNeedsHumanSince(phaseSigs), // CTL-1131: real age anchor
+        escalationSince: deriveEscalationSince(phaseSigs), // CTL-1131: real age anchor
         prStuck,
         prStuckSince: prPhaseStartedAt,
         phaseFailed,
         // CTL-1239: prefer the full-scan escalation_type (covers recovery-pass /
         // remediate) and fall back to the failed-phase value. deriveAttention only
-        // surfaces this in the needs-human branch, so it stays null elsewhere.
+        // surfaces this in the `ask` branch, so it stays null elsewhere.
         escalationType: escalationType ?? failedEscalationType,
         linearTerminal, // CTL-1239
         // CAT-170: the correlation role rides the same explSigs scan (canonical +
@@ -2336,7 +2353,7 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
         // signal) → again rendered unavailable, never now-anchored to a guess.
         currentPhaseSince: cur.startedAt ?? null,
         // CTL-1130: call_to_action from the most-recent phase signal's explanation,
-        // surfaced as the inbox sub-label for needs-human rows. CTL-1158: fall back
+        // surfaced as the inbox sub-label for `ask` rows. CTL-1158: fall back
         // to the PR-stuck reason so the inbox sub-label names WHY (research F12).
         // CTL-1239: scan explSigs (canonical + ancillary) so a recovery-pass
         // call_to_action surfaces (it is not in PHASE_ORDER).
@@ -2346,9 +2363,10 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
         // CTL-1239: same explSigs scan so the recovery-pass explanation card renders.
         explanation: deriveExplanation(explSigs),
         // CTL-729: the single needs-attention bucket — 'waiting-on-you' (live
-        // blocked bg job) | 'needs-human' (escalation label/marker) | null, with an
-        // ISO attentionSince anchor (or null, never fabricated). Drives the ONE
-        // yellow board accent + the Inbox "Needs you" section. needs-human wins.
+        // blocked bg job) | 'ask' (an ask/needs-input label, a stuck PR, a failed
+        // phase) | null, with an ISO attentionSince anchor (or null, never
+        // fabricated). Drives the ONE yellow board accent + the Inbox "Needs you"
+        // section, which IS the ask section (CTL-2161). `ask` wins.
         attention: attn.attention,
         attentionSince: attn.attentionSince,
         // CAT-170: "anchor" | "member" | null. The notification projectors (web
@@ -2421,17 +2439,17 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
   const orphanTickets = synthesizeOrphanTickets(readOrphanPrState(), now);
   tickets = [...tickets, ...orphanTickets];
 
-  // Parked needs-human cards. A needs-human/needs-input ticket whose worker dir
+  // Parked attention cards. An ask / needs-input ticket whose worker dir
   // was torn down is in NONE of the worker-dir-sourced sets above (live /
   // between-phases / recent-done / queued / orphan), so it never reached the inbox
   // even though deriveAttention supports the label. Read the SAME cache the board
-  // enriches from (filter-state.db descriptors, via readParkedNeedsHumanTickets —
-  // non-removed, non-terminal, needs-human-labelled) and append one attention card
+  // enriches from (filter-state.db descriptors, via readParkedAttentionTickets —
+  // non-removed, non-terminal, ask/needs-input-labelled) and append one attention card
   // per parked ticket NOT already carded. Deduped against every existing card id;
   // terminal/removed excluded by the reader; fail-open ([] on a db read error).
   const existingCardIds = new Set(tickets.map((t) => t.id));
-  const parkedTickets = synthesizeParkedNeedsHumanTickets(
-    parkedNeedsHuman,
+  const parkedTickets = synthesizeParkedAttentionTickets(
+    parkedAttention,
     existingCardIds,
     now,
     replicaTitles,
@@ -2441,14 +2459,14 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
 
   // CTL-1643: durable escalation cards. Read the GC-surviving per-ticket
   // escalation records written by the scheduler's escalateOnce (even when the
-  // worker dir was torn down by J4 and even when the needs-human label never
+  // worker dir was torn down by J4 and even when the escalation artifact never
   // confirmed in Linear). Deduped against every existing card id (now including
   // the parked set); terminal/Done/Canceled tickets excluded by isLinearTerminal.
   const terminalLinearIds = new Set(
     Object.keys(linfo).filter((id) => isLinearTerminal(linfo[id]?.linearState))
   );
   // ⛔ CTL-2159 CLASS GATE. The durable store is a per-ticket escalation artifact
-  // in its own right — it renders as `attention:"needs-human"` with a
+  // in its own right — it renders as `attention:"ask"` with a
   // humanQuestion on both the merge and the synthesis path below. A SYSTEM stall
   // (provider overload, a spent retry budget, a wedged worker) must produce ZERO
   // of those: the CTL-2156 fleet alert names the condition once for the whole
@@ -2479,7 +2497,7 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
   );
   tickets = [...tickets, ...durableTickets];
 
-  // CTL-1588: annotate-not-hide. A parked needs-human/needs-input ticket can
+  // CTL-1588: annotate-not-hide. A parked ask / needs-input ticket can
   // still be Todo in Linear (so it sits in the eligible projection) while the
   // admission gate holds it — presenting it as "dispatching next" is misleading.
   // The parked descriptor set is already loaded above; stamp `humanHold` with the
@@ -2490,16 +2508,16 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
   // Second source (CTL-1588 follow-up): the parked set is webhook-fed and the
   // receiver is single-homed, so a label this node's broker never saw leaves a
   // durable gap (live: mini-2 ranked CRM-1/2/5/6 as imminent while the replica
-  // carried their needs-human). Replica labels fill the gaps; the parked
+  // carried their hold label). Replica labels fill the gaps; the parked
   // descriptor (fresher on THIS node's webhook stream) wins on conflict.
   const replicaHolds = await readReplicaHumanHolds({ ids: notInFlight.map((e) => e.id) });
   const humanHoldByTicket = new Map([
     ...Object.entries(replicaHolds),
-    ...parkedNeedsHuman.map((p) => [
+    ...parkedAttention.map((p) => [
       p.ticket,
-      // needs-human outranks needs-input on a dual-labeled ticket — same
+      // an ask outranks needs-input on a dual-labeled ticket — same
       // precedence as the parked cards / status counts / holding buckets.
-      p.labels.includes("needs-human") ? "needs-human" : "needs-input",
+      hasAskLabel(p.labels) ? "ask" : "needs-input",
     ]),
   ]);
 
@@ -2537,7 +2555,7 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
         // CTL-1066: active dispatch retry cool-down; null when not cooling down.
         dispatchCooldown: cooldowns.get(e.id) ?? null,
         // CTL-1588: the human-hold keeping this ticket from dispatching
-        // ("needs-human" | "needs-input"), or null when genuinely dispatchable.
+        // ("ask" | "needs-input"), or null when genuinely dispatchable.
         humanHold: humanHoldByTicket.get(e.id) ?? null,
       };
     })
@@ -2550,6 +2568,13 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
   );
 
   const repos = [...new Set([...boardWorkers, ...tickets].map((x) => x.repo))].sort();
+
+  // ⛔ CTL-2161: the FLEET alert strip. SYSTEM trouble (provider overload, a spent
+  // budget, no capacity, a system-class stall) is ONE fleet-scoped row for the
+  // whole condition — never a per-ticket card. Deleting the `needs-human` label
+  // without this leaves the board SILENT during an outage, which is worse than the
+  // bin the label was. Fail-open: [] on any read error.
+  const fleetAlerts = await readFleetAlerts();
 
   return {
     generatedAt: new Date().toISOString(),
@@ -2568,6 +2593,7 @@ export async function assembleBoard({ getPrStatus = null, ring = null } = {}) {
       ),
     },
     repos,
+    fleetAlerts,
     workers: boardWorkers.sort((a, b) => (a.runtimeMs ?? 0) - (b.runtimeMs ?? 0)),
     tickets,
     queue,

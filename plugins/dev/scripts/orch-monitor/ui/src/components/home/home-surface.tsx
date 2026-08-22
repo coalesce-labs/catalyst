@@ -330,7 +330,7 @@ export function HomeSurface() {
   );
 
   // CTL-1569: the inline REPLY's outcome. A confirmed post is a real resolution —
-  // the Linear comment clears `needs-human` within seconds (CTL-1567) — so the row
+  // the Linear comment clears the escalation hold within seconds (CTL-1567) — so the row
   // is optimistically cleared through the SAME mark + grace-window machinery the
   // verb uses; if the label never actually clears, the standing reconcile rolls it
   // back and the row returns. Every failure marks did-not-take instead, so the item

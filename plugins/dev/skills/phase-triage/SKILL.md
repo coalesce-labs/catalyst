@@ -312,7 +312,7 @@ fi
 # CTL-614 / CTL-550: the Linear comment post is best-effort. triage.json is
 # already on disk; the canonical pipeline contract is
 # `phase.triage.complete.<TICKET>` (see CTL-452). A comment-post failure must
-# NOT escalate the ticket to `needs-human`.
+# NOT escalate the ticket.
 # CTL-864: cross-host fence — bow out if a takeover superseded us. No-op single-host.
 "${__PT_REPO_ROOT}/plugins/dev/scripts/lib/cluster-fence-guard.sh" --phase "${CATALYST_PHASE:-triage}" --ticket "$TICKET" || exit 10
 __PT_COMMENT_POST="${CATALYST_COMMENT_POST_HELPER:-${__PT_REPO_ROOT}/plugins/dev/scripts/lib/linear-comment-post.sh}"
@@ -477,7 +477,7 @@ ambiguous to classify, or a required external resource is unavailable), emit
 # structured triage escalation silently degraded to {} — which is exactly the
 # failure CTL-1609's explanation chokepoint exists to prevent: with no
 # explanation it emits `escalation.explanation-absent`, coerces a degraded
-# fallback, and the operator inbox renders a bare `needs-human` label instead of
+# fallback, and the operator inbox renders a bare escalation row instead of
 # the specific question this section demands below.
 #
 # Same defect CTL-1410 fixed in phase-monitor-deploy (there it was fatal, under

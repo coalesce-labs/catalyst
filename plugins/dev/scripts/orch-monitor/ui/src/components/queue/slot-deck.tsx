@@ -214,7 +214,7 @@ function RemoteSlotCard({
 }
 
 // CTL-764 Phase 8: capacity badges — the triage/queued/blocked/needs-input/
-// needs-human counts config carries alongside inFlight/freeSlots but the deck
+// ask counts config carries alongside inFlight/freeSlots but the deck
 // never rendered. One dim pill per non-zero disposition; the legend (triage
 // only) surfaces via the native title tooltip, matching the header's minimal
 // "Linear calm" treatment (no new dependency, no extra chrome).

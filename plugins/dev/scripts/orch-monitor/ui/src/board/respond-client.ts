@@ -25,7 +25,7 @@ import { isNeedsYouSection, type InboxRow } from "./home-inbox";
 
 /** The kind of needs-you item a verb acts on — drives the verb word + accent.
  *  CTL-729: 'attention' is the single needs-attention bucket (waiting-on-you ∪
- *  needs-human) whose ONE bright verb is "Respond". */
+ *  an open ask) whose ONE bright verb is "Respond". */
 export type VerbKind = "decision" | "blocked" | "attention";
 
 /** The ONE bright primary verb a needs-you row carries (Direction A
@@ -59,7 +59,7 @@ type OverflowAction = (typeof OVERFLOW_ACTIONS)[number];
 export function verbActionFor(row: InboxRow): VerbAction | null {
   if (!isNeedsYouSection(row.section)) return null;
   // CTL-729: the single needs-attention bucket — its ONE bright verb is "Respond"
-  // (it covers both waiting-on-you and needs-human escalations).
+  // (it covers both waiting-on-you and ask escalations).
   if (row.section === "attention") {
     return { ticket: row.id, verb: "Respond", kind: "attention" };
   }

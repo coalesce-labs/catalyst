@@ -284,7 +284,7 @@ function isLiveWorkerStatus(status) {
 // Done/Canceled/Duplicate exclusion (linear-reconcile.mjs terminalStates), so
 // board-health never proposes recovery for already-terminal work whose only
 // remaining signal is a stale cached label (the CTL-1157/1162 stale-label class
-// that terminal-needs-human-reconcile strips lazily).
+// that the board's terminal-state gate excludes).
 // tsMillis — epoch-ms number | numeric string | ISO string → ms, else NaN.
 // Producers disagree on the wire shape; a timestamp reader that understands only
 // one of them fails SILENTLY (every row reads "unknown age"), so it understands both.
@@ -1494,7 +1494,7 @@ function checkFrozenNeedsHuman(b, t) {
     if (labels) haveLabels = true;
     if (!labels || !labels.some((l) => NEEDS_HUMAN_LABEL_RE.test(labelName(l)))) continue;
     // A Done/Canceled/Duplicate ticket can keep a stale cached needs-human label
-    // until terminal-needs-human-reconcile strips it. Flagging it purely by age
+    // even though the board excludes it by state. Flagging it purely by age
     // would propose recovery for already-terminal work — mirror the reconcile's
     // terminal-state exclusion and skip it (the CTL-1157/1162 stale-label class).
     if (isTerminalLinearState(d)) continue;

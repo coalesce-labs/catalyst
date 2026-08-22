@@ -46,7 +46,7 @@ in one screen is a stall nobody has to ask about.
 3. **Needs a decision** → an ask ticket, and proceed on the default.
 
 ⛔ **Never escalate straight to the human.** The ladder is instrument → steward → concierge → human, and
-the human is only ever reached as an ask. A bare `needs-human` label with no ask behind it puts a row in
+the human is only ever reached as an ask. A bare escalation with no ask behind it puts a row in
 their queue that nothing can clear.
 
 ## When the instrument pages you

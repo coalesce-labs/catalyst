@@ -66,7 +66,7 @@ import { CONFIG_TEAM_IDENTITY_MISMATCH } from "../execution-core/config-identity
 import { ENTITLEMENT_EVENT_NAMES } from "../execution-core/entitlement-event.mjs";
 // CTL-2056 — the needs-human escalation event, imported from its owning module so a
 // rename cannot leave a re-typed literal behind that still passes.
-import { ESCALATION_EVENT_NEEDS_HUMAN } from "../execution-core/escalation-event.mjs";
+import { ESCALATION_EVENT_TICKET_ESCALATED } from "../execution-core/escalation-event.mjs";
 // CTL-2052 — the label retry-exhausted escalation, imported from its owning module
 // (not a re-typed literal). The `linear.label.` prefix is UNPROTECTED under the
 // namespace contract (a dedicated test below asserts it, alongside the salvage family).
@@ -123,7 +123,7 @@ const EXEC_CORE_EVENT_NAMES = [
   ...LEASE_EVENT_NAMES, // CTL-1786 lease-authority.mjs — shadow would-grant / would-refuse
   CONFIG_TEAM_IDENTITY_MISMATCH, // CTL-2076 config-identity-event.mjs — registry team-identity mismatch (CAT-52), boot telemetry
   ...ENTITLEMENT_EVENT_NAMES, // CTL-1785 entitlement-event.mjs — would-shed / shed / restored (v3 bare-name, host-suffixed)
-  ESCALATION_EVENT_NEEDS_HUMAN, // CTL-2056 escalation-event.mjs — ticket.escalated (entity=ticket/action=escalated)
+  ESCALATION_EVENT_TICKET_ESCALATED, // CTL-2056 escalation-event.mjs — ticket.escalated (entity=ticket/action=escalated)
   LABEL_RETRY_EXHAUSTED_EVENT, // CTL-2052 label-retry-event.mjs — the "stopped after N and said so" escalation
   FENCE_STANDOFF_EVENT, // CAT-173 fence-standoff.mjs — mutual fence standoff escalation
   ...INLINE_EVENT_NAMES,

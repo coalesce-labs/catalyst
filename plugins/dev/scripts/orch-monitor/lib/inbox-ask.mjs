@@ -441,14 +441,19 @@ const RECOVERY_STATUS_HEADER =
  * trailer is about the pass's own next tick, not about the operator, so treating
  * the whole note as status buries the blocker it just named.
  */
-const NEEDS_HUMAN_CONFIRMED = /\bneeds-human VALID\b/i;
+// ⛔ CTL-2161: this matches HISTORICAL COMMENT TEXT, not the deleted label. The
+// recovery-pass bot wrote "🔍 reviewed this — needs-human VALID: …" into Linear
+// comments that still exist and still render in the inbox. Deleting this pattern
+// with the label would silently start swallowing those verdicts, which is the one
+// case the carve-out exists for. It retires when the comments age out, not now.
+const RECOVERY_VERDICT_CONFIRMED = /\bneeds-human VALID\b/i;
 
 /** Is this the recovery pass reporting rather than asking? Exported for testing. */
 export function isRecoveryStatusNote(body) {
   const s = nonEmptyString(body);
   if (s == null) return false;
   if (!RECOVERY_STATUS_HEADER.test(s)) return false;
-  return !NEEDS_HUMAN_CONFIRMED.test(s);
+  return !RECOVERY_VERDICT_CONFIRMED.test(s);
 }
 
 /**

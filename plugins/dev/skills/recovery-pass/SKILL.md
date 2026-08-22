@@ -2,7 +2,7 @@
 name: recovery-pass
 description: |
   Goal-driven senior-engineer pipeline-unstick sweep (CTL-1176 rung 3). Given the
-  stuck/failed/needs-human set (or ONE ticket handed by the recovery router), its
+  stuck/failed/escalated set (or ONE ticket handed by the recovery router), its
   GOAL is to get the pipeline MOVING again — not to fix one ticket's review
   findings (that is phase-remediate). It runs AFTER the eyes (diagnostician
   evidence) and the hands (deterministic unstuck-sweep seams) have already tried,
@@ -52,7 +52,7 @@ move genuinely requires the operator, author a clear executive briefing and hand
 > **This is NOT phase-remediate.** phase-remediate fixes ONE ticket whose
 > `verify` verdict failed, from `verify.json.findings[]`, editing source files in
 > place and handing back to a fresh `verify` (cap 3). recovery-pass keeps the
-> WHOLE pipeline moving — its scope is the stuck/failed/needs-human set, its input
+> WHOLE pipeline moving — its scope is the stuck/failed/escalated set, its input
 > is the diagnostician + unstuck output, and its actions are git/gh/dispatch, not
 > just Edit/Write. Do not narrow yourself to one ticket's review findings.
 
@@ -343,7 +343,7 @@ research → plan → implement → verify → review → pr → monitor-merge �
 monitor-deploy → teardown. Each phase runs as one short-lived `claude --bg` worker. A worker
 writes its state to a signal file at `${ORCH_DIR}/workers/<ticket>/phase-*.json`
 (`status`, `failureReason`, `bg_job_id`). A ticket is "stuck" when a phase signal
-sits at `needs-human`/`failed`/`stalled`, or its worker died with the signal frozen.
+sits at `failed`/`stalled`, or its worker died with the signal frozen.
 
 **Where to look (per item).**
 
@@ -450,7 +450,7 @@ If the board scan is all-OK and the flagged YOURS set is empty, you are done —
 > snapshot that may lag. Before you act on or escalate ANY ticket, read its current
 > Linear state via direct SQL against the replica (see the `linearis` skill's
 > "Reading Linear" section) — never act on the snapshot alone. A ticket the context
-> shows blocked / needs-human / in a given column may be none of those. Reads → the
+> shows blocked / escalated / in a given column may be none of those. Reads → the
 > replica; writes → `linearis`.
 
 ## The 3-tier rope — how much you may do on your own
@@ -932,7 +932,7 @@ real verdict, not a reason to silently move on. Record it:
 ```bash
 node "${EXEC_CORE}/recovery-emit.mjs" leave-alone \
   --ticket "$TICKET" --orch-dir "$ORCH_DIR" \
-  --reason "<one line: why no action is needed — e.g. 'needs-human label is stale; the human is actively driving this worktree'>"
+  --reason "<one line: why no action is needed — e.g. 'the escalation is stale; the human is actively driving this worktree'>"
 ```
 
 One call writes all three surfaces: the `recovery.verdict` event (the log
@@ -1040,7 +1040,7 @@ payload so the monitor's `notification-composer.ts` (in
 `scripts/orch-monitor/lib/`, NOT `${EXEC_CORE}` — the skill never invokes it; the
 curation layer does) derives the push `short_text` (≤140) + the inbox
 `full_briefing`; merges the payload as the `explanation` block on your signal
-(→ `deriveAttention` flips `needs-human` → the inbox row + nav dot + the push gate
+(→ `deriveAttention` flips `ask` → the inbox row + nav dot + the push gate
 `shouldNotify`); and latches the host-local escalated intent (terminal — the
 router stops re-acting and hands off to the operator):
 
@@ -1052,7 +1052,7 @@ node "${EXEC_CORE}/recovery-emit.mjs" escalated \
 
 You do NOT call web-push yourself — the curation layer
 (`deriveAttention`/`deriveNavSignal` → `shouldNotify` → `/api/notifications/stream`)
-gates the push off the `needs-human` + WARN signals you just wrote. The native/PWA
+gates the push off the `ask` + WARN signals you just wrote. The native/PWA
 app is a thin transport over that same shared filter; there is no second filter to
 satisfy. Print that both the event and the signal explanation were written — that
 printed line is your record that the escalation landed (the goal's branch (b)).
@@ -1162,7 +1162,7 @@ this skill plugs in beneath them — exactly where the phase-remediate dispatch 
 - **Mode gate** — `off | shadow | enforce` from `readRecoveryPassConfig()`
   (`CATALYST_RECOVERY_PASS`). At `off` (the default) the pass never runs, so this
   skill is never dispatched — **no live behavior change until an operator opts in.**
-- **Backlog filter** — only `needs-human | failed | stalled | unknown`, HRW
+- **Backlog filter** — only `failed | stalled | unknown`, HRW
   ownership, and the terminal/merged drop. You never see a finished ticket.
 - **Caps** — the per-tick fix cap (`maxFixesPerTick`, default 3) and the
   event-counted per-target recovery-pass cycle cap

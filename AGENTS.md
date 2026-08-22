@@ -322,7 +322,7 @@ counters) are emitted *directly* to the OTLP metrics pipeline, not log-derived.
 - **Alerting → Grafana.** Alert rules are **file-provisioned** (`provisioning/alerting/*.yaml`) and
   **upsert-only** — a malformed rule file crash-loops the *shared* Grafana, so validate any change
   against a throwaway Grafana before deploying. Active rules cover the scheduler wedge
-  (tick / recovery-pass / liveness-timeout), needs-human pileup, slot starvation, and install/updater
+  (tick / recovery-pass / liveness-timeout), system trouble (CTL-2156), slot starvation, and install/updater
   failures.
 
 **Signal catalog — the data dictionary.** The authoritative, signal-by-signal reference (every

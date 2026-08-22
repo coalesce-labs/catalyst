@@ -3,7 +3,7 @@
 // collaborator is injected so nothing reads a real worker dir, runs the real
 // fence CLI, touches the real Linear API, or appends to the real event log. These
 // tests encode the three Gherkin scenarios directly:
-//   1. Answer/unblock records the response, clears the needs-human marker, and
+//   1. Answer/unblock records the response, clears the ask marker, and
 //      emits the resume event that drives CTL-876's loop.
 //   2. The mutation is fence-aware: a verified-stale generation is rejected and
 //      NOTHING is mutated.
@@ -13,7 +13,7 @@ import { describe, it, expect } from "bun:test";
 import {
   respondTicket,
   findHeldRun,
-  clearNeedsHumanMarker,
+  clearEscalationMarker,
   recordResponse,
   buildResumeEvent,
   emitResumeEvent,
@@ -68,7 +68,7 @@ describe("respondTicket — Scenario 1: answer/unblock records the response and 
     expect(recorded).toEqual([
       { ticket: "CTL-845", phase: "implement", response: "go ahead — the dep is merged" },
     ]);
-    // The needs-human marker is cleared (re-arms the daemon's labelOnce guard).
+    // The ask marker is cleared (re-arms the daemon's labelOnce guard).
     expect(cleared).toEqual([{ ticket: "CTL-845" }]);
     // The resume event (CTL-876 loop) is emitted carrying the operator's response.
     expect(emitted).toEqual([
@@ -350,10 +350,10 @@ describe("findHeldRun — locate the parked needs-input run", () => {
   });
 });
 
-describe("clearNeedsHumanMarker — inverse of the daemon's labelOnce marker", () => {
+describe("clearEscalationMarker — inverse of the daemon's labelOnce marker", () => {
   it("removes the .applied + .skipped once-markers and reports what was removed", () => {
     const removed: string[] = [];
-    const out = clearNeedsHumanMarker(
+    const out = clearEscalationMarker(
       { ticket: "CTL-845" },
       {
         workersDir: "/w",
@@ -370,7 +370,7 @@ describe("clearNeedsHumanMarker — inverse of the daemon's labelOnce marker", (
   });
 
   it("an absent marker is best-effort (never throws), removes only what exists", () => {
-    const out = clearNeedsHumanMarker(
+    const out = clearEscalationMarker(
       { ticket: "CTL-845" },
       {
         workersDir: "/w",

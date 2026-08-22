@@ -169,7 +169,7 @@ when `verify` produces a verdict-fail (`verify.json.regression_risk ≥ 5` OR an
 the code, commits, emits `phase.remediate.complete`, and the router cycles back
 to a fresh `verify`. The loop repeats up to **3** times (a counter distinct from
 the revive budget, event-counted via `phase.remediate.complete.<ticket>`); only a
-verdict-fail *after* the budget is spent escalates to `stalled` → `needs-human`.
+verdict-fail *after* the budget is spent escalates to `stalled` → the escalation guard.
 
 | Phase | Sub-skill / agent | Linear state | Prior artifact | Default model | Turn cap |
 |---|---|---|---|---|---|
@@ -199,7 +199,7 @@ divergence surfaces at dispatch instead of riding all the way to `monitor-merge`
 It is local-only (never pushes, never touches the PR) and mechanical: a clean
 rebase falls through to the normal launch; a textual **conflict** aborts, parks
 the ticket (`status:"stalled"` + `failureReason:"rebase_conflict_with_origin_main"`,
-`phase.<phase>.failed` emitted) and routes it to `needs-human` without launching a
+`phase.<phase>.failed` emitted) and routes it to the escalation guard without launching a
 worker — conflicts are never auto-resolved. Resume dispatches (CTL-658) and the
 non-build phases (`triage`/`pr`/`remediate`/`monitor-merge`/`monitor-deploy`/`teardown`) skip
 the rebase; the `monitor-*` and `teardown` phases operate on the PR / merged SHA and keep their
@@ -218,7 +218,7 @@ stateDiagram-v2
   verify --> review: verdict-pass (risk<5, no high finding)
   verify --> remediate: verdict-fail & cycle<3 (CTL-653)
   remediate --> verify: re-verify (reset signals, cycle++)
-  verify --> stalled: verdict-fail & cycle≥3 → needs-human
+  verify --> stalled: verdict-fail & cycle≥3 → escalate
   review --> pr: phase.review.complete
   pr --> monitor_merge: phase.pr.complete
   monitor_merge --> monitor_deploy: phase.monitor-merge.complete
@@ -418,7 +418,7 @@ artifacts — the tickets simply wait and resume by themselves. The alert clears
 itself when the condition ends, either because a producer retracts (capacity
 restored, account no longer rejected) or because every affected key ages out of the
 window. This replaces the retired `needs_human_pileup` kind, which counted
-`needs-human` labels — the per-ticket escalation artifact — rather than the
+escalation LABELS — the per-ticket artifact — rather than the
 condition. These alert events ride the same event log → `otel-forward` → OTel collector → fan-out (Loki, dash0),
 where a downstream alert rule routes them to a channel. **Delivery is a separate concern**
 — the broker emits intent only; no channel or credential lives in the daemon, so the

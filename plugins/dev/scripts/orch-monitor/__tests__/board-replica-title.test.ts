@@ -10,7 +10,7 @@
 // slots it into title resolution right after the triage-recorded title. This file
 // drives the PURE board helpers the wiring threads `replicaTitles` through —
 // ticketTitle, collectNullTitleIds, synthesizeQueuedTicket, and
-// synthesizeParkedNeedsHumanTickets — with an in-memory replica map (no DB).
+// synthesizeParkedAttentionTickets — with an in-memory replica map (no DB).
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -24,11 +24,11 @@ import {
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
-// synthesizeParkedNeedsHumanTickets is dynamic-imported + cast (same pattern as
-// board-parked-needs-human.test.ts) — it is not declared in board-data.d.mts.
+// synthesizeParkedAttentionTickets is dynamic-imported + cast (same pattern as
+// board-parked-ask.test.ts) — it is not declared in board-data.d.mts.
 const boardMod = await import(join(HERE, "..", "lib", "board-data.mjs"));
-const synthesizeParkedNeedsHumanTickets = (boardMod as Record<string, unknown>)
-  .synthesizeParkedNeedsHumanTickets as (
+const synthesizeParkedAttentionTickets = (boardMod as Record<string, unknown>)
+  .synthesizeParkedAttentionTickets as (
   parked: unknown,
   existingIds: unknown,
   now: number,
@@ -102,10 +102,10 @@ describe("collectNullTitleIds — replica-aware (CTL-1372)", () => {
   });
 });
 
-describe("synthesizeParkedNeedsHumanTickets — replica title (CTL-1372 — the repro)", () => {
+describe("synthesizeParkedAttentionTickets — replica title (CTL-1372 — the repro)", () => {
   const parked = (over: Record<string, unknown> = {}) => ({
     ticket: KEY,
-    labels: ["needs-human"],
+    labels: ["catalyst-ask"],
     linearState: "Implement",
     priority: 2,
     updatedAt: new Date(120_000).toISOString(),
@@ -113,7 +113,7 @@ describe("synthesizeParkedNeedsHumanTickets — replica title (CTL-1372 — the 
   });
 
   it("renders the replica title instead of the bare ticket id", () => {
-    const cards = synthesizeParkedNeedsHumanTickets([parked()], new Set<string>(), 600_000, {
+    const cards = synthesizeParkedAttentionTickets([parked()], new Set<string>(), 600_000, {
       [KEY]: REPLICA_TITLE,
     });
     expect(cards).toHaveLength(1);
@@ -122,12 +122,12 @@ describe("synthesizeParkedNeedsHumanTickets — replica title (CTL-1372 — the 
   });
 
   it("falls back to the bare id when the replica has no hit (honest last resort)", () => {
-    const cards = synthesizeParkedNeedsHumanTickets([parked()], new Set<string>(), 600_000, {});
+    const cards = synthesizeParkedAttentionTickets([parked()], new Set<string>(), 600_000, {});
     expect(cards[0].title).toBe(KEY); // unchanged pre-replica behavior, never crashes
   });
 
   it("is back-compat when called without a replica map", () => {
-    const cards = synthesizeParkedNeedsHumanTickets([parked()], new Set<string>(), 600_000);
+    const cards = synthesizeParkedAttentionTickets([parked()], new Set<string>(), 600_000);
     expect(cards[0].title).toBe(KEY);
   });
 
@@ -136,14 +136,14 @@ describe("synthesizeParkedNeedsHumanTickets — replica title (CTL-1372 — the 
   // before falling through to the bare id.
   it("on a replica MISS, uses the on-demand title fetched into linfo (CTL-1378)", () => {
     const linfo = { [KEY]: { title: "On-demand fetched title" } };
-    const cards = synthesizeParkedNeedsHumanTickets([parked()], new Set<string>(), 600_000, {}, linfo);
+    const cards = synthesizeParkedAttentionTickets([parked()], new Set<string>(), 600_000, {}, linfo);
     expect(cards[0].title).toBe("On-demand fetched title");
     expect(cards[0].title).not.toBe(KEY);
   });
 
   it("prefers the replica title over the linfo fallback (CTL-1378)", () => {
     const linfo = { [KEY]: { title: "linfo title" } };
-    const cards = synthesizeParkedNeedsHumanTickets(
+    const cards = synthesizeParkedAttentionTickets(
       [parked()],
       new Set<string>(),
       600_000,
@@ -154,7 +154,7 @@ describe("synthesizeParkedNeedsHumanTickets — replica title (CTL-1372 — the 
   });
 
   it("ignores an empty linfo title and falls through to the bare id (CTL-1378)", () => {
-    const cards = synthesizeParkedNeedsHumanTickets(
+    const cards = synthesizeParkedAttentionTickets(
       [parked()],
       new Set<string>(),
       600_000,

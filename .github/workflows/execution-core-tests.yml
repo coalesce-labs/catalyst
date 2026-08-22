@@ -1220,6 +1220,13 @@ jobs:
         #   NOTHING before this edit, against the same positive control of
         #   `assertion-evidence-parity`, which returns its list line.
         #
+        #   CTL-2160 NOTE: needs-human-migration-sweep.test.mjs is REGISTERED here
+        #   deliberately. Its most important case is that an UNAVAILABLE `blocks`
+        #   relation source ABORTS the sweep instead of passing — the audit found
+        #   that rule, as originally specified, could not run on the data source it
+        #   named and would have silently auto-cleared the tickets it exists to
+        #   protect. A safety rule that only runs when someone remembers to run its
+        #   test is not a safety rule.
         #   CTL-2159 NOTE: escalation-publish.test.mjs is the PRODUCER SWEEP's
         #   proof — per producer, that its own trigger no longer writes the Linear
         #   `needs-human` label and that the correct replacement fired. It is
@@ -1285,6 +1292,7 @@ jobs:
             stall-class.test.mjs \
             stall-class-wiring.test.mjs \
             escalation-publish.test.mjs \
+            needs-human-migration-sweep.test.mjs \
             delegate-first.test.mjs \
             durable-escalation.test.mjs \
             cli-header-backtick-guard.test.mjs \

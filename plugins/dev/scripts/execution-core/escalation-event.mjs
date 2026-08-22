@@ -1,13 +1,13 @@
-// escalation-event.mjs — CTL-2056. Needs-human escalation event builder +
+// escalation-event.mjs — CTL-2056. Ticket-escalation event builder +
 // best-effort appender. Mirrors ratelimit-event.mjs's shape (OTel envelope,
 // appendFileSync, never throws) so the catalyst-otel count connector picks up
 // event.entity="ticket" / event.action="escalated" and the unchanged
 // catalyst_recovery_escalation_burst alarm selector matches real escalations.
 //
 // One event name:
-//   ticket.escalated — INFO, emitted at the confirmed-apply chokepoint in
-//   label-guard.mjs's labelNeedsHumanUnlessBeliefOwner (one per genuine
-//   escalation — the marker guard in labelOnce ensures cardinality = 1).
+//   ticket.escalated — INFO, emitted at the confirmed-publish chokepoint in
+//   label-guard.mjs's escalation guard (one per genuine escalation — the marker
+//   guard in labelOnce ensures cardinality = 1).
 
 import { mkdirSync, appendFileSync } from "node:fs";
 import { dirname } from "node:path";
@@ -15,11 +15,11 @@ import { randomBytes } from "node:crypto";
 import { getEventLogPath, log } from "./config.mjs";
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 
-export const ESCALATION_EVENT_NEEDS_HUMAN = "ticket.escalated";
+export const ESCALATION_EVENT_TICKET_ESCALATED = "ticket.escalated";
 
 /**
- * buildEscalationEnvelope — assemble the canonical OTel envelope for a
- * needs-human escalation event. Pure (modulo random ids + timestamp); no I/O.
+ * buildEscalationEnvelope — assemble the canonical OTel envelope for a ticket
+ * escalation event. Pure (modulo random ids + timestamp); no I/O.
  *
  * The count connector in catalyst-otel/collector-config.yaml keys on
  * event.entity × event.action, so setting entity="ticket" and action="escalated"
@@ -47,7 +47,7 @@ export function buildEscalationEnvelope(
   const severityNumber = 9;
 
   const attributes = {
-    "event.name": ESCALATION_EVENT_NEEDS_HUMAN,
+    "event.name": ESCALATION_EVENT_TICKET_ESCALATED,
     "event.entity": "ticket",
     "event.action": "escalated",
     "event.label": ticket ?? "unknown",

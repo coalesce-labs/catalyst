@@ -163,7 +163,7 @@
         "string",
         "null"
       ],
-      "description": "Human-readable explanation written when the daemon escalates the ticket to needs-human status. null during normal operation.",
+      "description": "Human-readable explanation written when the daemon escalates the ticket. null during normal operation.",
       "examples": [
         "revive-budget-exhausted",
         "turn-cap-exhausted after 3 revivals"

@@ -8,7 +8,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  ESCALATION_EVENT_NEEDS_HUMAN,
+  ESCALATION_EVENT_TICKET_ESCALATED,
   buildEscalationEnvelope,
   emitEscalationEvent,
 } from "./escalation-event.mjs";
@@ -23,14 +23,14 @@ describe("buildEscalationEnvelope", () => {
     expect(e.attributes["event.label"]).toBe("CTL-2056");
   });
 
-  test("event.name equals ESCALATION_EVENT_NEEDS_HUMAN constant", () => {
+  test("event.name equals ESCALATION_EVENT_TICKET_ESCALATED constant", () => {
     const e = buildEscalationEnvelope("CTL-1");
-    expect(e.attributes["event.name"]).toBe(ESCALATION_EVENT_NEEDS_HUMAN);
+    expect(e.attributes["event.name"]).toBe(ESCALATION_EVENT_TICKET_ESCALATED);
     expect(e.attributes["event.name"]).toBe("ticket.escalated");
   });
 
   test("event name is namespace-safe (not phase.*/filter.*/broker.daemon/session.heartbeat)", () => {
-    const name = ESCALATION_EVENT_NEEDS_HUMAN;
+    const name = ESCALATION_EVENT_TICKET_ESCALATED;
     expect(name.startsWith("filter.")).toBe(false);
     expect(name.startsWith("broker.daemon")).toBe(false);
     expect(name).not.toBe("session.heartbeat");

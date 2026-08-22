@@ -27,7 +27,7 @@ const DOT_COLOR: Record<HoldingBucket["kind"], string> = {
   blocked: C.red,
   queued: C.fgDim,
   "needs-input": C.fgDim,
-  "needs-human": C.red,
+  ask: C.red,
 };
 const BUCKET_LABEL: Record<HoldingBucket["kind"], string> = {
   "needs-you": "Needs you",
@@ -35,7 +35,7 @@ const BUCKET_LABEL: Record<HoldingBucket["kind"], string> = {
   blocked: "Blocked by dependencies",
   queued: "Held — awaiting capacity",
   "needs-input": "Waiting for input",
-  "needs-human": "Needs human review",
+  ask: "Ask — an answer is needed",
 };
 
 function ColorDot({ color }: { color: string }) {
@@ -180,7 +180,7 @@ export function HoldingBuckets({
           <Bucket bucket={buckets.blocked} onOpenTicket={onOpenTicket} titleByTicket={titleByTicket} />
           <Bucket bucket={buckets.queued} onOpenTicket={onOpenTicket} titleByTicket={titleByTicket} />
           <Bucket bucket={buckets.needsInput} onOpenTicket={onOpenTicket} titleByTicket={titleByTicket} />
-          <Bucket bucket={buckets.needsHuman} onOpenTicket={onOpenTicket} titleByTicket={titleByTicket} />
+          <Bucket bucket={buckets.ask} onOpenTicket={onOpenTicket} titleByTicket={titleByTicket} />
         </>
       )}
     </section>
