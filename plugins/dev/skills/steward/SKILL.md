@@ -54,7 +54,7 @@ You own one project or initiative until it closes: you make work **ready and vis
 | -- | -- |
 | a worker asked a question or reported a blocker | threaded reply on **that ticket** — answer it, don't redo its job |
 | a human commented inside your scope | threaded reply under the **root of their comment**, ≤ 15 min while active |
-| you need a decision only the human can make | an **ask ticket**, linked in your reply; proceed on the default |
+| you need a decision only the human can make | ⛔ first clear the three gates ([`references/escalation.md`](references/escalation.md)) — decide it yourself, take the default, or pull in a peer; a system failure is ONE fleet alert, never a per-ticket block. Then an **ask ticket**, linked in your reply; proceed on the default |
 | a ticket stalled | a nudge in that ticket's thread, plus a line in the status doc |
 | a merge, a blocker change, or 90 min passed | the **status doc** |
 | roughly every 45 min while active | a roll-up turn on the **channel** (numbered, signed) |

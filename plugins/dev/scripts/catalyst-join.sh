@@ -144,6 +144,11 @@ CATALYST_DIR="${CATALYST_DIR:-${HOME}/catalyst}"
 MARKER_DIR="${CATALYST_DIR}/cluster"
 MARKER_FILE="${MARKER_DIR}/join-progress.json"
 LAYER2_CONFIG="${CATALYST_LAYER2_CONFIG_FILE:-${HOME}/.config/catalyst/config.json}"
+# CTL-1210: sibling files in the same dir — shared keys (byte-identical across nodes) and
+# per-node identity/tunables. Derived from LAYER2_CONFIG so CATALYST_LAYER2_CONFIG_FILE
+# overrides in tests also move these siblings correctly.
+CLUSTER_SECRETS_CONFIG="${LAYER2_CONFIG%/*}/cluster-secrets.json"
+NODE_CONFIG="${LAYER2_CONFIG%/*}/node.json"
 
 mkdir -p "$MARKER_DIR"
 
@@ -651,17 +656,19 @@ do_provision_thoughts() {
 
 # ── SHARED config merge ───────────────────────────────────────────────────────
 merge_shared_config() {
-  local cfg="$LAYER2_CONFIG"
+  # CTL-1210: shared bundle keys go to $CLUSTER_SECRETS_CONFIG (byte-identical across nodes,
+  # 0600).  $cfg remains for the webhook-wiring gate's cloudFeed/githubFeed node-local writes.
+  local cfg="$CLUSTER_SECRETS_CONFIG"
+  local cfg_node="$NODE_CONFIG"
   mkdir -p "$(dirname "$cfg")"
   if [[ ! -f "$cfg" ]]; then
-    # Create at 0600 before it ever holds botCreds.orchestrator/worker — the
-    # default umask would otherwise leave a transient world-readable window
-    # (verify security finding; CTL-1203 secrets-600 hygiene).
     echo '{}' > "$cfg"
     chmod 0600 "$cfg" 2>/dev/null || true
   fi
 
-  # Extract SHARED keys from bundle; preserve all existing node-local keys
+  # Extract SHARED keys from bundle. cluster-secrets.json must contain ONLY shared keys so its
+  # sha256 is byte-identical across all cluster nodes. Use `jq -S` (sorted keys) for
+  # deterministic serialization — a //= merge into a mixed file would vary by node-local state.
   local la_project la_team la_statemap bot_orch bot_worker liveness repo_url plugin_url
   la_project="$(bundle_get '.layer1Identity.projectKey')"
   la_team="$(bundle_get '.layer1Identity.teamKey')"
@@ -673,8 +680,10 @@ merge_shared_config() {
   plugin_url="$(bundle_get '.pluginSourceUrl')"
 
   local tmp
-  tmp="$(mktemp "$(dirname "$cfg")/.config.XXXXXX")"
-  jq \
+  tmp="$(mktemp "$(dirname "$cfg")/.cluster-secrets.XXXXXX")"
+  chmod 0600 "$tmp" 2>/dev/null || true
+  # Fresh deterministic write (not //= merge) so the file is byte-identical on every node.
+  jq -S \
     --arg la_project "$la_project" \
     --arg la_team "$la_team" \
     --argjson la_statemap "$la_statemap" \
@@ -683,22 +692,17 @@ merge_shared_config() {
     --arg liveness "$liveness" \
     --arg repo_url "$repo_url" \
     --arg plugin_url "$plugin_url" \
-    '
-      .catalyst //= {}
-      | .catalyst.linear //= {}
-      | .catalyst.linear.bot //= {}
-      | .catalyst.linear.bot.orchestrator //= $bot_orch
-      | .catalyst.linear.bot.worker //= $bot_worker
-      | .catalyst.cluster //= {}
-      | .catalyst.cluster.livenessAnchorIssue //= $liveness
-      | .catalyst.repository //= $repo_url
-      | .catalyst.feedback //= $plugin_url
-      | .catalyst.layer1Identity //= {}
-      | .catalyst.layer1Identity.projectKey //= $la_project
-      | .catalyst.layer1Identity.teamKey //= $la_team
-      | .catalyst.layer1Identity.stateMap //= $la_statemap
-    ' "$cfg" > "$tmp" && mv "$tmp" "$cfg" || { rm -f "$tmp"; return 1; }
-  info "SHARED config merged into ${cfg}"
+    --null-input \
+    '{
+      catalyst: {
+        cluster: { livenessAnchorIssue: $liveness },
+        feedback: $plugin_url,
+        layer1Identity: ($la_statemap | { projectKey: $la_project, teamKey: $la_team, stateMap: . }),
+        linear: { bot: { orchestrator: $bot_orch, worker: $bot_worker } },
+        repository: $repo_url
+      }
+    }' > "$tmp" && mv "$tmp" "$cfg" || { rm -f "$tmp"; return 1; }
+  info "SHARED config written to ${cfg}"
 
   # CTL-1284: webhook ingestion wiring (non-secret smee channels + per-team
   # webhookId map; HMAC secrets travel via SOPS/cluster-sync, not the bundle).
@@ -965,19 +969,31 @@ merge_shared_config() {
     # today's behaviour rather than being pinned to a posture nobody declared.
     local bundle_gf
     bundle_gf="$(echo "$BUNDLE_JSON" | jq -c '.githubFeed // null')" || bundle_gf="null"
-    jq --argjson wh "$monitor_wh_stripped" --argjson gf "$bundle_gf" '
+    # CTL-1210: split webhook writes by key class.
+    # SHARED (monitor.github.smeeChannel)         → $CLUSTER_SECRETS_CONFIG.
+    # NODE   (cloudFeed.mode, githubFeed.mode)    → $cfg_node (node.json).
+    local tmp_shared tmp_node
+    tmp_shared="$(mktemp "$(dirname "$cfg")/.cluster-secrets.XXXXXX")"
+    chmod 0600 "$tmp_shared" 2>/dev/null || true
+    # merge $wh (monitor block) into cluster-secrets.json (non-clobber for monitor sub-keys).
+    jq --argjson wh "$monitor_wh_stripped" '
         .catalyst //= {}
         | .catalyst.monitor = ($wh * (.catalyst.monitor // {}))
-        | .catalyst.cloudFeed //= {}
-        | .catalyst.cloudFeed.mode //= "enforce"
+      ' "$cfg" > "$tmp_shared" && mv "$tmp_shared" "$cfg" || { rm -f "$tmp_shared"; return 1; }
+    # cloudFeed.mode + githubFeed.mode (per-node tunables) → node.json (non-clobber).
+    if [[ ! -f "$cfg_node" ]]; then echo '{}' > "$cfg_node"; chmod 0600 "$cfg_node" 2>/dev/null || true; fi
+    tmp_node="$(mktemp "$(dirname "$cfg_node")/.node.XXXXXX")"
+    chmod 0600 "$tmp_node" 2>/dev/null || true
+    jq --argjson gf "$bundle_gf" '
+        .catalyst //= {}
+        | .catalyst.cloudFeed //= {} | .catalyst.cloudFeed.mode //= "enforce"
         | if ($gf | type) == "object" and ($gf.mode | type) == "string"
           then .catalyst.githubFeed //= {} | .catalyst.githubFeed.mode //= $gf.mode
           else . end
-      ' "$cfg" > "$tmp2" && mv "$tmp2" "$cfg" || { rm -f "$tmp2"; return 1; }
-    local cf_mode
-    cf_mode="$(jq -r '.catalyst.cloudFeed.mode // "unset"' "$cfg" 2>/dev/null)"
-    local gf_mode
-    gf_mode="$(jq -r '.catalyst.githubFeed.mode // "unset"' "$cfg" 2>/dev/null)"
+      ' "$cfg_node" > "$tmp_node" && mv "$tmp_node" "$cfg_node" || { rm -f "$tmp_node"; return 1; }
+    local cf_mode gf_mode
+    cf_mode="$(jq -r '.catalyst.cloudFeed.mode // "unset"' "$cfg_node" 2>/dev/null)"
+    gf_mode="$(jq -r '.catalyst.githubFeed.mode // "unset"' "$cfg_node" 2>/dev/null)"
     if [[ "$github_wired" == "no" ]]; then
       info "webhook ingestion NOT wired (rule=${rule} mode=${CATALYST_DEPLOYMENT_MODE_RESOLVED} roster=${roster_len:-0}) | bundle carried ONLY the retired Linear block (CTL-1928); cloudFeed=${cf_mode} githubFeed=${gf_mode}"
     else
@@ -989,7 +1005,8 @@ merge_shared_config() {
 }
 
 persist_host_name() {
-  local cfg="$LAYER2_CONFIG"
+  # CTL-1210: host.name is a per-node key — write to node.json, not config.json.
+  local cfg="$NODE_CONFIG"
   local host_name="${CATALYST_HOST_NAME:-}"
   if [[ -z "$host_name" ]]; then
     host_name="$(hostname -s 2>/dev/null || hostname | sed 's/\.local$//')"
@@ -997,10 +1014,11 @@ persist_host_name() {
   fi
   if [[ ! -f "$cfg" ]]; then
     echo '{}' > "$cfg"
-    chmod 0600 "$cfg" 2>/dev/null || true  # holds botCreds; protect immediately (CTL-1203)
+    chmod 0600 "$cfg" 2>/dev/null || true  # holds identity; protect immediately (CTL-1203)
   fi
   local tmp
-  tmp="$(mktemp "$(dirname "$cfg")/.config.XXXXXX")"
+  tmp="$(mktemp "$(dirname "$cfg")/.node.XXXXXX")"
+  chmod 0600 "$tmp" 2>/dev/null || true
   jq --arg hn "$host_name" '.catalyst.host.name = $hn' "$cfg" > "$tmp" && mv "$tmp" "$cfg" || { rm -f "$tmp"; return 1; }
   info "host.name set to: ${host_name}"
   # CTL-1185 remediate: return the host name via a global, NOT via stdout. The

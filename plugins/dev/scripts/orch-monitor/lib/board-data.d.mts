@@ -170,6 +170,10 @@ export interface BoardTicket {
    *  stamp is projected). The Inbox row anchors its duration to attentionSince ??
    *  heldSince; null is rendered unavailable, never fabricated. */
   attentionSince: string | null;
+  /** CAT-170: "anchor" | "member" | null — the escalation-correlation role for a
+   *  multi-ticket incident. Members render normally but are suppressed by the
+   *  notification projectors so one incident yields ONE operator alert. */
+  correlationRole: string | null;
   /** CTL-922 (BFF10): the node owning this ticket, from the phase signals
    *  host:{name,id} (CTL-852) or the durable fence projection owner_host (BFF11).
    *  null when no host is named (single-host resolves to the one node). */
@@ -343,7 +347,20 @@ export function deriveAttention(opts?: {
    *  Short-circuits all attention reasons to null — a shipped/canceled ticket must
    *  never surface as needs-human / waiting-on-you from a stale phase signal. */
   linearTerminal?: boolean;
-}): { attention: BoardAttention; attentionSince: string | null; escalationType: string | null };
+  /** CAT-170: the escalation-correlation role ("anchor" | "member") from
+   *  deriveCorrelationRole. Surfaced only on the needs-human branch — it is the
+   *  projection the notification path uses to suppress a member's duplicate push. */
+  correlationRole?: string | null;
+}): {
+  attention: BoardAttention;
+  attentionSince: string | null;
+  escalationType: string | null;
+  correlationRole: string | null;
+};
+
+/** CAT-170: extract the top-level `correlation.role` from the most-recent phase
+ *  signal carrying one. Returns "anchor" | "member" | null. */
+export function deriveCorrelationRole(phaseSigs: unknown[]): string | null;
 
 /** CTL-1239: true when a dead bg-job corpse sits on a Linear-terminal ticket
  *  (Done/Canceled) — leftover state on a shipped/canceled ticket, not a real dead

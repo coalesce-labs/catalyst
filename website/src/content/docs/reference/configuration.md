@@ -7,13 +7,22 @@ sidebar:
   order: 0
 ---
 
-Catalyst reads two config files. The setup script (`setup-catalyst.sh`) writes both for you, so you
+Catalyst reads two config layers. The setup script (`setup-catalyst.sh`) writes both for you, so you
 rarely edit them by hand. This page covers the keys you're most likely to touch.
 
 - **`.catalyst/config.json`** — plain project info. Safe to commit to git.
-- **`~/.config/catalyst/config-{projectKey}.json`** — secrets like API keys. Never commit this.
+- **`~/.config/catalyst/`** — machine-local Layer-2. Never commit these files. Three siblings
+  compose the merged view (earlier wins):
+  - **`cluster-secrets.json`** — shared, byte-identical across all cluster nodes (bot OAuth creds,
+    `smeeChannel`, `livenessAnchorIssue`, etc.). Written by `cluster-sync` from `cluster-bots.sops.json`
+    and by `catalyst-join` from the bundle. Read first.
+  - **`node.json`** — per-node (host name, cloudFeed/githubFeed mode, orchestration tuning, etc.).
+    Written by `catalyst-join` (non-clobber; preserves operator overrides). Read second.
+  - **`config.json`** — backward-compat fallback. Read last. Keys still here on nodes that haven't
+    run `catalyst-join` or `cluster-sync` yet; migrated keys are gradually drained by those tools.
 
-The `projectKey` links the two files.
+The `projectKey` links Layer-1 and the per-project `config-{projectKey}.json` (legacy file for
+per-team API keys; separate from the three Layer-2 siblings above).
 
 ## Project config (`.catalyst/config.json`)
 
@@ -146,6 +155,7 @@ The `orchestration.dispatchMode` key picks how Catalyst runs each ticket:
 | `orchestration.githubQuotaSweep.enabled`                      | `true`                       | Sample the host's GitHub core REST quota and atomically publish it to `<orchDir>/github-quota.json`. Set `false` to disable the timer; a previous snapshot may remain on disk but becomes stale and cannot arm board-health.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `orchestration.githubQuotaSweep.intervalSeconds`              | `300`                        | How often the daemon runs the quota sampler (seconds). The sampler calls the quota-reporting endpoint, which does not consume the core quota it reports.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `responder.intervalSeconds`                                   | `180`                        | How often the daemon-health responder launchd sweep runs (seconds, clamped 60–900). The responder (`health-responder.sh`, CTL-1509) detects a dead/stale cloud-sync replica writer and issues bounded `launchctl kickstart`s, escalating after the attempt cap. Baked into the launchd plist at install time (`install-health-responder.sh`); re-run `catalyst-stack install-services` after changing it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `CATALYST_CLAUDE_UPDATE_MIN_INTERVAL_MS` _(env var)_          | `21600000`                   | Minimum gap between `claude update` invocations (milliseconds; default 6 hours). The `claude-selfupdate.sh` LaunchAgent installed by `catalyst-stack install-services` honours this via a durable marker at `~/catalyst/.claude-selfupdate.last`. Reduce to `0` to force a run on the next LaunchAgent tick; increase to spread out update checks on resource-constrained hosts. The LaunchAgent itself fires every 6 hours (`StartInterval: 21600`) and is installed on all node classes. (CTL-2085) |
 | `orchestration.reconcile.mode`                                | `off`                        | Completion-declaration reconcile timer (CTL-1371). Linear state is driven by **explicit completion declarations** — the model/pipeline/human says "this is done" via `catalyst-linear-reconcile declare <TICKET>` — **never** inferred from PR/merge state (a draft PR opens while work is in progress; a merged PR is not yet Done — the pipeline puts deploy-verification + teardown between merge and Done). The timer drains _pending_ declarations and makes Linear reflect them, retrying any write that didn't land. `off` = inert (also the default); `notify` = compute drift + emit `ticket.completion.drift.<ticket>` events but **never write** (safe first-ship); `write` = write the declared state via the canonical primitive. Runs on the daemon event loop, separate from the dispatch scheduler. Idempotent + CTL-758 backward-write guard (never resurrects a Canceled ticket, never regresses a Done one). |
 | `orchestration.reconcile.intervalSeconds`                     | `600`                        | How often the drain timer ticks (seconds).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `EXECUTION_CORE_RECONCILE_BLIND_ALERT_MS`                     | `300000`                     | Time-based total-board-blindness alarm. When every registered team's reconcile is failing and no team has succeeded inside this window, execution-core raises the fleet admission alert and emits `fleet.health.degraded`. This complements `EXECUTION_CORE_RECONCILE_FAILURE_ALERT_THRESHOLD`; it does not replace the count-based per-team latch.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
@@ -1498,6 +1508,56 @@ outage can never quarantine a healthy, resolvable, in-flight ticket.
 `SCHEDULER_CIRCUIT_BREAKER_THRESHOLD` is the Linear-independent backstop; the runaway knobs are
 observability only.
 
+### Label-write retry cap (CTL-2052)
+
+The disposition/held-label convergers cool down a failed `applyLabel` (CTL-834/COORD-236). A
+**deterministic cloud label rejection** — an exclusive-conflict add that the write-proxy refuses,
+surfaced to the caller as the generic `cloud:failed`/`cloud:rejected` and normalized to
+`cloud:label-rejected` — is cool-down-eligible but never provably terminal on the host, so without a
+cap it would retry ~once per cool-down window forever (each refused write still spending a cloud
+write-budget unit). These env vars on the `catalyst-execution-core` process bound that:
+
+- `SCHEDULER_LABEL_RETRY_CAP` (default `5`) — after this many cool-down **cycles** for one
+  `(ticket, label)` the converger STOPS re-issuing the write and emits one
+  `linear.label.retry-exhausted` event (plus a `log.error`). Attempts are counted per cool-down
+  cycle, not per tick. The prior behavior was effectively `N=∞`, so any finite cap is a strict
+  improvement.
+- `SCHEDULER_LABEL_RETRY_EXHAUSTED_MS` (default `1800000`, 30 min) — the long back-off held after the
+  cap is reached. Must be `>` `SCHEDULER_LABEL_COOLDOWN_MS` so the cap wins over the ordinary
+  per-window cool-down. When it elapses, exactly **one** self-heal probe apply is allowed so a
+  since-resolved conflict can still land (the label is never permanently abandoned — COORD-236); a
+  successful apply resets the counter.
+
+### Fence-standoff human-surfacing bound (CAT-173)
+
+These execution-core environment variables bound how long repeated fence suppression can remain
+invisible to a human. The count and age must both be reached; the 45-minute floor spans three
+15-minute fence cooldowns, preventing a fast tick loop from paging on a transient blip.
+
+| Variable | Default | Meaning |
+| --- | ---: | --- |
+| `CATALYST_FENCE_STANDOFF_CAP` | `4` | Consecutive suppressions required before out-of-band escalation. |
+| `CATALYST_FENCE_STANDOFF_MIN_AGE_MS` | `2700000` (45 min) | Minimum episode age before out-of-band escalation. |
+| `CATALYST_FENCE_STANDOFF_COOLDOWN_MS` | `21600000` (6 h) | After a delivered break-glass, how long the terminal sweep skips this ticket's probe + fence check + `needs-human` write. |
+| `CATALYST_FENCE_STANDOFF_DELIVERY_RETRY_MAX` | `5` | Consecutive FAILED break-glass deliveries that may bypass the ordinary 15-minute suppression cooldown to retry on the very next tick. |
+
+Crossing the bound writes a durable board/push escalation and does not loosen the fence or perform
+a Linear write. Two cadence caveats:
+
+- The out-of-band escalation fires **once per episode**. `breakGlassAt` latches on the first
+  delivered break-glass and is reset only by `clearFenceStandoff` (a later fence PASS, or the
+  terminal branch of the sweep), so `CATALYST_FENCE_STANDOFF_COOLDOWN_MS` paces the ticket's
+  *fence re-probe*, not a repeat page.
+- Because that cooldown gates the whole terminal-sweep probe+write block, a standoff that heals
+  after a break-glass has its `needs-human` Linear write — and the terminal-clear retraction on a
+  late Done — deferred by up to one cooldown window (6 h by default, versus the 15 min the
+  pre-existing `.fence-suppressed` marker imposed).
+- A break-glass whose durable-record or event write fails drops the 15-minute marker so delivery
+  retries next tick. `CATALYST_FENCE_STANDOFF_DELIVERY_RETRY_MAX` bounds that bypass: past it the
+  ordinary cooldown is retained, so a persistently unwritable sink degrades to a 15-minute retry
+  cadence instead of re-running the per-tick Linear probe + fence-check subprocess forever
+  (the CTL-1329 quota burn).
+
 ### Broker watchdog session eviction (CTL-1516)
 
 The broker's watchdog tick keeps per-session bookkeeping (`lastHeartbeat`, `workerToOrchestrator`)
@@ -1546,6 +1606,31 @@ immediately before its terminal `phase-agent-emit-complete` call.
   }
 }
 ```
+
+### Retry-cap escalation correlation (CAT-170)
+
+The exhausted recovery-intent sweep can correlate tickets that reached the retry cap for the same
+normalized failure signature. Signatures are recorded at attempt time in the host-local intent
+ledger, so grouping is per host; legacy or null-signature entries continue to escalate
+individually. In enforce mode, one deterministic anchor carries the operator decision and the other
+tickets receive pointer briefs rather than separate decisions.
+
+| Key | Default | Notes |
+| --- | --- | --- |
+| `CATALYST_RECOVERY_CORRELATION` | `shadow` | `off` preserves independent escalation and emits no correlation events; `shadow` computes candidate groups and emits `recovery.escalation.would-correlate` without changing operator-visible behavior; `enforce` raises one anchored escalation per group and emits `recovery.escalation.correlated` for each member. Matching is case-insensitive and trims surrounding whitespace. Any unrecognized value (empty, misspelled) falls back to `shadow` — never to `off`, so a typo degrades to observe-only rather than silently disabling the telemetry. |
+| `CATALYST_RECOVERY_CORRELATION_WINDOW_MIN` | `60` | Maximum span, in minutes, for matching signatures to belong to one correlated group. Must be a **finite positive** number; `0`, a negative value, `Infinity`, or a non-number falls back to the default. |
+| `CATALYST_RECOVERY_CORRELATION_MIN_GROUP` | `2` | Minimum number of matching candidates required for correlation. Must be an **integer of at least 2** (a group of one is a singleton by definition); anything smaller, non-integer, or non-numeric falls back to the default. |
+
+Both tunables are read once at module load, so a window or group-size change needs a daemon
+restart; the mode is re-read per call and takes effect without one.
+
+A missing or null signature never correlates with another missing signature. Changing the mode to
+`off` restores the independent escalation path; there is no on-disk migration to reverse.
+
+In `enforce` mode a member whose escalation cannot complete (for example a failed `needs-human`
+label write) records a pointer at its anchor under `<orchDir>/.escalation-correlation/<TICKET>.json`,
+so its retry on a later tick stays a pointer instead of becoming a second operator decision. The
+pointer expires with `CATALYST_RECOVERY_CORRELATION_WINDOW_MIN`.
 
 ### Board-health delegate (CTL-1290)
 

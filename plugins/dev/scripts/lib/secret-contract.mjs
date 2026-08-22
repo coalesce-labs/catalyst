@@ -773,10 +773,19 @@ function resolveConfigJson(row, env, cwd) {
     const viaEnv = resolveEnvAliasOnly(row, env);
     if (viaEnv.value != null) return viaEnv;
   }
-  const path = resolveLayer2Path(env);
-  const raw = readJsonField(path, row.configJsonPath);
-  const resolved = canonicalizeConfigJsonValue(raw);
-  if (resolved != null && meetsRequiredObjectFields(row, raw)) {
+  // CTL-1210: probe cluster-secrets.json first (shared keys land there via cluster-sync),
+  // then fall through to config.json for per-node keys and backward-compat installs.
+  const layer2Path = resolveLayer2Path(env);
+  const clusterSecretsPath = join(dirname(layer2Path), "cluster-secrets.json");
+  let resolved = null;
+  let raw;
+  let path = null;
+  for (const candidate of [clusterSecretsPath, layer2Path]) {
+    raw = readJsonField(candidate, row.configJsonPath);
+    resolved = canonicalizeConfigJsonValue(raw);
+    if (resolved != null && meetsRequiredObjectFields(row, raw)) { path = candidate; break; }
+  }
+  if (path != null) {
     return { value: resolved, source: "config-json", provider: row.delivery, rotation: row.rotation, filePath: path };
   }
   // LEGACY TIERS (CTL-1616 PR4, linear-worker-actor only): tried, in order, ONLY once the
