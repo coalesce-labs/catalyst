@@ -35,6 +35,7 @@ import {
   renameSync,
   unlinkSync,
   rmSync,
+  statSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
 // CTL-1568: read-only predicate — is the belief engine the needs-human owner?
@@ -76,6 +77,15 @@ import {
   RECOVERY_CORRELATION_MIN_GROUP,
   RECOVERY_CORRELATION_WINDOW_MS,
 } from "./escalation-correlation.mjs";
+// CTL-1563: the transient-infra exemption. The classifier is a zero-import leaf;
+// the reason RESOLUTION deliberately composes two existing halves rather than
+// authoring a third key ladder — see resolveTicketDeathReason below.
+import {
+  isTransientInfraReason,
+  resolveTransientInfraReasons,
+} from "./transient-infra.mjs";
+import { readAllPhaseSignals } from "./signal-reader.mjs";
+import { resolveSignalReason } from "./escalation-explanation.mjs";
 
 // Wrap defaultLog to ensure it's a function (config.mjs may export an object)
 const defaultLogFn = typeof defaultLog === "function" ? defaultLog : (msg) => {
@@ -3050,6 +3060,88 @@ export function clearCorrelationPointer(orchDir, ticket) {
     return true;
   } catch {
     return false; // absent is the common case
+  }
+}
+
+// resolveTicketDeathReason — CTL-1563. The death reason recorded by a ticket's
+// MOST RECENT worker phase signal, or null when there is nothing to read.
+//
+// ⚠️ THIS FUNCTION AUTHORS NO KEY LADDER, AND THAT IS THE POINT. Two existing
+// halves already own the halves of this question, and both traps below have
+// already been paid for once:
+//
+//   1. WHICH SIGNAL — signal-reader.mjs's readAllPhaseSignals(orchDir), the wider
+//      per-file observation set (every workers/<T>/phase-<p>.json, artifacts and
+//      CTL-702 yield tombstones excluded), not the one-row-per-ticket active-phase
+//      projection.
+//   2. WHICH KEY — escalation-explanation.mjs's exported resolveSignalReason(signal),
+//      whose three-key ladder (stalledReason → failureReason → attentionReason) is
+//      strictly stronger than scheduler.mjs's two-key readDispatchFailureReason, and
+//      whose three-valued return (named / absent / unreadable) never throws.
+//
+// ⚠️ The signal object is passed through UNMODIFIED. parseSignal returns a
+// PROJECTION that lifts only ticket/layout/phase/status/liveness/updatedAt/pr/
+// worktreePath/host to the top level — `attentionReason`, the exact field the
+// overload backstop writes, survives ONLY under `.raw`. resolveSignalReason reads
+// both levels for precisely this reason; flattening `.raw` first, or hand-rolling
+// a ladder against the on-disk shape, produces a resolver that is GREEN against an
+// on-disk-shaped fixture and INERT in production. That is not hypothetical — it is
+// Codex #3699 P1, where an operator card read empty 41 times out of 41. The
+// anti-inert control in recovery-reasoning.test.mjs asserts the projection path.
+//
+// FAIL-CLOSED: only a `named` reason is returned. An absent worker dir, an
+// unparseable signal, a signal recording no reason, and a throw all answer null —
+// and null is not transient, so "could not look" escalates exactly as it does
+// today. A resolver that cannot distinguish "no reason" from "could not read"
+// must never be the thing that buys a retry.
+//
+// @param {string} orchDir the orchestrator dir holding workers/
+// @param {string} ticket the ticket id
+// @returns {string|null} the trimmed reason, or null
+export function resolveTicketDeathReason(orchDir, ticket, opts = {}) {
+  if (!orchDir || typeof ticket !== "string" || ticket.trim() === "") return null;
+  const { readSignals = readAllPhaseSignals, resolveReason = resolveSignalReason } = opts;
+  try {
+    const mine = readSignals(orchDir).filter((s) => s?.ticket === ticket);
+    if (mine.length === 0) return null;
+    // Newest wins. `updatedAt` is the authoritative recency stamp and every writer
+    // sets it; mtime is only the fallback for a pre-CTL signal that predates the
+    // field, and a stamped signal always outranks an unstamped one so the two
+    // clocks are never compared against each other.
+    let newest = null;
+    let newestRank = null;
+    for (const signal of mine) {
+      const parsed = Date.parse(signal.updatedAt ?? signal.raw?.updatedAt ?? "");
+      const rank = Number.isFinite(parsed)
+        ? { stamped: 1, at: parsed }
+        : { stamped: 0, at: signalMtimeMs(signal.signalPath) };
+      if (
+        newestRank === null ||
+        rank.stamped > newestRank.stamped ||
+        (rank.stamped === newestRank.stamped && rank.at > newestRank.at)
+      ) {
+        newest = signal;
+        newestRank = rank;
+      }
+    }
+    // Deliberately NO fallback to an older phase's reason. The freshest signal is
+    // the ticket's current state; reaching backwards would let a long-resolved
+    // overload exempt a ticket whose CURRENT death is structural.
+    const resolved = resolveReason(newest);
+    return resolved?.status === "named" ? resolved.reason : null;
+  } catch {
+    return null; // never throw on the escalation path
+  }
+}
+
+// Recency fallback for a signal with no parseable `updatedAt`. Returns -Infinity
+// on any read failure so an unreadable file can never outrank a readable one.
+function signalMtimeMs(signalPath) {
+  if (typeof signalPath !== "string" || signalPath === "") return -Infinity;
+  try {
+    return statSync(signalPath).mtimeMs;
+  } catch {
+    return -Infinity;
   }
 }
 

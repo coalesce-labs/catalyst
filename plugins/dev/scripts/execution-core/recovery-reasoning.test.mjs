@@ -39,7 +39,9 @@ import {
   resolveCorrelationMode, // CAT-170
   readCorrelationPointer, // CAT-170
   writeCorrelationPointer, // CAT-170
+  resolveTicketDeathReason, // CTL-1563
 } from "./recovery-reasoning.mjs";
+import { readAllPhaseSignals } from "./signal-reader.mjs";
 import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join as pathJoin } from "node:path";
 import { tmpdir } from "node:os";
@@ -4024,5 +4026,139 @@ describe("defaultWriteEscalationSignal — stale correlation clearing (CAT-170)"
       role: "anchor",
       anchor: "CTL-4",
     });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CTL-1563 — transient-infra deaths are retryable, not spent recovery attempts.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("resolveTicketDeathReason (CTL-1563)", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(pathJoin(tmpdir(), "rec-death-"));
+  });
+  afterEach(() => {
+    try {
+      rmSync(orchDir, { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
+  });
+
+  // Writes a NESTED phase signal in the ON-DISK shape (what the backstop writes).
+  const writeSignal = (ticket, phase, body) => {
+    const dir = pathJoin(orchDir, "workers", ticket);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      pathJoin(dir, `phase-${phase}.json`),
+      JSON.stringify({ ticket, phase, ...body }),
+    );
+  };
+
+  test("resolves the incident case — a stalled overload signal names sdk-overloaded-exhausted", () => {
+    // Exactly what defaultWriteSignalStalled writes on the SDK overload backstop.
+    writeSignal("CTL-OL", "implement", {
+      status: "stalled",
+      attentionReason: "sdk-overloaded-exhausted",
+      assertedBy: "sdk-backstop",
+      updatedAt: "2026-07-29T12:00:00Z",
+    });
+    expect(resolveTicketDeathReason(orchDir, "CTL-OL")).toBe("sdk-overloaded-exhausted");
+  });
+
+  test("⚠️ ANTI-INERT CONTROL — the reason resolves through the CANONICAL PROJECTION shape", () => {
+    // signal-reader.mjs's parseSignal returns a PROJECTION: only ticket/layout/
+    // phase/status/liveness/updatedAt/pr/worktreePath/host are lifted to the top
+    // level. `attentionReason` survives ONLY under `.raw`. A resolver written
+    // against the on-disk shape alone is therefore INERT in production even though
+    // an on-disk-shaped fixture makes it look green (Codex #3699 P1).
+    //
+    // This test proves the production path by asserting the real reader is in the
+    // loop: the fixture is written to disk, read back through readAllPhaseSignals,
+    // and the reason must come off `.raw`. It is the SAME fixture as the test
+    // above — which is the point: on disk there is one shape, and the projection
+    // is what the resolver actually receives.
+    writeSignal("CTL-RAW", "implement", {
+      status: "stalled",
+      attentionReason: "sdk-overloaded-exhausted",
+    });
+    const [projected] = readAllPhaseSignals(orchDir).filter((s) => s.ticket === "CTL-RAW");
+    // The trap, made explicit: the projection does NOT carry the key at the top.
+    expect(projected.attentionReason).toBeUndefined();
+    expect(projected.raw.attentionReason).toBe("sdk-overloaded-exhausted");
+    // And the resolver still names it.
+    expect(resolveTicketDeathReason(orchDir, "CTL-RAW")).toBe("sdk-overloaded-exhausted");
+  });
+
+  test("delegates the full three-key ladder — a stalledReason resolves too", () => {
+    // A hand-rolled two-key (failureReason ?? attentionReason) resolver — the
+    // superseded scheduler.mjs:readDispatchFailureReason shape — would MISS this.
+    writeSignal("CTL-SR", "verify", { status: "stalled", stalledReason: "sdk-overloaded-exhausted" });
+    expect(resolveTicketDeathReason(orchDir, "CTL-SR")).toBe("sdk-overloaded-exhausted");
+    writeSignal("CTL-FR", "verify", { status: "failed", failureReason: "ended-without-declaration" });
+    expect(resolveTicketDeathReason(orchDir, "CTL-FR")).toBe("ended-without-declaration");
+  });
+
+  test("picks the MOST RECENT phase signal when a ticket has several", () => {
+    writeSignal("CTL-MULTI", "research", {
+      status: "done",
+      updatedAt: "2026-07-29T10:00:00Z",
+    });
+    writeSignal("CTL-MULTI", "plan", {
+      status: "failed",
+      failureReason: "stale-older-death",
+      updatedAt: "2026-07-29T11:00:00Z",
+    });
+    writeSignal("CTL-MULTI", "implement", {
+      status: "stalled",
+      attentionReason: "sdk-overloaded-exhausted",
+      updatedAt: "2026-07-29T12:00:00Z",
+    });
+    expect(resolveTicketDeathReason(orchDir, "CTL-MULTI")).toBe("sdk-overloaded-exhausted");
+  });
+
+  test("a newest signal that records NO reason does not fall back to an older one", () => {
+    // Fail-closed: the freshest signal is the ticket's current state. Reaching
+    // backwards for an older phase's reason would let a long-resolved overload
+    // exempt a ticket whose CURRENT death is structural.
+    writeSignal("CTL-STALE", "plan", {
+      status: "stalled",
+      attentionReason: "sdk-overloaded-exhausted",
+      updatedAt: "2026-07-29T10:00:00Z",
+    });
+    writeSignal("CTL-STALE", "implement", {
+      status: "failed",
+      updatedAt: "2026-07-29T12:00:00Z",
+    });
+    expect(resolveTicketDeathReason(orchDir, "CTL-STALE")).toBeNull();
+  });
+
+  test("returns null for an absent ticket, an absent workers dir, and an unparseable signal", () => {
+    expect(resolveTicketDeathReason(orchDir, "CTL-NOPE")).toBeNull();
+    expect(resolveTicketDeathReason(pathJoin(orchDir, "nope"), "CTL-X")).toBeNull();
+    const dir = pathJoin(orchDir, "workers", "CTL-BAD");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(pathJoin(dir, "phase-implement.json"), "{not json");
+    expect(resolveTicketDeathReason(orchDir, "CTL-BAD")).toBeNull();
+  });
+
+  test("returns null (never throws) on a missing/blank orchDir or ticket", () => {
+    expect(resolveTicketDeathReason(null, "CTL-X")).toBeNull();
+    expect(resolveTicketDeathReason(orchDir, null)).toBeNull();
+    expect(resolveTicketDeathReason(orchDir, "")).toBeNull();
+  });
+
+  test("a blank/whitespace reason is `absent`, not a named reason", () => {
+    writeSignal("CTL-BLANK", "implement", { status: "stalled", attentionReason: "   " });
+    expect(resolveTicketDeathReason(orchDir, "CTL-BLANK")).toBeNull();
+  });
+
+  test("does not confuse one ticket's signal for another's", () => {
+    writeSignal("CTL-ONE", "implement", {
+      status: "stalled",
+      attentionReason: "sdk-overloaded-exhausted",
+    });
+    expect(resolveTicketDeathReason(orchDir, "CTL-TWO")).toBeNull();
   });
 });
