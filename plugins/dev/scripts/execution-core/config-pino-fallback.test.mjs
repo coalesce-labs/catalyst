@@ -63,6 +63,12 @@ function stageScratch() {
   // the omission on the first full run rather than letting a host discover it — which
   // is exactly the contract the comment above states, working.
   cpSync(resolve(__dirname, "../lib/github-feed-mode.mjs"), join(libDir, "github-feed-mode.mjs"));
+  // CTL-1216: getEventLogPath now delegates to the zero-import event-log-paths
+  // leaf, so it joins config.mjs's relative-import graph. ⭐ Same story as
+  // github-feed-mode above: this fixture caught the omission on the CI run
+  // rather than letting a host discover it at load time — the contract stated
+  // in the comment above, working a second time.
+  cpSync(resolve(__dirname, "../lib/event-log-paths.mjs"), join(libDir, "event-log-paths.mjs"));
   // CTL-1785: config.mjs now imports the entitlement seam — the zero-import
   // ../lib/entitlement.mjs leaf, plus the sibling entitlement-roster.mjs (which
   // itself pulls in entitlement-event.mjs) and execution-core/lib/canonical-event.mjs
