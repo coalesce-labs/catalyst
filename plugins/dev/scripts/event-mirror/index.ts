@@ -17,6 +17,11 @@ import {
   filterNewLines,
   type MirrorState,
 } from "./lib/state.ts";
+import {
+  eventLogBasenameFor,
+  resolveRotationScheme,
+  parseEventLogBasename,
+} from "../lib/event-log-paths.mjs";
 
 const CATALYST_DIR = process.env.CATALYST_DIR ?? join(homedir(), "catalyst");
 const EVENTS_DIR = join(CATALYST_DIR, "events");
@@ -26,15 +31,44 @@ const DEFAULT_SSH_TIMEOUT_S = 10;
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
-function currentMonthFile(): string {
-  const d = new Date();
-  const yyyy = d.getUTCFullYear();
-  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
-  return `${yyyy}-${mm}.jsonl`;
+// CTL-1216: resolved by lib/event-log-paths.mjs, not derived here.
+function currentEventFile(): string {
+  return eventLogBasenameFor(new Date(), resolveRotationScheme({ env: process.env }));
 }
 
 function localEventFilePath(): string {
-  return join(EVENTS_DIR, currentMonthFile());
+  return join(EVENTS_DIR, currentEventFile());
+}
+
+// pickRemoteFile — WHICH file to tail on a REMOTE host.
+//
+// ⚠️ This is the mixed-fleet hazard, and it is the reason Phase 3 must land
+// before any host flips its scheme. The old code computed the basename LOCALLY
+// and applied it to the remote path: a peer writing 2026-W34.jsonl while this
+// node is still on `month` would be asked for 2026-08.jsonl — a file that
+// exists, that stopped growing, and that therefore returns an empty tail
+// forever. The mirror would report the host HEALTHY and fan in nothing. A silent
+// zero, which is the failure mode this repo keeps re-learning.
+//
+// So: ask the remote what it actually has and take the NEWEST log file, ordered
+// by the interval its NAME encodes (not lexically — "2026-08.jsonl" and
+// "2026-W34.jsonl" do not sort chronologically as strings, and not by mtime,
+// which an rsync or a backup can rewrite). Anything unparseable — including the
+// CTL-1813 *.legacy.* quarantine files — is skipped.
+//
+// Fail direction: if listing is unavailable (no listFn injected, ssh failed, or
+// the remote returned nothing usable) fall back to the locally-computed name.
+// That is exactly today's behaviour, so a listing failure is never WORSE than
+// the status quo — it just stops being an improvement.
+export function pickRemoteFile(remoteNames: string[] | null, fallback: string): string {
+  if (!remoteNames || remoteNames.length === 0) return fallback;
+  let best: { name: string; startMs: number } | null = null;
+  for (const name of remoteNames) {
+    const iv = parseEventLogBasename(name);
+    if (!iv) continue;
+    if (best === null || iv.startMs > best.startMs) best = { name, startMs: iv.startMs };
+  }
+  return best === null ? fallback : best.name;
 }
 
 function loadState(): MirrorState {
@@ -72,6 +106,31 @@ export type FetchFn = (
   cursor: number,
   file: string
 ) => Promise<FetchResult>;
+
+/** Lists the remote host's event-log basenames. CTL-1216. Injectable for the
+ *  same reason FetchFn is: the transport is swappable (a cloud changefeed drops
+ *  in here without touching the dedup core). */
+export type ListFn = (host: string) => Promise<string[]>;
+
+function defaultListFn(): ListFn {
+  return async (host) => {
+    const proc = Bun.spawn(
+      ["ssh", "-o", `ConnectTimeout=${DEFAULT_SSH_TIMEOUT_S}`, "-o", "BatchMode=yes",
+       host, "ls -1 ~/catalyst/events/ 2>/dev/null || true"],
+      { stdout: "pipe", stderr: "pipe" }
+    );
+    const [stdout, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      proc.exited,
+    ]);
+    // Unlike the fetch path, a listing failure is NOT fatal: pickRemoteFile
+    // falls back to the locally-computed name, which is the pre-CTL-1216
+    // behaviour. Returning [] rather than throwing keeps a host that merely
+    // cannot be listed from being marked unhealthy.
+    if (exitCode !== 0) return [];
+    return stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+  };
+}
 
 function defaultFetchFn(): FetchFn {
   return async (host, cursor, file) => {
@@ -137,6 +196,9 @@ export interface MirrorTickOpts {
   hosts: string[];
   state: MirrorState;
   fetchFn: FetchFn;
+  /** CTL-1216. Optional: absent means "compute the name locally", i.e. the
+   *  pre-CTL-1216 behaviour. */
+  listFn?: ListFn;
   localFile?: string;
 }
 
@@ -146,8 +208,8 @@ export interface TickResult {
 }
 
 export async function mirrorTick(opts: MirrorTickOpts): Promise<TickResult> {
-  const { hosts, state, fetchFn } = opts;
-  const currentFile = currentMonthFile();
+  const { hosts, state, fetchFn, listFn } = opts;
+  const localName = currentEventFile();
   const localFile = opts.localFile ?? localEventFilePath();
   const byHostResult: TickResult["byHost"] = {};
   let totalAppended = 0;
@@ -158,11 +220,21 @@ export async function mirrorTick(opts: MirrorTickOpts): Promise<TickResult> {
   await Promise.all(
     hosts.map(async (host) => {
       const hs = getHostState(state, host);
-      // Reset cursor on file rollover (month changed).
-      if (hs.currentFile && hs.currentFile !== currentFile) {
-        hs.cursor = 0;
+
+      // CTL-1216: ask the remote which file it is actually writing, and keep a
+      // cursor PER FILE. The old code reset the single cursor to 0 whenever the
+      // locally-computed name changed — re-reading the whole new file, and
+      // losing our place in the old one while the remote was very likely still
+      // appending to it across the boundary.
+      let remoteNames: string[] | null = null;
+      if (listFn) {
+        try {
+          remoteNames = await listFn(host);
+        } catch {
+          remoteNames = null; // listing is best-effort; pickRemoteFile falls back
+        }
       }
-      hs.currentFile = currentFile;
+      const remoteFile = pickRemoteFile(remoteNames, localName);
 
       // CTL-1812: capture the offset this read STARTS at, and set the cursor
       // ABSOLUTELY from it below. The previous `hs.cursor += bytesRead` was a
@@ -175,15 +247,18 @@ export async function mirrorTick(opts: MirrorTickOpts): Promise<TickResult> {
       // remote later grew past the parked cursor. Setting it absolutely makes the
       // update idempotent — an overlapping tick now computes the SAME endpoint
       // instead of doubling it.
-      const startCursor = hs.cursor;
+      const startCursor = hs.cursors[remoteFile] ?? 0;
       try {
-        const { lines, bytesRead } = await fetchFn(host, startCursor, currentFile);
-        const survivors = filterNewLines(state, lines, currentFile);
+        const { lines, bytesRead } = await fetchFn(host, startCursor, remoteFile);
+        // Dedup is keyed on the LOCAL file we are appending to, not the remote
+        // one: the ring exists to stop a line being written to this file twice,
+        // and several peers on different schemes all fan into one local file.
+        const survivors = filterNewLines(state, lines, localFile);
         if (survivors.length > 0) {
           appendFileSync(localFile, survivors.map(l => l + "\n").join(""));
           totalAppended += survivors.length;
         }
-        hs.cursor = startCursor + bytesRead;
+        hs.cursors[remoteFile] = startCursor + bytesRead;
         hs.healthy = true;
         hs.lastSeenTs = new Date().toISOString();
         byHostResult[host] = { healthy: true, linesAppended: survivors.length };
@@ -226,6 +301,7 @@ export function resolveHosts(): string[] {
 if (import.meta.main) {
   const intervalMs = parseInt(process.env.CATALYST_EVENT_MIRROR_INTERVAL_MS ?? String(DEFAULT_INTERVAL_MS), 10);
   const fetchFn = defaultFetchFn();
+  const listFn = defaultListFn();
   const state = loadState();
 
   console.log("[catalyst-event-mirror] starting (CTL-1654)");
@@ -236,7 +312,7 @@ if (import.meta.main) {
       console.log("[catalyst-event-mirror] no hosts configured — sleeping");
       return;
     }
-    const result = await mirrorTick({ hosts, state, fetchFn });
+    const result = await mirrorTick({ hosts, state, fetchFn, listFn });
     emitHealthEvent(
       Object.fromEntries(Object.entries(result.byHost).map(([h, v]) => [h, v.healthy]))
     );

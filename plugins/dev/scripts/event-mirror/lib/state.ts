@@ -1,12 +1,42 @@
 // event-mirror/lib/state.ts — per-host byte cursor + event-id dedup ring (CTL-1654).
 // Transport-agnostic: the mirror writer injects a fetchFn; this module owns bookkeeping only.
 
-/** Per-host mirror state persisted across ticks. */
+/** Per-host mirror state persisted across ticks.
+ *
+ *  CTL-1216: cursors are keyed BY FILE. The old shape was one scalar `cursor`
+ *  plus a `currentFile`, and a file change reset the cursor to 0 — which is both
+ *  a re-read of the whole new file and, worse, a permanent loss of where we were
+ *  in the old one if the remote is still being appended to across the boundary.
+ *  Per-file cursors also make a MIXED-SCHEME fleet safe: this node can be
+ *  tracking a peer's 2026-W34.jsonl and its own 2026-08.jsonl independently
+ *  instead of applying one locally-computed name to every host.
+ *
+ *  `cursor`/`currentFile` are retained as the MIGRATION source only — loadState
+ *  folds them into `cursors` once and they are never written again. Dropping
+ *  them outright would silently restart every host from byte 0 on the first tick
+ *  after deploy, re-mirroring an entire file. */
 export interface HostState {
-  cursor: number;
+  cursors: Record<string, number>;
   lastSeenTs: string | null;
   healthy: boolean;
-  currentFile: string | null;
+  /** @deprecated migration source only — see the note above. */
+  cursor?: number;
+  /** @deprecated migration source only — see the note above. */
+  currentFile?: string | null;
+}
+
+/** Fold the pre-CTL-1216 scalar shape into the per-file map, exactly once.
+ *  A host that already has `cursors` is left alone. */
+export function migrateHostState(hs: HostState): HostState {
+  if (!hs.cursors) hs.cursors = {};
+  if (typeof hs.cursor === "number" && hs.currentFile) {
+    if (hs.cursors[hs.currentFile] === undefined) {
+      hs.cursors[hs.currentFile] = hs.cursor;
+    }
+    delete hs.cursor;
+    delete hs.currentFile;
+  }
+  return hs;
 }
 
 /** The full mirror state (one entry per host). */
@@ -23,9 +53,9 @@ export function newMirrorState(): MirrorState {
 
 export function getHostState(state: MirrorState, host: string): HostState {
   if (!state.byHost[host]) {
-    state.byHost[host] = { cursor: 0, lastSeenTs: null, healthy: true, currentFile: null };
+    state.byHost[host] = { cursors: {}, lastSeenTs: null, healthy: true };
   }
-  return state.byHost[host];
+  return migrateHostState(state.byHost[host]);
 }
 
 /**

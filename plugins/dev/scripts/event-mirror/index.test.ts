@@ -7,8 +7,21 @@ import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir, hostname } from "node:os";
 import { join } from "node:path";
-import { mirrorTick, resolveHosts, type FetchFn } from "./index.ts";
-import { newMirrorState, filterNewLines, extractEventId } from "./lib/state.ts";
+import { pickRemoteFile, mirrorTick, resolveHosts, type FetchFn } from "./index.ts";
+import { newMirrorState, filterNewLines, extractEventId, migrateHostState } from "./lib/state.ts";
+import type { MirrorState } from "./lib/state.ts";
+
+// CTL-1216: cursors are keyed by remote FILENAME now. These tests inject no
+// listFn, so every host resolves to the one locally-computed name — assert that
+// there is exactly ONE cursor as well as its value, since "the cursor is right"
+// would also be satisfied by a map that quietly grew a second entry per tick.
+function soleCursor(state: MirrorState, host: string): number {
+  const cursors = state.byHost[host].cursors;
+  const keys = Object.keys(cursors);
+  expect(keys.length).toBe(1);
+  return cursors[keys[0]];
+}
+
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -167,7 +180,7 @@ describe("mirrorTick — fan-in from multiple hosts", () => {
       fetchFn: makeCursorFetch({ mini: { lines: [EV_A], nextBytes: bytes } }),
       localFile,
     });
-    expect(state.byHost["mini"].cursor).toBe(bytes);
+    expect(soleCursor(state, "mini")).toBe(bytes);
   });
 
   test("unreachable host degrades, does not crash mirror", async () => {
@@ -327,8 +340,8 @@ describe("CTL-1812 — overlapping ticks must not park the cursor past remote EO
       const eof = Buffer.byteLength(content, "utf8");
       // THE ASSERTION. With `cursor += bytesRead` this lands at ~2*eof and the mirror
       // goes dark for everything written before the remote catches up.
-      expect(state.byHost["h1"].cursor).toBeLessThanOrEqual(eof);
-      expect(state.byHost["h1"].cursor).toBe(eof);
+      expect(soleCursor(state, "h1")).toBeLessThanOrEqual(eof);
+      expect(soleCursor(state, "h1")).toBe(eof);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -355,9 +368,127 @@ describe("CTL-1812 — overlapping ticks must not park the cursor past remote EO
       for (let i = 0; i < 20; i++) {
         expect(body).toContain(`"b-${i}"`);
       }
-      expect(state.byHost["h1"].cursor).toBe(Buffer.byteLength(grown, "utf8"));
+      expect(soleCursor(state, "h1")).toBe(Buffer.byteLength(grown, "utf8"));
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// ── CTL-1216: mixed-fleet remote-file discovery + per-file cursors ───────────
+//
+// The hazard this closes: the basename used to be computed LOCALLY and applied
+// to the REMOTE path. A peer writing 2026-W34.jsonl while this node is still on
+// `month` was asked for 2026-08.jsonl — a file that exists, stopped growing, and
+// returns an empty tail forever. The mirror reported the host HEALTHY and fanned
+// in nothing. A silent zero.
+describe("CTL-1216 — remote file discovery", () => {
+  test("picks the NEWEST remote file by its encoded interval, not lexically", () => {
+    // "2026-08.jsonl" > "2026-W34.jsonl" is FALSE as strings ("0" < "W"), so a
+    // lexical max would pick the weekly file here by luck and the monthly one in
+    // other months. Order must come from the interval the name encodes.
+    expect(pickRemoteFile(["2026-07.jsonl", "2026-08.jsonl"], "fallback")).toBe("2026-08.jsonl");
+    expect(pickRemoteFile(["2026-08.jsonl", "2026-W34.jsonl"], "fallback")).toBe("2026-W34.jsonl");
+    expect(pickRemoteFile(["2026-W34.jsonl", "2026-W33.jsonl"], "fallback")).toBe("2026-W34.jsonl");
+  });
+
+  test("skips CTL-1813 quarantine files and other non-log names", () => {
+    expect(
+      pickRemoteFile(
+        ["2026-08.jsonl.legacy.20260813T101010Z.512", "README.md", "2026-08.jsonl"],
+        "fallback",
+      ),
+    ).toBe("2026-08.jsonl");
+  });
+
+  test("falls back to the locally-computed name when listing is unavailable", () => {
+    // Fail direction: no worse than the pre-CTL-1216 behaviour, never worse.
+    expect(pickRemoteFile(null, "2026-08.jsonl")).toBe("2026-08.jsonl");
+    expect(pickRemoteFile([], "2026-08.jsonl")).toBe("2026-08.jsonl");
+    expect(pickRemoteFile(["README.md", "notes.txt"], "2026-08.jsonl")).toBe("2026-08.jsonl");
+  });
+
+  test("a peer on a DIFFERENT scheme is tailed on ITS file, not ours", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mirror-mixed-"));
+    try {
+      const state = newMirrorState();
+      const localFile = join(dir, "local.jsonl");
+      const asked: string[] = [];
+      const fetchFn: FetchFn = async (_host, _cursor, file) => {
+        asked.push(file);
+        return { lines: [], bytesRead: 0 };
+      };
+      // The peer has rotated to weekly; this node has not.
+      const listFn = async () => ["2026-08.jsonl", "2026-W34.jsonl"];
+      await mirrorTick({ hosts: ["peer"], state, fetchFn, listFn, localFile });
+      expect(asked).toEqual(["2026-W34.jsonl"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a listFn that THROWS degrades to the local name, host stays healthy", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mirror-listfail-"));
+    try {
+      const state = newMirrorState();
+      const localFile = join(dir, "local.jsonl");
+      const asked: string[] = [];
+      const fetchFn: FetchFn = async (_host, _cursor, file) => {
+        asked.push(file);
+        return { lines: [], bytesRead: 0 };
+      };
+      const listFn = async () => {
+        throw new Error("ssh exploded");
+      };
+      const res = await mirrorTick({ hosts: ["peer"], state, fetchFn, listFn, localFile });
+      expect(asked.length).toBe(1);
+      // A host we merely could not LIST is not an unhealthy host.
+      expect(res.byHost["peer"].healthy).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("cursors are per FILE — a rollover does not lose our place in the old one", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mirror-percursor-"));
+    try {
+      const state = newMirrorState();
+      const localFile = join(dir, "local.jsonl");
+      const fetchFn: FetchFn = async (_host, _cursor, _file) => ({ lines: [], bytesRead: 10 });
+
+      await mirrorTick({ hosts: ["h"], state, fetchFn, listFn: async () => ["2026-W33.jsonl"], localFile });
+      await mirrorTick({ hosts: ["h"], state, fetchFn, listFn: async () => ["2026-W34.jsonl"], localFile });
+
+      const cursors = state.byHost["h"].cursors;
+      // The W33 cursor SURVIVES the move to W34 — the old code reset the single
+      // cursor to 0 and lost it, while the remote was very likely still
+      // appending to W33 across the boundary.
+      expect(cursors["2026-W33.jsonl"]).toBe(10);
+      expect(cursors["2026-W34.jsonl"]).toBe(10);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("CTL-1216 — HostState migration", () => {
+  test("the pre-CTL-1216 scalar shape folds into the map exactly once", () => {
+    const hs = { cursor: 4096, currentFile: "2026-08.jsonl", lastSeenTs: null, healthy: true } as never;
+    const migrated = migrateHostState(hs);
+    expect(migrated.cursors).toEqual({ "2026-08.jsonl": 4096 });
+    // Dropping the old fields outright would silently restart every host from
+    // byte 0 on the first tick after deploy, re-mirroring a whole file.
+    expect(migrated.cursor).toBeUndefined();
+    expect(migrated.currentFile).toBeUndefined();
+  });
+
+  test("migration is idempotent and never clobbers a live per-file cursor", () => {
+    const hs = { cursors: { "2026-08.jsonl": 99 }, cursor: 1, currentFile: "2026-08.jsonl", lastSeenTs: null, healthy: true } as never;
+    expect(migrateHostState(hs).cursors).toEqual({ "2026-08.jsonl": 99 });
+  });
+
+  test("a scalar with no currentFile is dropped, not filed under a guessed name", () => {
+    const hs = { cursor: 500, currentFile: null, lastSeenTs: null, healthy: true } as never;
+    expect(migrateHostState(hs).cursors).toEqual({});
   });
 });

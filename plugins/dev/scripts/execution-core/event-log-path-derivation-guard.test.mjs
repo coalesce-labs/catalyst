@@ -119,7 +119,6 @@ export function scanForSelfDerivedEventLogNames(root) {
 // fixed site that stays listed is just as red as a new site that is not.
 const ALLOWED_REMAINING = [
   // ── still to fold, Phase 2 (readers) ──────────────────────────────────────
-  "event-mirror/index.ts",
 
   // ── SANCTIONED loud fallbacks, not un-migrated sites ──────────────────────
   // These DO resolve through the shared mirror on the normal path. What the
