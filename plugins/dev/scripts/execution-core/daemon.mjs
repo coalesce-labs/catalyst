@@ -67,6 +67,7 @@ import {
   codexConfig, // CTL-1457: codex-exec runtime settings (codexHome/bin/…) for the boot-eligibility gate
   readGovernanceConfig, // CTL-1552: boot governance-mode + source self-report
   readGovernanceSources, // CTL-1552: which config layer each governance mode resolved from
+  resolvePublishPreflightMode,
 } from "./config.mjs";
 import { resolveBootIdentity } from "./host-boot-identity.mjs"; // CTL-1093
 import { readStickyIdentity, writeStickyIdentity } from "./host-sticky.mjs"; // CTL-1093
@@ -159,6 +160,7 @@ import { resolveGithubBootAuth, rearmGithubTokenFromFile } from "./github-auth-p
 import { rearmClaudeAccountsFromFile } from "./claude-accounts-rearm.mjs"; // CTL-1984: account-slot live-rearm hook
 import { resolveBootDependencies, BOOT_DEPENDENCY_HOLD_REASON } from "./boot-dependency-preflight.mjs";
 import { getReconcileHealth } from "./reconcile-health.mjs";
+import { probePublishCapability as realProbePublishCapability, resolvePushRemote } from "./publish-preflight.mjs";
 import { registerRearmHook, armSecret } from "../lib/secret-contract.mjs"; // CTL-1623: wires rearmGithubTokenFromFile as the github-token row's registered timer rearm hook
 import { startAutoTuner } from "./autotune.mjs"; // CTL-684: side-car maxParallel auto-tuner
 import { dispatchTicket, makeCommentWakeDispatch, makePhaseAwareDispatchFn, setAgentSessionNarrator } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch; CTL-1365a/b: executor→dispatch selection at the launch seam + comment-wake executor binding; CTL-1457: per-phase-aware dispatchFn factory (owns the executor→dispatch selection internally)
@@ -166,7 +168,7 @@ import { resolveSdkBootExecutor, assertSdkAuth } from "./sdk-run-phase-agent.mjs
 import { resolveCodexBootEligibility } from "./codex-run-phase-agent.mjs"; // CTL-1457: codex boot gate (auth.json + `codex --version`) that degrades routed codex phases + emits execution-core.executor.codex-fallback
 import { removeLabel as defaultRemoveLabel } from "./linear-write.mjs"; // CTL-549: clear needs-human on resume
 import { setLinearWriteProxy, setLinearWriteProxyResolver } from "./linear-write.mjs"; // CTL-1889: install the cloud write-proxy transport + its replica-backed id resolver
-import { createLinearWriteProxy } from "./linear-write-proxy.mjs"; // CTL-1889
+import { createLinearWriteProxy, resolveWriteBudgetCaps } from "./linear-write-proxy.mjs"; // CTL-1889; CTL-2073: same cap resolution, for the boot-time doctor snapshot below
 import { createAgentSessionNarrator } from "./agent-session-narrator.mjs"; // CTL-1943
 import { createProxyResolver } from "./linear-write-proxy-resolve.mjs"; // CTL-1889
 import { buildTeamIdentityMismatchEvents } from "./config-identity-event.mjs"; // CTL-2076: surface a registry team-identity mismatch (CAT-52) on the unified event log
@@ -1166,7 +1168,23 @@ export function startDaemon({
   // AFTER the pid file — readers require both to agree, so the reverse order would
   // publish a snapshot that is briefly unverifiable. `pidFile` is recorded in the
   // payload because EXECUTION_CORE_PID_FILE can relocate it (round-5 P2).
-  writeDaemonRuntimeEnv(orchDir, { pidFile });
+  // CTL-2073 (Codex P1): fold the write-proxy's live budget into the SAME pid-gated
+  // snapshot drain-disabled already uses (round-3 P1's fix for CTL-1678) — a stale
+  // execution-core.env read otherwise disagrees with what THIS process actually
+  // enforces once the file is edited post-boot but pre-restart. Mode is read here
+  // (again — it is pure/cheap; the real read for proxy construction happens later
+  // at its own call site) purely to decide whether a live budget exists to record;
+  // "off" means there is no live proxy to disagree with the file, so write-budget-
+  // health.mjs's own ledger-absent branch already covers that host state.
+  const writeBudgetSnapshot =
+    readLinearWriteProxyConfig().mode !== "off" ? resolveWriteBudgetCaps(process.env) : null;
+  writeDaemonRuntimeEnv(orchDir, {
+    pidFile,
+    writeBudget: writeBudgetSnapshot && {
+      CATALYST_LINEAR_WRITE_DAILY_BUDGET: writeBudgetSnapshot.dailyBudget,
+      CATALYST_LINEAR_WRITE_TICKET_CAP: writeBudgetSnapshot.perTicketCap,
+    },
+  });
 
   // A throw from any composed boot step must not leave a stale PID file —
   // stopDaemon removes _pidFile via unlinkSync. Rethrow so the main()-level
@@ -1904,6 +1922,18 @@ export function startDaemon({
       // terminal-ness from the local Catalyst-Cloud replica. undefined → inert.
       replica: replicaReader,
       isBgJobAlive,
+      // CAT-60: production arms the otherwise-hermetic scheduler seam. Resolve
+      // the project repo from the ticket prefix and cache per remote slug.
+      publishPreflightMode: resolvePublishPreflightMode({ configPath }),
+      probePublishCapability: ({ ticket }) => {
+        const team = String(ticket || "").split("-")[0];
+        const project = realListProjects().find((p) => p.team === team);
+        return realProbePublishCapability({
+          repoRoot: project?.repoRoot,
+          pushRemote: resolvePushRemote({ repoRoot: project?.repoRoot, layer1Path: configPath, layer2Path }),
+          cacheDir: join(orchDir, ".publish-preflight"),
+        });
+      },
       // CTL-1044: provide the production operator-event appender for the
       // scheduler's `appendIntentEvent` seam (scheduler.mjs:4300). Without this
       // the seam is null and the advance-shadow comparator's disagree/tick

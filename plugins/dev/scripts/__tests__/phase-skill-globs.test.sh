@@ -86,8 +86,19 @@ echo "Test: phase-monitor-merge assigns EMIT before it uses it (CTL-1998)"
 # `set -euo pipefail` prelude — so the unresolved-human-thread branch aborted with
 # an unbound-variable error and emitted nothing, recording an undeclared
 # abandonment. Assert ORDER, not mere presence: presence was never the problem.
-EMIT_ASSIGN_LINE="$(grep -nE '^EMIT=' "$PHASE_MONITOR_MERGE" | head -1 | cut -d: -f1)"
-EMIT_FIRST_USE_LINE="$(grep -nE '"\$EMIT"' "$PHASE_MONITOR_MERGE" | head -1 | cut -d: -f1)"
+#
+# After the CTL-2080 progressive-disclosure split, EMIT= lives in references/prelude.md
+# and uses live in references/merge-execute.md and references/end-block.md. Compose the
+# skill body in semantic runtime order (SKILL.md, then prelude.md first, then the rest
+# alphabetically) so the line-number ordering check still reflects the actual load order.
+SKILL_MM_DIR="${REPO_ROOT}/plugins/dev/skills/phase-monitor-merge"
+_mm_body_semantic() {
+  cat "$PHASE_MONITOR_MERGE" 2>/dev/null
+  cat "${SKILL_MM_DIR}/references/prelude.md" 2>/dev/null
+  find "${SKILL_MM_DIR}/references" -name "*.md" ! -name "prelude.md" 2>/dev/null | sort | xargs cat 2>/dev/null
+}
+EMIT_ASSIGN_LINE="$(_mm_body_semantic | grep -nE '^EMIT=' | head -1 | cut -d: -f1)"
+EMIT_FIRST_USE_LINE="$(_mm_body_semantic | grep -nE '"\$EMIT"' | head -1 | cut -d: -f1)"
 if [[ -z "$EMIT_ASSIGN_LINE" ]]; then
   fail "phase-monitor-merge SKILL never assigns EMIT"
 elif [[ -z "$EMIT_FIRST_USE_LINE" ]]; then

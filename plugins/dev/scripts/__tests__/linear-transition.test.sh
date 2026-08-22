@@ -438,10 +438,10 @@ ONESHOT_SKILL="${REPO_ROOT}/plugins/legacy/skills/oneshot/SKILL.md"
 run "oneshot SKILL.md references linear-transition.sh" \
   bash -c "grep -q 'linear-transition.sh' '$ONESHOT_SKILL'"
 
-# ─── Test 19: merge-pr SKILL.md uses the helper ───────────────────────────
-MERGE_SKILL="${REPO_ROOT}/plugins/dev/skills/merge-pr/SKILL.md"
-run "merge-pr SKILL.md uses linear-transition.sh" \
-  bash -c "grep -q 'linear-transition.sh' '$MERGE_SKILL'"
+# ─── Test 19: merge-pr skill uses the helper (SKILL.md + references/) ────
+MERGE_SKILL_DIR="${REPO_ROOT}/plugins/dev/skills/merge-pr"
+run "merge-pr skill uses linear-transition.sh" \
+  bash -c "grep -rq 'linear-transition.sh' '$MERGE_SKILL_DIR'"
 
 # ─── Test 20: verifying transition uses stateMap.verifying from config ────
 # Phase-agent observability (CTL-454). New transition keys for the verify and

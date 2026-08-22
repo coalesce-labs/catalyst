@@ -74,6 +74,21 @@ try {
 }
 export { log };
 
+export const PUBLISH_PREFLIGHT_MODES = ["off", "shadow", "enforce"];
+
+export function resolvePublishPreflightMode({ env = process.env, configPath = null, logger = log } = {}) {
+  let raw = env?.CATALYST_PUBLISH_PREFLIGHT;
+  if (raw == null && configPath) {
+    try {
+      raw = JSON.parse(readFileSync(configPath, "utf8"))?.catalyst?.orchestration?.publishPreflight?.mode;
+    } catch { /* missing/malformed config uses shipped default */ }
+  }
+  const mode = typeof raw === "string" ? raw.trim().toLowerCase() : "shadow";
+  if (PUBLISH_PREFLIGHT_MODES.includes(mode)) return mode;
+  logger?.warn?.({ value: raw }, "publish-preflight: invalid mode; using shadow");
+  return "shadow";
+}
+
 // CTL-1617: the canonical deployment-mode resolver is a zero-import leaf
 // (../lib/deployment-mode.mjs) shared verbatim by execution-core (this
 // re-export) and orch-monitor (direct cross-directory import) — never
@@ -193,6 +208,14 @@ export function writeDaemonRuntimeEnv(
     pid = process.pid,
     pidFile = null,
     now = () => new Date().toISOString(),
+    // CTL-2073: { CATALYST_LINEAR_WRITE_DAILY_BUDGET, CATALYST_LINEAR_WRITE_TICKET_CAP }
+    // — the SAME validated values createLinearWriteProxy resolved for THIS process
+    // (linear-write-proxy.mjs's resolveWriteBudgetCaps), or null when no write-proxy
+    // is live on this daemon (mode "off" — there is no live budget to disagree
+    // about; write-budget-health.mjs's own ledger-absent branch already covers that
+    // host state). Same mutable-file problem this whole mechanism exists to solve
+    // for drainDisabled/bootDrained, applied to the write-budget doctor check.
+    writeBudget = null,
   } = {}
 ) {
   const payload = {
@@ -208,6 +231,7 @@ export function writeDaemonRuntimeEnv(
     startedAt: now(),
     drainDisabled: isDrainDisabled(env),
     bootDrained: env?.CATALYST_BOOT_DRAINED === "1",
+    writeBudget,
   };
   try {
     const p = getDaemonRuntimeEnvPath(orchDir);
