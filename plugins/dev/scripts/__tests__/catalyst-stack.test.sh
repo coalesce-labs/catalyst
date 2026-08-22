@@ -551,6 +551,47 @@ run "uninstall-services removes all three plists" bash -c "
   fi
 "
 
+run "uninstall-services removes the claude-update plist" bash -c "
+  if [[ \"\$(uname -s)\" != \"Darwin\" ]]; then true; else
+    fh='${SCRATCH}/uninst_cu_home'
+    mkdir -p \"\$fh/Library/LaunchAgents\"
+    printf '<plist/>' > \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-claude-update.plist\"
+    mkdir -p '${SCRATCH}/uninst_cu_bin'
+    printf '#!/usr/bin/env bash\nexit 0\n' > '${SCRATCH}/uninst_cu_bin/launchctl'
+    chmod +x '${SCRATCH}/uninst_cu_bin/launchctl'
+    CATALYST_ALLOW_FOREIGN_HOME_LAUNCHD=1 PATH='${SCRATCH}/uninst_cu_bin:${REAL_PATH}' HOME=\"\$fh\" '${STACK}' uninstall-services >/dev/null 2>&1 || true
+    [[ ! -e \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-claude-update.plist\" ]]
+  fi
+"
+
+# ── CTL-2085: claude CLI self-update LaunchAgent (StartInterval, all node classes) ──
+# --print assertions are pure (no launchctl/filesystem), so they run in CI + macOS.
+
+run "install-services --print emits the claude-update label" bash -c "
+  '${STACK}' install-services --print 2>&1 | grep -q 'ai.coalesce.catalyst-claude-update'
+"
+
+run "install-services --print claude-update has StartInterval 21600" bash -c "
+  out=\$('${STACK}' install-services --print 2>/dev/null)
+  printf '%s\n' \"\$out\" | awk '/ai.coalesce.catalyst-claude-update/{found=1} found && /StartInterval/{p=1} p && /<integer>/{print; exit}' | grep -q '<integer>21600</integer>'
+"
+
+run "install-services --print claude-update has RunAtLoad true" bash -c "
+  out=\$('${STACK}' install-services --print 2>/dev/null)
+  printf '%s\n' \"\$out\" | awk '/ai.coalesce.catalyst-claude-update/{found=1} found' | grep -A1 'RunAtLoad' | grep -q '<true/>'
+"
+
+run "install-services --print claude-update PATH includes ~/.local/bin (for claude)" bash -c "
+  out=\$('${STACK}' install-services --print 2>/dev/null)
+  printf '%s\n' \"\$out\" | awk '/ai.coalesce.catalyst-claude-update/{found=1} found' | grep -q '/.local/bin'
+"
+
+run "install-services --print is side-effect-free (no claude-update plist written)" bash -c "
+  fh='${SCRATCH}/cu_home'; mkdir -p \"\$fh/Library/LaunchAgents\";
+  HOME=\"\$fh\" '${STACK}' install-services --print >/dev/null 2>&1;
+  [[ ! -e \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-claude-update.plist\" ]]
+"
+
 # ── CTL-1285: dedicated log-shipper LaunchAgent (KeepAlive) ───────────────────
 # --print assertions are pure (no launchctl/filesystem), so they run in CI + macOS.
 
