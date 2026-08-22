@@ -166,7 +166,7 @@ import { resolveSdkBootExecutor, assertSdkAuth } from "./sdk-run-phase-agent.mjs
 import { resolveCodexBootEligibility } from "./codex-run-phase-agent.mjs"; // CTL-1457: codex boot gate (auth.json + `codex --version`) that degrades routed codex phases + emits execution-core.executor.codex-fallback
 import { removeLabel as defaultRemoveLabel } from "./linear-write.mjs"; // CTL-549: clear needs-human on resume
 import { setLinearWriteProxy, setLinearWriteProxyResolver } from "./linear-write.mjs"; // CTL-1889: install the cloud write-proxy transport + its replica-backed id resolver
-import { createLinearWriteProxy } from "./linear-write-proxy.mjs"; // CTL-1889
+import { createLinearWriteProxy, resolveWriteBudgetCaps } from "./linear-write-proxy.mjs"; // CTL-1889; CTL-2073: same cap resolution, for the boot-time doctor snapshot below
 import { createAgentSessionNarrator } from "./agent-session-narrator.mjs"; // CTL-1943
 import { createProxyResolver } from "./linear-write-proxy-resolve.mjs"; // CTL-1889
 import { buildTeamIdentityMismatchEvents } from "./config-identity-event.mjs"; // CTL-2076: surface a registry team-identity mismatch (CAT-52) on the unified event log
@@ -1166,7 +1166,23 @@ export function startDaemon({
   // AFTER the pid file — readers require both to agree, so the reverse order would
   // publish a snapshot that is briefly unverifiable. `pidFile` is recorded in the
   // payload because EXECUTION_CORE_PID_FILE can relocate it (round-5 P2).
-  writeDaemonRuntimeEnv(orchDir, { pidFile });
+  // CTL-2073 (Codex P1): fold the write-proxy's live budget into the SAME pid-gated
+  // snapshot drain-disabled already uses (round-3 P1's fix for CTL-1678) — a stale
+  // execution-core.env read otherwise disagrees with what THIS process actually
+  // enforces once the file is edited post-boot but pre-restart. Mode is read here
+  // (again — it is pure/cheap; the real read for proxy construction happens later
+  // at its own call site) purely to decide whether a live budget exists to record;
+  // "off" means there is no live proxy to disagree with the file, so write-budget-
+  // health.mjs's own ledger-absent branch already covers that host state.
+  const writeBudgetSnapshot =
+    readLinearWriteProxyConfig().mode !== "off" ? resolveWriteBudgetCaps(process.env) : null;
+  writeDaemonRuntimeEnv(orchDir, {
+    pidFile,
+    writeBudget: writeBudgetSnapshot && {
+      CATALYST_LINEAR_WRITE_DAILY_BUDGET: writeBudgetSnapshot.dailyBudget,
+      CATALYST_LINEAR_WRITE_TICKET_CAP: writeBudgetSnapshot.perTicketCap,
+    },
+  });
 
   // A throw from any composed boot step must not leave a stale PID file —
   // stopDaemon removes _pidFile via unlinkSync. Rethrow so the main()-level

@@ -1,10 +1,30 @@
-# Escalation — the three gates before anything reaches a human
+# Escalation — the gates before anything reaches a human
 
 **A stuck agent is asking YOU for help, not filing an escalation.** You hold the broader context and
 have the standing mandate to *unblock*, not to relay. An agent saying "I'm stuck" is an input to your
 judgement, never a decision that has already been made.
 
-Nothing reaches the human until you have answered all three:
+Nothing reaches the human until you have answered all four — **starting with gate zero.**
+
+## 0. Do I even know WHY it is stuck?
+
+⛔ **"Why has this not moved?" is never an escalation. It is a diagnosis job you dispatch yourself,
+automatically** — the moment you notice a stall, a ticket nothing picks up, a phase that will not
+advance, or a PR that will not merge. Finding out is your job, not the human's.
+
+**Never file an ask whose options amount to _investigate_ vs _don't investigate_, or _wait_ vs
+_look_.** That spends a human's attention authorising work you could simply have done.
+
+> Ryan, 2026-08-21: *"dispatch an agent to diagnose why this is stuck.. this should be the default
+> thing we always do for these things.. you shouldn't need to escalate to me about it.. once you know
+> and you need a decision."*
+
+The ask that earned this rule offered him *"leave it — worker cadence, will pick up on its own"*
+versus *"investigate"*, and then sat as his **top blocking item for ~13 hours** while holding a P1.
+No human input could improve either option.
+
+When you do escalate afterwards, **lead with the cause.** An ask carrying a diagnosis is worth a
+human's time; an ask carrying a question mark usually is not.
 
 ## 1. Can I decide this myself?
 
@@ -27,7 +47,8 @@ move** — a second steward with adjacent context is usually faster than a human
 nothing scarce. "I couldn't do it" is not the same as "a human must do it."
 
 Only a genuine **product / priority / approval** decision, or an action only a human can physically
-take (tap a device, hold a credential, approve a spend), survives all three and becomes an ask.
+take (tap a device, hold a credential, approve a spend), survives all four and becomes an ask —
+and it arrives carrying the diagnosis from gate zero, not a question mark.
 
 ## ⛔ A system-level failure is never a per-ticket human block
 
