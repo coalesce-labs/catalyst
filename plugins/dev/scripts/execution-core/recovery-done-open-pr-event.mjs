@@ -24,16 +24,17 @@ import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 import { hostName } from "./lib/host-identity.mjs";
+// CTL-1216: THE event-log path resolver — a zero-npm-import leaf, so it keeps
+// this module loadable under the plain-node CLI.
+import { getEventLogPath } from "../lib/event-log-paths.mjs";
 
-// defaultAppend — append a JSONL line to the canonical unified event log. Path is
-// resolved the same way the rest of the reconciler emits (CATALYST_DIR, monthly
-// rotation) so this module stays runtime-portable: it works under the daemon AND
-// under the plain-node CLI without importing the bun-tinted config.mjs.
+// defaultAppend — append a JSONL line to the canonical unified event log.
+// CTL-1216: the path is now RESOLVED by lib/event-log-paths.mjs rather than
+// re-derived here. The module stays runtime-portable for the same reason it did
+// before — it works under the daemon AND under the plain-node CLI without
+// importing the bun-tinted config.mjs — because the leaf is zero-npm-import.
 function defaultAppend(line) {
-  const dir = process.env.CATALYST_DIR || join(homedir(), "catalyst");
-  const d = new Date();
-  const month = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
-  const file = join(dir, "events", `${month}.jsonl`);
+  const file = getEventLogPath({ env: process.env });
   mkdirSync(dirname(file), { recursive: true });
   appendFileSync(file, line);
 }
