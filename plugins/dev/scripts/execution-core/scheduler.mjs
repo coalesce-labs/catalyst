@@ -112,7 +112,12 @@ import {
   GATEWAY_EXISTS_FRESH_MS,
 } from "./linear-query.mjs";
 import { gatewayLabelsHit, descriptorAgeMs } from "./gateway-read.mjs"; // CTL-1079 / CTL-1570
-import { getProjectConfig, listProjects, ownerRepoFromRepoRoot, resolveEligibleQuery } from "./registry.mjs"; // CTL-1157: ownerRepoFromRepoRoot reconciles registry repoRoot → GitHub owner/repo for board-health's composite (repo,number) PR-status lookup; resolveEligibleQuery (CTL-1783) — the reopen-to-eligible-status check
+import {
+  getProjectConfig,
+  listProjects,
+  ownerRepoFromRepoRoot,
+  resolveEligibleQuery,
+} from "./registry.mjs"; // CTL-1157: ownerRepoFromRepoRoot reconciles registry repoRoot → GitHub owner/repo for board-health's composite (repo,number) PR-status lookup; resolveEligibleQuery (CTL-1783) — the reopen-to-eligible-status check
 import {
   appendPublishPreflightBlockedEvent as defaultAppendPublishPreflightBlockedEvent,
   appendPublishPreflightWouldBlockEvent as defaultAppendPublishPreflightWouldBlockEvent,
@@ -1365,7 +1370,10 @@ export function expireYieldedSignals(
   } catch (err) {
     // ⚠️ NEVER SILENT. A swallowed throw here disables expiry exactly the way the
     // TDZ ReferenceError did — the defect this function was extracted to fix.
-    log.warn({ orchDir, err: err?.message }, "expireYieldedSignals: signal read failed — no yield evaluated this tick (CTL-1854)");
+    log.warn(
+      { orchDir, err: err?.message },
+      "expireYieldedSignals: signal read failed — no yield evaluated this tick (CTL-1854)"
+    );
     return { evaluated: 0, ok: false };
   }
   for (const sig of signals ?? []) {
@@ -1488,7 +1496,9 @@ export function retractContradictedFailures(
   // facts, and collapsing them is how a detector stops being able to fail. Same
   // reason the classifier is three-valued at all.
   const heldReasons = Object.create(null);
-  const note = (r) => { heldReasons[r] = (heldReasons[r] ?? 0) + 1; };
+  const note = (r) => {
+    heldReasons[r] = (heldReasons[r] ?? 0) + 1;
+  };
   let signals;
   try {
     signals = readAll(orchDir);
@@ -1541,8 +1551,7 @@ export function retractContradictedFailures(
         _file.startsWith("phase-") && _file.endsWith(".json")
           ? _file.slice("phase-".length, -".json".length)
           : null;
-      const ticket =
-        typeof sig.ticket === "string" && sig.ticket ? sig.ticket : sig.derivedTicket;
+      const ticket = typeof sig.ticket === "string" && sig.ticket ? sig.ticket : sig.derivedTicket;
       const phase = typeof sig.phase === "string" && sig.phase ? sig.phase : sig.derivedPhase;
 
       // Conjunct (b) — the artifact. ⚠️ THREE-VALUED: `null` means the probe
@@ -2749,7 +2758,10 @@ function classifyLabelCooldownLog(reason, { cloudMsg, throttledMsg, terminalMsg 
 // meanwhile — COORD-236 "never permanently abandon a label"). Placed BEFORE the ordinary
 // per-window cool-down gate so the cap wins over the time gate.
 function labelRetryCapBlocks(orchDir, ticket, label, now, { cap, exhaustedMs }) {
-  const st = labelRetryState(readLabelCooldownMarker(orchDir, ticket, label), now, { cap, exhaustedMs });
+  const st = labelRetryState(readLabelCooldownMarker(orchDir, ticket, label), now, {
+    cap,
+    exhaustedMs,
+  });
   if (st.blocked) return true;
   if (st.exhaustedProbe) clearLabelCooldown(orchDir, ticket, label); // spend one self-heal probe
   return false;
@@ -2789,7 +2801,10 @@ export function convergeHeldLabel(
   if (
     orchDir &&
     desired &&
-    labelRetryCapBlocks(orchDir, ticket, desired, now(), { cap: retryCap, exhaustedMs: retryExhaustedMs })
+    labelRetryCapBlocks(orchDir, ticket, desired, now(), {
+      cap: retryCap,
+      exhaustedMs: retryExhaustedMs,
+    })
   ) {
     return 0;
   }
@@ -2836,7 +2851,12 @@ export function convergeHeldLabel(
           // CTL-2083/CTL-2027 Phase 1: a budget/rate refusal arms the same
           // cool-down the apply side uses so the next tick does not re-issue
           // this doomed removal, and counts toward the retry cap.
-          else settleRefusedRemoval(orchDir, ticket, label, r, now(), { cap: retryCap, exhaustedMs: retryExhaustedMs, onRetryExhausted });
+          else
+            settleRefusedRemoval(orchDir, ticket, label, r, now(), {
+              cap: retryCap,
+              exhaustedMs: retryExhaustedMs,
+              onRetryExhausted,
+            });
           onRemoveResult?.(label, removed);
         },
         (err) => {
@@ -2853,7 +2873,12 @@ export function convergeHeldLabel(
     if (removed) clearMarker(label);
     // CTL-2083/CTL-2027 Phase 1: sync path (test doubles) — arm the cool-down
     // and count toward the retry cap on a refusal too.
-    else settleRefusedRemoval(orchDir, ticket, label, res, now(), { cap: retryCap, exhaustedMs: retryExhaustedMs, onRetryExhausted });
+    else
+      settleRefusedRemoval(orchDir, ticket, label, res, now(), {
+        cap: retryCap,
+        exhaustedMs: retryExhaustedMs,
+        onRetryExhausted,
+      });
     onRemoveResult?.(label, removed);
   };
   for (const label of HELD_LABELS_REMOVABLE) {
@@ -2865,7 +2890,10 @@ export function convergeHeldLabel(
       // ordering as the apply-side gate above.
       if (
         orchDir &&
-        labelRetryCapBlocks(orchDir, ticket, label, now(), { cap: retryCap, exhaustedMs: retryExhaustedMs })
+        labelRetryCapBlocks(orchDir, ticket, label, now(), {
+          cap: retryCap,
+          exhaustedMs: retryExhaustedMs,
+        })
       ) {
         continue;
       }
@@ -2936,8 +2964,18 @@ export function convergeHeldLabel(
           "coord-236: held-label apply THROTTLED (host write budget / rate limit) — backing off; this write is not re-issued until the cool-down elapses",
         terminalMsg: "ctl-834: held-label apply unrecoverable — backing off (cool-down)",
       });
-      log.warn({ ticket, label: desired, reason: res.reason, label_failure_class: cls, attempts }, message);
-      maybeEscalateRetryExhausted({ ticket, label: desired, attempts, reason: res.reason, cap: retryCap, onRetryExhausted }); // CTL-2052 AC3
+      log.warn(
+        { ticket, label: desired, reason: res.reason, label_failure_class: cls, attempts },
+        message
+      );
+      maybeEscalateRetryExhausted({
+        ticket,
+        label: desired,
+        attempts,
+        reason: res.reason,
+        cap: retryCap,
+        onRetryExhausted,
+      }); // CTL-2052 AC3
     } else if (orchDir && desired && (res === undefined || res?.applied === true)) {
       clearLabelCooldown(orchDir, ticket, desired); // CTL-2052: success resets the ledger
     }
@@ -2995,7 +3033,10 @@ export function convergeDispositionLabel(
   if (
     orchDir &&
     desired &&
-    labelRetryCapBlocks(orchDir, ticket, desired, now(), { cap: retryCap, exhaustedMs: retryExhaustedMs })
+    labelRetryCapBlocks(orchDir, ticket, desired, now(), {
+      cap: retryCap,
+      exhaustedMs: retryExhaustedMs,
+    })
   ) {
     return 0;
   }
@@ -3014,7 +3055,10 @@ export function convergeDispositionLabel(
       // ordinary per-window cool-down, mirroring convergeHeldLabel's ordering.
       if (
         orchDir &&
-        labelRetryCapBlocks(orchDir, ticket, label, now(), { cap: retryCap, exhaustedMs: retryExhaustedMs })
+        labelRetryCapBlocks(orchDir, ticket, label, now(), {
+          cap: retryCap,
+          exhaustedMs: retryExhaustedMs,
+        })
       ) {
         continue;
       }
@@ -3037,7 +3081,12 @@ export function convergeDispositionLabel(
       }
       if (res != null && typeof res.then === "function") {
         res.then(
-          (r) => settleRefusedRemoval(orchDir, ticket, label, r, now(), { cap: retryCap, exhaustedMs: retryExhaustedMs, onRetryExhausted }),
+          (r) =>
+            settleRefusedRemoval(orchDir, ticket, label, r, now(), {
+              cap: retryCap,
+              exhaustedMs: retryExhaustedMs,
+              onRetryExhausted,
+            }),
           (err) =>
             log.warn(
               { ticket, phase: "admission", label, err: err?.message },
@@ -3045,7 +3094,11 @@ export function convergeDispositionLabel(
             )
         );
       } else {
-        settleRefusedRemoval(orchDir, ticket, label, res, now(), { cap: retryCap, exhaustedMs: retryExhaustedMs, onRetryExhausted });
+        settleRefusedRemoval(orchDir, ticket, label, res, now(), {
+          cap: retryCap,
+          exhaustedMs: retryExhaustedMs,
+          onRetryExhausted,
+        });
       }
       writes++;
     }
@@ -3071,8 +3124,18 @@ export function convergeDispositionLabel(
           "coord-236: disposition-label apply THROTTLED (host write budget / rate limit) — backing off; this write is not re-issued until the cool-down elapses",
         terminalMsg: "ctl-764: disposition-label apply unrecoverable — backing off (cool-down)",
       });
-      log.warn({ ticket, label: desired, reason: res.reason, label_failure_class: cls, attempts }, message);
-      maybeEscalateRetryExhausted({ ticket, label: desired, attempts, reason: res.reason, cap: retryCap, onRetryExhausted }); // CTL-2052 AC3
+      log.warn(
+        { ticket, label: desired, reason: res.reason, label_failure_class: cls, attempts },
+        message
+      );
+      maybeEscalateRetryExhausted({
+        ticket,
+        label: desired,
+        attempts,
+        reason: res.reason,
+        cap: retryCap,
+        onRetryExhausted,
+      }); // CTL-2052 AC3
     } else if (orchDir && desired && (res === undefined || res?.applied === true)) {
       clearLabelCooldown(orchDir, ticket, desired); // CTL-2052: success resets the ledger
     }
@@ -3169,7 +3232,11 @@ function clearLabelCooldown(orchDir, ticket, label) {
 }
 function inLabelCooldown(orchDir, ticket, label, now) {
   const marker = readLabelCooldownMarker(orchDir, ticket, label);
-  return marker != null && typeof marker.failedAt === "number" && now - marker.failedAt < LABEL_COOLDOWN_MS;
+  return (
+    marker != null &&
+    typeof marker.failedAt === "number" &&
+    now - marker.failedAt < LABEL_COOLDOWN_MS
+  );
 }
 // CTL-2052 — the marker carries a per-(ticket,label) attempt count so AC3 can bound
 // the storm. Read the prior count, increment, persist, and RETURN the new value so the
@@ -3220,7 +3287,14 @@ export function labelRetryState(marker, now, { cap, exhaustedMs } = {}) {
 // use tiny caps/windows; production uses the real ones) and both the sync and
 // thenable call sites in both convergers funnel through this ONE place —
 // guaranteeing they cannot drift apart on the escalation behavior either.
-function settleRefusedRemoval(orchDir, ticket, label, res, now, { cap, exhaustedMs, onRetryExhausted } = {}) {
+function settleRefusedRemoval(
+  orchDir,
+  ticket,
+  label,
+  res,
+  now,
+  { cap, exhaustedMs, onRetryExhausted } = {}
+) {
   if (!orchDir || res == null) return;
   if (res.removed === false && shouldCoolDownLabel(res.reason)) {
     const attempts = recordLabelCooldown(orchDir, ticket, label, now);
@@ -3229,12 +3303,24 @@ function settleRefusedRemoval(orchDir, ticket, label, res, now, { cap, exhausted
     // that is not actually missing.
     const throttled = isThrottledLabelReason(res.reason);
     log.warn(
-      { ticket, label, reason: res.reason, label_failure_class: throttled ? "throttled" : "terminal" },
+      {
+        ticket,
+        label,
+        reason: res.reason,
+        label_failure_class: throttled ? "throttled" : "terminal",
+      },
       throttled
         ? "coord-236/ctl-2083: held-label REMOVE THROTTLED (host write budget / rate limit) — backing off; this removal is not re-issued until the cool-down elapses"
         : "ctl-2083: held-label remove unrecoverable — backing off (cool-down)"
     );
-    maybeEscalateRetryExhausted({ ticket, label, attempts, reason: res.reason, cap, onRetryExhausted }); // CTL-2027 Phase 1 (AC3 extended to removals)
+    maybeEscalateRetryExhausted({
+      ticket,
+      label,
+      attempts,
+      reason: res.reason,
+      cap,
+      onRetryExhausted,
+    }); // CTL-2027 Phase 1 (AC3 extended to removals)
   }
 }
 
@@ -3986,7 +4072,7 @@ function stampFenceStandoffCooldown(orchDir, ticket, nowMs, env = process.env) {
   try {
     writeFileSync(
       fenceStandoffCooldownPath(orchDir, ticket),
-      JSON.stringify({ expiresAt: nowMs + resolveStandoffCooldownMs(env) }),
+      JSON.stringify({ expiresAt: nowMs + resolveStandoffCooldownMs(env) })
     );
   } catch {
     /* best-effort — re-probe next tick */
@@ -3996,7 +4082,7 @@ function stampFenceStandoffCooldown(orchDir, ticket, nowMs, env = process.env) {
 function isFenceStandoffCooldownFresh(orchDir, ticket, nowMs) {
   try {
     const { expiresAt } = JSON.parse(
-      readFileSync(fenceStandoffCooldownPath(orchDir, ticket), "utf8"),
+      readFileSync(fenceStandoffCooldownPath(orchDir, ticket), "utf8")
     );
     return Number.isFinite(expiresAt) && nowMs < expiresAt;
   } catch {
@@ -4541,7 +4627,12 @@ function reconcileTerminalBackstop(
       // this in the same linear.state.write audit stream as the sibling
       // "reconcile-backstop" source rather than inventing a second one.
       emitStateWrite({
-        writerResult: { applied: false, reason: "reopen-archive", from_state: state, to_state: null },
+        writerResult: {
+          applied: false,
+          reason: "reopen-archive",
+          from_state: state,
+          to_state: null,
+        },
         ticket,
         phase: TERMINAL_PHASE,
         source: "reconcile-backstop-reopen-archive",
@@ -5333,7 +5424,9 @@ export function schedulerTick(
     appendPublishPreflightWouldBlockEvent = defaultAppendPublishPreflightWouldBlockEvent,
     escalatePublishDenied = ({ orchDir: dir, ticket, explanation }) =>
       labelNeedsHumanUnlessBeliefOwner(dir, ticket, writeStatus, {
-        env: process.env, site: "publish-preflight", explanation,
+        env: process.env,
+        site: "publish-preflight",
+        explanation,
       }),
     // CTL-1410 Phase B: in-process SDK-worker probe for the sweep. The REAL
     // registry read is the safe default here — it is a local Map lookup in this
@@ -5843,7 +5936,10 @@ export function schedulerTick(
       try {
         pub = probePublishCapability({ orchDir, ticket, phase }) ?? pub;
       } catch (err) {
-        log.warn({ ticket, phase, err: err?.message }, "publish-preflight: probe threw; dispatch proceeding");
+        log.warn(
+          { ticket, phase, err: err?.message },
+          "publish-preflight: probe threw; dispatch proceeding"
+        );
       }
     }
     if (pub.state === "denied" && publishPreflightMode !== "off") {
@@ -5851,24 +5947,39 @@ export function schedulerTick(
         const repoKey = pub.slug ?? ticket;
         if (!publishWouldBlockSeen.has(repoKey)) {
           publishWouldBlockSeen.add(repoKey);
-          safeEmit(appendPublishPreflightBlockedEvent, { ticket, phase, verdict: pub }, { ticket, phase });
+          safeEmit(
+            appendPublishPreflightBlockedEvent,
+            { ticket, phase, verdict: pub },
+            { ticket, phase }
+          );
         }
         try {
-          escalatePublishDenied({ orchDir, ticket, phase, verdict: pub,
+          escalatePublishDenied({
+            orchDir,
+            ticket,
+            phase,
+            verdict: pub,
             explanation: {
               problem: `Cannot publish to ${pub.slug ?? "the configured repository"}: the automation identity lacks push permission.`,
               call_to_action: `Grant push permission${pub.login ? ` to ${pub.login}` : ""} on ${pub.slug ?? "the configured push remote"}, or configure catalyst.pr.pushRemote to a writable remote.`,
             },
           });
         } catch (err) {
-          log.warn({ ticket, err: err?.message }, "publish-preflight: escalation failed; dispatch remains blocked");
+          log.warn(
+            { ticket, err: err?.message },
+            "publish-preflight: escalation failed; dispatch remains blocked"
+          );
         }
         return { aborted: true };
       }
       const repoKey = pub.slug ?? ticket;
       if (!publishWouldBlockSeen.has(repoKey)) {
         publishWouldBlockSeen.add(repoKey);
-        safeEmit(appendPublishPreflightWouldBlockEvent, { ticket, phase, verdict: pub }, { ticket, phase });
+        safeEmit(
+          appendPublishPreflightWouldBlockEvent,
+          { ticket, phase, verdict: pub },
+          { ticket, phase }
+        );
       }
     }
 
@@ -7307,7 +7418,8 @@ export function schedulerTick(
           // env-driven path the live write-proxy reads/writes
           // (defaultBudgetPath — not orchDir-scoped, unlike github-quota.json).
           getLinearWriteLedger:
-            _boardHealth.getLinearWriteLedger ?? (() => readLinearWriteLedgerForBoard(process.env, Date.now())),
+            _boardHealth.getLinearWriteLedger ??
+            (() => readLinearWriteLedgerForBoard(process.env, Date.now())),
           getPeerProductivity:
             _boardHealth.getPeerProductivity ??
             (() => {
@@ -7621,7 +7733,9 @@ export function schedulerTick(
                 { ticket: member, orchDir, multiHost, gateway, self },
                 {
                   proceedOnMissingGeneration: true,
-                  onSuppress: (verdict) => { cycleFenceVerdict = verdict; },
+                  onSuppress: (verdict) => {
+                    cycleFenceVerdict = verdict;
+                  },
                 }
               )
             ) {
@@ -8692,7 +8806,9 @@ export function schedulerTick(
               { ticket: member, orchDir, multiHost, gateway, self },
               {
                 proceedOnMissingGeneration: true,
-                onSuppress: (verdict) => { c925FenceVerdict = verdict; },
+                onSuppress: (verdict) => {
+                  c925FenceVerdict = verdict;
+                },
               }
             )
           ) {
@@ -8732,7 +8848,7 @@ export function schedulerTick(
           } else {
             log.warn(
               { ticket: member, reason: c925FenceVerdict?.reason ?? null },
-              "cat-173: fence suppressed eligible dependency-cycle escalation",
+              "cat-173: fence suppressed eligible dependency-cycle escalation"
             );
             maybeBreakGlass({
               orchDir,
@@ -9111,7 +9227,12 @@ export function schedulerTick(
         // A FAILED claim here is a silent new-work stall for this ticket on the one
         // host HRW says may dispatch it, so it warns; a lost race stays debug.
         const claimReason = claim?.reason ?? null;
-        const ctx = { ticket: t.identifier, host: self, claim_reason: claimReason, claim_detail: claim?.detail ?? null };
+        const ctx = {
+          ticket: t.identifier,
+          host: self,
+          claim_reason: claimReason,
+          claim_detail: claim?.detail ?? null,
+        };
         if (isClaimFailure(claimReason)) {
           log.warn(
             ctx,
@@ -9802,7 +9923,8 @@ const LABEL_RETRY_CAP = Number(process.env.SCHEDULER_LABEL_RETRY_CAP) || 5;
 // CTL-2052 (AC3): the long back-off held after the cap. > LABEL_COOLDOWN_MS so the cap
 // genuinely wins over the ordinary per-window gate; when it elapses, exactly one probe
 // is let through so a since-resolved conflict can still land (COORD-236 self-heal).
-const LABEL_RETRY_EXHAUSTED_MS = Number(process.env.SCHEDULER_LABEL_RETRY_EXHAUSTED_MS) || 1_800_000; // 30 min
+const LABEL_RETRY_EXHAUSTED_MS =
+  Number(process.env.SCHEDULER_LABEL_RETRY_EXHAUSTED_MS) || 1_800_000; // 30 min
 // CTL-713: permanent-failure cooldown. code=2 (prior_artifact_missing,
 // phase-agent-dispatch exit 2) is a structural refusal — back it off longer than
 // the 60s transient window. GC reaps the marker once the ticket leaves the eligible set.
@@ -10884,9 +11006,7 @@ export function holisticBoardHealthAct(
   // Sorted, so the signature depends on the SET of causes and not on proposal
   // order — two scans with the same causes always agree, two with different
   // causes never coincide.
-  const scanSignature = scanMoves.size
-    ? `board-health: ${[...scanMoves].sort().join("+")}`
-    : null;
+  const scanSignature = scanMoves.size ? `board-health: ${[...scanMoves].sort().join("+")}` : null;
   // A candidate with no proposed move of its own (a deferred-intent anchor, or the
   // eligible-queue fallback) has no per-ticket invariant to name — fall back to the
   // scan's triggering moves, and only then to the gate reason, which is at least

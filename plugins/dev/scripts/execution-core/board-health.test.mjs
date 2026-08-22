@@ -152,7 +152,7 @@ function parkedMap(...ids) {
 describe("isParkedByHuman — descriptor label reader", () => {
   test("true when descriptor carries the label (alongside needs-human)", () => {
     expect(
-      isParkedByHuman({ labels: [{ name: "needs-human" }, { name: "parked-by-human" }] }),
+      isParkedByHuman({ labels: [{ name: "needs-human" }, { name: "parked-by-human" }] })
     ).toBe(true);
   });
   test("false when absent / labels missing / null / undefined", () => {
@@ -192,7 +192,7 @@ describe("evaluateInvariants — per-invariant green/fail", () => {
         capacity: { maxParallel: 4, liveCount: 0, freeSlots: 4 },
         eligible: [{ id: "CTL-1" }, { id: "CTL-2" }],
         ring: { recentDispatchTs: NOW - 30 * MIN }, // > 10min default stall
-      }),
+      })
     );
     expect(wedged.dispatchLiveness.ok).toBe(false);
     expect(wedged.dispatchLiveness.failed).toBe(1);
@@ -203,18 +203,22 @@ describe("evaluateInvariants — per-invariant green/fail", () => {
         eligible: [{ id: "CTL-1" }],
         capacity: { maxParallel: 4, liveCount: 0, freeSlots: 4 },
         ring: { recentDispatchTs: NOW - 1 * MIN }, // recent
-      }),
+      })
     );
     expect(live.dispatchLiveness.ok).toBe(true);
   });
 
   test("dispatchLiveness: no free slots OR empty queue → no wedge (ok)", () => {
     const noSlots = evaluateInvariants(
-      mkBoard({ capacity: { freeSlots: 0 }, eligible: [{ id: "CTL-1" }], ring: { recentDispatchTs: null } }),
+      mkBoard({
+        capacity: { freeSlots: 0 },
+        eligible: [{ id: "CTL-1" }],
+        ring: { recentDispatchTs: null },
+      })
     );
     expect(noSlots.dispatchLiveness.ok).toBe(true);
     const noQueue = evaluateInvariants(
-      mkBoard({ capacity: { freeSlots: 4 }, eligible: [], ring: { recentDispatchTs: null } }),
+      mkBoard({ capacity: { freeSlots: 4 }, eligible: [], ring: { recentDispatchTs: null } })
     );
     expect(noQueue.dispatchLiveness.ok).toBe(true);
   });
@@ -242,7 +246,7 @@ describe("evaluateInvariants — per-invariant green/fail", () => {
       wedgeBoard({
         eligible: [{ id: "CTL-1743" }],
         delegateClaims: new Map([["CTL-1743", NOW - 2 * MIN]]), // claimed 2 min ago
-      }),
+      })
     );
     expect(r.dispatchLiveness.ok).toBe(true);
     expect(r.dispatchLiveness.failed).toBe(0);
@@ -259,7 +263,7 @@ describe("evaluateInvariants — per-invariant green/fail", () => {
       wedgeBoard({
         eligible: [{ id: "CTL-1743" }],
         delegateClaims: new Map([["CTL-1743", NOW - (GRACE_MS + 1)]]), // 1ms past grace
-      }),
+      })
     );
     expect(r.dispatchLiveness.ok).toBe(false);
     expect(r.dispatchLiveness.failed).toBe(1);
@@ -272,14 +276,14 @@ describe("evaluateInvariants — per-invariant green/fail", () => {
       wedgeBoard({
         eligible: [{ id: "CTL-1" }],
         delegateClaims: new Map([["CTL-1", NOW - GRACE_MS]]),
-      }),
+      })
     );
     expect(atEdge.dispatchLiveness.ok).toBe(true);
     const pastEdge = evaluateInvariants(
       wedgeBoard({
         eligible: [{ id: "CTL-1" }],
         delegateClaims: new Map([["CTL-1", NOW - GRACE_MS - 1]]),
-      }),
+      })
     );
     expect(pastEdge.dispatchLiveness.ok).toBe(false);
   });
@@ -302,9 +306,7 @@ describe("evaluateInvariants — per-invariant green/fail", () => {
       ["null claims", null],
     ];
     for (const [label, delegateClaims] of cases) {
-      const r = evaluateInvariants(
-        wedgeBoard({ eligible: [{ id: "CTL-1" }], delegateClaims }),
-      );
+      const r = evaluateInvariants(wedgeBoard({ eligible: [{ id: "CTL-1" }], delegateClaims }));
       expect(`${label}: ${r.dispatchLiveness.ok}`).toBe(`${label}: false`);
       expect(`${label}: ${r.dispatchLiveness.flagged.includes("CTL-1")}`).toBe(`${label}: true`);
     }
@@ -321,9 +323,9 @@ describe("evaluateInvariants — per-invariant green/fail", () => {
         ring: { recentDispatchTs: NOW - 30 * MIN },
         eligible: [{ id: "CTL-PEER" }],
         delegateClaims: new Map([["CTL-PEER", NOW - 2 * MIN]]),
-      }),
+      })
     );
-    expect(peerOwned.dispatchLiveness.ok).toBe(true);      // not ours → never a wedge
+    expect(peerOwned.dispatchLiveness.ok).toBe(true); // not ours → never a wedge
     expect(peerOwned.dispatchLiveness.queuedOwned).toBe(0); // ownership unaffected by grace
     expect(peerOwned.dispatchLiveness.queuedOwnedInDelegateGrace).toBe(0);
 
@@ -338,7 +340,7 @@ describe("evaluateInvariants — per-invariant green/fail", () => {
           ["CTL-FRESH", NOW - 1 * MIN],
           ["CTL-STALE", NOW - 3 * HOUR],
         ]),
-      }),
+      })
     );
     expect(mixed.dispatchLiveness.ok).toBe(false);
     expect(mixed.dispatchLiveness.flagged).toContain("CTL-STALE");
@@ -355,7 +357,7 @@ describe("evaluateInvariants — per-invariant green/fail", () => {
         eligible: [{ id: "CTL-1" }],
         ring: { recentDispatchTs: NOW - 1 * MIN },
         delegateClaims: new Map([["CTL-1", NOW - 3 * HOUR]]),
-      }),
+      })
     );
     expect(r.dispatchLiveness.ok).toBe(true);
   });
@@ -370,11 +372,21 @@ describe("evaluateInvariants — per-invariant green/fail", () => {
       expect(normalizeDelegateClaims(bad).size).toBe(0);
     }
     const mixed = normalizeDelegateClaims(
-      new Map([["CTL-OK", 1], ["CTL-NAN", NaN], ["CTL-STR", "1"], ["", 1], ["CTL-NEG", -1]]),
+      new Map([
+        ["CTL-OK", 1],
+        ["CTL-NAN", NaN],
+        ["CTL-STR", "1"],
+        ["", 1],
+        ["CTL-NEG", -1],
+      ])
     );
     expect([...mixed.keys()]).toEqual(["CTL-OK"]);
     // a throwing iterable degrades to empty rather than propagating
-    const hostile = { [Symbol.iterator]() { throw new Error("boom"); } };
+    const hostile = {
+      [Symbol.iterator]() {
+        throw new Error("boom");
+      },
+    };
     expect(normalizeDelegateClaims(hostile).size).toBe(0);
   });
 
@@ -385,7 +397,9 @@ describe("evaluateInvariants — per-invariant green/fail", () => {
 
     const throwing = assembleBoardState({
       orchDir: "/tmp/x",
-      getDelegateClaims: () => { throw new Error("unreadable"); },
+      getDelegateClaims: () => {
+        throw new Error("unreadable");
+      },
     });
     expect(throwing.delegateClaims.size).toBe(0);
 
@@ -404,7 +418,7 @@ describe("evaluateInvariants — per-invariant green/fail", () => {
           { ticket: "CTL-YOUNG", phase: "implement", status: "running", ageMs: 1 * HOUR },
           { ticket: "CTL-DONE", phase: "implement", status: "complete", ageMs: 99 * HOUR }, // terminal → skip
         ],
-      }),
+      })
     );
     expect(r.workerAge.ok).toBe(false);
     expect(r.workerAge.failed).toBe(1);
@@ -413,7 +427,9 @@ describe("evaluateInvariants — per-invariant green/fail", () => {
 
   test("workerAge: research phase has a tighter (1h) normal than the 4h default", () => {
     const r = evaluateInvariants(
-      mkBoard({ signals: [{ ticket: "CTL-R", phase: "research", status: "running", ageMs: 2 * HOUR }] }),
+      mkBoard({
+        signals: [{ ticket: "CTL-R", phase: "research", status: "running", ageMs: 2 * HOUR }],
+      })
     );
     expect(r.workerAge.flagged).toEqual(["CTL-R"]);
   });
@@ -434,21 +450,27 @@ describe("evaluateInvariants — per-invariant green/fail", () => {
     expect(evaluateInvariants(mkBoard({ ticketsById: doneById })).blockedTree.ok).toBe(true);
 
     // blocker present in the eligible queue → scheduled → not a dead chain
-    const scheduled = evaluateInvariants(
-      mkBoard({ ticketsById, eligible: [{ id: "CTL-B" }] }),
-    );
+    const scheduled = evaluateInvariants(mkBoard({ ticketsById, eligible: [{ id: "CTL-B" }] }));
     expect(scheduled.blockedTree.ok).toBe(true);
   });
 
   test("projectSilence: project quiet past threshold flags; recent movement ok; no join → not observable", () => {
     const silent = evaluateInvariants(
-      mkBoard({ eligible: [{ id: "CTL-A", project: "P1", updatedAt: new Date(NOW - 25 * HOUR).toISOString() }] }),
+      mkBoard({
+        eligible: [
+          { id: "CTL-A", project: "P1", updatedAt: new Date(NOW - 25 * HOUR).toISOString() },
+        ],
+      })
     );
     expect(silent.projectSilence.ok).toBe(false);
     expect(silent.projectSilence.flagged).toEqual(["P1"]);
 
     const moving = evaluateInvariants(
-      mkBoard({ eligible: [{ id: "CTL-A", project: "P1", updatedAt: new Date(NOW - 1 * HOUR).toISOString() }] }),
+      mkBoard({
+        eligible: [
+          { id: "CTL-A", project: "P1", updatedAt: new Date(NOW - 1 * HOUR).toISOString() },
+        ],
+      })
     );
     expect(moving.projectSilence.ok).toBe(true);
 
@@ -460,33 +482,46 @@ describe("evaluateInvariants — per-invariant green/fail", () => {
     const absent = evaluateInvariants(mkBoard());
     expect(absent.rateLimitHeadroom).toMatchObject({ ok: true, failed: 0, observable: false });
 
-    const exhausted = evaluateInvariants(mkBoard({
-      githubQuotaMode: "shadow",
-      githubQuota: quotaSnapshot({ remaining: 0 }),
-    })).rateLimitHeadroom;
+    const exhausted = evaluateInvariants(
+      mkBoard({
+        githubQuotaMode: "shadow",
+        githubQuota: quotaSnapshot({ remaining: 0 }),
+      })
+    ).rateLimitHeadroom;
     expect(exhausted).toMatchObject({ ok: true, failed: 0, observable: false });
     expect(exhausted.note).toContain("0/5000");
     expect(exhausted.note).toContain("2026-06-20T13:00:00.000Z");
   });
 
   test("rateLimitHeadroom enforce maps ok/low/exhausted and stale samples safely", () => {
-    const ok = evaluateInvariants(mkBoard({
-      githubQuotaMode: "enforce", githubQuota: quotaSnapshot({ remaining: 501 }),
-    })).rateLimitHeadroom;
+    const ok = evaluateInvariants(
+      mkBoard({
+        githubQuotaMode: "enforce",
+        githubQuota: quotaSnapshot({ remaining: 501 }),
+      })
+    ).rateLimitHeadroom;
     expect(ok).toMatchObject({ ok: true, failed: 0, observable: true });
 
     for (const remaining of [500, 0]) {
-      const result = evaluateInvariants(mkBoard({
-        githubQuotaMode: "enforce", githubQuota: quotaSnapshot({ remaining }),
-      })).rateLimitHeadroom;
+      const result = evaluateInvariants(
+        mkBoard({
+          githubQuotaMode: "enforce",
+          githubQuota: quotaSnapshot({ remaining }),
+        })
+      ).rateLimitHeadroom;
       expect(result).toMatchObject({ ok: false, failed: 1, observable: true });
       expect(result.flagged).toEqual([]);
     }
 
-    const stale = evaluateInvariants(mkBoard({
-      githubQuotaMode: "enforce",
-      githubQuota: quotaSnapshot({ remaining: 0, sampledAt: new Date(NOW - 16 * MIN).toISOString() }),
-    })).rateLimitHeadroom;
+    const stale = evaluateInvariants(
+      mkBoard({
+        githubQuotaMode: "enforce",
+        githubQuota: quotaSnapshot({
+          remaining: 0,
+          sampledAt: new Date(NOW - 16 * MIN).toISOString(),
+        }),
+      })
+    ).rateLimitHeadroom;
     expect(stale).toMatchObject({ ok: true, failed: 0, observable: false });
   });
 
@@ -499,7 +534,7 @@ describe("evaluateInvariants — per-invariant green/fail", () => {
         roster: ["mini", "mini-2"],
         ownerForTicket,
         reconcileMarkers: { "mini-2": { consecutiveFailures: 3 } },
-      }),
+      })
     );
     expect(r.strandedNode.ok).toBe(false);
     expect(r.strandedNode.observable).toBe(true);
@@ -512,7 +547,12 @@ describe("evaluateInvariants — per-invariant green/fail", () => {
 
     const ticketsById = new Map([["CTL-A", { identifier: "CTL-A" }]]);
     const noSignal = evaluateInvariants(
-      mkBoard({ ticketsById, roster: ["mini", "mini-2"], ownerForTicket: () => "mini-2", reconcileMarkers: {} }),
+      mkBoard({
+        ticketsById,
+        roster: ["mini", "mini-2"],
+        ownerForTicket: () => "mini-2",
+        reconcileMarkers: {},
+      })
     );
     expect(noSignal.strandedNode.observable).toBe(false);
   });
@@ -520,8 +560,12 @@ describe("evaluateInvariants — per-invariant green/fail", () => {
   test("a throwing invariant fails OPEN ({ok:true,error}) and never aborts the scan", () => {
     // ticketsById that throws when iterated (blockedTree walks it).
     const boom = {
-      get size() { return 1; },
-      [Symbol.iterator]() { throw new Error("boom"); },
+      get size() {
+        return 1;
+      },
+      [Symbol.iterator]() {
+        throw new Error("boom");
+      },
     };
     const r = evaluateInvariants(mkBoard({ ticketsById: boom }));
     expect(r.blockedTree.ok).toBe(true);
@@ -534,7 +578,13 @@ describe("evaluateInvariants — per-invariant green/fail", () => {
 
 // ─── CTL-1157 off-gate: off = truly dark (no cohort code, no PR SELECT) ──────
 describe("CTL-1157 off-gate — cohort invariants + PR SELECT are dark in off", () => {
-  const COHORT_KEYS = ["phantomMergedPr", "orphanedOpenPr", "frozenNeedsHuman", "needsHumanPile", "stalledPr"];
+  const COHORT_KEYS = [
+    "phantomMergedPr",
+    "orphanedOpenPr",
+    "frozenNeedsHuman",
+    "needsHumanPile",
+    "stalledPr",
+  ];
 
   test("evaluateInvariants(mode:off) omits ALL four cohort invariants (legacy set only)", () => {
     const r = evaluateInvariants(mkBoard(), { mode: "off" });
@@ -549,7 +599,7 @@ describe("CTL-1157 off-gate — cohort invariants + PR SELECT are dark in off", 
         "rateLimitHeadroom",
         "strandedNode",
         "workerAge",
-      ].sort(),
+      ].sort()
     );
   });
 
@@ -618,29 +668,35 @@ describe("CTL-1157 multi-repo collision — composite (repo,number) disambiguati
     ]);
 
   test("phantom-merged: a ticket in org/x (the MERGED repo) IS flagged despite the collision", () => {
-    const ticketsById = new Map([["CTL-Y", { identifier: "CTL-Y", state: "In Review", prNumber: 42 }]]);
+    const ticketsById = new Map([
+      ["CTL-Y", { identifier: "CTL-Y", state: "In Review", prNumber: 42 }],
+    ]);
     const r = evaluateInvariants(
       mkBoard({ ticketsById, prStatusMap: COLLIDE_42(), repoForTicket: () => "org/x" }),
-      { mode: "shadow" },
+      { mode: "shadow" }
     );
     expect(r.phantomMergedPr.flagged).toContain("CTL-Y"); // genuine phantom still caught
   });
 
   test("phantom-merged: a ticket in org/y (the OPEN repo) is NOT flagged — no false phantom from org/x's merged", () => {
-    const ticketsById = new Map([["CTL-Y", { identifier: "CTL-Y", state: "In Review", prNumber: 42 }]]);
+    const ticketsById = new Map([
+      ["CTL-Y", { identifier: "CTL-Y", state: "In Review", prNumber: 42 }],
+    ]);
     const r = evaluateInvariants(
       mkBoard({ ticketsById, prStatusMap: COLLIDE_42(), repoForTicket: () => "org/y" }),
-      { mode: "shadow" },
+      { mode: "shadow" }
     );
     expect(r.phantomMergedPr.flagged).not.toContain("CTL-Y"); // org/y's #42 is open, not merged
     expect(r.phantomMergedPr.ok).toBe(true);
   });
 
   test("phantom-merged: collision + repo UNDERIVABLE (no repoForTicket) → ambiguous skip (true residual)", () => {
-    const ticketsById = new Map([["CTL-Y", { identifier: "CTL-Y", state: "In Review", prNumber: 42 }]]);
+    const ticketsById = new Map([
+      ["CTL-Y", { identifier: "CTL-Y", state: "In Review", prNumber: 42 }],
+    ]);
     const r = evaluateInvariants(
       mkBoard({ ticketsById, prStatusMap: COLLIDE_42() /* repoForTicket: null */ }),
-      { mode: "shadow" },
+      { mode: "shadow" }
     );
     expect(r.phantomMergedPr.flagged).not.toContain("CTL-Y"); // can't pick → skip, never borrow
   });
@@ -651,13 +707,23 @@ describe("CTL-1157 multi-repo collision — composite (repo,number) disambiguati
     const ticketsById = new Map([["CTL-Z", { identifier: "CTL-Z", prNumber: 99 }]]);
     const prStatusMap = mkPrStatusMap([
       // org/x's #99 is merged & fresh — the unrelated collision that used to hide CTL-Z.
-      { prNumber: 99, repo: "org/x", status: "merged", updatedAt: new Date(NOW - 1 * HOUR).toISOString() },
+      {
+        prNumber: 99,
+        repo: "org/x",
+        status: "merged",
+        updatedAt: new Date(NOW - 1 * HOUR).toISOString(),
+      },
       // org/y's #99 — CTL-Z's real PR: open, stale, no live worker → orphaned.
-      { prNumber: 99, repo: "org/y", status: "open", updatedAt: new Date(NOW - 100 * HOUR).toISOString() },
+      {
+        prNumber: 99,
+        repo: "org/y",
+        status: "open",
+        updatedAt: new Date(NOW - 100 * HOUR).toISOString(),
+      },
     ]);
     const r = evaluateInvariants(
       mkBoard({ ticketsById, prStatusMap, repoForTicket: () => "org/y" }),
-      { mode: "shadow" },
+      { mode: "shadow" }
     );
     expect(r.orphanedOpenPr.flagged).toContain("CTL-Z"); // detection no longer hidden
   });
@@ -665,23 +731,37 @@ describe("CTL-1157 multi-repo collision — composite (repo,number) disambiguati
   test("orphaned-open: collision + repo UNDERIVABLE → ambiguous skip (true residual)", () => {
     const ticketsById = new Map([["CTL-Z", { identifier: "CTL-Z", prNumber: 99 }]]);
     const prStatusMap = mkPrStatusMap([
-      { prNumber: 99, repo: "org/x", status: "merged", updatedAt: new Date(NOW - 1 * HOUR).toISOString() },
-      { prNumber: 99, repo: "org/y", status: "open", updatedAt: new Date(NOW - 100 * HOUR).toISOString() },
+      {
+        prNumber: 99,
+        repo: "org/x",
+        status: "merged",
+        updatedAt: new Date(NOW - 1 * HOUR).toISOString(),
+      },
+      {
+        prNumber: 99,
+        repo: "org/y",
+        status: "open",
+        updatedAt: new Date(NOW - 100 * HOUR).toISOString(),
+      },
     ]);
-    const r = evaluateInvariants(
-      mkBoard({ ticketsById, prStatusMap /* repoForTicket: null */ }),
-      { mode: "shadow" },
-    );
+    const r = evaluateInvariants(mkBoard({ ticketsById, prStatusMap /* repoForTicket: null */ }), {
+      mode: "shadow",
+    });
     expect(r.orphanedOpenPr.flagged).not.toContain("CTL-Z"); // can't pick → skip
   });
 
   // N=1 / single-repo: NO collision (one inner entry per number) → number-only
   // resolution, byte-identical whether or not the ticket's repo was derived.
   test("single-repo (N=1): phantom-merged still flags with NO repoForTicket bound", () => {
-    const ticketsById = new Map([["CTL-Y", { identifier: "CTL-Y", state: "In Review", prNumber: 42 }]]);
+    const ticketsById = new Map([
+      ["CTL-Y", { identifier: "CTL-Y", state: "In Review", prNumber: 42 }],
+    ]);
     const r = evaluateInvariants(
-      mkBoard({ ticketsById, prStatusMap: mkPrStatusMap([{ prNumber: 42, repo: "org/solo", status: "merged" }]) }),
-      { mode: "shadow" },
+      mkBoard({
+        ticketsById,
+        prStatusMap: mkPrStatusMap([{ prNumber: 42, repo: "org/solo", status: "merged" }]),
+      }),
+      { mode: "shadow" }
     );
     expect(r.phantomMergedPr.flagged).toContain("CTL-Y");
   });
@@ -689,7 +769,12 @@ describe("CTL-1157 multi-repo collision — composite (repo,number) disambiguati
   test("single-repo (N=1): orphaned-open still flags with NO repoForTicket bound", () => {
     const ticketsById = new Map([["CTL-Z", { identifier: "CTL-Z", prNumber: 99 }]]);
     const prStatusMap = mkPrStatusMap([
-      { prNumber: 99, repo: "org/solo", status: "open", updatedAt: new Date(NOW - 100 * HOUR).toISOString() },
+      {
+        prNumber: 99,
+        repo: "org/solo",
+        status: "open",
+        updatedAt: new Date(NOW - 100 * HOUR).toISOString(),
+      },
     ]);
     const r = evaluateInvariants(mkBoard({ ticketsById, prStatusMap }), { mode: "shadow" });
     expect(r.orphanedOpenPr.flagged).toContain("CTL-Z");
@@ -700,11 +785,13 @@ describe("CTL-1157 multi-repo collision — composite (repo,number) disambiguati
   // path returned that unrelated row, so a ticket in org/y inherited org/x#42's MERGED
   // status → a FALSE phantom. Now a known repo requires the exact row → never borrow.
   test("phantom-merged: known repo org/y is NOT flagged when the ONLY #42 row is org/x (no cross-repo borrow)", () => {
-    const ticketsById = new Map([["CTL-Y", { identifier: "CTL-Y", state: "In Review", prNumber: 42 }]]);
+    const ticketsById = new Map([
+      ["CTL-Y", { identifier: "CTL-Y", state: "In Review", prNumber: 42 }],
+    ]);
     const prStatusMap = mkPrStatusMap([{ prNumber: 42, repo: "org/x", status: "merged" }]);
     const r = evaluateInvariants(
       mkBoard({ ticketsById, prStatusMap, repoForTicket: () => "org/y" }),
-      { mode: "shadow" },
+      { mode: "shadow" }
     );
     expect(r.phantomMergedPr.flagged).not.toContain("CTL-Y"); // org/x#42's status is not CTL-Y's
     expect(r.phantomMergedPr.ok).toBe(true);
@@ -714,11 +801,13 @@ describe("CTL-1157 multi-repo collision — composite (repo,number) disambiguati
   // (written before repo attribution) is still trusted — detection must not regress on
   // the single-repo fleet whose filter_state rows carry no repo.
   test("phantom-merged: known repo still flags off a lone UNATTRIBUTED row (single-repo preservation)", () => {
-    const ticketsById = new Map([["CTL-Y", { identifier: "CTL-Y", state: "In Review", prNumber: 42 }]]);
+    const ticketsById = new Map([
+      ["CTL-Y", { identifier: "CTL-Y", state: "In Review", prNumber: 42 }],
+    ]);
     const prStatusMap = mkPrStatusMap([{ prNumber: 42, repo: null, status: "merged" }]); // repoKey ""
     const r = evaluateInvariants(
       mkBoard({ ticketsById, prStatusMap, repoForTicket: () => "org/y" }),
-      { mode: "shadow" },
+      { mode: "shadow" }
     );
     expect(r.phantomMergedPr.flagged).toContain("CTL-Y");
   });
@@ -730,7 +819,12 @@ describe("CTL-1157 multi-repo collision — composite (repo,number) disambiguati
 // (2) frozen-needs-human: a terminal (Done/Canceled/Duplicate) ticket carrying a
 //     stale cached needs-human label must NOT be flagged for recovery.
 describe("CTL-1157 cohort correctness — dead-worker orphans + terminal stale-label", () => {
-  const staleOpen = { prNumber: 7, repo: "org/solo", status: "open", updatedAt: new Date(NOW - 100 * HOUR).toISOString() };
+  const staleOpen = {
+    prNumber: 7,
+    repo: "org/solo",
+    status: "open",
+    updatedAt: new Date(NOW - 100 * HOUR).toISOString(),
+  };
 
   test("orphaned-open: a stale open PR whose ONLY worker signal is FAILED IS flagged", () => {
     const ticketsById = new Map([["CTL-DEAD", { identifier: "CTL-DEAD", prNumber: 7 }]]);
@@ -740,7 +834,7 @@ describe("CTL-1157 cohort correctness — dead-worker orphans + terminal stale-l
         prStatusMap: mkPrStatusMap([staleOpen]),
         signals: [{ ticket: "CTL-DEAD", phase: "implement", status: "failed" }],
       }),
-      { mode: "shadow" },
+      { mode: "shadow" }
     );
     expect(r.orphanedOpenPr.flagged).toContain("CTL-DEAD"); // failed worker ≠ live
   });
@@ -753,7 +847,7 @@ describe("CTL-1157 cohort correctness — dead-worker orphans + terminal stale-l
         prStatusMap: mkPrStatusMap([staleOpen]),
         signals: [{ ticket: "CTL-STALL", phase: "implement", status: "stalled" }],
       }),
-      { mode: "shadow" },
+      { mode: "shadow" }
     );
     expect(r.orphanedOpenPr.flagged).toContain("CTL-STALL");
   });
@@ -763,24 +857,28 @@ describe("CTL-1157 cohort correctness — dead-worker orphans + terminal stale-l
   // as an orphaned-PR anchor — dispatching a recovery-pass on already-finished work wastes
   // a slot. Mirrors the terminal exclusion the needs-human cohorts already apply.
   test("orphaned-open: a TERMINAL (Canceled) ticket with a stale open PR is NOT flagged", () => {
-    const ticketsById = new Map([["CTL-TERM", { identifier: "CTL-TERM", prNumber: 7, state: "Canceled" }]]);
+    const ticketsById = new Map([
+      ["CTL-TERM", { identifier: "CTL-TERM", prNumber: 7, state: "Canceled" }],
+    ]);
     const r = evaluateInvariants(
       mkBoard({
         ticketsById,
         prStatusMap: mkPrStatusMap([staleOpen]),
         signals: [{ ticket: "CTL-TERM", phase: "implement", status: "failed" }],
       }),
-      { mode: "shadow" },
+      { mode: "shadow" }
     );
     expect(r.orphanedOpenPr.flagged).not.toContain("CTL-TERM"); // terminal → not a recovery anchor
     expect(r.orphanedOpenPr.ok).toBe(true);
   });
 
   test("orphaned-open: a Done ticket with a stale open PR is NOT flagged", () => {
-    const ticketsById = new Map([["CTL-DONE", { identifier: "CTL-DONE", prNumber: 7, state: "Done" }]]);
+    const ticketsById = new Map([
+      ["CTL-DONE", { identifier: "CTL-DONE", prNumber: 7, state: "Done" }],
+    ]);
     const r = evaluateInvariants(
       mkBoard({ ticketsById, prStatusMap: mkPrStatusMap([staleOpen]), signals: [] }),
-      { mode: "shadow" },
+      { mode: "shadow" }
     );
     expect(r.orphanedOpenPr.flagged).not.toContain("CTL-DONE");
   });
@@ -793,7 +891,7 @@ describe("CTL-1157 cohort correctness — dead-worker orphans + terminal stale-l
         prStatusMap: mkPrStatusMap([staleOpen]),
         signals: [{ ticket: "CTL-LIVE", phase: "implement", status: "running" }],
       }),
-      { mode: "shadow" },
+      { mode: "shadow" }
     );
     expect(r.orphanedOpenPr.flagged).not.toContain("CTL-LIVE"); // running worker → live
   });
@@ -801,9 +899,33 @@ describe("CTL-1157 cohort correctness — dead-worker orphans + terminal stale-l
   test("frozen-needs-human: a TERMINAL ticket with a stale needs-human label is NOT flagged", () => {
     const old = new Date(NOW - 100 * HOUR).toISOString();
     const ticketsById = new Map([
-      ["CTL-DONE", { identifier: "CTL-DONE", state: "Done", labels: [{ name: "needs-human" }], updatedAt: old }],
-      ["CTL-CANCEL", { identifier: "CTL-CANCEL", state: "Canceled", labels: [{ name: "needs-human" }], updatedAt: old }],
-      ["CTL-DUP", { identifier: "CTL-DUP", state: "Duplicate", labels: [{ name: "needs-human" }], updatedAt: old }],
+      [
+        "CTL-DONE",
+        {
+          identifier: "CTL-DONE",
+          state: "Done",
+          labels: [{ name: "needs-human" }],
+          updatedAt: old,
+        },
+      ],
+      [
+        "CTL-CANCEL",
+        {
+          identifier: "CTL-CANCEL",
+          state: "Canceled",
+          labels: [{ name: "needs-human" }],
+          updatedAt: old,
+        },
+      ],
+      [
+        "CTL-DUP",
+        {
+          identifier: "CTL-DUP",
+          state: "Duplicate",
+          labels: [{ name: "needs-human" }],
+          updatedAt: old,
+        },
+      ],
     ]);
     const r = evaluateInvariants(mkBoard({ ticketsById }), { mode: "shadow" });
     expect(r.frozenNeedsHuman.flagged).not.toContain("CTL-DONE");
@@ -814,12 +936,15 @@ describe("CTL-1157 cohort correctness — dead-worker orphans + terminal stale-l
 
   test("frozen-needs-human: a NON-terminal ticket with a stale needs-human label IS still flagged", () => {
     const ticketsById = new Map([
-      ["CTL-STUCK", {
-        identifier: "CTL-STUCK",
-        state: "In Progress",
-        labels: [{ name: "needs-human" }],
-        updatedAt: new Date(NOW - 100 * HOUR).toISOString(),
-      }],
+      [
+        "CTL-STUCK",
+        {
+          identifier: "CTL-STUCK",
+          state: "In Progress",
+          labels: [{ name: "needs-human" }],
+          updatedAt: new Date(NOW - 100 * HOUR).toISOString(),
+        },
+      ],
     ]);
     const r = evaluateInvariants(mkBoard({ ticketsById }), { mode: "shadow" });
     expect(r.frozenNeedsHuman.flagged).toContain("CTL-STUCK"); // real frozen escalation preserved
@@ -859,7 +984,11 @@ describe("decideBoardHealth — ordered gates, first match wins", () => {
   });
 
   test("Gate 3: failures + free slots + rate-limit cliff → skip/rate-limit-cliff", () => {
-    const invs = { ...allGreen(), dispatchLiveness: inv(false, 1), rateLimitHeadroom: inv(false, 1) };
+    const invs = {
+      ...allGreen(),
+      dispatchLiveness: inv(false, 1),
+      rateLimitHeadroom: inv(false, 1),
+    };
     const d = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
     expect(d.gate.decision).toBe("skip");
     expect(d.gate.reason).toBe("rate-limit-cliff");
@@ -875,7 +1004,10 @@ describe("decideBoardHealth — ordered gates, first match wins", () => {
   });
 
   test("every return carries a non-empty gate.reason", () => {
-    for (const board of [mkBoard({ capacity: { freeSlots: 4 } }), mkBoard({ capacity: { freeSlots: 0 } })]) {
+    for (const board of [
+      mkBoard({ capacity: { freeSlots: 4 } }),
+      mkBoard({ capacity: { freeSlots: 0 } }),
+    ]) {
       const d = decideBoardHealth({ ...allGreen(), dispatchLiveness: inv(false, 1) }, board);
       expect(typeof d.gate.reason).toBe("string");
       expect(d.gate.reason.length).toBeGreaterThan(0);
@@ -901,7 +1033,10 @@ describe("proposeMoves — tiering", () => {
     };
     const m = proposeMoves(invs, mkBoard());
     expect(m.tier1.some((x) => x.move === "kick-dispatch")).toBe(true);
-    expect(m.tier1.filter((x) => x.move === "nudge").map((x) => x.ticket)).toEqual(["CTL-1", "CTL-2"]);
+    expect(m.tier1.filter((x) => x.move === "nudge").map((x) => x.ticket)).toEqual([
+      "CTL-1",
+      "CTL-2",
+    ]);
   });
 
   test("blocked-tree → tier2; stranded-node + project-silence → tier3", () => {
@@ -914,7 +1049,7 @@ describe("proposeMoves — tiering", () => {
     const m = proposeMoves(invs, mkBoard());
     expect(m.tier2.map((x) => x.move)).toContain("re-dispatch-blocker");
     expect(m.tier3.map((x) => x.move)).toEqual(
-      expect.arrayContaining(["escalate-stranded-node", "escalate-project-silence"]),
+      expect.arrayContaining(["escalate-stranded-node", "escalate-project-silence"])
     );
   });
 
@@ -922,7 +1057,11 @@ describe("proposeMoves — tiering", () => {
     const m = proposeMoves(allGreen(), mkBoard());
     expect(m).toEqual({ tier1: [], tier2: [], tier3: [] });
 
-    const invs = { ...allGreen(), dispatchLiveness: inv(false, 1), blockedTree: inv(false, 1, true, ["CTL-A"]) };
+    const invs = {
+      ...allGreen(),
+      dispatchLiveness: inv(false, 1),
+      blockedTree: inv(false, 1, true, ["CTL-A"]),
+    };
     const d = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
     expect(d.proposed.tier1).toBe(d.moves.tier1.length);
     expect(d.proposed.tier2).toBe(d.moves.tier2.length);
@@ -935,7 +1074,10 @@ describe("proposeMoves — tiering", () => {
 // parked-by-human label; the suppression behavior these pin is unchanged.)
 describe("proposeMoves — parked-latch suppression (B3, via parked-by-human label)", () => {
   test("a parked frozen ticket is NOT re-proposed; a non-parked one still is", () => {
-    const invs = { ...allGreen(), frozenNeedsHuman: inv(false, 2, true, ["CTL-SANCT", "CTL-REAL"]) };
+    const invs = {
+      ...allGreen(),
+      frozenNeedsHuman: inv(false, 2, true, ["CTL-SANCT", "CTL-REAL"]),
+    };
     const m = proposeMoves(invs, mkBoard({ ticketsById: parkedMap("CTL-SANCT") }));
     const t2 = m.tier2.filter((x) => x.move === "review-needs-human").map((x) => x.ticket);
     expect(t2).toContain("CTL-REAL");
@@ -1010,13 +1152,15 @@ describe("CTL-1552 — parked-by-human label suppression", () => {
     expect(ev.details.sanctioned).toContain("CTL-9");
     expect(ev.details.sanctioned).not.toContain("CTL-REAL"); // only what was actually suppressed
   });
-
 });
 
 // ─── CTL-1432 (B2): deferred board-health intents become anchor candidates ──────
 describe("selectAnchorCandidates — CTL-1432 deferred board-health (B2)", () => {
   test("a deferred board-health ticket (on the live board) with NO invariant flag is a self-owned anchor candidate", () => {
-    const board = mkBoard({ deferredBoardHealth: ["ADV-1403"], ticketsById: new Map([["ADV-1403", {}]]) });
+    const board = mkBoard({
+      deferredBoardHealth: ["ADV-1403"],
+      ticketsById: new Map([["ADV-1403", {}]]),
+    });
     const out = selectAnchorCandidates({ tier1: [], tier2: [], tier3: [] }, board);
     expect(out).toContain("ADV-1403");
   });
@@ -1039,7 +1183,10 @@ describe("selectAnchorCandidates — CTL-1432 deferred board-health (B2)", () =>
   });
 
   test("(Codex P1 r3) a deferred ticket in a TERMINAL Linear state is dropped (getBoard keeps Done descriptors)", () => {
-    const board = mkBoard({ deferredBoardHealth: ["CTL-DONE"], ticketsById: new Map([["CTL-DONE", { state: "Done" }]]) });
+    const board = mkBoard({
+      deferredBoardHealth: ["CTL-DONE"],
+      ticketsById: new Map([["CTL-DONE", { state: "Done" }]]),
+    });
     const out = selectAnchorCandidates({ tier1: [], tier2: [], tier3: [] }, board);
     expect(out).not.toContain("CTL-DONE");
   });
@@ -1081,7 +1228,11 @@ describe("decideBoardHealth — CTL-1432 gate (deferred proceed / all-sanctioned
   });
 
   test("(Codex P1) a deferred intent whose ticket is terminal (not on the board) does NOT proceed", () => {
-    const board = mkBoard({ deferredBoardHealth: ["ADV-DONE"], ticketsById: new Map(), capacity: { freeSlots: 4 } });
+    const board = mkBoard({
+      deferredBoardHealth: ["ADV-DONE"],
+      ticketsById: new Map(),
+      capacity: { freeSlots: 4 },
+    });
     const d = decideBoardHealth(allGreen(), board);
     expect(d.gate.decision).toBe("skip");
   });
@@ -1094,7 +1245,10 @@ describe("decideBoardHealth — CTL-1432 gate (deferred proceed / all-sanctioned
   });
 
   test("(F2) an all-parked frozenNeedsHuman as the ONLY failure → gate SKIPS (no actionable moves)", () => {
-    const invs = { ...allGreen(), frozenNeedsHuman: inv(false, 2, true, ["CTL-SANCT-1", "CTL-SANCT-2"]) };
+    const invs = {
+      ...allGreen(),
+      frozenNeedsHuman: inv(false, 2, true, ["CTL-SANCT-1", "CTL-SANCT-2"]),
+    };
     const board = mkBoard({
       ticketsById: parkedMap("CTL-SANCT-1", "CTL-SANCT-2"),
       capacity: { freeSlots: 4 },
@@ -1105,7 +1259,10 @@ describe("decideBoardHealth — CTL-1432 gate (deferred proceed / all-sanctioned
   });
 
   test("a partially-parked frozenNeedsHuman still PROCEEDS on the non-parked ticket", () => {
-    const invs = { ...allGreen(), frozenNeedsHuman: inv(false, 2, true, ["CTL-SANCT", "CTL-REAL"]) };
+    const invs = {
+      ...allGreen(),
+      frozenNeedsHuman: inv(false, 2, true, ["CTL-SANCT", "CTL-REAL"]),
+    };
     const board = mkBoard({ ticketsById: parkedMap("CTL-SANCT"), capacity: { freeSlots: 4 } });
     const d = decideBoardHealth(invs, board);
     expect(d.gate.decision).toBe("proceed");
@@ -1118,7 +1275,12 @@ describe("buildBoardScanEvent", () => {
   test("publishes GitHub quota numerics and reset/host payload fields", () => {
     const board = mkBoard({ githubQuota: quotaSnapshot({ remaining: 250 }) });
     const invs = evaluateInvariants(board);
-    const ev = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision: decideBoardHealth(invs, board), board });
+    const ev = buildBoardScanEvent({
+      mode: "shadow",
+      invariants: invs,
+      decision: decideBoardHealth(invs, board),
+      board,
+    });
     expect(ev.details.githubCoreRemaining).toBe(250);
     expect(ev.details.githubCoreRemainingPct).toBe(5);
     expect(ev.details.githubQuotaResetAt).toBe("2026-06-20T13:00:00.000Z");
@@ -1132,7 +1294,12 @@ describe("buildBoardScanEvent", () => {
   test("Codex P1: quota scalars are promoted into OTel attributes, not just details", () => {
     const board = mkBoard({ githubQuota: quotaSnapshot({ remaining: 250 }) });
     const invs = evaluateInvariants(board);
-    const flat = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision: decideBoardHealth(invs, board), board });
+    const flat = buildBoardScanEvent({
+      mode: "shadow",
+      invariants: invs,
+      decision: decideBoardHealth(invs, board),
+      board,
+    });
     const attrs = buildRecoveryEnvelope(flat, { now: () => "2026-06-20T11:59:00Z" }).attributes;
     expect(attrs["recovery.github.core_remaining"]).toBe(250);
     expect(attrs["recovery.github.core_remaining_pct"]).toBe(5);
@@ -1140,7 +1307,11 @@ describe("buildBoardScanEvent", () => {
 
   test("Codex P1: an absent snapshot promotes nothing rather than charting a fake zero", () => {
     const invs = evaluateInvariants(mkBoard());
-    const flat = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision: decideBoardHealth(invs, mkBoard()) });
+    const flat = buildBoardScanEvent({
+      mode: "shadow",
+      invariants: invs,
+      decision: decideBoardHealth(invs, mkBoard()),
+    });
     const attrs = buildRecoveryEnvelope(flat, { now: () => "2026-06-20T11:59:00Z" }).attributes;
     expect(attrs).not.toHaveProperty("recovery.github.core_remaining");
     expect(attrs).not.toHaveProperty("recovery.github.core_remaining_pct");
@@ -1150,7 +1321,12 @@ describe("buildBoardScanEvent", () => {
   test("publishes Linear write-budget headroom numerics + state beside githubCoreRemaining", () => {
     const board = mkBoard({ linearWriteLedger: { day: "2026-06-20", total: 4, byTicket: {} } });
     const invs = evaluateInvariants(board);
-    const ev = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision: decideBoardHealth(invs, board), board });
+    const ev = buildBoardScanEvent({
+      mode: "shadow",
+      invariants: invs,
+      decision: decideBoardHealth(invs, board),
+      board,
+    });
     expect(ev.details.linearWriteRemaining).toBe(296);
     expect(ev.details.linearWriteRemainingPct).toBeCloseTo((296 / 300) * 100);
     expect(ev.details.linearWriteState).toBe("ok");
@@ -1159,7 +1335,12 @@ describe("buildBoardScanEvent", () => {
   test("Linear write scalars are promoted into OTel attributes, not just details", () => {
     const board = mkBoard({ linearWriteLedger: { day: "2026-06-20", total: 300, byTicket: {} } });
     const invs = evaluateInvariants(board);
-    const flat = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision: decideBoardHealth(invs, board), board });
+    const flat = buildBoardScanEvent({
+      mode: "shadow",
+      invariants: invs,
+      decision: decideBoardHealth(invs, board),
+      board,
+    });
     const attrs = buildRecoveryEnvelope(flat, { now: () => "2026-06-20T11:59:00Z" }).attributes;
     expect(attrs["recovery.linear_write.remaining"]).toBe(0);
     expect(attrs["recovery.linear_write.remaining_pct"]).toBe(0);
@@ -1169,7 +1350,12 @@ describe("buildBoardScanEvent", () => {
   test("an absent ledger reports linearWriteState 'unknown' and promotes NO numeric attributes (never a fake zero)", () => {
     const board = mkBoard(); // linearWriteLedger defaults to null
     const invs = evaluateInvariants(board);
-    const flat = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision: decideBoardHealth(invs, board), board });
+    const flat = buildBoardScanEvent({
+      mode: "shadow",
+      invariants: invs,
+      decision: decideBoardHealth(invs, board),
+      board,
+    });
     expect(flat.details.linearWriteState).toBe("unknown");
     expect(flat.details.linearWriteRemaining).toBeNull();
     const attrs = buildRecoveryEnvelope(flat, { now: () => "2026-06-20T11:59:00Z" }).attributes;
@@ -1181,9 +1367,16 @@ describe("buildBoardScanEvent", () => {
   });
 
   test("a per-ticket cap breach reports 'capped' even with plenty of daily headroom left (the live CTL-2015 shape)", () => {
-    const board = mkBoard({ linearWriteLedger: { day: "2026-06-20", total: 60, byTicket: { "CTL-2015": 50 } } });
+    const board = mkBoard({
+      linearWriteLedger: { day: "2026-06-20", total: 60, byTicket: { "CTL-2015": 50 } },
+    });
     const invs = evaluateInvariants(board);
-    const ev = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision: decideBoardHealth(invs, board), board });
+    const ev = buildBoardScanEvent({
+      mode: "shadow",
+      invariants: invs,
+      decision: decideBoardHealth(invs, board),
+      board,
+    });
     expect(ev.details.linearWriteState).toBe("capped");
     expect(ev.details.linearWriteRemaining).toBe(0);
   });
@@ -1202,7 +1395,11 @@ describe("buildBoardScanEvent", () => {
     expect(typeof ev.details.gateReason).toBe("string");
     expect(ev.details.proposedTier1).toBe(decision.proposed.tier1);
     // per-invariant {ok,failed,observable}
-    expect(ev.details.invariants.dispatchLiveness).toEqual({ ok: false, failed: 1, observable: true });
+    expect(ev.details.invariants.dispatchLiveness).toEqual({
+      ok: false,
+      failed: 1,
+      observable: true,
+    });
     // rosters/move arrays live in details (→ body.payload), as arrays
     expect(Array.isArray(ev.details.flagged)).toBe(true);
     expect(ev.details.flagged).toContain("CTL-1");
@@ -1288,8 +1485,13 @@ describe("buildBoardContext", () => {
     const board = mkBoard({ githubQuota: quotaSnapshot({ remaining: 250 }) });
     const ctx = buildBoardContext(board, evaluateInvariants(board));
     expect(ctx.githubQuota).toMatchObject({
-      state: "low", remaining: 250, limit: 5000, remainingPct: 5,
-      resetAt: "2026-06-20T13:00:00.000Z", host: "mini", ageMs: 0,
+      state: "low",
+      remaining: 250,
+      limit: 5000,
+      remainingPct: 5,
+      resetAt: "2026-06-20T13:00:00.000Z",
+      host: "mini",
+      ageMs: 0,
     });
     expect(ctx.invariants.rateLimitHeadroom).toEqual({ ok: true, failed: 0 });
     const empty = mkBoard();
@@ -1312,7 +1514,12 @@ describe("buildBoardContext", () => {
     expect(ctx.eligibleQueue.depth).toBe(2);
     expect(ctx.eligibleQueue.topTickets).toEqual(["CTL-1", "CTL-2"]);
     expect(ctx.stuckWorkers).toEqual([
-      { ticket: "CTL-OLD", phase: "implement", status: "running", ageSeconds: Math.round(5 * HOUR / 1000) },
+      {
+        ticket: "CTL-OLD",
+        phase: "implement",
+        status: "running",
+        ageSeconds: Math.round((5 * HOUR) / 1000),
+      },
     ]);
     expect(ctx.invariants.workerAge).toEqual({ ok: false, failed: 1 });
   });
@@ -1337,21 +1544,30 @@ describe("buildBoardContext", () => {
 describe("assembleBoardState", () => {
   test("github quota seam is skipped in off and sampled in shadow", () => {
     let calls = 0;
-    const getGithubQuota = () => { calls += 1; return quotaSnapshot(); };
-    expect(assembleBoardState({ mode: "off", getGithubQuota, now: () => NOW }).githubQuota).toBeNull();
+    const getGithubQuota = () => {
+      calls += 1;
+      return quotaSnapshot();
+    };
+    expect(
+      assembleBoardState({ mode: "off", getGithubQuota, now: () => NOW }).githubQuota
+    ).toBeNull();
     expect(calls).toBe(0);
-    expect(assembleBoardState({ mode: "shadow", getGithubQuota, now: () => NOW }).githubQuota).toEqual(quotaSnapshot());
+    expect(
+      assembleBoardState({ mode: "shadow", getGithubQuota, now: () => NOW }).githubQuota
+    ).toEqual(quotaSnapshot());
     expect(calls).toBe(1);
   });
 
   test("account quota ring retains Anthropic payload without synthesizing nearCliff", () => {
     const board = assembleBoardState({
       now: () => NOW,
-      readEventRing: () => [{
-        ts: new Date(NOW).toISOString(),
-        attributes: { "event.name": "account.ratelimit.sampled" },
-        body: { payload: { fiveHourPct: 42, sevenDayPct: 17 } },
-      }],
+      readEventRing: () => [
+        {
+          ts: new Date(NOW).toISOString(),
+          attributes: { "event.name": "account.ratelimit.sampled" },
+          body: { payload: { fiveHourPct: 42, sevenDayPct: 17 } },
+        },
+      ],
     });
     expect(board.ring.accountRatelimit).toEqual({ fiveHourPct: 42, sevenDayPct: 17 });
     expect(board.ring.accountRatelimit).not.toHaveProperty("nearCliff");
@@ -1362,7 +1578,14 @@ describe("assembleBoardState", () => {
       orchDir: "/tmp/x",
       getBoard: () => [{ identifier: "CTL-A", state: "In Progress" }],
       // a raw signal with NO `evidence` field — age must still compute from top-level updatedAt
-      getWorkerSignals: () => [{ ticket: "CTL-A", phase: "implement", status: "running", updatedAt: new Date(NOW - 5 * HOUR).toISOString() }],
+      getWorkerSignals: () => [
+        {
+          ticket: "CTL-A",
+          phase: "implement",
+          status: "running",
+          updatedAt: new Date(NOW - 5 * HOUR).toISOString(),
+        },
+      ],
       getEligible: () => [{ identifier: "CTL-B", project: "P1" }],
       roster: ["mini"],
       self: "mini",
@@ -1383,7 +1606,9 @@ describe("assembleBoardState", () => {
   test("deriveRing: dispatch SUCCESS events set recentDispatchTs; failed/escalated/runaway do NOT", () => {
     const ring = (name) =>
       assembleBoardState({
-        readEventRing: () => [{ attributes: { "event.name": name }, ts: new Date(NOW - MIN).toISOString() }],
+        readEventRing: () => [
+          { attributes: { "event.name": name }, ts: new Date(NOW - MIN).toISOString() },
+        ],
         now: () => NOW,
       }).ring.recentDispatchTs;
     // success / activity signals → counted (dispatcher is alive)
@@ -1401,7 +1626,12 @@ describe("assembleBoardState", () => {
       getEligible: () => [{ identifier: "CTL-1" }],
       capacity: { maxParallel: 4, liveCount: 0, freeSlots: 4 },
       // a fail-loop: recent phase.dispatch.failed events, no launched/requested
-      readEventRing: () => [{ attributes: { "event.name": "phase.dispatch.failed.CTL-1" }, ts: new Date(NOW - MIN).toISOString() }],
+      readEventRing: () => [
+        {
+          attributes: { "event.name": "phase.dispatch.failed.CTL-1" },
+          ts: new Date(NOW - MIN).toISOString(),
+        },
+      ],
       now: () => NOW,
     });
     expect(evaluateInvariants(board).dispatchLiveness.ok).toBe(false); // wedge NOT masked by failures
@@ -1410,11 +1640,21 @@ describe("assembleBoardState", () => {
   test("each reader fails soft — a throwing dep degrades to []/{}, never throws", () => {
     const board = assembleBoardState({
       orchDir: "/tmp/x",
-      getBoard: () => { throw new Error("db down"); },
-      getWorkerSignals: () => { throw new Error("signals down"); },
-      getEligible: () => { throw new Error("eligible down"); },
-      readEventRing: () => { throw new Error("ring down"); },
-      getReconcileMarkers: () => { throw new Error("markers down"); },
+      getBoard: () => {
+        throw new Error("db down");
+      },
+      getWorkerSignals: () => {
+        throw new Error("signals down");
+      },
+      getEligible: () => {
+        throw new Error("eligible down");
+      },
+      readEventRing: () => {
+        throw new Error("ring down");
+      },
+      getReconcileMarkers: () => {
+        throw new Error("markers down");
+      },
       now: () => NOW,
     });
     expect(board.ticketsById.size).toBe(0);
@@ -1450,7 +1690,13 @@ describe("boardHealthPass — mode branching + shadow safety", () => {
   test("mode:off → strict no-op: no emit, act never called, returns {ran:false,reason:off}", () => {
     const emits = [];
     const r = boardHealthPass(
-      flaggedDeps({ mode: "off", emit: (e) => emits.push(e), act: () => { throw new Error("must not act"); } }),
+      flaggedDeps({
+        mode: "off",
+        emit: (e) => emits.push(e),
+        act: () => {
+          throw new Error("must not act");
+        },
+      })
     );
     expect(r).toEqual({ ran: false, reason: "off" });
     expect(emits.length).toBe(0);
@@ -1459,7 +1705,13 @@ describe("boardHealthPass — mode branching + shadow safety", () => {
   test("mode:shadow → emits ONE recovery.board-scan (mode=shadow); act is NEVER called (no throw)", () => {
     const emits = [];
     const r = boardHealthPass(
-      flaggedDeps({ mode: "shadow", emit: (e) => emits.push(e), act: () => { throw new Error("shadow must not act"); } }),
+      flaggedDeps({
+        mode: "shadow",
+        emit: (e) => emits.push(e),
+        act: () => {
+          throw new Error("shadow must not act");
+        },
+      })
     );
     expect(r.ran).toBe(true);
     expect(emits.length).toBe(1);
@@ -1508,9 +1760,12 @@ describe("boardHealthPass — mode branching + shadow safety", () => {
         emit: (e) => emits.push(e),
         getDelegateClaims: () => {
           calls += 1;
-          return new Map([["CTL-1", NOW - 60_000], ["CTL-2", NOW - 60_000]]);
+          return new Map([
+            ["CTL-1", NOW - 60_000],
+            ["CTL-2", NOW - 60_000],
+          ]);
         },
-      }),
+      })
     );
     expect(r.ran).toBe(true);
     // (1) the forwarding contract itself: the reader was actually invoked.
@@ -1528,8 +1783,11 @@ describe("boardHealthPass — mode branching + shadow safety", () => {
       flaggedDeps({
         mode: "enforce",
         emit: (e) => emits.push(e),
-        act: (payload) => { acted.push(payload); return { dispatched: true, attempts: 1 }; },
-      }),
+        act: (payload) => {
+          acted.push(payload);
+          return { dispatched: true, attempts: 1 };
+        },
+      })
     );
     // ONE delegate per proceeding scan — NOT one per proposed move.
     expect(acted.length).toBe(1);
@@ -1551,10 +1809,15 @@ describe("boardHealthPass — mode branching + shadow safety", () => {
         emit: () => {},
         // a worker idling well past phase-normal → worker-age flags it → tier-1 nudge w/ ticket
         getWorkerSignals: () => [
-          { ticket: "CTL-STUCK", phase: "implement", status: "running", updatedAt: new Date(NOW - 10 * HOUR).toISOString() },
+          {
+            ticket: "CTL-STUCK",
+            phase: "implement",
+            status: "running",
+            updatedAt: new Date(NOW - 10 * HOUR).toISOString(),
+          },
         ],
         act: (payload) => acted.push(payload),
-      }),
+      })
     );
     expect(acted.length).toBe(1);
     expect(acted[0].anchor).toBe("CTL-STUCK"); // nudge ticket beats eligible[0]=CTL-1
@@ -1592,7 +1855,14 @@ describe("boardHealthPass — mode branching + shadow safety", () => {
       orchDir: "/tmp/x",
       mode: "enforce",
       getBoard: () => [{ identifier: "CTL-OWNED-ELSEWHERE" }],
-      getWorkerSignals: () => [{ ticket: "CTL-OWNED-ELSEWHERE", phase: "implement", status: "running", updatedAt: new Date(NOW - 5 * HOUR).toISOString() }],
+      getWorkerSignals: () => [
+        {
+          ticket: "CTL-OWNED-ELSEWHERE",
+          phase: "implement",
+          status: "running",
+          updatedAt: new Date(NOW - 5 * HOUR).toISOString(),
+        },
+      ],
       getEligible: () => [],
       roster: ["mini", "mini-2"],
       self: "mini",
@@ -1613,10 +1883,35 @@ describe("boardHealthPass — mode branching + shadow safety", () => {
 
   test("selectAnchor: tier-1 nudge > tier-2 re-dispatch-blocker > top eligible > null", () => {
     const board = { eligible: [{ id: "CTL-ELIG" }] };
-    expect(selectAnchor({ tier1: [{ move: "kick-dispatch" }, { ticket: "CTL-N", move: "nudge" }], tier2: [{ ticket: "CTL-B", move: "re-dispatch-blocker" }], tier3: [] }, board)).toBe("CTL-N");
-    expect(selectAnchor({ tier1: [{ move: "kick-dispatch" }], tier2: [{ ticket: "CTL-B", move: "re-dispatch-blocker" }], tier3: [] }, board)).toBe("CTL-B");
-    expect(selectAnchor({ tier1: [{ move: "kick-dispatch" }], tier2: [], tier3: [{ host: "mini-2" }] }, board)).toBe("CTL-ELIG");
-    expect(selectAnchor({ tier1: [], tier2: [], tier3: [{ host: "mini-2" }] }, { eligible: [] })).toBe(null);
+    expect(
+      selectAnchor(
+        {
+          tier1: [{ move: "kick-dispatch" }, { ticket: "CTL-N", move: "nudge" }],
+          tier2: [{ ticket: "CTL-B", move: "re-dispatch-blocker" }],
+          tier3: [],
+        },
+        board
+      )
+    ).toBe("CTL-N");
+    expect(
+      selectAnchor(
+        {
+          tier1: [{ move: "kick-dispatch" }],
+          tier2: [{ ticket: "CTL-B", move: "re-dispatch-blocker" }],
+          tier3: [],
+        },
+        board
+      )
+    ).toBe("CTL-B");
+    expect(
+      selectAnchor(
+        { tier1: [{ move: "kick-dispatch" }], tier2: [], tier3: [{ host: "mini-2" }] },
+        board
+      )
+    ).toBe("CTL-ELIG");
+    expect(
+      selectAnchor({ tier1: [], tier2: [], tier3: [{ host: "mini-2" }] }, { eligible: [] })
+    ).toBe(null);
   });
 
   // ─── CTL-1302: selectAnchor must prefer a SELF-OWNED flagged ticket ──────────
@@ -1627,26 +1922,44 @@ describe("boardHealthPass — mode branching + shadow safety", () => {
   // owned work. selectAnchor must filter to self-owned (single-host owns all).
   test("selectAnchor (CTL-1302) prefers a self-owned flagged ticket over a foreign-owned earlier one", () => {
     const board = {
-      self: "mini", multiHost: true, roster: ["mini", "mini-2"],
+      self: "mini",
+      multiHost: true,
+      roster: ["mini", "mini-2"],
       ownerForTicket: (t) => (t === "CTL-MINE" ? "mini" : "mini-2"),
       eligible: [],
     };
-    const moves = { tier1: [{ ticket: "CTL-FOREIGN", move: "nudge" }, { ticket: "CTL-MINE", move: "nudge" }], tier2: [], tier3: [] };
+    const moves = {
+      tier1: [
+        { ticket: "CTL-FOREIGN", move: "nudge" },
+        { ticket: "CTL-MINE", move: "nudge" },
+      ],
+      tier2: [],
+      tier3: [],
+    };
     expect(selectAnchor(moves, board)).toBe("CTL-MINE");
   });
 
   test("selectAnchor (CTL-1302) returns null when this host owns NONE of the flagged/eligible", () => {
     const board = {
-      self: "mini", multiHost: true, roster: ["mini", "mini-2"],
-      ownerForTicket: () => "mini-2", eligible: [{ id: "CTL-E" }],
+      self: "mini",
+      multiHost: true,
+      roster: ["mini", "mini-2"],
+      ownerForTicket: () => "mini-2",
+      eligible: [{ id: "CTL-E" }],
     };
-    const moves = { tier1: [{ ticket: "CTL-A", move: "nudge" }], tier2: [{ ticket: "CTL-B", move: "re-dispatch-blocker" }], tier3: [] };
+    const moves = {
+      tier1: [{ ticket: "CTL-A", move: "nudge" }],
+      tier2: [{ ticket: "CTL-B", move: "re-dispatch-blocker" }],
+      tier3: [],
+    };
     expect(selectAnchor(moves, board)).toBe(null);
   });
 
   test("selectAnchor (CTL-1302) falls back to a self-owned eligible ticket (skips foreign eligible)", () => {
     const board = {
-      self: "mini", multiHost: true, roster: ["mini", "mini-2"],
+      self: "mini",
+      multiHost: true,
+      roster: ["mini", "mini-2"],
       ownerForTicket: (t) => (t === "CTL-E2" ? "mini" : "mini-2"),
       eligible: [{ id: "CTL-E1" }, { id: "CTL-E2" }], // E1 foreign, E2 mine
     };
@@ -1655,8 +1968,18 @@ describe("boardHealthPass — mode branching + shadow safety", () => {
   });
 
   test("selectAnchor (CTL-1302) single-host (no ownerForTicket / multiHost false) owns all — unchanged", () => {
-    expect(selectAnchor({ tier1: [{ ticket: "CTL-X", move: "nudge" }], tier2: [], tier3: [] }, { eligible: [{ id: "CTL-1" }] })).toBe("CTL-X");
-    expect(selectAnchor({ tier1: [{ ticket: "CTL-X", move: "nudge" }], tier2: [], tier3: [] }, { multiHost: false, ownerForTicket: () => "mini-2", self: "mini", eligible: [] })).toBe("CTL-X");
+    expect(
+      selectAnchor(
+        { tier1: [{ ticket: "CTL-X", move: "nudge" }], tier2: [], tier3: [] },
+        { eligible: [{ id: "CTL-1" }] }
+      )
+    ).toBe("CTL-X");
+    expect(
+      selectAnchor(
+        { tier1: [{ ticket: "CTL-X", move: "nudge" }], tier2: [], tier3: [] },
+        { multiHost: false, ownerForTicket: () => "mini-2", self: "mini", eligible: [] }
+      )
+    ).toBe("CTL-X");
   });
 
   test("boardHealthPass (CTL-1302): multiHost dispatches against the self-owned flagged ticket, not the foreign first one", () => {
@@ -1667,8 +1990,18 @@ describe("boardHealthPass — mode branching + shadow safety", () => {
       // two stalled workers: CTL-FOREIGN (mini-2) flagged first, CTL-MINE (mini) flagged second
       getBoard: () => [{ identifier: "CTL-FOREIGN" }, { identifier: "CTL-MINE" }],
       getWorkerSignals: () => [
-        { ticket: "CTL-FOREIGN", phase: "implement", status: "running", updatedAt: new Date(NOW - 6 * HOUR).toISOString() },
-        { ticket: "CTL-MINE", phase: "implement", status: "running", updatedAt: new Date(NOW - 6 * HOUR).toISOString() },
+        {
+          ticket: "CTL-FOREIGN",
+          phase: "implement",
+          status: "running",
+          updatedAt: new Date(NOW - 6 * HOUR).toISOString(),
+        },
+        {
+          ticket: "CTL-MINE",
+          phase: "implement",
+          status: "running",
+          updatedAt: new Date(NOW - 6 * HOUR).toISOString(),
+        },
       ],
       getEligible: () => [],
       roster: ["mini", "mini-2"],
@@ -1682,7 +2015,10 @@ describe("boardHealthPass — mode branching + shadow safety", () => {
       intervalMs: 0,
       now: () => NOW,
       emit: () => {},
-      act: (payload) => { acted.push(payload); return { dispatched: true }; },
+      act: (payload) => {
+        acted.push(payload);
+        return { dispatched: true };
+      },
     });
     expect(acted.length).toBe(1);
     expect(acted[0].anchor).toBe("CTL-MINE"); // NOT CTL-FOREIGN (which it doesn't own)
@@ -1696,7 +2032,7 @@ describe("boardHealthPass — mode branching + shadow safety", () => {
         emit: (e) => emits.push(e),
         lastRunMs: NOW - 1 * MIN, // 1min ago
         intervalMs: 5 * MIN, // 5min floor → throttled
-      }),
+      })
     );
     expect(r).toEqual({ ran: false, reason: "throttled" });
     expect(emits.length).toBe(0);
@@ -1704,7 +2040,12 @@ describe("boardHealthPass — mode branching + shadow safety", () => {
 
   test("fail-soft: a throwing emit is caught — the pass still returns {ran:true}", () => {
     const r = boardHealthPass(
-      flaggedDeps({ mode: "shadow", emit: () => { throw new Error("emit blew up"); } }),
+      flaggedDeps({
+        mode: "shadow",
+        emit: () => {
+          throw new Error("emit blew up");
+        },
+      })
     );
     expect(r.ran).toBe(true);
   });
@@ -1718,8 +2059,17 @@ describe("buildBoardScanEvent — C1 act-outcome (CTL-1435)", () => {
 
   test("no act param → default shadow outcome; actDispatched 0", () => {
     const invs = { ...allGreen(), dispatchLiveness: inv(false, 1, true, ["CTL-1"]) };
-    const ev = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision: decisionFor(invs) });
-    expect(ev.details.act).toEqual({ dispatched: false, anchor: null, skippedReason: "shadow", skippedReasonNoClock: false });
+    const ev = buildBoardScanEvent({
+      mode: "shadow",
+      invariants: invs,
+      decision: decisionFor(invs),
+    });
+    expect(ev.details.act).toEqual({
+      dispatched: false,
+      anchor: null,
+      skippedReason: "shadow",
+      skippedReasonNoClock: false,
+    });
     expect(ev.details.actDispatched).toBe(0);
   });
 
@@ -1731,7 +2081,12 @@ describe("buildBoardScanEvent — C1 act-outcome (CTL-1435)", () => {
       decision: decisionFor(invs),
       act: { dispatched: true, anchor: "CTL-7", skippedReason: null },
     });
-    expect(ev.details.act).toEqual({ dispatched: true, anchor: "CTL-7", skippedReason: null, skippedReasonNoClock: false });
+    expect(ev.details.act).toEqual({
+      dispatched: true,
+      anchor: "CTL-7",
+      skippedReason: null,
+      skippedReasonNoClock: false,
+    });
     expect(ev.details.actDispatched).toBe(1);
     expect(ev.reason).toContain("dispatched CTL-7");
   });
@@ -1758,7 +2113,7 @@ describe("boardHealthPass — C1 act-outcome captured on the emitted scan (CTL-1
         mode: "enforce",
         emit: (e) => emits.push(e),
         act: () => ({ dispatched: true, attempts: 1, candidate: "CTL-1" }),
-      }),
+      })
     );
     expect(emits.length).toBe(1);
     expect(emits[0].details.act.dispatched).toBe(true);
@@ -1774,7 +2129,12 @@ describe("boardHealthPass — C1 act-outcome captured on the emitted scan (CTL-1
       mode: "enforce",
       getBoard: () => [{ identifier: "CTL-OWNED-ELSEWHERE" }],
       getWorkerSignals: () => [
-        { ticket: "CTL-OWNED-ELSEWHERE", phase: "implement", status: "running", updatedAt: new Date(NOW - 5 * HOUR).toISOString() },
+        {
+          ticket: "CTL-OWNED-ELSEWHERE",
+          phase: "implement",
+          status: "running",
+          updatedAt: new Date(NOW - 5 * HOUR).toISOString(),
+        },
       ],
       getEligible: () => [],
       roster: ["mini", "mini-2"],
@@ -1788,7 +2148,9 @@ describe("boardHealthPass — C1 act-outcome captured on the emitted scan (CTL-1
       intervalMs: 0,
       now: () => NOW,
       emit: (e) => emits.push(e),
-      act: () => { throw new Error("must not act — no anchor"); },
+      act: () => {
+        throw new Error("must not act — no anchor");
+      },
     });
     expect(emits.length).toBe(1);
     expect(emits[0].details.act.dispatched).toBe(false);
@@ -1802,8 +2164,10 @@ describe("boardHealthPass — C1 act-outcome captured on the emitted scan (CTL-1
         mode: "enforce",
         getEligible: () => [], // no queue → no dispatch wedge → all-green → gate=skip
         emit: (e) => emits.push(e),
-        act: () => { throw new Error("must not act — gate held"); },
-      }),
+        act: () => {
+          throw new Error("must not act — gate held");
+        },
+      })
     );
     expect(emits.length).toBe(1);
     expect(emits[0].details.act.dispatched).toBe(false);
@@ -1813,9 +2177,20 @@ describe("boardHealthPass — C1 act-outcome captured on the emitted scan (CTL-1
   test("shadow → emitted scan records skippedReason:shadow, dispatched:false (never actuates)", () => {
     const emits = [];
     boardHealthPass(
-      flaggedDeps({ mode: "shadow", emit: (e) => emits.push(e), act: () => { throw new Error("shadow must not act"); } }),
+      flaggedDeps({
+        mode: "shadow",
+        emit: (e) => emits.push(e),
+        act: () => {
+          throw new Error("shadow must not act");
+        },
+      })
     );
-    expect(emits[0].details.act).toEqual({ dispatched: false, anchor: null, skippedReason: "shadow", skippedReasonNoClock: false });
+    expect(emits[0].details.act).toEqual({
+      dispatched: false,
+      anchor: null,
+      skippedReason: "shadow",
+      skippedReasonNoClock: false,
+    });
   });
 
   test("Codex round-2: enforce with NO act seam → skippedReason:no-actuator (a miswired-actuator wedge)", () => {
@@ -1831,8 +2206,11 @@ describe("boardHealthPass — C1 act-outcome captured on the emitted scan (CTL-1
       flaggedDeps({
         mode: "enforce",
         emit: () => order.push("emit"),
-        act: () => { order.push("act"); return { dispatched: true, candidate: "CTL-1" }; },
-      }),
+        act: () => {
+          order.push("act");
+          return { dispatched: true, candidate: "CTL-1" };
+        },
+      })
     );
     expect(order).toEqual(["act", "emit"]);
   });
@@ -1875,23 +2253,48 @@ describe("deriveRing → board.ring.boardScans via assembleBoardState (CTL-1435 
       {
         ts: "2026-06-20T11:59:00Z",
         type: "recovery.board-scan",
-        payload: { mode: "enforce", gateDecision: "proceed", proposedTier1: 1, proposedTier2: 2, proposedTier3: 0, act: { dispatched: true, skippedReason: null } },
+        payload: {
+          mode: "enforce",
+          gateDecision: "proceed",
+          proposedTier1: 1,
+          proposedTier2: 2,
+          proposedTier3: 0,
+          act: { dispatched: true, skippedReason: null },
+        },
       },
     ];
     const board = assembleBoardState({
-      orchDir: "/tmp/x", getBoard: () => [], getWorkerSignals: () => [], getEligible: () => [],
-      readEventRing: () => events, mode: "enforce", now: () => NOW,
+      orchDir: "/tmp/x",
+      getBoard: () => [],
+      getWorkerSignals: () => [],
+      getEligible: () => [],
+      readEventRing: () => events,
+      mode: "enforce",
+      now: () => NOW,
     });
     expect(board.ring.boardScans[0]).toEqual({
       tsMs: Date.parse("2026-06-20T11:59:00Z"),
-      mode: "enforce", gate: "proceed", proposedMoves: 3, dispatched: true, skippedReason: null, skippedReasonNoClock: false,
+      mode: "enforce",
+      gate: "proceed",
+      proposedMoves: 3,
+      dispatched: true,
+      skippedReason: null,
+      skippedReasonNoClock: false,
     });
   });
 });
 
 describe("checkActuationLiveness — via evaluateInvariants (CTL-1435 C2)", () => {
   // default scan = an owned-but-undispatched wedge (all-candidates-cooldown).
-  const mkScan = (o = {}) => ({ tsMs: NOW, mode: "enforce", gate: "proceed", proposedMoves: 3, dispatched: false, skippedReason: "all-candidates-cooldown", ...o });
+  const mkScan = (o = {}) => ({
+    tsMs: NOW,
+    mode: "enforce",
+    gate: "proceed",
+    proposedMoves: 3,
+    dispatched: false,
+    skippedReason: "all-candidates-cooldown",
+    ...o,
+  });
 
   test("K enforce scans ALL owned-but-undispatched (all-candidates-cooldown) → flags", () => {
     const boardScans = Array.from({ length: 6 }, () => mkScan());
@@ -1914,13 +2317,18 @@ describe("checkActuationLiveness — via evaluateInvariants (CTL-1435 C2)", () =
   });
 
   test("no-owned-anchor scans are BENIGN (nothing this host owns) → NOT flagged", () => {
-    const boardScans = Array.from({ length: 6 }, () => mkScan({ skippedReason: "no-owned-anchor" }));
+    const boardScans = Array.from({ length: 6 }, () =>
+      mkScan({ skippedReason: "no-owned-anchor" })
+    );
     const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
     expect(r.actuationLiveness.ok).toBe(true);
   });
 
   test("one dispatched:true within the K window → passes (ok:true)", () => {
-    const boardScans = [...Array.from({ length: 5 }, () => mkScan()), mkScan({ dispatched: true, skippedReason: null })];
+    const boardScans = [
+      ...Array.from({ length: 5 }, () => mkScan()),
+      mkScan({ dispatched: true, skippedReason: null }),
+    ];
     const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
     expect(r.actuationLiveness.ok).toBe(true);
   });
@@ -1982,7 +2390,9 @@ describe("buildRecoveryEnvelope — recovery.act_dispatched promotion (CTL-1435)
   };
 
   test("dispatched scan → attributes['recovery.act_dispatched'] === 1 (chartable dispatch rate)", () => {
-    const env = buildRecoveryEnvelope(mkEvent({ dispatched: true, anchor: "CTL-1", skippedReason: null }));
+    const env = buildRecoveryEnvelope(
+      mkEvent({ dispatched: true, anchor: "CTL-1", skippedReason: null })
+    );
     expect(env.attributes["recovery.act_dispatched"]).toBe(1);
     // the high-cardinality anchor stays in body.payload.details, never promoted.
     expect(env.attributes["recovery.act_anchor"]).toBeUndefined();
@@ -1990,7 +2400,9 @@ describe("buildRecoveryEnvelope — recovery.act_dispatched promotion (CTL-1435)
   });
 
   test("non-dispatch scan → attributes['recovery.act_dispatched'] === 0", () => {
-    const env = buildRecoveryEnvelope(mkEvent({ dispatched: false, anchor: null, skippedReason: "all-candidates-cooldown" }));
+    const env = buildRecoveryEnvelope(
+      mkEvent({ dispatched: false, anchor: null, skippedReason: "all-candidates-cooldown" })
+    );
     expect(env.attributes["recovery.act_dispatched"]).toBe(0);
   });
 });
@@ -2060,7 +2472,10 @@ describe("boardHealthPass — CTL-1524 C4b lazy deadHosts", () => {
 
   test("a thunk and the equivalent array produce the SAME board state", () => {
     const fromArray = assembleBoardState({ roster: ["mini", "mini-2"], deadHosts: ["mini-2"] });
-    const fromThunk = assembleBoardState({ roster: ["mini", "mini-2"], deadHosts: () => ["mini-2"] });
+    const fromThunk = assembleBoardState({
+      roster: ["mini", "mini-2"],
+      deadHosts: () => ["mini-2"],
+    });
     expect(fromThunk.deadHosts).toEqual(fromArray.deadHosts);
     expect(fromThunk.deadHosts).toEqual(["mini-2"]);
   });
@@ -2108,8 +2523,7 @@ describe("checkUnownedInFlight (CTL-1475)", () => {
   const HOUR = 3_600_000;
   const NOW = Date.parse("2026-07-27T00:00:00.000Z");
   const at = (hoursAgo) => new Date(NOW - hoursAgo * HOUR).toISOString();
-  const board = (o = {}) =>
-    mkBoard({ now: NOW, mode: "enforce", ...o });
+  const board = (o = {}) => mkBoard({ now: NOW, mode: "enforce", ...o });
   const one = (over = {}) =>
     new Map([["CTL-9", { id: "CTL-9", state: "Implement", updatedAt: at(72), ...over }]]);
 
@@ -2212,7 +2626,15 @@ describe("checkUnownedInFlight (CTL-1475)", () => {
   // `stateMap.reviewing = "Review"` never appeared in our data and the gap was
   // invisible locally. Every configured in-flight phase name must be covered.
   test("covers every in-flight state in the shipped template stateMap", () => {
-    for (const state of ["Research", "Plan", "Implement", "Validate", "Review", "Remediate", "PR"]) {
+    for (const state of [
+      "Research",
+      "Plan",
+      "Implement",
+      "Validate",
+      "Review",
+      "Remediate",
+      "PR",
+    ]) {
       const r = evaluateInvariants(board({ ticketsById: one({ state }) })).unownedInFlight;
       expect(r.flagged).toEqual(["CTL-9"]);
     }
@@ -2297,10 +2719,7 @@ describe("checkUnownedInFlight (CTL-1475)", () => {
   // leave the rest exactly as stuck. Mutation-checked: drop the field → RED.
   test("buildBoardContext surfaces the WHOLE cohort, not just the anchor", () => {
     const many = new Map(
-      ["CTL-9", "CTL-10", "CTL-11"].map((id) => [
-        id,
-        { id, state: "Implement", updatedAt: at(72) },
-      ]),
+      ["CTL-9", "CTL-10", "CTL-11"].map((id) => [id, { id, state: "Implement", updatedAt: at(72) }])
     );
     const b = board({ ticketsById: many });
     const ctx = buildBoardContext(b, evaluateInvariants(b));
@@ -2315,11 +2734,21 @@ describe("checkUnownedInFlight (CTL-1475)", () => {
 
 // ─── CTL-1610 (Phase 2): skippedReasonNoClock threading ─────────────────────
 describe("checkActuationLiveness — skippedReasonNoClock (CTL-1610)", () => {
-  const mkScan = (o = {}) => ({ tsMs: NOW, mode: "enforce", gate: "proceed", proposedMoves: 3, dispatched: false, skippedReason: "all-candidates-cooldown", skippedReasonNoClock: false, ...o });
+  const mkScan = (o = {}) => ({
+    tsMs: NOW,
+    mode: "enforce",
+    gate: "proceed",
+    proposedMoves: 3,
+    dispatched: false,
+    skippedReason: "all-candidates-cooldown",
+    skippedReasonNoClock: false,
+    ...o,
+  });
 
   test("(CTL-1610) all-candidates-exhausted with skippedReasonNoClock:true across the window → flags (wedge)", () => {
     const boardScans = Array.from({ length: 6 }, () =>
-      mkScan({ skippedReason: "all-candidates-exhausted", skippedReasonNoClock: true }));
+      mkScan({ skippedReason: "all-candidates-exhausted", skippedReasonNoClock: true })
+    );
     const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
     expect(r.actuationLiveness.observable).toBe(true);
     expect(r.actuationLiveness.ok).toBe(false);
@@ -2327,14 +2756,17 @@ describe("checkActuationLiveness — skippedReasonNoClock (CTL-1610)", () => {
 
   test("(CTL-1610) all-candidates-exhausted with a valid clock (skippedReasonNoClock:false) stays BENIGN (not flagged)", () => {
     const boardScans = Array.from({ length: 6 }, () =>
-      mkScan({ skippedReason: "all-candidates-exhausted", skippedReasonNoClock: false }));
+      mkScan({ skippedReason: "all-candidates-exhausted", skippedReasonNoClock: false })
+    );
     const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
     expect(r.actuationLiveness.ok).toBe(true);
   });
 
   test("(CTL-1610) a dispatched scan within a no-clock-latch window still clears the wedge", () => {
     const boardScans = [
-      ...Array.from({ length: 5 }, () => mkScan({ skippedReason: "all-candidates-exhausted", skippedReasonNoClock: true })),
+      ...Array.from({ length: 5 }, () =>
+        mkScan({ skippedReason: "all-candidates-exhausted", skippedReasonNoClock: true })
+      ),
       mkScan({ dispatched: true, skippedReason: null }),
     ];
     const r = evaluateInvariants(mkBoard({ mode: "enforce", ring: { boardScans } }));
@@ -2346,8 +2778,17 @@ describe("buildBoardScanEvent — act.skippedReasonNoClock round-trip (CTL-1610)
   test("(CTL-1610) buildBoardScanEvent carries act.skippedReasonNoClock", () => {
     const invs = { ...allGreen(), dispatchLiveness: inv(false, 1, true, ["CTL-1"]) };
     const decision = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
-    const ev = buildBoardScanEvent({ mode: "enforce", invariants: invs, decision,
-      act: { dispatched: false, anchor: null, skippedReason: "all-candidates-exhausted", skippedReasonNoClock: true } });
+    const ev = buildBoardScanEvent({
+      mode: "enforce",
+      invariants: invs,
+      decision,
+      act: {
+        dispatched: false,
+        anchor: null,
+        skippedReason: "all-candidates-exhausted",
+        skippedReasonNoClock: true,
+      },
+    });
     expect(ev.details.act.skippedReasonNoClock).toBe(true);
   });
 });
@@ -2364,8 +2805,12 @@ describe("boardHealthPass — latchedNoClock → scan.skippedReasonNoClock (CTL-
       flaggedDeps({
         mode: "enforce",
         emit: (e) => emits.push(e),
-        act: () => ({ dispatched: false, reason: "all-candidates-exhausted", latchedNoClock: true }),
-      }),
+        act: () => ({
+          dispatched: false,
+          reason: "all-candidates-exhausted",
+          latchedNoClock: true,
+        }),
+      })
     );
     expect(emits.length).toBe(1);
     expect(emits[0].details.act.dispatched).toBe(false);
@@ -2379,8 +2824,12 @@ describe("boardHealthPass — latchedNoClock → scan.skippedReasonNoClock (CTL-
       flaggedDeps({
         mode: "enforce",
         emit: (e) => emits.push(e),
-        act: () => ({ dispatched: false, reason: "all-candidates-exhausted", latchedNoClock: false }),
-      }),
+        act: () => ({
+          dispatched: false,
+          reason: "all-candidates-exhausted",
+          latchedNoClock: false,
+        }),
+      })
     );
     expect(emits[0].details.act.skippedReason).toBe("all-candidates-exhausted");
     expect(emits[0].details.act.skippedReasonNoClock).toBe(false);
@@ -2393,7 +2842,7 @@ describe("boardHealthPass — latchedNoClock → scan.skippedReasonNoClock (CTL-
         mode: "enforce",
         emit: (e) => emits.push(e),
         act: () => ({ dispatched: true, candidate: "CTL-1", latchedNoClock: true }),
-      }),
+      })
     );
     expect(emits[0].details.act.dispatched).toBe(true);
     expect(emits[0].details.act.skippedReasonNoClock).toBe(false);
@@ -2438,14 +2887,22 @@ describe("classifyRevivalRoute (CTL-1644)", () => {
 
   test("salvage CHECKED and absent (fields present & false) ⇒ restart-fresh", () => {
     const c = classifyRevivalRoute({
-      openPr: null, remoteBranchExists: false, worktreeUnpushed: false,
-      hasWorkerDir: false, hasLiveBg: false, hasFreshIntent: false,
+      openPr: null,
+      remoteBranchExists: false,
+      worktreeUnpushed: false,
+      hasWorkerDir: false,
+      hasLiveBg: false,
+      hasFreshIntent: false,
     });
     expect(c.route).toBe("restart-fresh");
   });
 
   test("open PR takes precedence over remote branch", () => {
-    const c = classifyRevivalRoute({ openPr: { number: 7 }, remoteBranchExists: true, worktreeUnpushed: true });
+    const c = classifyRevivalRoute({
+      openPr: { number: 7 },
+      remoteBranchExists: true,
+      worktreeUnpushed: true,
+    });
     expect(c.route).toBe("pr-not-merged");
   });
 });
@@ -2463,8 +2920,15 @@ describe("checkStrandedMidPipeline (CTL-1644)", () => {
   // Evidence stub helper: array of rows → Map<id, evidence>
   const ev = (rows) => new Map(rows.map((r) => [r.id, r]));
   // Full "nothing salvageable" evidence row for CTL-9.
-  const noActuation = { id: "CTL-9", hasWorkerDir: false, hasLiveBg: false,
-    hasFreshIntent: false, openPr: null, remoteBranchExists: false, worktreeUnpushed: false };
+  const noActuation = {
+    id: "CTL-9",
+    hasWorkerDir: false,
+    hasLiveBg: false,
+    hasFreshIntent: false,
+    openPr: null,
+    remoteBranchExists: false,
+    worktreeUnpushed: false,
+  };
 
   test("observable:false when no evidence seam provided (empty Map → shadow-first wiring)", () => {
     // strandedEvidence defaults to new Map() in mkBoard → size 0 → not observable.
@@ -2475,12 +2939,14 @@ describe("checkStrandedMidPipeline (CTL-1644)", () => {
   });
 
   test("flags an HRW-owned in-flight ticket with NO actuation past threshold, and classifies it", () => {
-    const r = evaluateInvariants(board({
-      ticketsById: one(),
-      self: "mini",
-      ownerForTicket: () => "mini",
-      strandedEvidence: ev([noActuation]),
-    })).strandedMidPipeline;
+    const r = evaluateInvariants(
+      board({
+        ticketsById: one(),
+        self: "mini",
+        ownerForTicket: () => "mini",
+        strandedEvidence: ev([noActuation]),
+      })
+    ).strandedMidPipeline;
     expect(r.observable).toBe(true);
     expect(r.ok).toBe(false);
     expect(r.flagged).toEqual(["CTL-9"]);
@@ -2488,150 +2954,178 @@ describe("checkStrandedMidPipeline (CTL-1644)", () => {
   });
 
   test("does NOT flag when a worker dir exists (actuation present)", () => {
-    const r = evaluateInvariants(board({
-      ticketsById: one(),
-      self: "mini",
-      ownerForTicket: () => "mini",
-      strandedEvidence: ev([{ id: "CTL-9", hasWorkerDir: true }]),
-    })).strandedMidPipeline;
+    const r = evaluateInvariants(
+      board({
+        ticketsById: one(),
+        self: "mini",
+        ownerForTicket: () => "mini",
+        strandedEvidence: ev([{ id: "CTL-9", hasWorkerDir: true }]),
+      })
+    ).strandedMidPipeline;
     expect(r.ok).toBe(true);
     expect(r.flagged).toEqual([]);
   });
 
   test("does NOT flag when a live bg worker exists", () => {
-    const r = evaluateInvariants(board({
-      ticketsById: one(),
-      self: "mini",
-      ownerForTicket: () => "mini",
-      strandedEvidence: ev([{ id: "CTL-9", hasLiveBg: true }]),
-    })).strandedMidPipeline;
+    const r = evaluateInvariants(
+      board({
+        ticketsById: one(),
+        self: "mini",
+        ownerForTicket: () => "mini",
+        strandedEvidence: ev([{ id: "CTL-9", hasLiveBg: true }]),
+      })
+    ).strandedMidPipeline;
     expect(r.flagged).toEqual([]);
   });
 
   test("does NOT flag when a FRESH live-status signal exists (active worker)", () => {
-    const r = evaluateInvariants(board({
-      ticketsById: one(),
-      self: "mini",
-      ownerForTicket: () => "mini",
-      signals: [{ ticket: "CTL-9", phase: "implement", status: "running", ageMs: 1 * HOUR }],
-      strandedEvidence: ev([noActuation]),
-    })).strandedMidPipeline;
+    const r = evaluateInvariants(
+      board({
+        ticketsById: one(),
+        self: "mini",
+        ownerForTicket: () => "mini",
+        signals: [{ ticket: "CTL-9", phase: "implement", status: "running", ageMs: 1 * HOUR }],
+        strandedEvidence: ev([noActuation]),
+      })
+    ).strandedMidPipeline;
     expect(r.flagged).toEqual([]);
   });
 
   test("DOES flag when the only 'live' signal is STALE past threshold [Codex P2 round 5]", () => {
     // A dead worker's persisted `running` signal (never wrote a terminal signal)
     // must NOT mask the stranded ticket once it has sat live past the window.
-    const r = evaluateInvariants(board({
-      ticketsById: one(),
-      self: "mini",
-      ownerForTicket: () => "mini",
-      signals: [{ ticket: "CTL-9", phase: "implement", status: "running", ageMs: 72 * HOUR }],
-      strandedEvidence: ev([noActuation]),
-    })).strandedMidPipeline;
+    const r = evaluateInvariants(
+      board({
+        ticketsById: one(),
+        self: "mini",
+        ownerForTicket: () => "mini",
+        signals: [{ ticket: "CTL-9", phase: "implement", status: "running", ageMs: 72 * HOUR }],
+        strandedEvidence: ev([noActuation]),
+      })
+    ).strandedMidPipeline;
     expect(r.flagged).toEqual(["CTL-9"]);
   });
 
   test("does NOT flag when a fresh recovery intent exists", () => {
-    const r = evaluateInvariants(board({
-      ticketsById: one(),
-      self: "mini",
-      ownerForTicket: () => "mini",
-      strandedEvidence: ev([{ id: "CTL-9", hasFreshIntent: true }]),
-    })).strandedMidPipeline;
+    const r = evaluateInvariants(
+      board({
+        ticketsById: one(),
+        self: "mini",
+        ownerForTicket: () => "mini",
+        strandedEvidence: ev([{ id: "CTL-9", hasFreshIntent: true }]),
+      })
+    ).strandedMidPipeline;
     expect(r.flagged).toEqual([]);
   });
 
   test("does NOT flag a foreign-owned ticket (HRW belongs to another host)", () => {
-    const r = evaluateInvariants(board({
-      ticketsById: one(),
-      self: "mini",
-      ownerForTicket: () => "studio",
-      strandedEvidence: ev([noActuation]),
-    })).strandedMidPipeline;
+    const r = evaluateInvariants(
+      board({
+        ticketsById: one(),
+        self: "mini",
+        ownerForTicket: () => "studio",
+        strandedEvidence: ev([noActuation]),
+      })
+    ).strandedMidPipeline;
     expect(r.flagged).toEqual([]);
   });
 
   test("does NOT flag a needs-human LABELLED ticket (parked contract, label not status)", () => {
-    const r = evaluateInvariants(board({
-      ticketsById: one({ labels: [{ name: "needs-human" }] }),
-      self: "mini",
-      ownerForTicket: () => "mini",
-      strandedEvidence: ev([noActuation]),
-    })).strandedMidPipeline;
+    const r = evaluateInvariants(
+      board({
+        ticketsById: one({ labels: [{ name: "needs-human" }] }),
+        self: "mini",
+        ownerForTicket: () => "mini",
+        strandedEvidence: ev([noActuation]),
+      })
+    ).strandedMidPipeline;
     expect(r.flagged).toEqual([]);
   });
 
   test("does NOT flag before the age threshold (1h stale, threshold is 24h)", () => {
-    const r = evaluateInvariants(board({
-      ticketsById: one({ updatedAt: at(1) }),
-      self: "mini",
-      ownerForTicket: () => "mini",
-      strandedEvidence: ev([noActuation]),
-    })).strandedMidPipeline;
+    const r = evaluateInvariants(
+      board({
+        ticketsById: one({ updatedAt: at(1) }),
+        self: "mini",
+        ownerForTicket: () => "mini",
+        strandedEvidence: ev([noActuation]),
+      })
+    ).strandedMidPipeline;
     expect(r.flagged).toEqual([]);
   });
 
   test("does NOT flag a terminal ticket (Done)", () => {
-    const r = evaluateInvariants(board({
-      ticketsById: one({ state: "Done" }),
-      self: "mini",
-      ownerForTicket: () => "mini",
-      strandedEvidence: ev([noActuation]),
-    })).strandedMidPipeline;
+    const r = evaluateInvariants(
+      board({
+        ticketsById: one({ state: "Done" }),
+        self: "mini",
+        ownerForTicket: () => "mini",
+        strandedEvidence: ev([noActuation]),
+      })
+    ).strandedMidPipeline;
     expect(r.flagged).toEqual([]);
   });
 
   test("does NOT flag Todo/Backlog (not an ownership claim)", () => {
     for (const state of ["Todo", "Backlog"]) {
-      const r = evaluateInvariants(board({
-        ticketsById: one({ state }),
-        self: "mini",
-        ownerForTicket: () => "mini",
-        strandedEvidence: ev([noActuation]),
-      })).strandedMidPipeline;
+      const r = evaluateInvariants(
+        board({
+          ticketsById: one({ state }),
+          self: "mini",
+          ownerForTicket: () => "mini",
+          strandedEvidence: ev([noActuation]),
+        })
+      ).strandedMidPipeline;
       expect(r.flagged).toEqual([]);
     }
   });
 
   test("FAILS SAFE on an unreadable timestamp — unknown age is never staleness", () => {
-    const r = evaluateInvariants(board({
-      ticketsById: one({ updatedAt: "not-a-date" }),
-      self: "mini",
-      ownerForTicket: () => "mini",
-      strandedEvidence: ev([noActuation]),
-    })).strandedMidPipeline;
+    const r = evaluateInvariants(
+      board({
+        ticketsById: one({ updatedAt: "not-a-date" }),
+        self: "mini",
+        ownerForTicket: () => "mini",
+        strandedEvidence: ev([noActuation]),
+      })
+    ).strandedMidPipeline;
     expect(r.ok).toBe(true);
     expect(r.unobservableAges).toBe(1);
   });
 
   test("routes to pr-not-merged when an open PR exists in evidence", () => {
-    const r = evaluateInvariants(board({
-      ticketsById: one(),
-      self: "mini",
-      ownerForTicket: () => "mini",
-      strandedEvidence: ev([{ ...noActuation, openPr: { number: 42, status: "open" } }]),
-    })).strandedMidPipeline;
+    const r = evaluateInvariants(
+      board({
+        ticketsById: one(),
+        self: "mini",
+        ownerForTicket: () => "mini",
+        strandedEvidence: ev([{ ...noActuation, openPr: { number: 42, status: "open" } }]),
+      })
+    ).strandedMidPipeline;
     expect(r.classified["CTL-9"].route).toBe("pr-not-merged");
   });
 
   test("routes to resume-from-remote when remote branch exists but no worktree", () => {
-    const r = evaluateInvariants(board({
-      ticketsById: one(),
-      self: "mini",
-      ownerForTicket: () => "mini",
-      strandedEvidence: ev([{ ...noActuation, remoteBranchExists: true }]),
-    })).strandedMidPipeline;
+    const r = evaluateInvariants(
+      board({
+        ticketsById: one(),
+        self: "mini",
+        ownerForTicket: () => "mini",
+        strandedEvidence: ev([{ ...noActuation, remoteBranchExists: true }]),
+      })
+    ).strandedMidPipeline;
     expect(r.classified["CTL-9"].route).toBe("resume-from-remote");
   });
 
   test("mode:off omits the invariant entirely (the off set stays byte-identical)", () => {
-    const r = evaluateInvariants(board({
-      ticketsById: one(),
-      mode: "off",
-      ownerForTicket: () => "mini",
-      strandedEvidence: ev([noActuation]),
-    }));
+    const r = evaluateInvariants(
+      board({
+        ticketsById: one(),
+        mode: "off",
+        ownerForTicket: () => "mini",
+        strandedEvidence: ev([noActuation]),
+      })
+    );
     expect(r.strandedMidPipeline).toBeUndefined();
   });
 
@@ -2694,7 +3188,10 @@ describe("CTL-1644 off-gate — getStrandedEvidence never invoked in off mode", 
       getBoard: () => [],
       getWorkerSignals: () => [],
       getEligible: () => [],
-      getStrandedEvidence: () => { called += 1; return new Map([["CTL-9", {}]]); },
+      getStrandedEvidence: () => {
+        called += 1;
+        return new Map([["CTL-9", {}]]);
+      },
       mode: "off",
       now: () => NOW,
     });
@@ -2709,7 +3206,10 @@ describe("CTL-1644 off-gate — getStrandedEvidence never invoked in off mode", 
       getBoard: () => [],
       getWorkerSignals: () => [],
       getEligible: () => [],
-      getStrandedEvidence: () => { called += 1; return new Map(); },
+      getStrandedEvidence: () => {
+        called += 1;
+        return new Map();
+      },
       mode: "shadow",
       now: () => NOW,
     });
@@ -2726,7 +3226,8 @@ function mkStalledPrMap(rows = []) {
 
 describe("CTL-1608 checkStalledPr — review/CI/no-push staleness, liveness-independent", () => {
   const DAY = 24 * HOUR;
-  const openPrTicket = (id) => new Map([[id, { identifier: id, linear_state: "In Review", pr_number: 1 }]]);
+  const openPrTicket = (id) =>
+    new Map([[id, { identifier: id, linear_state: "In Review", pr_number: 1 }]]);
 
   test("empty map → observable:false (shadow-first seam)", () => {
     const r = evaluateInvariants(mkBoard({ stalledPrMap: new Map() }), { mode: "shadow" });
@@ -2735,87 +3236,137 @@ describe("CTL-1608 checkStalledPr — review/CI/no-push staleness, liveness-inde
   });
 
   test("CI failing past threshold → flagged", () => {
-    const r = evaluateInvariants(mkBoard({
-      ticketsById: openPrTicket("CTL-CI"),
-      stalledPrMap: mkStalledPrMap([
-        { ticket: "CTL-CI", prNumber: 1, ciFirstFailedAt: new Date(NOW - 3 * DAY).toISOString() },
-      ]),
-    }), { mode: "shadow" });
+    const r = evaluateInvariants(
+      mkBoard({
+        ticketsById: openPrTicket("CTL-CI"),
+        stalledPrMap: mkStalledPrMap([
+          { ticket: "CTL-CI", prNumber: 1, ciFirstFailedAt: new Date(NOW - 3 * DAY).toISOString() },
+        ]),
+      }),
+      { mode: "shadow" }
+    );
     expect(r.stalledPr.flagged).toContain("CTL-CI");
     expect(r.stalledPr.ok).toBe(false);
   });
 
   test("review requested past threshold → flagged", () => {
-    const r = evaluateInvariants(mkBoard({
-      ticketsById: openPrTicket("CTL-RV"),
-      stalledPrMap: mkStalledPrMap([
-        { ticket: "CTL-RV", prNumber: 1, reviewRequestedAt: new Date(NOW - 5 * DAY).toISOString() },
-      ]),
-    }), { mode: "shadow" });
+    const r = evaluateInvariants(
+      mkBoard({
+        ticketsById: openPrTicket("CTL-RV"),
+        stalledPrMap: mkStalledPrMap([
+          {
+            ticket: "CTL-RV",
+            prNumber: 1,
+            reviewRequestedAt: new Date(NOW - 5 * DAY).toISOString(),
+          },
+        ]),
+      }),
+      { mode: "shadow" }
+    );
     expect(r.stalledPr.flagged).toContain("CTL-RV");
   });
 
   test("no push past threshold → flagged", () => {
-    const r = evaluateInvariants(mkBoard({
-      ticketsById: openPrTicket("CTL-NP"),
-      stalledPrMap: mkStalledPrMap([
-        { ticket: "CTL-NP", prNumber: 1, lastPushAt: new Date(NOW - 8 * DAY).toISOString() },
-      ]),
-    }), { mode: "shadow" });
+    const r = evaluateInvariants(
+      mkBoard({
+        ticketsById: openPrTicket("CTL-NP"),
+        stalledPrMap: mkStalledPrMap([
+          { ticket: "CTL-NP", prNumber: 1, lastPushAt: new Date(NOW - 8 * DAY).toISOString() },
+        ]),
+      }),
+      { mode: "shadow" }
+    );
     expect(r.stalledPr.flagged).toContain("CTL-NP");
   });
 
   test("flags EVEN WITH a live worker (independent of worker liveness — the ticket's whole point)", () => {
-    const r = evaluateInvariants(mkBoard({
-      ticketsById: openPrTicket("CTL-LIVE"),
-      signals: [{ ticket: "CTL-LIVE", phase: "monitor-merge", status: "running" }],
-      stalledPrMap: mkStalledPrMap([
-        { ticket: "CTL-LIVE", prNumber: 1, ciFirstFailedAt: new Date(NOW - 3 * DAY).toISOString() },
-      ]),
-    }), { mode: "shadow" });
+    const r = evaluateInvariants(
+      mkBoard({
+        ticketsById: openPrTicket("CTL-LIVE"),
+        signals: [{ ticket: "CTL-LIVE", phase: "monitor-merge", status: "running" }],
+        stalledPrMap: mkStalledPrMap([
+          {
+            ticket: "CTL-LIVE",
+            prNumber: 1,
+            ciFirstFailedAt: new Date(NOW - 3 * DAY).toISOString(),
+          },
+        ]),
+      }),
+      { mode: "shadow" }
+    );
     expect(r.stalledPr.flagged).toContain("CTL-LIVE"); // orphanedOpenPr would EXCLUDE this
   });
 
   test("fresh stall (under threshold) → not flagged", () => {
-    const r = evaluateInvariants(mkBoard({
-      ticketsById: openPrTicket("CTL-FRESH"),
-      stalledPrMap: mkStalledPrMap([
-        { ticket: "CTL-FRESH", prNumber: 1, ciFirstFailedAt: new Date(NOW - 1 * HOUR).toISOString() },
-      ]),
-    }), { mode: "shadow" });
+    const r = evaluateInvariants(
+      mkBoard({
+        ticketsById: openPrTicket("CTL-FRESH"),
+        stalledPrMap: mkStalledPrMap([
+          {
+            ticket: "CTL-FRESH",
+            prNumber: 1,
+            ciFirstFailedAt: new Date(NOW - 1 * HOUR).toISOString(),
+          },
+        ]),
+      }),
+      { mode: "shadow" }
+    );
     expect(r.stalledPr.flagged).not.toContain("CTL-FRESH");
     expect(r.stalledPr.ok).toBe(true);
   });
 
   test("null stamps → not flagged (CI green / review arrived / recently pushed)", () => {
-    const r = evaluateInvariants(mkBoard({
-      ticketsById: openPrTicket("CTL-OK"),
-      stalledPrMap: mkStalledPrMap([
-        { ticket: "CTL-OK", prNumber: 1, ciFirstFailedAt: null, reviewRequestedAt: null, lastPushAt: null },
-      ]),
-    }), { mode: "shadow" });
+    const r = evaluateInvariants(
+      mkBoard({
+        ticketsById: openPrTicket("CTL-OK"),
+        stalledPrMap: mkStalledPrMap([
+          {
+            ticket: "CTL-OK",
+            prNumber: 1,
+            ciFirstFailedAt: null,
+            reviewRequestedAt: null,
+            lastPushAt: null,
+          },
+        ]),
+      }),
+      { mode: "shadow" }
+    );
     expect(r.stalledPr.flagged).not.toContain("CTL-OK");
   });
 
   test("terminal Linear state → skipped (no recovery anchor on finished work)", () => {
-    const r = evaluateInvariants(mkBoard({
-      ticketsById: new Map([["CTL-DONE", { identifier: "CTL-DONE", linear_state: "Done", pr_number: 1 }]]),
-      stalledPrMap: mkStalledPrMap([
-        { ticket: "CTL-DONE", prNumber: 1, ciFirstFailedAt: new Date(NOW - 9 * DAY).toISOString() },
-      ]),
-    }), { mode: "shadow" });
+    const r = evaluateInvariants(
+      mkBoard({
+        ticketsById: new Map([
+          ["CTL-DONE", { identifier: "CTL-DONE", linear_state: "Done", pr_number: 1 }],
+        ]),
+        stalledPrMap: mkStalledPrMap([
+          {
+            ticket: "CTL-DONE",
+            prNumber: 1,
+            ciFirstFailedAt: new Date(NOW - 9 * DAY).toISOString(),
+          },
+        ]),
+      }),
+      { mode: "shadow" }
+    );
     expect(r.stalledPr.flagged).not.toContain("CTL-DONE");
   });
 
   test("proposeMoves → tier1 nudge-stalled-pr for a flagged ticket", () => {
-    const invs = evaluateInvariants(mkBoard({
-      ticketsById: openPrTicket("CTL-CI"),
-      stalledPrMap: mkStalledPrMap([
-        { ticket: "CTL-CI", prNumber: 1, ciFirstFailedAt: new Date(NOW - 3 * DAY).toISOString() },
-      ]),
-    }), { mode: "shadow" });
+    const invs = evaluateInvariants(
+      mkBoard({
+        ticketsById: openPrTicket("CTL-CI"),
+        stalledPrMap: mkStalledPrMap([
+          { ticket: "CTL-CI", prNumber: 1, ciFirstFailedAt: new Date(NOW - 3 * DAY).toISOString() },
+        ]),
+      }),
+      { mode: "shadow" }
+    );
     const moves = proposeMoves(invs, mkBoard());
-    expect(moves.tier1.find((m) => m.ticket === "CTL-CI" && m.move === "nudge-stalled-pr")).toBeTruthy();
+    expect(
+      moves.tier1.find((m) => m.ticket === "CTL-CI" && m.move === "nudge-stalled-pr")
+    ).toBeTruthy();
   });
 
   test("parked-by-human label suppresses the stalled-pr move (stays visible in the invariant)", () => {
@@ -2824,26 +3375,40 @@ describe("CTL-1608 checkStalledPr — review/CI/no-push staleness, liveness-inde
     // BOTH the open-PR shape checkStalledPr needs AND the parked-by-human label
     // makeSuppressed reads.
     const parkedOpenPr = new Map([
-      ["CTL-CI", { identifier: "CTL-CI", linear_state: "In Review", pr_number: 1, labels: [{ name: "parked-by-human" }] }],
+      [
+        "CTL-CI",
+        {
+          identifier: "CTL-CI",
+          linear_state: "In Review",
+          pr_number: 1,
+          labels: [{ name: "parked-by-human" }],
+        },
+      ],
     ]);
-    const invs = evaluateInvariants(mkBoard({
-      ticketsById: openPrTicket("CTL-CI"),
-      stalledPrMap: mkStalledPrMap([
-        { ticket: "CTL-CI", prNumber: 1, ciFirstFailedAt: new Date(NOW - 3 * DAY).toISOString() },
-      ]),
-    }), { mode: "shadow" });
+    const invs = evaluateInvariants(
+      mkBoard({
+        ticketsById: openPrTicket("CTL-CI"),
+        stalledPrMap: mkStalledPrMap([
+          { ticket: "CTL-CI", prNumber: 1, ciFirstFailedAt: new Date(NOW - 3 * DAY).toISOString() },
+        ]),
+      }),
+      { mode: "shadow" }
+    );
     const moves = proposeMoves(invs, mkBoard({ ticketsById: parkedOpenPr }));
     expect(moves.tier1.find((m) => m.ticket === "CTL-CI")).toBeFalsy();
     expect(invs.stalledPr.flagged).toContain("CTL-CI"); // suppression is in proposeMoves ONLY
   });
 
   test("buildBoardContext surfaces stalledPrs additively", () => {
-    const invs = evaluateInvariants(mkBoard({
-      ticketsById: openPrTicket("CTL-CI"),
-      stalledPrMap: mkStalledPrMap([
-        { ticket: "CTL-CI", prNumber: 1, ciFirstFailedAt: new Date(NOW - 3 * DAY).toISOString() },
-      ]),
-    }), { mode: "shadow" });
+    const invs = evaluateInvariants(
+      mkBoard({
+        ticketsById: openPrTicket("CTL-CI"),
+        stalledPrMap: mkStalledPrMap([
+          { ticket: "CTL-CI", prNumber: 1, ciFirstFailedAt: new Date(NOW - 3 * DAY).toISOString() },
+        ]),
+      }),
+      { mode: "shadow" }
+    );
     const ctx = buildBoardContext(mkBoard(), invs);
     expect(ctx.stalledPrs).toContain("CTL-CI");
   });
@@ -2854,7 +3419,12 @@ describe("assembleBoardState — attentionReason on signals (CTL-1649)", () => {
   test("attentionReason from s.raw?.attentionReason is carried on the normalised signal", () => {
     const board = assembleBoardState({
       getWorkerSignals: () => [
-        { ticket: "CTL-1", phase: "triage", status: "stalled", raw: { attentionReason: "sdk-overloaded-exhausted" } },
+        {
+          ticket: "CTL-1",
+          phase: "triage",
+          status: "stalled",
+          raw: { attentionReason: "sdk-overloaded-exhausted" },
+        },
       ],
     });
     expect(board.signals[0].attentionReason).toBe("sdk-overloaded-exhausted");
@@ -2863,7 +3433,12 @@ describe("assembleBoardState — attentionReason on signals (CTL-1649)", () => {
   test("attentionReason from s.attentionReason (flat) is carried when raw is absent", () => {
     const board = assembleBoardState({
       getWorkerSignals: () => [
-        { ticket: "CTL-2", phase: "triage", status: "stalled", attentionReason: "sdk-launch-failed" },
+        {
+          ticket: "CTL-2",
+          phase: "triage",
+          status: "stalled",
+          attentionReason: "sdk-launch-failed",
+        },
       ],
     });
     expect(board.signals[0].attentionReason).toBe("sdk-launch-failed");
@@ -2879,7 +3454,12 @@ describe("assembleBoardState — attentionReason on signals (CTL-1649)", () => {
   test("existing fields (ticket, phase, status, failureReason) are byte-identical (no regression)", () => {
     const board = assembleBoardState({
       getWorkerSignals: () => [
-        { ticket: "CTL-4", phase: "implement", status: "running", raw: { failureReason: "timeout" } },
+        {
+          ticket: "CTL-4",
+          phase: "implement",
+          status: "running",
+          raw: { failureReason: "timeout" },
+        },
       ],
     });
     const s = board.signals[0];
@@ -2945,10 +3525,14 @@ describe("assembleBoardState — triageLaunchFailureOnlyTickets (CTL-1649)", () 
 
   test("a ticket in the set with needs_human status variant is also excluded", () => {
     const board = assembleBoardState({
-      getWorkerSignals: () => [{
-        ticket: "CTL-1", phase: "triage", status: "needs_human",
-        attentionReason: "sdk-launch-failed",
-      }],
+      getWorkerSignals: () => [
+        {
+          ticket: "CTL-1",
+          phase: "triage",
+          status: "needs_human",
+          attentionReason: "sdk-launch-failed",
+        },
+      ],
       hasTriageArtifact: () => false,
     });
     expect(board.triageLaunchFailureOnlyTickets.has("CTL-1")).toBe(true);
@@ -2988,7 +3572,9 @@ describe("selectAnchorCandidates — CTL-1649 triage-launch-failure exclusion", 
   test("with empty exclusion set (unbound seam), output is byte-identical to today", () => {
     // Use assembleBoardState with default seam → triageLaunchFailureOnlyTickets is empty
     const board = assembleBoardState({
-      getWorkerSignals: () => [{ ticket: "CTL-3", phase: "triage", status: "stalled", attentionReason: "sdk" }],
+      getWorkerSignals: () => [
+        { ticket: "CTL-3", phase: "triage", status: "stalled", attentionReason: "sdk" },
+      ],
       // default hasTriageArtifact → () => true → exclusion set empty
     });
     const moves = { tier1: [{ ticket: "CTL-3" }], tier2: [], tier3: [] };
@@ -3031,7 +3617,12 @@ describe("boardHealthPass enforce — launch-failure exclusion prevents recovery
         return { dispatched: false, anchor: null, skippedReason: "no-owned-anchor" };
       },
       getWorkerSignals: () => [
-        { ticket: "CTL-EXCL", phase: "triage", status: "stalled", attentionReason: "sdk-overloaded" },
+        {
+          ticket: "CTL-EXCL",
+          phase: "triage",
+          status: "stalled",
+          attentionReason: "sdk-overloaded",
+        },
       ],
       hasTriageArtifact: () => false,
       // The invariant must fire so the gate proceeds
@@ -3048,14 +3639,16 @@ describe("CAT-57 host-scoped board health", () => {
       roster: ["mini", "offline"],
       dispatchRoster: ["mini"],
       eligible: [],
-      owner: (_ticket, roster) => roster.includes("offline") ? "offline" : "mini",
+      owner: (_ticket, roster) => (roster.includes("offline") ? "offline" : "mini"),
     });
     const moves = { tier1: [{ ticket: "CAT-PEER" }], tier2: [], tier3: [] };
     expect(selectAnchorCandidates(moves, b)).toEqual([]);
-    expect(selectAnchorCandidates(moves, b, {
-      holistic: true,
-      strandedOrDeadHosts: new Set(["offline"]),
-    })).toEqual(["CAT-PEER"]);
+    expect(
+      selectAnchorCandidates(moves, b, {
+        holistic: true,
+        strandedOrDeadHosts: new Set(["offline"]),
+      })
+    ).toEqual(["CAT-PEER"]);
   });
 
   test("makeOwnsFilter defaults to raw roster, supports dispatch scope, and fails open", () => {
@@ -3063,12 +3656,26 @@ describe("CAT-57 host-scoped board health", () => {
     const b = mkOwnedBoard({
       roster: ["mini", "stale"],
       dispatchRoster: ["mini", "peer"],
-      owner: (_ticket, roster) => { seen.push(roster); return "mini"; },
+      owner: (_ticket, roster) => {
+        seen.push(roster);
+        return "mini";
+      },
     });
     expect(makeOwnsFilter(b)("CAT-57")).toBe(true);
     expect(makeOwnsFilter(b, { scope: "dispatch" })("CAT-57")).toBe(true);
-    expect(seen).toEqual([["mini", "stale"], ["mini", "peer"]]);
-    expect(makeOwnsFilter(mkOwnedBoard({ owner: () => { throw new Error("hrw"); } }))("CAT-57")).toBe(true);
+    expect(seen).toEqual([
+      ["mini", "stale"],
+      ["mini", "peer"],
+    ]);
+    expect(
+      makeOwnsFilter(
+        mkOwnedBoard({
+          owner: () => {
+            throw new Error("hrw");
+          },
+        })
+      )("CAT-57")
+    ).toBe(true);
   });
 
   test("resolveRosterSeam resolves arrays/thunks and falls back on invalid/throw", () => {
@@ -3076,7 +3683,11 @@ describe("CAT-57 host-scoped board health", () => {
     expect(resolveRosterSeam(["peer"], fallback)).toEqual(["peer"]);
     expect(resolveRosterSeam(() => ["peer"], fallback)).toEqual(["peer"]);
     expect(resolveRosterSeam(null, fallback)).toBe(fallback);
-    expect(resolveRosterSeam(() => { throw new Error("down"); }, fallback)).toBe(fallback);
+    expect(
+      resolveRosterSeam(() => {
+        throw new Error("down");
+      }, fallback)
+    ).toBe(fallback);
   });
 
   test("dispatch liveness judges only this host's eligible share and reports both depths", () => {
@@ -3087,15 +3698,22 @@ describe("CAT-57 host-scoped board health", () => {
       ring: { recentDispatchTs: null },
     });
     expect(evaluateInvariants(foreign).dispatchLiveness).toMatchObject({
-      ok: true, queuedTotal: 1, queuedOwned: 0, flagged: [],
+      ok: true,
+      queuedTotal: 1,
+      queuedOwned: 0,
+      flagged: [],
     });
     const owned = mkOwnedBoard({
       eligible: [{ id: "CAT-OWNED" }, { id: "CAT-FOREIGN" }],
-      owner: (id) => id === "CAT-OWNED" ? "mini" : "peer",
-      capacity: { freeSlots: 4 }, ring: { recentDispatchTs: null },
+      owner: (id) => (id === "CAT-OWNED" ? "mini" : "peer"),
+      capacity: { freeSlots: 4 },
+      ring: { recentDispatchTs: null },
     });
     expect(evaluateInvariants(owned).dispatchLiveness).toMatchObject({
-      ok: false, queuedTotal: 2, queuedOwned: 1, flagged: ["CAT-OWNED"],
+      ok: false,
+      queuedTotal: 2,
+      queuedOwned: 1,
+      flagged: ["CAT-OWNED"],
     });
   });
 
@@ -3106,18 +3724,37 @@ describe("CAT-57 host-scoped board health", () => {
       ts: new Date(NOW - MIN).toISOString(),
     });
     const base = { self: "mini", now: () => NOW };
-    expect(assembleBoardState({ ...base, readEventRing: () => [event("peer")] }).ring.recentDispatchTs).toBeNull();
-    expect(assembleBoardState({ ...base, readEventRing: () => [event()] }).ring.recentDispatchTs).toBe(NOW - MIN);
-    expect(assembleBoardState({ ...base, readEventRing: () => [event("mini")] }).ring.recentDispatchTs).toBe(NOW - MIN);
+    expect(
+      assembleBoardState({ ...base, readEventRing: () => [event("peer")] }).ring.recentDispatchTs
+    ).toBeNull();
+    expect(
+      assembleBoardState({ ...base, readEventRing: () => [event()] }).ring.recentDispatchTs
+    ).toBe(NOW - MIN);
+    expect(
+      assembleBoardState({ ...base, readEventRing: () => [event("mini")] }).ring.recentDispatchTs
+    ).toBe(NOW - MIN);
   });
 
   test("context and scan expose additive owned eligible depth", () => {
-    const b = mkOwnedBoard({ eligible: [{ id: "A" }, { id: "B" }], owner: (id) => id === "A" ? "mini" : "peer" });
+    const b = mkOwnedBoard({
+      eligible: [{ id: "A" }, { id: "B" }],
+      owner: (id) => (id === "A" ? "mini" : "peer"),
+    });
     const invs = evaluateInvariants(b);
     const ctx = buildBoardContext(b, invs);
     expect(ctx.schema).toBe("recovery-board-context/v4");
-    expect(ctx.eligibleQueue).toMatchObject({ depth: 2, topTickets: ["A", "B"], ownedDepth: 1, ownedTopTickets: ["A"] });
-    const event = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision: decideBoardHealth(invs, b), board: b });
+    expect(ctx.eligibleQueue).toMatchObject({
+      depth: 2,
+      topTickets: ["A", "B"],
+      ownedDepth: 1,
+      ownedTopTickets: ["A"],
+    });
+    const event = buildBoardScanEvent({
+      mode: "shadow",
+      invariants: invs,
+      decision: decideBoardHealth(invs, b),
+      board: b,
+    });
     expect(event.details.eligibleOwnedDepth).toBe(1);
   });
 });
@@ -3126,21 +3763,39 @@ describe("CAT-57 nodeProductivity invariant", () => {
   const stale = new Date(NOW - 48 * HOUR).toISOString();
   const fresh = new Date(NOW - HOUR).toISOString();
   const seen = new Date(NOW - 30_000).toISOString();
-  const productivityBoard = (o = {}) => mkOwnedBoard({
-    ticketsById: new Map([["CAT-PEER", { identifier: "CAT-PEER" }]]),
-    owner: () => "peer",
-    productivityMode: "enforce",
-    peerProductivity: { peer: { last_seen: seen, last_advance_at: stale } },
-    ...o,
-  });
+  const productivityBoard = (o = {}) =>
+    mkOwnedBoard({
+      ticketsById: new Map([["CAT-PEER", { identifier: "CAT-PEER" }]]),
+      owner: () => "peer",
+      productivityMode: "enforce",
+      peerProductivity: { peer: { last_seen: seen, last_advance_at: stale } },
+      ...o,
+    });
 
   test("flags only live peers with owned work and stale advances", () => {
     const bad = evaluateInvariants(productivityBoard()).nodeProductivity;
     expect(bad).toMatchObject({ ok: false, failed: 1, flagged: ["peer"], observable: true });
-    expect(evaluateInvariants(productivityBoard({ peerProductivity: { peer: { last_seen: seen, last_advance_at: fresh } } })).nodeProductivity.flagged).toEqual([]);
-    expect(evaluateInvariants(productivityBoard({ owner: () => "mini" })).nodeProductivity.flagged).toEqual([]);
-    expect(evaluateInvariants(productivityBoard({ peerProductivity: { peer: { last_seen: stale, last_advance_at: stale } } })).nodeProductivity.flagged).toEqual([]);
-    expect(evaluateInvariants(productivityBoard({ peerProductivity: { peer: { last_seen: seen } } })).nodeProductivity.flagged).toEqual([]);
+    expect(
+      evaluateInvariants(
+        productivityBoard({
+          peerProductivity: { peer: { last_seen: seen, last_advance_at: fresh } },
+        })
+      ).nodeProductivity.flagged
+    ).toEqual([]);
+    expect(
+      evaluateInvariants(productivityBoard({ owner: () => "mini" })).nodeProductivity.flagged
+    ).toEqual([]);
+    expect(
+      evaluateInvariants(
+        productivityBoard({
+          peerProductivity: { peer: { last_seen: stale, last_advance_at: stale } },
+        })
+      ).nodeProductivity.flagged
+    ).toEqual([]);
+    expect(
+      evaluateInvariants(productivityBoard({ peerProductivity: { peer: { last_seen: seen } } }))
+        .nodeProductivity.flagged
+    ).toEqual([]);
   });
 
   test("mode and seam gates are fail-open; self is never judged", () => {
@@ -3149,23 +3804,57 @@ describe("CAT-57 nodeProductivity invariant", () => {
       expect(r.observable).toBe(false);
       expect(r.note.length).toBeGreaterThan(0);
     }
-    expect(evaluateInvariants(productivityBoard({ peerProductivity: null })).nodeProductivity.observable).toBe(false);
-    expect(evaluateInvariants(productivityBoard({ peerProductivity: {} })).nodeProductivity.observable).toBe(false);
-    expect(evaluateInvariants(productivityBoard({ roster: ["mini"] })).nodeProductivity.observable).toBe(false);
-    expect(evaluateInvariants(productivityBoard({ ticketsById: new Map([["SELF", {}]]), owner: () => "mini", peerProductivity: { mini: { last_seen: seen, last_advance_at: stale } } })).nodeProductivity.flagged).toEqual([]);
-    expect(evaluateInvariants(productivityBoard({ owner: () => { throw new Error("hrw"); } })).nodeProductivity.observable).toBe(false);
+    expect(
+      evaluateInvariants(productivityBoard({ peerProductivity: null })).nodeProductivity.observable
+    ).toBe(false);
+    expect(
+      evaluateInvariants(productivityBoard({ peerProductivity: {} })).nodeProductivity.observable
+    ).toBe(false);
+    expect(
+      evaluateInvariants(productivityBoard({ roster: ["mini"] })).nodeProductivity.observable
+    ).toBe(false);
+    expect(
+      evaluateInvariants(
+        productivityBoard({
+          ticketsById: new Map([["SELF", {}]]),
+          owner: () => "mini",
+          peerProductivity: { mini: { last_seen: seen, last_advance_at: stale } },
+        })
+      ).nodeProductivity.flagged
+    ).toEqual([]);
+    expect(
+      evaluateInvariants(
+        productivityBoard({
+          owner: () => {
+            throw new Error("hrw");
+          },
+        })
+      ).nodeProductivity.observable
+    ).toBe(false);
   });
 
   test("is tier3-only, non-actionable, and included in context/event", () => {
     const b = productivityBoard();
     const invs = evaluateInvariants(b);
     const moves = proposeMoves(invs, b);
-    expect(moves.tier3).toContainEqual(expect.objectContaining({ host: "peer", move: "escalate-unproductive-node" }));
+    expect(moves.tier3).toContainEqual(
+      expect.objectContaining({ host: "peer", move: "escalate-unproductive-node" })
+    );
     expect(moves.tier1.some((m) => m.move === "escalate-unproductive-node")).toBe(false);
     expect(moves.tier2.some((m) => m.move === "escalate-unproductive-node")).toBe(false);
-    expect(decideBoardHealth({ nodeProductivity: invs.nodeProductivity }, b).gate).toMatchObject({ decision: "skip", reason: "no-actionable-moves" });
-    expect(buildBoardContext(b, invs).unproductiveNodes).toEqual([{ host: "peer", lastAdvanceAt: stale, ageMs: 48 * HOUR, ownedTickets: ["CAT-PEER"] }]);
-    const ev = buildBoardScanEvent({ mode: "shadow", invariants: invs, decision: decideBoardHealth(invs, b), board: b });
+    expect(decideBoardHealth({ nodeProductivity: invs.nodeProductivity }, b).gate).toMatchObject({
+      decision: "skip",
+      reason: "no-actionable-moves",
+    });
+    expect(buildBoardContext(b, invs).unproductiveNodes).toEqual([
+      { host: "peer", lastAdvanceAt: stale, ageMs: 48 * HOUR, ownedTickets: ["CAT-PEER"] },
+    ]);
+    const ev = buildBoardScanEvent({
+      mode: "shadow",
+      invariants: invs,
+      decision: decideBoardHealth(invs, b),
+      board: b,
+    });
     expect(ev.details.unproductiveNodeCount).toBe(1);
   });
 
@@ -3185,42 +3874,69 @@ describe("CAT-57 nodeProductivity invariant", () => {
       { host: "peer", lastAdvanceAt: stale, ageMs: 48 * HOUR, ownedTickets: ["CAT-PEER"] },
     ]);
     expect(
-      buildBoardScanEvent({ mode: "shadow", invariants: invs, decision: decideBoardHealth(invs, b), board: b })
-        .details.unproductiveNodeCount,
+      buildBoardScanEvent({
+        mode: "shadow",
+        invariants: invs,
+        decision: decideBoardHealth(invs, b),
+        board: b,
+      }).details.unproductiveNodeCount
     ).toBe(1);
 
     // ...while staying strictly non-actuating: ok stays true and observable false,
     // so proposeMoves' `!ok` gate yields no tier-3 escalate.
     expect(r).toMatchObject({ ok: true, failed: 0, observable: false });
-    expect(proposeMoves(invs, b).tier3.some((m) => m.move === "escalate-unproductive-node")).toBe(false);
+    expect(proposeMoves(invs, b).tier3.some((m) => m.move === "escalate-unproductive-node")).toBe(
+      false
+    );
   });
 
   // CAT-57 (Codex P2): the board snapshot retains Done/Canceled rows, so a peer
   // whose entire HRW share has already shipped must not count as owning work.
   test("terminal tickets are not part of a peer's owned share", () => {
     for (const state of ["Done", "Canceled", "Duplicate", "Merged"]) {
-      const r = evaluateInvariants(productivityBoard({
-        ticketsById: new Map([["CAT-PEER", { identifier: "CAT-PEER", state }]]),
-      })).nodeProductivity;
+      const r = evaluateInvariants(
+        productivityBoard({
+          ticketsById: new Map([["CAT-PEER", { identifier: "CAT-PEER", state }]]),
+        })
+      ).nodeProductivity;
       expect(r.flagged).toEqual([]);
     }
     // Non-vacuity: the identical fixture in a NON-terminal state is still flagged,
     // and a peer keeps its share when only SOME of its tickets are terminal.
-    expect(evaluateInvariants(productivityBoard({
-      ticketsById: new Map([["CAT-PEER", { identifier: "CAT-PEER", state: "In Progress" }]]),
-    })).nodeProductivity.flagged).toEqual(["peer"]);
-    expect(evaluateInvariants(productivityBoard({
-      ticketsById: new Map([
-        ["CAT-DONE", { identifier: "CAT-DONE", state: "Done" }],
-        ["CAT-PEER", { identifier: "CAT-PEER", state: "Todo" }],
-      ]),
-    })).nodeProductivity.unproductive.peer.ownedTickets).toEqual(["CAT-PEER"]);
+    expect(
+      evaluateInvariants(
+        productivityBoard({
+          ticketsById: new Map([["CAT-PEER", { identifier: "CAT-PEER", state: "In Progress" }]]),
+        })
+      ).nodeProductivity.flagged
+    ).toEqual(["peer"]);
+    expect(
+      evaluateInvariants(
+        productivityBoard({
+          ticketsById: new Map([
+            ["CAT-DONE", { identifier: "CAT-DONE", state: "Done" }],
+            ["CAT-PEER", { identifier: "CAT-PEER", state: "Todo" }],
+          ]),
+        })
+      ).nodeProductivity.unproductive.peer.ownedTickets
+    ).toEqual(["CAT-PEER"]);
   });
 
   test("off omits key and never reads productivity seam", () => {
-    expect(evaluateInvariants(productivityBoard({ mode: "off" }), { mode: "off" }).nodeProductivity).toBeUndefined();
+    expect(
+      evaluateInvariants(productivityBoard({ mode: "off" }), { mode: "off" }).nodeProductivity
+    ).toBeUndefined();
     let called = 0;
-    expect(() => assembleBoardState({ mode: "off", productivityMode: "enforce", getPeerProductivity: () => { called += 1; throw new Error("must not run"); } })).not.toThrow();
+    expect(() =>
+      assembleBoardState({
+        mode: "off",
+        productivityMode: "enforce",
+        getPeerProductivity: () => {
+          called += 1;
+          throw new Error("must not run");
+        },
+      })
+    ).not.toThrow();
     expect(called).toBe(0);
   });
 });

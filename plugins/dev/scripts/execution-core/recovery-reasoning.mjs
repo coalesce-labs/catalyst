@@ -44,10 +44,7 @@ import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
-import {
-  log as defaultLog,
-  getEventLogPath,
-} from "./config.mjs";
+import { log as defaultLog, getEventLogPath } from "./config.mjs";
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 import { defaultProbePrBlock } from "./pr-block-probe.mjs";
 // Static (not requireSync) on purpose. Bun rejects `require()` of a module whose
@@ -78,25 +75,26 @@ import {
 } from "./escalation-correlation.mjs";
 
 // Wrap defaultLog to ensure it's a function (config.mjs may export an object)
-const defaultLogFn = typeof defaultLog === "function" ? defaultLog : (msg) => {
-  if (typeof defaultLog?.debug === "function") {
-    defaultLog.debug(msg);
-  } else if (typeof console?.log === "function") {
-    console.log(msg);
-  }
-};
+const defaultLogFn =
+  typeof defaultLog === "function"
+    ? defaultLog
+    : (msg) => {
+        if (typeof defaultLog?.debug === "function") {
+          defaultLog.debug(msg);
+        } else if (typeof console?.log === "function") {
+          console.log(msg);
+        }
+      };
 
 // linear-comment-post.sh — the app-actor OAuth comment helper (CTL-1182 path).
 const LINEAR_COMMENT_POST_BIN = fileURLToPath(
-  new URL("../lib/linear-comment-post.sh", import.meta.url),
+  new URL("../lib/linear-comment-post.sh", import.meta.url)
 );
 import { postLinearCommentAsSpawnResult } from "./linear-comment-write.mjs"; // CTL-1889 inc 2
 
 // phase-agent-emit-complete — the canonical wake/synthetic-complete emitter, used
 // by the CTL-1186 phase-pr re-dispatch to nudge the scheduler after re-arming.
-const EMIT_COMPLETE_BIN = fileURLToPath(
-  new URL("../phase-agent-emit-complete", import.meta.url),
-);
+const EMIT_COMPLETE_BIN = fileURLToPath(new URL("../phase-agent-emit-complete", import.meta.url));
 
 // deriveFailureSignature — CAT-170 (Codex #3209 P1). PURE. The raw failure text a
 // recovery attempt is signed with, read from wherever the caller actually put it.
@@ -193,7 +191,7 @@ export function reasoningRecoveryPass(items, opts = {}) {
   //      change until an operator opts into shadow/enforce.
   const callerOverrodeRemediate = Object.prototype.hasOwnProperty.call(
     opts,
-    "invokeRemediateCapped",
+    "invokeRemediateCapped"
   );
   const effectiveInvokeRecoveryPass =
     injectedInvokeRecoveryPass ??
@@ -234,8 +232,7 @@ export function reasoningRecoveryPass(items, opts = {}) {
   // reason> so `count by (reason)` over the JSONL log surfaces every gap.
   // recovery.* is deliberately UNPROTECTED — no namespace registration needed.
   const emitSkipBreadcrumb = (item) => {
-    const reason =
-      item.evidence?.failureReason ?? item.evidence?.signal?.failureReason ?? null;
+    const reason = item.evidence?.failureReason ?? item.evidence?.signal?.failureReason ?? null;
     if (!reason) return; // only reason-bearing skips are queryable gaps
     emitEvent({
       type: `recovery.skipped.${sanitizeReasonForEvent(reason)}`,
@@ -321,7 +318,8 @@ export function reasoningRecoveryPass(items, opts = {}) {
     // rollup. Emitted in BOTH shadow and enforce: it records the classifier's
     // verdict, independent of whether the mode then acts on it.
     tickStats.processed += 1;
-    const rule = decision === "escalate" || decision === "defer" ? 3 : fix_class === "bounded-llm" ? 2 : 1;
+    const rule =
+      decision === "escalate" || decision === "defer" ? 3 : fix_class === "bounded-llm" ? 2 : 1;
     if (decision === "escalate") tickStats.decisions.escalate += 1;
     else if (decision === "defer") tickStats.decisions.defer += 1;
     else if (fix_class === "bounded-llm") tickStats.decisions.fix_bounded_llm += 1;
@@ -478,7 +476,7 @@ export function reasoningRecoveryPass(items, opts = {}) {
           actionLog.push(`deferred: per-tick fix cap (${maxFixesPerTick}) reached`);
           tickStats.actions.deferred += 1;
           log(
-            `recovery-reasoning: ${item.ticket} deferred — per-tick fix cap ${maxFixesPerTick} reached`,
+            `recovery-reasoning: ${item.ticket} deferred — per-tick fix cap ${maxFixesPerTick} reached`
           );
           results.push({
             ticket: item.ticket,
@@ -507,14 +505,7 @@ export function reasoningRecoveryPass(items, opts = {}) {
         if (fixOutcome.success) {
           clearFixFailuresFn(orchDir, item.ticket, fix_class);
         } else {
-          recordFixFailureFn(
-            orchDir,
-            item.ticket,
-            fix_class,
-            fixOutcome.reason,
-            nowMs(),
-            { log },
-          );
+          recordFixFailureFn(orchDir, item.ticket, fix_class, fixOutcome.reason, nowMs(), { log });
         }
 
         // Record intent
@@ -551,7 +542,7 @@ export function reasoningRecoveryPass(items, opts = {}) {
             if (!delivered) {
               log(
                 `recovery-reasoning: ${item.ticket} comment post reported failure; ` +
-                  `dedup hash not committed (comment stays eligible for retry)`,
+                  `dedup hash not committed (comment stays eligible for retry)`
               );
             }
           } catch (err) {
@@ -566,7 +557,7 @@ export function reasoningRecoveryPass(items, opts = {}) {
             } catch (err) {
               log(
                 `recovery-reasoning: ${item.ticket} fix-comment dedup latch write failed: ` +
-                  `${err.message}`,
+                  `${err.message}`
               );
             }
             actionLog.push("posted fix audit comment");
@@ -741,7 +732,7 @@ export function prNumberFromWorkerDir(signalPath, { readFile = readFileSync } = 
 // names a PR, which leaves the probe's title-search fallback in place.
 export function resolvePrNumberForRecovery(evidence, { readFile = readFileSync } = {}) {
   const fromReason = parsePrNumberFromReason(
-    evidence?.failureReason ?? evidence?.signal?.failureReason,
+    evidence?.failureReason ?? evidence?.signal?.failureReason
   );
   if (fromReason !== undefined) return fromReason;
   return prNumberFromWorkerDir(evidence?.signalPath ?? evidence?.signal?.signalPath, {
@@ -774,8 +765,7 @@ export function classifyPrNotMerged(evidence, { probePrBlock = defaultProbePrBlo
   // worker signal the scheduler already carries — without them an external-repo
   // ticket falls back to the daemon cwd and is misclassified as having no PR.
   const repo = evidence.repo ?? evidence.signal?.repo ?? undefined;
-  const worktreePath =
-    evidence.worktreePath ?? evidence.signal?.worktreePath ?? undefined;
+  const worktreePath = evidence.worktreePath ?? evidence.signal?.worktreePath ?? undefined;
   // CTL-1680 (Codex #3079 round-3/4 P1): phase-monitor-deploy's empty-SHA guard names
   // the PR in its own reason string (`… returned empty for pr#<N>`). Thread that
   // number to the probe so it resolves THAT PR exactly. Without it, a ticket with no
@@ -923,7 +913,10 @@ function _prNotMergedReasonText(probe) {
 //                     explanation carrying the attempts history)
 // Pure over the injected reader; readIntentAttempts defaults to the on-disk ledger
 // reader (orchDir from env) but is injectable for hermetic tests.
-export function retrySafeBudgetDecision(ticket, { readIntentAttempts = defaultReadIntentAttempts } = {}) {
+export function retrySafeBudgetDecision(
+  ticket,
+  { readIntentAttempts = defaultReadIntentAttempts } = {}
+) {
   let attempts = 0;
   try {
     attempts = readIntentAttempts(ticket) ?? 0;
@@ -948,8 +941,7 @@ export function buildRetrySafeExhaustionExplanation(ticket, reason, attempts) {
     call_to_action:
       `Investigate why re-dispatching ${ticket} did not clear "${reason}"; if this reason is ` +
       `mechanically recoverable, add a classifier rule for it, otherwise resolve the ticket by hand.`,
-    blocked_capability:
-      `automatic recovery of the retry-safe failure "${reason}" — it survived the bounded retry budget`,
+    blocked_capability: `automatic recovery of the retry-safe failure "${reason}" — it survived the bounded retry budget`,
     instructions: [
       `Read ${ticket}'s worker evidence (claude logs + the failed phase signal)`,
       `Decide whether "${reason}" needs a new classifier rule or a hand fix`,
@@ -967,11 +959,13 @@ export function buildRetrySafeExhaustionExplanation(ticket, reason, attempts) {
 // phase-event name parser; keep it to a bounded [a-z0-9_-] slug).
 export function sanitizeReasonForEvent(reason) {
   if (typeof reason !== "string" || reason === "") return "unknown";
-  return reason
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 64) || "unknown";
+  return (
+    reason
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 64) || "unknown"
+  );
 }
 
 export function defaultClassifyTicket(evidence, opts = {}) {
@@ -996,7 +990,10 @@ export function defaultClassifyTicket(evidence, opts = {}) {
   // All other failure reasons are intentionally untouched — the probe is bounded to this family.
   const effectiveFailureReason = failureReason ?? signal?.failureReason;
   if (isPrMergeUnconfirmedReason(effectiveFailureReason)) {
-    return classifyPrNotMerged(evidence, { probePrBlock: probePrBlock ?? defaultProbePrBlock, log });
+    return classifyPrNotMerged(evidence, {
+      probePrBlock: probePrBlock ?? defaultProbePrBlock,
+      log,
+    });
   }
 
   // Rule 1: Check for deterministic errors in logs.
@@ -1023,7 +1020,7 @@ export function defaultClassifyTicket(evidence, opts = {}) {
             explanation: buildRetrySafeExhaustionExplanation(
               ticket,
               "cluster_fence_stale",
-              budget.attempts,
+              budget.attempts
             ),
           },
         };
@@ -1138,7 +1135,8 @@ export function checkDeterministicErrors(logsOutput, failureReason, signal = nul
     return {
       fix_class: "fence_stale_redispatch",
       seam_id: "fence-stale-redispatch",
-      reason: "Cluster fence stale (side-effect not taken); re-dispatch the failed phase at a fresh generation",
+      reason:
+        "Cluster fence stale (side-effect not taken); re-dispatch the failed phase at a fresh generation",
       phase: signal?.phase,
     };
   }
@@ -1258,7 +1256,8 @@ export function checkBoundedLlmFixes(logsOutput, jobState, signal) {
     // change consistent with this ticket's goal, only escalate if fix would delete another
     // ticket's already-merged feature or if the conflict spans a load-bearing API boundary.
     {
-      pattern: "conflict.*merge.*tree|merge conflict in|conflict \\(content\\)|could not apply|rebase.*conflict",
+      pattern:
+        "conflict.*merge.*tree|merge conflict in|conflict \\(content\\)|could not apply|rebase.*conflict",
       reason: "Merge/rebase conflict detected; agent should read both sides and resolve",
       brief: generateRemediateBrief("merge-conflict"),
       failureReasons: ["merge-conflict", "rebase-failed"],
@@ -1292,7 +1291,8 @@ export function checkBoundedLlmFixes(logsOutput, jobState, signal) {
   ];
 
   for (const p of patterns) {
-    const logMatch = new RegExp(p.pattern, "i").test(logs) || new RegExp(p.pattern, "i").test(details);
+    const logMatch =
+      new RegExp(p.pattern, "i").test(logs) || new RegExp(p.pattern, "i").test(details);
     const signalMatch = p.failureReasons?.includes(signalFailure);
     if (logMatch || signalMatch) {
       return {
@@ -1332,7 +1332,8 @@ export function generateRemediateBrief(category, probe = null) {
       "Only escalate if the failure requires a design decision that is out of scope for this ticket.",
     ].join(" "),
     "bun-install": "Run bun install in affected packages and retry the phase.",
-    "typescript-error": "Review and fix type errors reported by the compiler, then retry the phase.",
+    "typescript-error":
+      "Review and fix type errors reported by the compiler, then retry the phase.",
     // CTL-1496: pr-not-merged remediation brief (embeds concrete blockers from the probe).
     "pr-not-merged": [
       probe
@@ -1378,7 +1379,7 @@ export function generateRemediateBrief(category, probe = null) {
         "monitor-deploy so the pipeline resumes from the recorded SHA.",
       "Escalate ONLY if the PR is NOT actually merged on the base branch " +
         "(verify with `gh pr view <n> --json state,mergedAt` — `merged` is not a " +
-        "supported `gh pr view --json` field; merged means state == \"MERGED\").",
+        'supported `gh pr view --json` field; merged means state == "MERGED").',
     ]
       .filter(Boolean)
       .join(" "),
@@ -1486,7 +1487,7 @@ function attemptFix(item, classification, { invokeSeam, invokeRecoveryPass, evid
             phase: item.phase ?? null,
             signal: evidence?.signal ?? item.evidence?.signal ?? null,
           },
-        },
+        }
       );
 
       const seamStatus = seamResult.success ? "success" : "failed";
@@ -1573,19 +1574,26 @@ export function synthesizeEscalationExplanation(escalationPayload = {}) {
   const instructions = Array.isArray(p.instructions) ? p.instructions.filter(Boolean) : [];
   const what_to_do = instructions.length
     ? `${instructions.map((s) => String(s).replace(/[.\s]+$/, "")).join(". ")}. Once resolved, the next scheduler tick picks it up.`
-    : (p.remediation_then_retry
-      ?? "Resolve the stuck state by hand; the next scheduler tick re-evaluates the ticket and re-dispatches if appropriate.");
-  const outcome = p.remediation_then_retry
-    ?? "Once the stuck state is resolved by hand, the next scheduler tick re-evaluates the ticket and re-dispatches if appropriate.";
-  const why_you = p.why_you
-    ?? `No autonomous fix path matched this failure: ${reason}. A human must read the raw evidence and decide: re-dispatch the phase, fix the branch by hand, or close the ticket.`;
-  const why_not_auto = p.why_not_auto
-    ?? p.blocked_capability
-    ?? "neither a deterministic act-seam nor a bounded-LLM fix matched this failure signature, so the pass has no safe action to take";
+    : (p.remediation_then_retry ??
+      "Resolve the stuck state by hand; the next scheduler tick re-evaluates the ticket and re-dispatches if appropriate.");
+  const outcome =
+    p.remediation_then_retry ??
+    "Once the stuck state is resolved by hand, the next scheduler tick re-evaluates the ticket and re-dispatches if appropriate.";
+  const why_you =
+    p.why_you ??
+    `No autonomous fix path matched this failure: ${reason}. A human must read the raw evidence and decide: re-dispatch the phase, fix the branch by hand, or close the ticket.`;
+  const why_not_auto =
+    p.why_not_auto ??
+    p.blocked_capability ??
+    "neither a deterministic act-seam nor a bounded-LLM fix matched this failure signature, so the pass has no safe action to take";
   return {
     escalation_type: typeof p.escalation_type === "string" ? p.escalation_type : "manual",
-    call_to_action: p.call_to_action ?? `Look at this ticket's worker log and decide whether to re-dispatch the phase, fix the branch by hand, or close it`,
-    problem: p.problem ?? `This ticket is stuck and the recovery pass could not classify it for an autonomous fix: ${reason}`,
+    call_to_action:
+      p.call_to_action ??
+      `Look at this ticket's worker log and decide whether to re-dispatch the phase, fix the branch by hand, or close it`,
+    problem:
+      p.problem ??
+      `This ticket is stuck and the recovery pass could not classify it for an autonomous fix: ${reason}`,
     why_you,
     why_not_auto,
     what_to_do,
@@ -1706,8 +1714,7 @@ function buildEscalationPayload(item, classification) {
   // If the skill already authored a rich escalation (CTL-1176 rung 3) and threaded
   // it onto the item/classification, prefer it verbatim — it carries the
   // executive-voiced summary/ask/options the operator should see.
-  const authored =
-    classification?.details?.escalation || item.authoredEscalation || null;
+  const authored = classification?.details?.escalation || item.authoredEscalation || null;
   if (authored && authored.escalation_type) {
     return {
       ...authored,
@@ -1996,7 +2003,7 @@ function defaultPostComment(ticket, markdown, opts = {}) {
     }
     log(
       `recovery-reasoning: ${ticket} comment post failed (status ${res.status}): ` +
-        `${(res.stderr || res.error?.message || "unknown").toString().trim().split("\n").pop()}`,
+        `${(res.stderr || res.error?.message || "unknown").toString().trim().split("\n").pop()}`
     );
     return { ok: false, via: "app-actor", status: res.status };
   } catch (err) {
@@ -2112,14 +2119,19 @@ export function defaultInvokeSeam(ticket, seamId, brief = {}, deps = {}) {
       const res = spawnSyncFn(
         EMIT_COMPLETE_BIN,
         [
-          "--phase", wakePhase,
-          "--ticket", ticket,
-          "--status", "complete",
+          "--phase",
+          wakePhase,
+          "--ticket",
+          ticket,
+          "--status",
+          "complete",
           "--no-signal-update",
-          "--orch-dir", orchDir,
-          "--orch-id", ticket,
+          "--orch-dir",
+          orchDir,
+          "--orch-id",
+          ticket,
         ],
-        { encoding: "utf8" },
+        { encoding: "utf8" }
       );
       return {
         success: res.status === 0 || res.status == null,
@@ -2158,14 +2170,19 @@ export function defaultInvokeSeam(ticket, seamId, brief = {}, deps = {}) {
       const res = spawnSync(
         EMIT_COMPLETE_BIN,
         [
-          "--phase", "review",
-          "--ticket", ticket,
-          "--status", "complete",
+          "--phase",
+          "review",
+          "--ticket",
+          ticket,
+          "--status",
+          "complete",
           "--no-signal-update",
-          "--orch-dir", orchDir,
-          "--orch-id", ticket,
+          "--orch-dir",
+          orchDir,
+          "--orch-id",
+          ticket,
         ],
-        { encoding: "utf8" },
+        { encoding: "utf8" }
       );
       return {
         success: res.status === 0 || res.status == null,
@@ -2374,8 +2391,7 @@ export function defaultInvokeRemediateCapped(ticket, { brief, reason } = {}, dep
 // The recovery-pass cap (event-counted phase.recovery-pass.complete.<ticket>) is
 // enforced HERE, mirroring the remediate cap — phase-agent-dispatch does not.
 export const RECOVERY_PASS_PHASE = "recovery-pass";
-export const RECOVERY_PASS_CYCLE_CAP =
-  Number(process.env.CATALYST_RECOVERY_PASS_CYCLE_CAP) || 3;
+export const RECOVERY_PASS_CYCLE_CAP = Number(process.env.CATALYST_RECOVERY_PASS_CYCLE_CAP) || 3;
 
 // readUnstuckSeamsTried — read the deterministic act-seam idempotency markers the
 // hands (unstuck-act-seams.mjs) leave under workers/<ticket>/ so the brief can
@@ -2431,7 +2447,12 @@ export function defaultInvokeRecoveryPass(ticket, briefObj = {}, deps = {}) {
 
   // Lazy imports — same rationale as defaultInvokeRemediateCapped (avoid loading
   // the dispatch graph on the off/shadow paths; no import cycle).
-  let dispatchTicket, countRecoveryPassCycles, settleDispatchSync, isThenable, backstopOnRejection, sdkSignalRunnable;
+  let dispatchTicket,
+    countRecoveryPassCycles,
+    settleDispatchSync,
+    isThenable,
+    backstopOnRejection,
+    sdkSignalRunnable;
   try {
     // CTL-1157 F2: also pull the async-settlement seam so an sdk dispatch Promise
     // is turned into the synchronous {code,async:true} the rest of this fn expects.
@@ -2539,7 +2560,10 @@ export function defaultInvokeRecoveryPass(ticket, briefObj = {}, deps = {}) {
         const failed = err || (_res && Number.isFinite(_res.code) && _res.code !== 0);
         if (!failed) return; // clean resolution → the worker owns its terminal event
         try {
-          backstopOnRejection?.({ orchDir, ticket, phase: RECOVERY_PASS_PHASE, log: defaultLogFn })(_res, err ?? new Error(`sdk recovery-pass resolved code=${_res?.code}`));
+          backstopOnRejection?.({ orchDir, ticket, phase: RECOVERY_PASS_PHASE, log: defaultLogFn })(
+            _res,
+            err ?? new Error(`sdk recovery-pass resolved code=${_res?.code}`)
+          );
         } catch {
           /* best-effort */
         }
@@ -2555,7 +2579,8 @@ export function defaultInvokeRecoveryPass(ticket, briefObj = {}, deps = {}) {
       // prelaunch failed is reported as a dispatch FAILURE (r.code:1) instead of a
       // blind success.
       r = settleDispatchSync(rawR, {
-        verifySync: () => (sdkSignalRunnable ? sdkSignalRunnable(orchDir, ticket, RECOVERY_PASS_PHASE) : true),
+        verifySync: () =>
+          sdkSignalRunnable ? sdkSignalRunnable(orchDir, ticket, RECOVERY_PASS_PHASE) : true,
         onSettled,
       });
     } else {
@@ -2588,7 +2613,7 @@ export function defaultInvokeRecoveryPass(ticket, briefObj = {}, deps = {}) {
         // disposable delegate-runner child MUST await this before process.exit, or it
         // kills the in-process worker it just launched. bg dispatch is synchronous →
         // r.pending is undefined → no-op.
-        pendingSdk: r.async ? r.pending ?? null : null,
+        pendingSdk: r.async ? (r.pending ?? null) : null,
       },
     };
   }
@@ -2626,8 +2651,7 @@ export const RECOVERY_COOLDOWN_MS =
   Number(process.env.CATALYST_RECOVERY_COOLDOWN_MIN) * 60 * 1000 || 30 * 60 * 1000;
 
 // max_attempts: recovery passes before we stop self-healing. Env-overridable, default 2.
-export const RECOVERY_MAX_ATTEMPTS =
-  Number(process.env.CATALYST_RECOVERY_MAX_ATTEMPTS) || 2;
+export const RECOVERY_MAX_ATTEMPTS = Number(process.env.CATALYST_RECOVERY_MAX_ATTEMPTS) || 2;
 
 // CTL-1568: how many consecutive ticks an attempts-exhausted escalation may DEFER
 // because its needs-human label write did not land (fence suppression, rate limit,
@@ -2668,7 +2692,10 @@ function recoveryIntentPath(orchDir, ticket) {
 // selectAnchorCandidates now folds these in as first-class self-owned anchors so
 // the holistic pass actually dispatches a recovery-pass for them. Pure read,
 // fail-open: absent dir / malformed entries → [].
-export function readDeferredBoardHealthIntents(orchDir, { now = () => Date.now(), cooldownMs = RECOVERY_COOLDOWN_MS } = {}) {
+export function readDeferredBoardHealthIntents(
+  orchDir,
+  { now = () => Date.now(), cooldownMs = RECOVERY_COOLDOWN_MS } = {}
+) {
   if (!orchDir) return [];
   const dir = join(orchDir, ".recovery-intents");
   let files;
@@ -2832,7 +2859,7 @@ export function recordVerdict(ticket, { verdict, reason = null } = {}, opts = {}
         verdict,
         verdictReason: reason,
       },
-      opts,
+      opts
     );
   }
   if (verdict === "fixed") {
@@ -2846,7 +2873,7 @@ export function recordVerdict(ticket, { verdict, reason = null } = {}, opts = {}
         verdict,
         verdictReason: reason,
       },
-      opts,
+      opts
     );
   }
   if (verdict === "escalate") {
@@ -2859,7 +2886,7 @@ export function recordVerdict(ticket, { verdict, reason = null } = {}, opts = {}
         verdict,
         verdictReason: reason,
       },
-      opts,
+      opts
     );
   }
   return null;
@@ -2902,8 +2929,7 @@ export function defaultSkipReason(ticket, opts = {}) {
       opts.holistic && data?.fix_class === "board-health" && typeof data?.deferredSince === "number"
         ? data.deferredSince
         : null;
-    const last =
-      holisticAnchor ?? (typeof data?.lastTs === "number" ? data.lastTs : data?.ts);
+    const last = holisticAnchor ?? (typeof data?.lastTs === "number" ? data.lastTs : data?.ts);
     return typeof last === "number" && now() - last < RECOVERY_COOLDOWN_MS
       ? "defer-cooldown"
       : null;
@@ -3072,7 +3098,7 @@ export function writeCorrelationPointer(orchDir, ticket, pointer, now) {
         signature: pointer.signature ?? null,
         tickets: Array.isArray(pointer.tickets) ? pointer.tickets : [ticket],
         at: now,
-      }),
+      })
     );
     return true;
   } catch {
@@ -3225,7 +3251,7 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
     now: now(),
   });
   const candidateByTicket = new Map(
-    groupableCandidates.map((candidate) => [candidate.ticket, candidate]),
+    groupableCandidates.map((candidate) => [candidate.ticket, candidate])
   );
   if (correlationMode === "shadow") {
     for (const group of computedGroups.filter((g) => g.correlated)) {
@@ -3268,55 +3294,58 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
       ? (group.correlationId ?? correlationId(group.signature, anchor ?? ticket))
       : null;
     const correlatedTickets = group?.tickets ?? [ticket];
-    const escalation = role === "singleton" ? {
-      escalation_type: "authorization",
-      problem: `${ticket} consumed ${data.attempts} recovery attempts (last decision "${data.decision}") without any recorded verdict — the self-heal loop is not resolving it.`,
-      call_to_action: `look at ${ticket}: authorize another recovery cycle (clear its ledger latch), or take it over?`,
-      recommendation: `inspect the last recovery-pass session for ${ticket}; repeated verdict-less deaths usually mean the ticket needs a human decision`,
-      risk: `left latched it rots silently — the audit RC1 failure this sweep exists to prevent`,
-      why_asking: reason,
-      observed: {
-        attempts: data.attempts,
-        decision: data.decision ?? null,
-        fix_class: data.fix_class ?? null,
-      },
-      attempts: [],
-    } : {
-      escalation_type: "authorization",
-      problem:
-        role === "anchor"
-          ? `${correlatedTickets.join(", ")} exhausted recovery attempts for the shared cause "${group.signature}".`
-          : `${ticket} is part of correlated incident ${corrId} — ${correlatedTickets.length} tickets share this cause; the decision is on ${anchor}.`,
-      call_to_action:
-        role === "anchor"
-          ? `look at ${correlatedTickets.join(", ")}: authorize one recovery cycle for this shared cause, or take the incident over?`
-          : `see the escalation on ${anchor}`,
-      recommendation: `inspect the correlated recovery-pass failures on ${anchor ?? ticket}`,
-      risk: `left latched the affected tickets rot silently`,
-      why_asking: reason,
-      observed: {
-        attempts: data.attempts,
-        decision: data.decision ?? null,
-        fix_class: data.fix_class ?? null,
-        correlation_id: corrId,
-        signature: group.signature,
-        correlated_tickets: correlatedTickets,
-        correlated_count: correlatedTickets.length,
-      },
-      // CAT-170 (Codex #3209 P1): the same identity ALSO as a first-class payload
-      // key. `observed` is audit passthrough that synthesizeEscalationExplanation
-      // discards, so it cannot be what a board consumer groups or suppresses on —
-      // writeEscalationSignal persists THIS key onto the signal instead.
-      correlation: {
-        id: corrId,
-        role,
-        anchor: anchor ?? ticket,
-        signature: group.signature,
-        tickets: correlatedTickets,
-        count: correlatedTickets.length,
-      },
-      attempts: [],
-    };
+    const escalation =
+      role === "singleton"
+        ? {
+            escalation_type: "authorization",
+            problem: `${ticket} consumed ${data.attempts} recovery attempts (last decision "${data.decision}") without any recorded verdict — the self-heal loop is not resolving it.`,
+            call_to_action: `look at ${ticket}: authorize another recovery cycle (clear its ledger latch), or take it over?`,
+            recommendation: `inspect the last recovery-pass session for ${ticket}; repeated verdict-less deaths usually mean the ticket needs a human decision`,
+            risk: `left latched it rots silently — the audit RC1 failure this sweep exists to prevent`,
+            why_asking: reason,
+            observed: {
+              attempts: data.attempts,
+              decision: data.decision ?? null,
+              fix_class: data.fix_class ?? null,
+            },
+            attempts: [],
+          }
+        : {
+            escalation_type: "authorization",
+            problem:
+              role === "anchor"
+                ? `${correlatedTickets.join(", ")} exhausted recovery attempts for the shared cause "${group.signature}".`
+                : `${ticket} is part of correlated incident ${corrId} — ${correlatedTickets.length} tickets share this cause; the decision is on ${anchor}.`,
+            call_to_action:
+              role === "anchor"
+                ? `look at ${correlatedTickets.join(", ")}: authorize one recovery cycle for this shared cause, or take the incident over?`
+                : `see the escalation on ${anchor}`,
+            recommendation: `inspect the correlated recovery-pass failures on ${anchor ?? ticket}`,
+            risk: `left latched the affected tickets rot silently`,
+            why_asking: reason,
+            observed: {
+              attempts: data.attempts,
+              decision: data.decision ?? null,
+              fix_class: data.fix_class ?? null,
+              correlation_id: corrId,
+              signature: group.signature,
+              correlated_tickets: correlatedTickets,
+              correlated_count: correlatedTickets.length,
+            },
+            // CAT-170 (Codex #3209 P1): the same identity ALSO as a first-class payload
+            // key. `observed` is audit passthrough that synthesizeEscalationExplanation
+            // discards, so it cannot be what a board consumer groups or suppresses on —
+            // writeEscalationSignal persists THIS key onto the signal instead.
+            correlation: {
+              id: corrId,
+              role,
+              anchor: anchor ?? ticket,
+              signature: group.signature,
+              tickets: correlatedTickets,
+              count: correlatedTickets.length,
+            },
+            attempts: [],
+          };
     // ─── CTL-1568: the LABEL is attempted FIRST, and it gates everything after ───
     // The escalation comment claims "(See your inbox.)". For a ticket with no worker
     // dir — 10 of 12 parked tickets, measured 2026-07-29 (daemon.mjs:431-434) — there
@@ -3361,19 +3390,33 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
       if (deferrals === null) {
         // Counter unwritable → no bound available. Retry quietly next tick; emitting
         // here would re-fire on every tick of a broken disk (Codex R1's storm).
-        log(`recovery-reasoning: ${ticket} exhausted-escalate label did not land and the deferral counter is unwritable — retrying silently`);
+        log(
+          `recovery-reasoning: ${ticket} exhausted-escalate label did not land and the deferral counter is unwritable — retrying silently`
+        );
       } else if (deferrals < maxDeferrals) {
-        emitEvent({ type: "recovery.escalation.deferred", ticket, reason, deferrals, site: "attempts-exhausted" });
+        emitEvent({
+          type: "recovery.escalation.deferred",
+          ticket,
+          reason,
+          deferrals,
+          site: "attempts-exhausted",
+        });
         log(
           `recovery-reasoning: ${ticket} exhausted-escalate label did not land — comment withheld, ` +
-            `escalation deferred (${deferrals}/${maxDeferrals}); retrying next tick`,
+            `escalation deferred (${deferrals}/${maxDeferrals}); retrying next tick`
         );
       } else if (deferrals === maxDeferrals) {
         // AC #5 — the should-never-happen state, raised ONCE, loudly.
-        emitEvent({ type: "recovery.escalation.split", ticket, reason, deferrals, site: "attempts-exhausted" });
+        emitEvent({
+          type: "recovery.escalation.split",
+          ticket,
+          reason,
+          deferrals,
+          site: "attempts-exhausted",
+        });
         log(
           `recovery-reasoning: ${ticket} exhausted-escalate SPLIT — needs-human label has not landed ` +
-            `after ${deferrals} attempts; escalation cannot complete from this host`,
+            `after ${deferrals} attempts; escalation cannot complete from this host`
         );
       }
       // CAT-170 (Codex #3209 P1): the act failed for a ticket that IS part of a
@@ -3391,7 +3434,7 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
             signature: group.signature,
             tickets: correlatedTickets,
           },
-          now(),
+          now()
         );
       }
       return false; // the act did not complete — not counted as escalated
@@ -3436,11 +3479,11 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
             signature: group.signature,
             tickets: correlatedTickets,
           },
-          now(),
+          now()
         );
       }
       log(
-        `recovery-reasoning: ${ticket} exhausted-escalate signal did not persist — retrying next tick (correlation pointer retained)`,
+        `recovery-reasoning: ${ticket} exhausted-escalate signal did not persist — retrying next tick (correlation pointer retained)`
       );
       return false; // unlatched → still a candidate, pointer intact → retried as a member
     }
@@ -3471,7 +3514,9 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
       latched = false;
     }
     if (!latched) {
-      log(`recovery-reasoning: ${ticket} exhausted-escalate latch did not persist — deferring side effects to the next tick`);
+      log(
+        `recovery-reasoning: ${ticket} exhausted-escalate latch did not persist — deferring side effects to the next tick`
+      );
       return false;
     }
     // CAT-170 (Codex #3209 P2): clear the member pointer ONLY once the latch is
@@ -3499,7 +3544,7 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
         ticket,
         role === "member"
           ? `Part of correlated recovery incident ${corrId}; see the operator escalation on ${anchor}.`
-          : `🔼 **recovery-pass** self-heal attempts exhausted on this ticket — escalated to the operator. ${reason}. (See your inbox.)`,
+          : `🔼 **recovery-pass** self-heal attempts exhausted on this ticket — escalated to the operator. ${reason}. (See your inbox.)`
       );
     } catch {
       /* comment is best-effort; the signal + event are the durable surfaces */
@@ -3507,7 +3552,7 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
     if (role !== "member") escalatedTickets.push(ticket);
     log(
       `recovery-reasoning: ${ticket} attempts-exhausted → escalated loudly (CTL-1440)` +
-        (ownedByBelief ? " [label owned by belief engine — CTL-1568 transfer]" : ""),
+        (ownedByBelief ? " [label owned by belief engine — CTL-1568 transfer]" : "")
     );
     return true;
   };
@@ -3561,7 +3606,7 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
             signature: group.signature,
             tickets: group.tickets,
           },
-          now(),
+          now()
         );
         continue;
       }
@@ -3676,8 +3721,11 @@ export function defaultLatchHasNoClock(ticket, opts = {}) {
   const orchDir = opts.orchDir ?? resolveOrchDir();
   if (!orchDir || !ticket) return false;
   let data;
-  try { data = JSON.parse(readFileSync(recoveryIntentPath(orchDir, ticket), "utf8")); }
-  catch { return false; }
+  try {
+    data = JSON.parse(readFileSync(recoveryIntentPath(orchDir, ticket), "utf8"));
+  } catch {
+    return false;
+  }
   if (!data || data.escalated !== true) return false;
   const last = typeof data.lastTs === "number" ? data.lastTs : data.ts;
   return typeof last !== "number";
@@ -3693,22 +3741,32 @@ export function restampNoClockEscalations(opts = {}) {
   const dryRun = opts.dryRun === true;
   const dir = join(orchDir, ".recovery-intents");
   let files;
-  try { files = readdirSync(dir).filter((f) => f.endsWith(".json")); } catch { return []; }
+  try {
+    files = readdirSync(dir).filter((f) => f.endsWith(".json"));
+  } catch {
+    return [];
+  }
   const changed = [];
   for (const f of files) {
     const ticket = f.replace(/\.json$/, "");
     if (!defaultLatchHasNoClock(ticket, { orchDir })) continue;
-    if (dryRun) { changed.push(ticket); continue; }
+    if (dryRun) {
+      changed.push(ticket);
+      continue;
+    }
     // Per-file try/catch: a single unreadable/unwritable file must not abort
     // the scan — remaining entries must still be healed (CTL-1610 Codex P2).
     try {
       const p = join(dir, f);
       const data = JSON.parse(readFileSync(p, "utf8"));
       const ts = now();
-      data.ts = ts; data.lastTs = ts;
+      data.ts = ts;
+      data.lastTs = ts;
       writeFileSync(p, JSON.stringify(data));
       changed.push(ticket);
-    } catch { /* best-effort per-file — continue to next */ }
+    } catch {
+      /* best-effort per-file — continue to next */
+    }
   }
   return changed;
 }

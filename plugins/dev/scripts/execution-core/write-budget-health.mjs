@@ -58,7 +58,11 @@ import { evaluateLinearWriteHeadroom } from "./linear-write-headroom.mjs";
 // Returns { value, confirmed }. `confirmed:false` means neither the runtime
 // snapshot, the env FILE, nor doctor's own env carried the var, so `value` is
 // DEFAULT_* — a guess, not a read.
-function resolveDaemonBudget(varName, fallback, { env, execCoreEnvPath, envFileExists, envFileRead, runtimeCaps }) {
+function resolveDaemonBudget(
+  varName,
+  fallback,
+  { env, execCoreEnvPath, envFileExists, envFileRead, runtimeCaps }
+) {
   if (runtimeCaps && Number.isFinite(runtimeCaps[varName]) && runtimeCaps[varName] > 0) {
     return { value: runtimeCaps[varName], confirmed: true };
   }
@@ -91,7 +95,8 @@ export function checkLinearWriteBudget(deps = {}) {
     // deliberately: a test stubbing ONLY the ledger's existence must not also make
     // this env-file check believe execution-core.env exists on whatever host the
     // test happens to run on.
-    execCoreEnvPath = env.CATALYST_EXECUTION_CORE_ENV || resolve(homedir(), ".config", "catalyst", "execution-core.env"),
+    execCoreEnvPath = env.CATALYST_EXECUTION_CORE_ENV ||
+      resolve(homedir(), ".config", "catalyst", "execution-core.env"),
     envFileExists = existsSync,
     envFileRead = readFileSync,
     // CTL-2073 AC2: "never assert exhaustion off an unverified default." A daemon
@@ -103,7 +108,11 @@ export function checkLinearWriteBudget(deps = {}) {
     // Deliberately just existence, not full liveness/identity verification (unlike
     // checkSdkDaemonEnv's `ps eww` probe) — this check is advisory-only and a stale
     // pid-file merely means "be more cautious," never "FAIL".
-    pidFilePath = resolve(env.CATALYST_DIR || `${homedir()}/catalyst`, "execution-core", "daemon.pid"),
+    pidFilePath = resolve(
+      env.CATALYST_DIR || `${homedir()}/catalyst`,
+      "execution-core",
+      "daemon.pid"
+    ),
     pidFileExists = existsSync,
     // CTL-2073: same orchDir a live daemon's boot writes daemon-runtime-env.json
     // into (getExecutionCoreDir()) — matches pidFilePath's base dir above, built
@@ -121,13 +130,17 @@ export function checkLinearWriteBudget(deps = {}) {
       envFileRead,
       runtimeCaps,
     }),
-    perTicketCapR = resolveDaemonBudget("CATALYST_LINEAR_WRITE_TICKET_CAP", DEFAULT_PER_TICKET_CAP, {
-      env,
-      execCoreEnvPath,
-      envFileExists,
-      envFileRead,
-      runtimeCaps,
-    }),
+    perTicketCapR = resolveDaemonBudget(
+      "CATALYST_LINEAR_WRITE_TICKET_CAP",
+      DEFAULT_PER_TICKET_CAP,
+      {
+        env,
+        execCoreEnvPath,
+        envFileExists,
+        envFileRead,
+        runtimeCaps,
+      }
+    ),
   } = deps;
   const dailyBudget = dailyBudgetR.value;
   const perTicketCap = perTicketCapR.value;

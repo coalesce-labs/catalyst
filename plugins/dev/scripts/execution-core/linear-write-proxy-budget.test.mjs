@@ -6,7 +6,11 @@
 // cloud call is not a fix, it is the incident with extra logging.
 
 import { describe, expect, test } from "bun:test";
-import { createLinearWriteProxy, EVENT_EXHAUSTED, EVENT_WOULD_BACKOFF } from "./linear-write-proxy.mjs";
+import {
+  createLinearWriteProxy,
+  EVENT_EXHAUSTED,
+  EVENT_WOULD_BACKOFF,
+} from "./linear-write-proxy.mjs";
 import {
   emptyLedger,
   recordWrite,
@@ -348,7 +352,11 @@ describe("CTL-2027 Phase 3: proxy-side (ticket, route) backpressure — enforce"
     let l = emptyLedger(DAY);
     for (let i = 0; i < DEFAULT_PER_TICKET_CAP; i++) l = recordWrite(l, "CTL-9");
     const h = harness({ ledger: l, backpressureMode: "enforce" });
-    const r = h.proxy.send({ routeId: "comment", ticket: "CTL-9", payload: { issueId: "i", body: "b" } });
+    const r = h.proxy.send({
+      routeId: "comment",
+      ticket: "CTL-9",
+      payload: { issueId: "i", body: "b" },
+    });
     expect(r.reason).toBe("budget:ticket-cap");
     expect(h.calls.length).toBe(0);
     expect(h.cooldowns["CTL-9:comment"]).toMatchObject({ failedAt: NOW() });
@@ -359,7 +367,11 @@ describe("CTL-2027 Phase 3: proxy-side (ticket, route) backpressure — enforce"
     for (let i = 0; i < DEFAULT_PER_TICKET_CAP; i++) l = recordWrite(l, "CTL-10");
     const h = harness({ ledger: l, backpressureMode: "enforce" });
     // session goes through sendAsync, not send.
-    h.proxy.sendAsync({ routeId: "session", ticket: "CTL-10", payload: { issueId: "i", body: "b" } });
+    h.proxy.sendAsync({
+      routeId: "session",
+      ticket: "CTL-10",
+      payload: { issueId: "i", body: "b" },
+    });
     expect(h.cooldowns["CTL-10:session"]).toMatchObject({ failedAt: NOW() });
   });
 
@@ -367,14 +379,22 @@ describe("CTL-2027 Phase 3: proxy-side (ticket, route) backpressure — enforce"
     let l = emptyLedger(DAY);
     for (let i = 0; i < DEFAULT_PER_TICKET_CAP; i++) l = recordWrite(l, "CTL-11");
     const h = harness({ ledger: l, backpressureMode: "enforce", cooldownMs: 60_000 });
-    const first = h.proxy.send({ routeId: "comment", ticket: "CTL-11", payload: { issueId: "i", body: "b" } });
+    const first = h.proxy.send({
+      routeId: "comment",
+      ticket: "CTL-11",
+      payload: { issueId: "i", body: "b" },
+    });
     expect(first.reason).toBe("budget:ticket-cap");
     expect(h.calls.length).toBe(0);
 
     // The ledger now fails OPEN (would allow) — proving the SECOND refusal below
     // is backpressure, not the pre-existing budget gate re-firing.
     h.unusable();
-    const second = h.proxy.send({ routeId: "comment", ticket: "CTL-11", payload: { issueId: "i", body: "b" } });
+    const second = h.proxy.send({
+      routeId: "comment",
+      ticket: "CTL-11",
+      payload: { issueId: "i", body: "b" },
+    });
     expect(second.applied).toBe(false);
     expect(second.reason).toBe("backpressure:cooldown");
     expect(h.calls.length).toBe(0); // still zero — no API attempt
@@ -389,7 +409,11 @@ describe("CTL-2027 Phase 3: proxy-side (ticket, route) backpressure — enforce"
 
     h.unusable(); // ledger now allows
     h.clock.now += 60_001; // past the window
-    const r = h.proxy.send({ routeId: "comment", ticket: "CTL-12", payload: { issueId: "i", body: "b" } });
+    const r = h.proxy.send({
+      routeId: "comment",
+      ticket: "CTL-12",
+      payload: { issueId: "i", body: "b" },
+    });
     expect(r.applied).toBe(true);
     expect(h.calls.length).toBe(1); // proves "zero" above is measurable, not a broken harness
   });
@@ -398,7 +422,11 @@ describe("CTL-2027 Phase 3: proxy-side (ticket, route) backpressure — enforce"
     let l = emptyLedger(DAY);
     for (let i = 0; i < DEFAULT_PER_TICKET_CAP; i++) l = recordWrite(l, "CTL-2015");
     const h = harness({ ledger: l, backpressureMode: "enforce" });
-    const r = h.proxy.send({ routeId: "comment", ticket: "CTL-2015", payload: { issueId: "i", body: "b" } });
+    const r = h.proxy.send({
+      routeId: "comment",
+      ticket: "CTL-2015",
+      payload: { issueId: "i", body: "b" },
+    });
     expect(r.reason).toBe("budget:ticket-cap");
     expect(h.cooldowns["CTL-2015:comment"]).toBeTruthy();
   });
@@ -406,18 +434,30 @@ describe("CTL-2027 Phase 3: proxy-side (ticket, route) backpressure — enforce"
   test("only BUDGET-class reasons arm it — a cloud rejection does NOT", () => {
     const rejected = `${JSON.stringify({ outcome: "rejected", reason: "nope" })}\n400`;
     const h = harness({ backpressureMode: "enforce", stdout: rejected });
-    const r = h.proxy.send({ routeId: "comment", ticket: "CTL-13", payload: { issueId: "i", body: "b" } });
+    const r = h.proxy.send({
+      routeId: "comment",
+      ticket: "CTL-13",
+      payload: { issueId: "i", body: "b" },
+    });
     expect(r.applied).toBe(false);
     expect(h.cooldowns["CTL-13:comment"]).toBeUndefined();
     // proof it really didn't arm: the next call still reaches the transport.
-    const second = h.proxy.send({ routeId: "comment", ticket: "CTL-13", payload: { issueId: "i", body: "b" } });
+    const second = h.proxy.send({
+      routeId: "comment",
+      ticket: "CTL-13",
+      payload: { issueId: "i", body: "b" },
+    });
     expect(h.calls.length).toBe(2);
     void second;
   });
 
   test("only BUDGET-class reasons arm it — a validation error (no-cloud-token) does NOT", () => {
     const h = harness({ backpressureMode: "enforce", env: { CATALYST_CLOUD_TOKEN: "" } });
-    const r = h.proxy.send({ routeId: "comment", ticket: "CTL-14", payload: { issueId: "i", body: "b" } });
+    const r = h.proxy.send({
+      routeId: "comment",
+      ticket: "CTL-14",
+      payload: { issueId: "i", body: "b" },
+    });
     expect(r.reason).toBe("no-cloud-token");
     expect(h.cooldowns["CTL-14:comment"]).toBeUndefined();
   });
@@ -430,10 +470,18 @@ describe("CTL-2027 Phase 3: proxy-side (ticket, route) backpressure — enforce"
     let l = emptyLedger(DAY);
     for (let i = 0; i < DEFAULT_PER_TICKET_CAP; i++) l = recordWrite(l, "CTL-15");
     const h = harness({ ledger: l, backpressureMode: "enforce", cooldownMs: 60_000 });
-    h.proxy.send({ routeId: "label", ticket: "CTL-15", payload: { issueId: "i", labelIds: ["lab-1"], mode: "remove" } });
+    h.proxy.send({
+      routeId: "label",
+      ticket: "CTL-15",
+      payload: { issueId: "i", labelIds: ["lab-1"], mode: "remove" },
+    });
     h.unusable();
     h.clock.now += 60_000; // exactly at the SAME window CTL-834/CTL-2083 use — not 2×
-    const r = h.proxy.send({ routeId: "label", ticket: "CTL-15", payload: { issueId: "i", labelIds: ["lab-1"], mode: "remove" } });
+    const r = h.proxy.send({
+      routeId: "label",
+      ticket: "CTL-15",
+      payload: { issueId: "i", labelIds: ["lab-1"], mode: "remove" },
+    });
     expect(r.applied).toBe(true); // window elapsed — allowed again, not still cooled
   });
 });
@@ -447,7 +495,11 @@ describe("CTL-2027 Phase 3: shadow mode observes, refuses nothing", () => {
     expect(h.cooldowns["CTL-16:comment"]).toBeTruthy(); // still armed — shadow evaluates fully
 
     h.unusable(); // ledger now allows
-    const r = h.proxy.send({ routeId: "comment", ticket: "CTL-16", payload: { issueId: "i", body: "b" } });
+    const r = h.proxy.send({
+      routeId: "comment",
+      ticket: "CTL-16",
+      payload: { issueId: "i", body: "b" },
+    });
     expect(r.applied).toBe(true); // shadow NEVER refuses on the strength of the cooldown
     expect(h.calls.length).toBe(1);
     const names = h.events.map((e) => e.attributes["event.name"]);
@@ -460,7 +512,11 @@ describe("CTL-2027 Phase 3: flag OFF ⇒ byte-identical behaviour", () => {
     let l = emptyLedger(DAY);
     const h = harness({ ledger: l }); // backpressureMode defaults to "off"
     h.cooldowns["CTL-17:comment"] = { failedAt: NOW() }; // pre-armed, out of band
-    const r = h.proxy.send({ routeId: "comment", ticket: "CTL-17", payload: { issueId: "i", body: "b" } });
+    const r = h.proxy.send({
+      routeId: "comment",
+      ticket: "CTL-17",
+      payload: { issueId: "i", body: "b" },
+    });
     expect(r.applied).toBe(true);
     expect(h.calls.length).toBe(1);
   });

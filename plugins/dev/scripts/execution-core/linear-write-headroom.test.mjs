@@ -15,7 +15,11 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
-import { evaluateLinearWriteHeadroom, resolveWriteBudgetCaps, LINEAR_WRITE_HEADROOM_DEFAULTS } from "./linear-write-headroom.mjs";
+import {
+  evaluateLinearWriteHeadroom,
+  resolveWriteBudgetCaps,
+  LINEAR_WRITE_HEADROOM_DEFAULTS,
+} from "./linear-write-headroom.mjs";
 import { resolveWriteBudgetCaps as proxyResolveWriteBudgetCaps } from "./linear-write-proxy.mjs";
 import { utcDayOf } from "./linear-write-budget.mjs";
 
@@ -55,7 +59,9 @@ describe("evaluateLinearWriteHeadroom — pure, three-valued", () => {
       const r = evaluateLinearWriteHeadroom({ ledger, caps: CAPS, now: NOW });
       expect(["ok", "warn", "capped", "unknown"]).toContain(r.state);
     }
-    expect(evaluateLinearWriteHeadroom({ ledger: null, caps: CAPS, now: NOW }).state).toBe("unknown");
+    expect(evaluateLinearWriteHeadroom({ ledger: null, caps: CAPS, now: NOW }).state).toBe(
+      "unknown"
+    );
   });
 
   test("a per-ticket cap breach is CAPPED even when the host total is nowhere near exhausted", () => {
@@ -81,7 +87,9 @@ describe("evaluateLinearWriteHeadroom — absent/unusable/stale ledgers report U
   });
 
   test("unparseable ledger (not an object — the shape a failed JSON.parse leaves a caller with) → unknown", () => {
-    expect(evaluateLinearWriteHeadroom({ ledger: "not json", caps: CAPS, now: NOW }).state).toBe("unknown");
+    expect(evaluateLinearWriteHeadroom({ ledger: "not json", caps: CAPS, now: NOW }).state).toBe(
+      "unknown"
+    );
   });
 
   test("a ledger from a PREVIOUS UTC day → unknown (the caller must roll before calling, never this leaf)", () => {
@@ -114,12 +122,17 @@ describe("evaluateLinearWriteHeadroom — absent/unusable/stale ledgers report U
   test("missing/invalid caps → unknown (a zero or negative cap must not be silently accepted)", () => {
     const ledger = { day: TODAY, total: 4, byTicket: {} };
     expect(evaluateLinearWriteHeadroom({ ledger, caps: {}, now: NOW }).state).toBe("unknown");
-    expect(evaluateLinearWriteHeadroom({ ledger, caps: { dailyBudget: 0, perTicketCap: 50 }, now: NOW }).state).toBe(
-      "unknown"
-    );
-    expect(evaluateLinearWriteHeadroom({ ledger, caps: { dailyBudget: 300, perTicketCap: -1 }, now: NOW }).state).toBe(
-      "unknown"
-    );
+    expect(
+      evaluateLinearWriteHeadroom({ ledger, caps: { dailyBudget: 0, perTicketCap: 50 }, now: NOW })
+        .state
+    ).toBe("unknown");
+    expect(
+      evaluateLinearWriteHeadroom({
+        ledger,
+        caps: { dailyBudget: 300, perTicketCap: -1 },
+        now: NOW,
+      }).state
+    ).toBe("unknown");
   });
 });
 
@@ -161,7 +174,10 @@ describe("resolveWriteBudgetCaps — cap resolution MATCHES the proxy's own reso
   });
 
   test("env overrides resolve identically through both import paths", () => {
-    const env = { CATALYST_LINEAR_WRITE_DAILY_BUDGET: "2000", CATALYST_LINEAR_WRITE_TICKET_CAP: "77" };
+    const env = {
+      CATALYST_LINEAR_WRITE_DAILY_BUDGET: "2000",
+      CATALYST_LINEAR_WRITE_TICKET_CAP: "77",
+    };
     expect(resolveWriteBudgetCaps(env)).toEqual(proxyResolveWriteBudgetCaps(env));
     expect(resolveWriteBudgetCaps(env)).toEqual({ dailyBudget: 2000, perTicketCap: 77 });
   });
@@ -194,7 +210,10 @@ describe("linear-write-headroom.mjs is a zero-IO leaf", () => {
   test("importable under BARE NODE (not bun) — matches the lib/ zero-npm-import discipline", () => {
     const out = execFileSync(
       process.execPath,
-      ["-e", 'import("./linear-write-headroom.mjs").then(() => console.log("OK")).catch((e) => { console.error(e); process.exit(1); })'],
+      [
+        "-e",
+        'import("./linear-write-headroom.mjs").then(() => console.log("OK")).catch((e) => { console.error(e); process.exit(1); })',
+      ],
       { cwd: import.meta.dir, encoding: "utf8" }
     );
     expect(out.trim()).toBe("OK");

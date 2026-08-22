@@ -107,7 +107,12 @@ describe("COORD-236 classification: 'never' and 'not right now' are different an
     // is deliberately NOT one of them: an unknown budget reason must still classify,
     // which is the whole argument for matching by prefix. (FLEET's #3667 P3: this
     // list used to say `budget:per-ticket-cap`, a string that does not exist.)
-    for (const r of ["budget:day-exhausted", "budget:ticket-cap", "budget:already-converged", "budget:something-nobody-has-written-yet"]) {
+    for (const r of [
+      "budget:day-exhausted",
+      "budget:ticket-cap",
+      "budget:already-converged",
+      "budget:something-nobody-has-written-yet",
+    ]) {
       expect(r.startsWith(BUDGET_REASON_PREFIX)).toBe(true);
       expect(isThrottledLabelReason(r)).toBe(true);
       expect(isTerminalLabelReason(r)).toBe(false);
@@ -542,7 +547,9 @@ describe("COORD-236 wiring: the cool-down is armed by the WIDE predicate", () =>
     // The apply arms key on `desired`; the CTL-2083 remove arm keys on `label`, so
     // this count of the `…, desired` sites stays exactly two — a proof that neither
     // remove-side change accidentally re-keyed an apply arm onto `label`.
-    const armings = SCHED.split("\n").filter((l) => l.includes("recordLabelCooldown(orchDir, ticket, desired"));
+    const armings = SCHED.split("\n").filter((l) =>
+      l.includes("recordLabelCooldown(orchDir, ticket, desired")
+    );
     expect(armings.length).toBe(2);
     // Each arming is guarded by the wide predicate on the line above it.
     const lines = SCHED.split("\n");
@@ -749,7 +756,11 @@ describe("CTL-2052 labelRetryState — the pure cap arithmetic", () => {
     });
   });
   test("a null / absent marker → nothing recorded yet, not blocked", () => {
-    expect(labelRetryState(null, 0, cfg)).toMatchObject({ blocked: false, exhaustedProbe: false, attempts: 0 });
+    expect(labelRetryState(null, 0, cfg)).toMatchObject({
+      blocked: false,
+      exhaustedProbe: false,
+      attempts: 0,
+    });
     expect(labelRetryState({}, 0, cfg)).toMatchObject({ blocked: false, attempts: 0 });
   });
 });

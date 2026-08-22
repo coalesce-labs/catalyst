@@ -38,7 +38,11 @@ describe("readLinearWriteLedgerForBoard", () => {
 
   test("a loaded ledger for TODAY is returned as-is", () => {
     const env = { CATALYST_DIR: dir };
-    writeFileSync(defaultBudgetPath(env), JSON.stringify({ day: TODAY, total: 4, byTicket: { "CTL-1": 4 } }), "utf8");
+    writeFileSync(
+      defaultBudgetPath(env),
+      JSON.stringify({ day: TODAY, total: 4, byTicket: { "CTL-1": 4 } }),
+      "utf8"
+    );
     expect(readLinearWriteLedgerForBoard(env, NOW)).toEqual({
       day: TODAY,
       total: 4,

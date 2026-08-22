@@ -84,16 +84,25 @@ function worstOf(byTicket) {
  * CTL-2015 shape this ticket documents, and the host as a whole can be nowhere
  * near exhausted while that is true).
  */
-export function evaluateLinearWriteHeadroom({ ledger, caps, now, warnPct = LINEAR_WRITE_HEADROOM_DEFAULTS.warnPct } = {}) {
+export function evaluateLinearWriteHeadroom({
+  ledger,
+  caps,
+  now,
+  warnPct = LINEAR_WRITE_HEADROOM_DEFAULTS.warnPct,
+} = {}) {
   const dailyBudget = caps?.dailyBudget;
   const perTicketCap = caps?.perTicketCap;
   const capsValid =
-    Number.isFinite(dailyBudget) && dailyBudget > 0 && Number.isFinite(perTicketCap) && perTicketCap > 0;
+    Number.isFinite(dailyBudget) &&
+    dailyBudget > 0 &&
+    Number.isFinite(perTicketCap) &&
+    perTicketCap > 0;
   if (!capsValid || !Number.isFinite(now)) return unknown();
   if (!ledger || typeof ledger !== "object" || Array.isArray(ledger)) return unknown();
   if (typeof ledger.day !== "string") return unknown();
   if (typeof ledger.total !== "number" || !Number.isFinite(ledger.total)) return unknown();
-  if (!ledger.byTicket || typeof ledger.byTicket !== "object" || Array.isArray(ledger.byTicket)) return unknown();
+  if (!ledger.byTicket || typeof ledger.byTicket !== "object" || Array.isArray(ledger.byTicket))
+    return unknown();
   if (ledger.day !== utcDayOf(now)) return unknown(); // stale — the caller must roll before calling
 
   const total = ledger.total;
