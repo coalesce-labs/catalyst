@@ -169,6 +169,17 @@ on:
       - "package.json"
       - "bun.lock"
       - "turbo.json"
+      # CTL-2162: THE TRIGGER MUST MATCH THE SCAN (same doctrine as the
+      # plugins/dev/scripts/** and plugins/*/skills/** entries above, on the docs
+      # axis). needs-human-deleted.test.sh scans the WHOLE repo for the deleted
+      # label; 11 of its 168 pinned survivor files live under docs/ and website/.
+      # Without these two globs a PR that reintroduces `needs-human` in a doc —
+      # including references/event-schema.md's off-machine event contract, which
+      # consumers outside this repo read — skips this job entirely and the guard
+      # never fires. Widening a required check only ever costs CI minutes;
+      # narrowing it costs correctness.
+      - "docs/**"
+      - "website/**"
 
 jobs:
   # Always runs (see the PR-TRIGGER NOTE above) so `execution-core-unit-tests`'s
@@ -238,6 +249,11 @@ jobs:
               # CTL-56: mirror the push-path entry above — the repo-wide guard scans the legacy
               # orchestrate skill, so a change confined to it must mark the PR relevant.
               - "plugins/legacy/skills/orchestrate/**"
+              # CTL-2162: mirror the two globs from on.push.paths — see the note
+              # there. needs-human-deleted.test.sh scans the whole repo, so a
+              # docs-only PR that reintroduces the label must mark the PR relevant.
+              - "docs/**"
+              - "website/**"
 
   execution-core-unit-tests:
     needs: detect-changes
@@ -1130,6 +1146,26 @@ jobs:
         # one-line add.
         working-directory: plugins/dev/scripts
         run: bash __tests__/merge-delete-branch-worktree-guard.test.sh
+
+      - name: needs-human deletion guard (CTL-2162)
+        # CTL-2162: the label `needs-human` is deleted (CTL-2156…CTL-2161). This is the
+        # guard that stops it coming back — a ratchet over a frozen survivor manifest
+        # plus four hard-zero properties (no setup script creates the label; no runtime
+        # writer stamps it as a phase-signal status; the orch-monitor attention taxonomy
+        # excludes it; the retired broker reconcile event name has no producer).
+        #
+        # Every zero in it is paired with a PLANTED-OCCURRENCE control, because the
+        # plan's own version of the runtime-writer case scanned the schema enums —
+        # where the value had never appeared — and so passed vacuously before any work
+        # was done. Read the header of the test before changing it.
+        #
+        # CTL-2076 applies: this workflow allowlists shell suites by name rather than
+        # globbing __tests__/, so a new suite runs in required CI only once registered
+        # here. The matching trigger widening (docs/**, website/**) is in on.push.paths
+        # and detect-changes — THE TRIGGER MUST MATCH THE SCAN, or the label comes back
+        # in a tree this job never runs for.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/needs-human-deleted.test.sh
 
       - name: Run stable unit tests
         # CTL-1789 round-1 P2 (Codex): assertion-evidence.test.mjs and
