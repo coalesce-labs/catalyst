@@ -8,6 +8,8 @@
 //
 // Ordered fallback: (auto-fix [deferred]) → delegate → human.
 import { enqueueDelegateIntent } from "./delegate-queue.mjs";
+import { applyInfraClassAction } from "./infra-class-backoff.mjs";
+import { isInfraClassReason } from "./infra-class-reasons.mjs";
 import { labelNeedsHumanUnlessBeliefOwner } from "./label-guard.mjs";
 import { readDelegateRunnerConfig, readDelegateFirstConfig } from "./config.mjs";
 
@@ -63,6 +65,19 @@ export function routeStuckTicketToDelegate(
     appendEvent = () => {},
   } = {}
 ) {
+  // CTL-2061: an infra-class reason (an API-capacity/transport transient the fleet's own
+  // plumbing owns, never the human's) never reaches the label chokepoint below, and never
+  // reaches the delegate queue either — retry-with-backoff / page-steward is a DIFFERENT
+  // remediation than "someone should look at this ticket." Checked before mode resolution
+  // so it applies identically under off/shadow/enforce.
+  if (isInfraClassReason(reason)) {
+    return applyInfraClassAction(orchDir, ticket, reason, {
+      log: logArg,
+      appendEvent,
+      ...(deps.postComment ? { postComment: deps.postComment } : {}),
+    });
+  }
+
   const mode = readDelegateFirstMode(env);
 
   // helper: call the Phase-1 label chokepoint and return { labelled: bool }
