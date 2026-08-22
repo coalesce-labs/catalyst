@@ -37,10 +37,6 @@ import {
   writeFileSync,
   renameSync,
 } from "node:fs";
-// CTL-1744: delegate-lands claim markers. A zero-import leaf so scheduler.mjs can
-// read them too without creating a scheduler↔monitor cycle (monitor already
-// imports scheduler). See delegate-claims.mjs for the full rationale.
-import { recordDelegateClaim, clearDelegateClaim } from "./delegate-claims.mjs";
 import { dirname, basename, join } from "node:path";
 import {
   getEventLogPath,
@@ -112,8 +108,8 @@ import {
   applyLabel, // CTL-1441: needs-human at the triage re-dispatch cap
   removeLabel, // CTL-1481: worker:<host> swap (remove-before-add)
 } from "./linear-write.mjs";
-import { routeStuckTicketToDelegate } from "./delegate-first.mjs"; // CTL-1609
 import { appendDelegateEvent as defaultAppendDelegateEvent } from "./delegate-event.mjs"; // CTL-1774
+import { labelNeedsHumanUnlessBeliefOwner } from "./label-guard.mjs"; // CTL-2141: direct Phase-1 chokepoint (delegate-first reverted)
 import { appendTriageTransitionEvent as defaultAppendEvent } from "./triage-transition-event.mjs";
 import { countBackgroundAgents, resetLivenessCache } from "./claude-agents.mjs";
 import {
@@ -1097,22 +1093,15 @@ function dispatchTriage(
     appendDelegateEvent = defaultAppendDelegateEvent,
     // CTL-1441: needs-human application at the re-dispatch cap. Injectable so
     // tests never spawn a real linearis write; default = the label-guard path.
+    // CTL-2141: reverted from routeStuckTicketToDelegate (deleted) to the
+    // direct Phase-1 chokepoint — byte-identical to its off-mode behavior.
     labelNeedsHuman = (dir, t) =>
-      routeStuckTicketToDelegate(dir, t, {
+      labelNeedsHumanUnlessBeliefOwner(dir, t, { applyLabel }, {
         site: "triage-redispatch-cap",
-        reason: "triage-redispatch-cap",
-        boardContext: { cap: TRIAGE_DISPATCH_CAP },
-        applyLabel: { applyLabel },
         explanation: {
           problem: `${t} hit the triage re-dispatch cap (${TRIAGE_DISPATCH_CAP})`,
           call_to_action: `triage ${t} manually or re-scope it`,
         },
-        // CTL-1609 (Codex P1): supply the configured ceiling so
-        // enqueueDelegateIntent can reach `queue-full` → human instead of
-        // defaulting to Infinity. Lazy: the state.json read is paid only on the
-        // enforce path that actually enqueues.
-        deps: { orchDir: dir, maxParallel: () => readMaxParallel(dir) },
-        appendEvent: (evt) => appendDelegateEvent({ ...evt, orchId }), // CTL-1774
       }),
     // CTL-1589 (Codex R3): when set (the sweep's Triage-BOARD candidates), the
     // ticket's LIVE state must still equal this workflow-state name at launch.
@@ -1274,11 +1263,6 @@ function dispatchTriage(
       // HELD this tick — it dispatches once the delegate lands in the cache
       // (webhook-projected). This is what gets queued-but-untriaged items moving.
       const d = applyAssignee({ ticket: identifier, userId: botWriteId });
-      // CTL-1744: stamp WHEN the claim was made, so board-health's
-      // dispatchLiveness can tell this legitimate two-pass wait from a wedge.
-      // Only on a confirmed apply — an unapplied claim is not a wait we should
-      // excuse, and stamping it anyway would suppress a real stall.
-      if (d.applied === true) recordDelegateClaim(orchDir, identifier);
       log.info(
         { identifier, applied: d.applied, reason: d.reason },
         "monitor: delegated to orchestrator — will dispatch once delegate lands (CTL-1174)"
@@ -1462,11 +1446,6 @@ function dispatchTriage(
   // retired above; the launcher short-circuits it). A dead-frozen "running"
   // signal is reset to stalled by the reclaim/revive path, after which counting
   // resumes; "failed"/"stalled" re-dispatches launch real workers and count.
-  // CTL-1744: the two-pass wait is over — this ticket is launching, so drop its
-  // delegate-claim marker. Pure housekeeping: a surviving marker would expire on
-  // its own once `now - claimedAt` passes graceMs, so this can never be
-  // load-bearing for correctness, only for keeping .delegate-claims/ bounded.
-  clearDelegateClaim(orchDir, identifier);
   const statusAtLaunch = readTriageSignalStatus(orchDir, identifier);
   if (!isTriageInFlight(statusAtLaunch) && statusAtLaunch !== "done") {
     bumpTriageDispatchCount(orchDir, identifier);

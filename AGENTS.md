@@ -330,8 +330,7 @@ metric, log/event, trace span, and alert — with dimensions, gotchas, and copy-
 patterns) lives in the sister repo **`catalyst-otel`** at `docs/data-dictionary.md`. **Read it before
 designing telemetry or trusting a query.** That repo (`collector-config.yaml`,
 `grafana-datasources.yml`, `tempo.yaml`, `dashboards/`, `provisioning/alerting/`) is the authoritative
-stack topology. For a copy-paste-runnable diagnose→unstick→file playbook against the live stack, see
-the `sensing-substrate` skill.
+stack topology.
 
 **Endpoints are environment-specific.** Backend addresses are resolved from environment variables —
 `OTEL_EXPORTER_OTLP_ENDPOINT` / `CATALYST_OTLP_ENDPOINT` for the daemons (collector ingest), and

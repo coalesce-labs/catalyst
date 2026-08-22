@@ -1,7 +1,13 @@
 // board-data-recovery.test.mjs — CTL-1220: loadRecoveryOutcomes parses the
 // unified event log's recovery.* events into per-ticket {autoFixed,triaged,
-// recoveredAt} flags. This is the read half of the emit↔read contract whose
-// emit side lives in execution-core/recovery-reasoning.mjs:defaultEmitEvent.
+// recoveredAt} flags. CTL-2141 deleted the emit side (recovery-reasoning.mjs
+// / recovery-emit.mjs) along with the whole recovery-pass judgment layer, so
+// nothing produces recovery.fixed/recovery.would-fix events going forward —
+// this reader is now permanently fed an empty stream in production. Kept
+// (not deleted) because loadRecoveryOutcomes/foldRecoveryOutcomes are still
+// live, wired into assembleBoard's per-3s recompute; only the local fixture
+// builder below (a minimal stand-in for the deleted buildRecoveryEnvelope,
+// scoped to just the fields foldRecoveryOutcomes actually reads) changed.
 //
 //   cd plugins/dev/scripts/orch-monitor && bun test lib/board-data-recovery.test.mjs
 
@@ -10,7 +16,22 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { loadRecoveryOutcomes } from "./board-data.mjs";
-import { buildRecoveryEnvelope } from "../../execution-core/recovery-reasoning.mjs";
+
+// Minimal stand-in for the deleted recovery-reasoning.mjs::buildRecoveryEnvelope —
+// only the shape foldRecoveryOutcomes (board-data.mjs) actually reads:
+// attributes["event.name"], attributes["event.label"] (+ its body.payload.ticket
+// fallback), and ts.
+function buildRecoveryEnvelope({ type, ticket = null }, { now } = {}) {
+  const ts = now ? now() : new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+  return {
+    ts,
+    attributes: {
+      "event.name": type,
+      "event.label": ticket,
+    },
+    body: { payload: { ticket } },
+  };
+}
 
 const dirs = [];
 afterEach(() => {

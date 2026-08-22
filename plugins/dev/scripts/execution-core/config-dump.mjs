@@ -41,10 +41,8 @@ import { resolve } from "node:path";
 
 import {
   BELIEFS_FLAGS,
-  BOARD_HEALTH_MODES,
   COORDINATION_MODES,
   DEAD_DOC_WORKER_MODES,
-  RECOVERY_PASS_MODES,
   LINEAR_WRITE_PROXY_MODES, // CTL-1889
   STALL_JANITOR_MODES,
   UNSTUCK_SWEEP_MODES,
@@ -378,15 +376,6 @@ export const CONFIG_KEYS = Object.freeze(
       reader: "readUnstuckSweepConfig",
     },
     {
-      key: "catalyst.recovery.pass.mode",
-      kind: "mode",
-      layer2: "catalyst.recovery.pass.mode",
-      env: ["CATALYST_RECOVERY_PASS"],
-      modes: RECOVERY_PASS_MODES,
-      fallback: "off",
-      reader: "readRecoveryPassConfig",
-    },
-    {
       // CTL-1889: the Linear write-proxy transport. Layer-2 only — the `routes`
       // sibling is a URL-path map, which has no env precedent and no business in a
       // daemon env var.
@@ -406,15 +395,6 @@ export const CONFIG_KEYS = Object.freeze(
       modes: DEAD_DOC_WORKER_MODES,
       fallback: "off",
       reader: "readDeadDocWorkerConfig",
-    },
-    {
-      key: "catalyst.boardHealth.mode",
-      kind: "mode",
-      layer2: "catalyst.boardHealth.mode",
-      env: ["CATALYST_BOARD_HEALTH"],
-      modes: BOARD_HEALTH_MODES,
-      fallback: "shadow",
-      reader: "readBoardHealthConfig",
     },
     {
       key: "catalyst.watchdog.mode",

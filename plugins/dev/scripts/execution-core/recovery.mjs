@@ -117,7 +117,10 @@ import { phaseIndex, isKnownPhase } from "../lib/phase-fsm.mjs";
 // unrecognized by isKnownPhase is treated as genuinely unknown data (a typo or
 // a corrupt signal), not a supported dispatch-reuse type — see the reclaim
 // supersede-guard below.
-import { RECOVERY_PASS_PHASE } from "./recovery-reasoning.mjs";
+// CTL-2141: inlined (was imported from the deleted recovery-reasoning.mjs).
+// "recovery-pass" stays a recognized non-pipeline phase slot — old and
+// operator-invoked recovery-pass worker signals still reach this reclaim path.
+const RECOVERY_PASS_PHASE = "recovery-pass";
 import { classifyEventStream } from "../lib/event-stream-class.mjs"; // CTL-1488: coordination/telemetry split
 import { ASSERTED_BY } from "./assertion-evidence.mjs";
 import { defaultAppendEventLog } from "./sdk-run-phase-agent.mjs"; // CTL-1854: the abandonment event emitter // CTL-1789: terminal-writer attribution

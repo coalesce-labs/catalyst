@@ -20,8 +20,8 @@ import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { jobLifecycle } from "./recovery.mjs";
-import { routeStuckTicketToDelegate } from "./delegate-first.mjs"; // CTL-1609
 import { appendDelegateEvent as defaultAppendDelegateEvent } from "./delegate-event.mjs"; // CTL-1774
+import { labelNeedsHumanUnlessBeliefOwner } from "./label-guard.mjs"; // CTL-2141: direct Phase-1 chokepoint (delegate-first reverted)
 import { fenceGuard } from "./fence-guard.mjs";
 import {
   appendFenceStandoffEvent,
@@ -485,27 +485,20 @@ export function defaultEscalate(
       },
     )) {
       clearFenceStandoff(orchDir, ticket);
-      const r = routeStuckTicketToDelegate(orchDir, ticket, {
-        site: "stale-pr-rescue",
-        reason: detail?.reason ?? "unresolvable-conflict",
-        boardContext: { prNumber: detail?.prNumber },
-        applyLabel: linearWrite,
+      // CTL-2141: reverted from routeStuckTicketToDelegate (deleted) to the
+      // direct Phase-1 chokepoint. `routed` stays permanently false — the
+      // delegate route no longer exists.
+      const r = labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, linearWrite, {
         env,
+        site: "stale-pr-rescue",
         log,
-        appendEvent: (evt) => appendDelegateEvent({ ...evt, orchId: ticket }), // CTL-1774
         explanation: {
           problem: `stale PR for ${ticket} could not be rescued: ${detail?.reason ?? "unresolvable conflict"}`,
           call_to_action: `resolve the PR conflict for ${ticket} or close the PR`,
         },
-        // CTL-1609 (Codex P1): supply the configured ceiling so the enqueue can
-        // reach `queue-full` → human instead of resolving to Infinity. Injected
-        // from the daemon (which already owns concurrency) rather than importing
-        // the scheduler here, which would pull its bun:sqlite graph into this timer.
-        deps: { orchDir, ...(maxParallel === undefined ? {} : { maxParallel }) },
       });
-      routed = r.routed === true;
-      labelled = r.labelled === true;
-      outcomeReason = r.reason ?? (labelled ? "labelled" : "not-labelled");
+      labelled = r === true;
+      outcomeReason = labelled ? "labelled" : "not-labelled";
     } else {
       outcomeReason = "fence-suppressed";
       log.warn(
