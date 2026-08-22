@@ -4553,4 +4553,118 @@ describe("escalateExhaustedIntents — transient-infra exemption (CTL-1563)", ()
     expect(readLedger("CTL-DONE2").decision).toBe("dispatched"); // untouched
     expect(events).toEqual([]);
   });
+  test("the exempted ticket is kept OUT of correlation grouping entirely", () => {
+    // A transient ticket must never become a group ANCHOR or MEMBER. An anchor
+    // raises ONE full operator decision covering its whole cohort, so letting a
+    // transient death anchor a group would reinstate the escalation through the
+    // side door — with a wider blast radius than the singleton path it bypassed.
+    const t0 = 1_000_000_000_000;
+    for (const t of ["CTL-C1", "CTL-C2", "CTL-C3"]) {
+      seedExhausted(t, t0);
+      overloadSignal(t);
+    }
+    const { out, events, labels, comments, signals } = run(t0 + 1, {
+      correlationMode: "enforce",
+    });
+    expect(out).toEqual([]);
+    expect(labels).toEqual([]);
+    expect(comments).toEqual([]);
+    expect(signals).toEqual([]);
+    expect(events.some((e) => e.type === "recovery.escalation.correlated")).toBe(false);
+    expect(events.some((e) => e.type === "recovery.escalation.would-correlate")).toBe(false);
+  });
+
+  test("the exemption never fabricates a fix_class (board-health consumer stays clean)", () => {
+    // decision:"defer" + fix_class:"board-health" is precisely what
+    // readDeferredBoardHealthIntents selects on. Defaulting an unclassified ticket
+    // to "board-health" would enqueue it for that consumer as a side effect of an
+    // unrelated exemption, and would also set the `deferredSince` aging anchor.
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent(
+      "CTL-FC",
+      { decision: "fix", fix_class: "bounded-llm", attempts: RECOVERY_MAX_ATTEMPTS },
+      { orchDir, now: () => t0 },
+    );
+    overloadSignal("CTL-FC");
+    run(t0 + 1);
+    const led = readLedger("CTL-FC");
+    expect(led.decision).toBe("defer");
+    expect(led.fix_class).toBe("bounded-llm"); // preserved, not rewritten
+    expect(led.deferredSince).toBeUndefined(); // not a board-health defer
+    expect(readDeferredBoardHealthIntents(orchDir, { now: () => t0 + 10_000_000 })).toEqual([]);
+  });
+
+  test("a THROWING backoff READ fails toward the exemption, never toward escalation", () => {
+    // The window throttles redispatch; it does not decide whether a human is paged.
+    // An unreadable window must never convert an infrastructure outage into an
+    // operator escalation.
+    const t0 = 1_000_000_000_000;
+    seedExhausted("CTL-BRFAIL", t0);
+    overloadSignal("CTL-BRFAIL");
+    const { out, labels } = run(t0 + 1, {
+      inTransientBackoff: () => {
+        throw new Error("unreadable window");
+      },
+    });
+    expect(out).toEqual([]);
+    expect(labels).toEqual([]);
+    const led = readLedger("CTL-BRFAIL");
+    expect(led.decision).toBe("defer");
+    expect(led.attempts).toBe(RECOVERY_MAX_ATTEMPTS - 1); // fell to the refunding path
+  });
+
+  test("a failing ledger write leaves the entry untouched — and still never escalates", () => {
+    // The defer write IS the exemption. If it cannot land, the correct outcome is
+    // "retry next tick", NOT "fall through and page a human".
+    const t0 = 1_000_000_000_000;
+    seedExhausted("CTL-LWFAIL", t0);
+    overloadSignal("CTL-LWFAIL");
+    const { out, labels, comments, signals } = run(t0 + 1, {
+      recordIntent: () => {
+        throw new Error("disk full");
+      },
+    });
+    expect(out).toEqual([]);
+    expect(labels).toEqual([]);
+    expect(comments).toEqual([]);
+    expect(signals).toEqual([]);
+    // Untouched → still sweepable → retried next tick.
+    const led = readLedger("CTL-LWFAIL");
+    expect(led.decision).toBe("dispatched");
+    expect(led.attempts).toBe(RECOVERY_MAX_ATTEMPTS);
+    expect(led.escalated).toBe(false);
+  });
+
+  test("a terminal ticket is still never swept — the isActive gate runs BEFORE the exemption", () => {
+    // Ordering guard: the exemption must not resurrect a Done ticket's ledger by
+    // writing a defer onto it. The terminal cleanup owns that entry.
+    const t0 = 1_000_000_000_000;
+    seedExhausted("CTL-DONE2", t0);
+    overloadSignal("CTL-DONE2");
+    const { out, events } = run(t0 + 1, { isActive: () => false });
+    expect(out).toEqual([]);
+    expect(readLedger("CTL-DONE2").decision).toBe("dispatched"); // untouched
+    expect(events.length).toBe(0);
+  });
+
+  test("the backoff record is keyed on the exemption's OWN fix class, not the ticket's", () => {
+    // A provider outage must not consume the budget metered against a genuine
+    // bounded-llm/seam fix failure (and vice versa) — they are different problems
+    // with different retry economics.
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent(
+      "CTL-KEY",
+      { decision: "fix", fix_class: "bounded-llm", attempts: RECOVERY_MAX_ATTEMPTS },
+      { orchDir, now: () => t0 },
+    );
+    overloadSignal("CTL-KEY");
+    const recorded = [];
+    run(t0 + 1, { recordTransientDefer: (...args) => recorded.push(args) });
+    expect(recorded.length).toBe(1);
+    const [dir, ticket, fixClass, reason] = recorded[0];
+    expect(dir).toBe(orchDir);
+    expect(ticket).toBe("CTL-KEY");
+    expect(fixClass).toBe("transient-infra"); // NOT "bounded-llm"
+    expect(reason).toBe("sdk-overloaded-exhausted");
+  });
 });
