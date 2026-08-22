@@ -1,0 +1,30 @@
+# event-log-week-oracle.txt — CTL-1216.
+#
+# THE shared ISO-week fixture list. Read by BOTH
+#   lib/event-log-paths.test.mjs                 (the JS engine)
+#   __tests__/event-log-paths-parity.test.sh     (the bash engine + JS, three-way)
+# so the two engines can never be checked against divergent date sets — a
+# divergent fixture list is how a parity suite passes while the engines
+# disagree on an untested date.
+#
+# Format: `<YYYY-MM-DD> <%G-W%V>`. The second column is the OUTPUT of
+#   date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "<date>T00:00:00Z" "+%G-W%V"
+# on macOS (BSD date), regenerated with the GNU `date -u -d` fallback the
+# repo already uses at compound-log.sh:73-79.
+#
+# %G is the ISO YEAR and is NOT %Y. 2026 is a 53-week year: 2026-12-31,
+# 2027-01-01 and 2027-01-03 are all 2026-W53.
+2021-01-01 2020-W53
+2024-12-30 2025-W01
+2025-12-29 2026-W01
+2026-01-01 2026-W01
+2026-01-05 2026-W02
+2026-08-17 2026-W34
+2026-08-22 2026-W34
+2026-08-23 2026-W34
+2026-12-31 2026-W53
+2027-01-01 2026-W53
+2027-01-03 2026-W53
+2027-01-04 2027-W01
+2028-02-29 2028-W09
+2030-12-31 2031-W01
