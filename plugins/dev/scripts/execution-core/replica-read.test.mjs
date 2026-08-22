@@ -9,7 +9,7 @@ import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createReplicaReader } from "./replica-read.mjs";
+import { createReplicaReader, readProjectId } from "./replica-read.mjs";
 
 let tmpDir;
 let dbPath;
@@ -1232,5 +1232,57 @@ describe("createReplicaReader.currentUpdatedAt (CTL-2070, real bun:sqlite)", () 
     expect(reader.currentUpdatedAt("CTL-1")).toBeUndefined();
     seed(); // handle was dropped → next call re-opens and sees the seeded schema
     expect(reader.currentUpdatedAt("CTL-3")).toBe(3000);
+  });
+});
+
+// ── readProjectId (CTL-2129) — the ticket → scope-key (project id) read ────────
+// Its own project-aware seed: the shared seed() uses positional inserts with no
+// project_id column, so adding one there would break every existing insert. This
+// block builds an issues table WITH project_id and exercises the standalone
+// readProjectId(identifier, { dbPath }) reader.
+describe("readProjectId (real bun:sqlite)", () => {
+  function seedWithProject() {
+    const db = new Database(dbPath, { create: true });
+    db.run(`
+      CREATE TABLE issues (
+        identifier   TEXT,
+        project_id   TEXT,
+        removed_at   TEXT
+      )
+    `);
+    db.run(`CREATE INDEX idx_issues_identifier ON issues (identifier)`);
+    db.run(`INSERT INTO issues VALUES ('CTL-100', 'proj-uuid-abc', NULL)`); // has a project
+    db.run(`INSERT INTO issues VALUES ('CTL-101', NULL, NULL)`); // no project → null
+    db.run(`INSERT INTO issues VALUES ('CTL-102', 'proj-uuid-xyz', '2026-06-03T00:00:00Z')`); // removed → MISS
+    db.close();
+  }
+
+  test("returns the project_id for a known identifier", () => {
+    seedWithProject();
+    expect(readProjectId("CTL-100", { dbPath })).toBe("proj-uuid-abc");
+  });
+
+  test("returns null for a ticket with no project (NULL project_id)", () => {
+    seedWithProject();
+    expect(readProjectId("CTL-101", { dbPath })).toBeNull();
+  });
+
+  test("returns null for an unknown identifier", () => {
+    seedWithProject();
+    expect(readProjectId("CTL-999", { dbPath })).toBeNull();
+  });
+
+  test("a tombstoned (removed) row is a MISS → null", () => {
+    seedWithProject();
+    expect(readProjectId("CTL-102", { dbPath })).toBeNull();
+  });
+
+  test("fail-open: null (never throws) when the db is absent", () => {
+    expect(readProjectId("CTL-100", { dbPath })).toBeNull(); // no db created
+  });
+
+  test("empty identifier → null", () => {
+    seedWithProject();
+    expect(readProjectId("", { dbPath })).toBeNull();
   });
 });

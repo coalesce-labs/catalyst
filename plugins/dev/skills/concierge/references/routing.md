@@ -28,6 +28,11 @@ instrument  →  steward of the scope  →  concierge  →  human (as an ask)
 - ⛔ **An instrument that reaches the human directly is a defect.** Board-health, the stalled-PR sweep and
   the comment watcher page the **steward**, threaded, tagged `instrument/<name>`. They never label, and
   they never post into a human's queue.
+- **How the steward rung resolves (CTL-2129):** the router matches a stalled item's **scope key** — its
+  Linear **project id** — against each role's `manifest.scopeKeys` (`resolveSteward`). The concierge
+  populates that array at scaffold time via `role-supervisor/install.sh --scope-keys <projectId>`
+  (`scaffold.md`). A project with no registered steward — or a scope key nothing matches — falls through
+  to **you**, which is the correct backstop, not a bug.
 - **Two silences from the same steward on the same item** (≈ 90 min) → the instrument pages **you** on the
   channel and the doctor goes red. Your call then is **ask vs relaunch** — say which, and why, in a
   channel turn. Relaunching is usually right; an ask is right when the *work* is ambiguous, not the role.
