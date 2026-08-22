@@ -15,8 +15,12 @@ import {
   TRIAGE_DISPATCH_CAP,
   readTriageSignalStatus,
   readTriageDispatchCount,
+  readTriageDispatchRecord,
   bumpTriageDispatchCount,
   fleetTriageDispatchCount,
+  markTriageCapped,
+  rearmTriageCapOnRequeue,
+  handleStateChangedEvent,
 } from "./monitor.mjs";
 
 let orchDir;
@@ -166,5 +170,426 @@ describe("fleetTriageDispatchCount — fleet-wide cap (CTL-1649)", () => {
       readFenceCount: () => ({ count: TRIAGE_DISPATCH_CAP }),
     });
     expect(fleetCount).toBeGreaterThanOrEqual(TRIAGE_DISPATCH_CAP);
+  });
+});
+
+// ─── CTL-2111: rearmTriageCapOnRequeue ───────────────────────────────────────
+
+describe("rearmTriageCapOnRequeue — human re-queue re-arm (CTL-2111)", () => {
+  // Seed a capped record: bump to the cap, then mark it capped at a fixed time.
+  function seedCapped(ticket, cappedAt) {
+    bumpTriageDispatchCount(orchDir, ticket);
+    bumpTriageDispatchCount(orchDir, ticket);
+    bumpTriageDispatchCount(orchDir, ticket);
+    markTriageCapped(orchDir, ticket, { now: () => cappedAt });
+    const rec = readTriageDispatchRecord(orchDir, ticket);
+    expect(rec.cappedAt).toBe(cappedAt);
+    return rec;
+  }
+
+  function makeSpies() {
+    const calls = { resetFence: [], clearLabel: [], appendRearmEvent: [] };
+    return {
+      calls,
+      resetFence: (arg) => { calls.resetFence.push(arg); return { count: 0 }; },
+      clearLabel: (dir, t) => { calls.clearLabel.push({ dir, t }); },
+      appendRearmEvent: (arg) => { calls.appendRearmEvent.push(arg); return true; },
+    };
+  }
+
+  test("capped + eventTs NEWER than cappedAt → re-armed (multi-host): counter+fence reset, label cleared, event once", () => {
+    seedCapped("CTL-2111", "2026-08-20T00:00:00Z");
+    const s = makeSpies();
+    const res = rearmTriageCapOnRequeue(orchDir, "CTL-2111", {
+      eventTs: "2026-08-21T00:00:00Z",
+      multiHost: true,
+      resetFence: s.resetFence,
+      clearLabel: s.clearLabel,
+      appendRearmEvent: s.appendRearmEvent,
+    });
+    expect(res.rearmed).toBe(true);
+    expect(s.calls.resetFence).toHaveLength(1);
+    expect(s.calls.resetFence[0]).toMatchObject({ ticket: "CTL-2111" });
+    expect(s.calls.clearLabel).toHaveLength(1);
+    expect(s.calls.appendRearmEvent).toHaveLength(1);
+    expect(readTriageDispatchCount(orchDir, "CTL-2111")).toBe(0);
+    expect(readTriageDispatchRecord(orchDir, "CTL-2111").cappedAt).toBeUndefined();
+  });
+
+  test("capped + eventTs OLDER/equal to cappedAt → no-op, no spies", () => {
+    seedCapped("CTL-2111", "2026-08-21T00:00:00Z");
+    const s = makeSpies();
+    const older = rearmTriageCapOnRequeue(orchDir, "CTL-2111", {
+      eventTs: "2026-08-20T00:00:00Z", multiHost: true,
+      resetFence: s.resetFence, clearLabel: s.clearLabel, appendRearmEvent: s.appendRearmEvent,
+    });
+    expect(older.rearmed).toBe(false);
+    const equal = rearmTriageCapOnRequeue(orchDir, "CTL-2111", {
+      eventTs: "2026-08-21T00:00:00Z", multiHost: true,
+      resetFence: s.resetFence, clearLabel: s.clearLabel, appendRearmEvent: s.appendRearmEvent,
+    });
+    expect(equal.rearmed).toBe(false);
+    expect(s.calls.resetFence).toHaveLength(0);
+    expect(s.calls.clearLabel).toHaveLength(0);
+    expect(s.calls.appendRearmEvent).toHaveLength(0);
+    // record untouched (still capped)
+    expect(readTriageDispatchRecord(orchDir, "CTL-2111").cappedAt).toBe("2026-08-21T00:00:00Z");
+  });
+
+  test("NOT capped (no cappedAt) → no-op regardless of eventTs", () => {
+    bumpTriageDispatchCount(orchDir, "CTL-2111"); // count but never capped
+    const s = makeSpies();
+    const res = rearmTriageCapOnRequeue(orchDir, "CTL-2111", {
+      eventTs: "2030-01-01T00:00:00Z", multiHost: true,
+      resetFence: s.resetFence, clearLabel: s.clearLabel, appendRearmEvent: s.appendRearmEvent,
+    });
+    expect(res.rearmed).toBe(false);
+    expect(res.reason).toBe("not-capped");
+    expect(s.calls.resetFence).toHaveLength(0);
+  });
+
+  test("eventTs missing/unparseable → conservative no-op (cannot prove newer)", () => {
+    seedCapped("CTL-2111", "2026-08-20T00:00:00Z");
+    const s = makeSpies();
+    expect(rearmTriageCapOnRequeue(orchDir, "CTL-2111", { eventTs: null, multiHost: true,
+      resetFence: s.resetFence, clearLabel: s.clearLabel, appendRearmEvent: s.appendRearmEvent }).rearmed).toBe(false);
+    expect(rearmTriageCapOnRequeue(orchDir, "CTL-2111", { eventTs: "not-a-date", multiHost: true,
+      resetFence: s.resetFence, clearLabel: s.clearLabel, appendRearmEvent: s.appendRearmEvent }).rearmed).toBe(false);
+    expect(s.calls.resetFence).toHaveLength(0);
+  });
+
+  // ── CTL-2111 (Codex #3824 P1): the fence reset must be CONFIRMED before the
+  // host-local latch is dropped. resetTriageAttemptCountSync signals failure with
+  // `{count:null}` and never throws, so an ignored result stranded the ticket:
+  // fleet fence still capped → re-parked, local cappedAt gone → never retried,
+  // and the durable event claimed a re-arm that did not happen.
+  test("multi-host + fence reset UNCONFIRMED ({count:null}) → latch retained, no event, not rearmed", () => {
+    seedCapped("CTL-2111", "2026-08-20T00:00:00Z");
+    const s = makeSpies();
+    const res = rearmTriageCapOnRequeue(orchDir, "CTL-2111", {
+      eventTs: "2026-08-21T00:00:00Z", multiHost: true,
+      resetFence: () => ({ count: null }), // ordinary write failure — does NOT throw
+      clearLabel: s.clearLabel, appendRearmEvent: s.appendRearmEvent,
+    });
+    expect(res.rearmed).toBe(false);
+    expect(res.reason).toBe("fence-reset-unconfirmed");
+    // The durable event must not claim a re-arm that did not happen.
+    expect(s.calls.appendRearmEvent).toHaveLength(0);
+    // The latch survives, so a later re-queue can RETRY the reset (the old code
+    // cleared cappedAt here, after which every later event read "not-capped").
+    const rec = readTriageDispatchRecord(orchDir, "CTL-2111");
+    expect(rec?.cappedAt).toBe("2026-08-20T00:00:00Z");
+  });
+
+  test("multi-host + fence reset THROWS → treated as unconfirmed, latch retained", () => {
+    seedCapped("CTL-2111", "2026-08-20T00:00:00Z");
+    const s = makeSpies();
+    const res = rearmTriageCapOnRequeue(orchDir, "CTL-2111", {
+      eventTs: "2026-08-21T00:00:00Z", multiHost: true,
+      resetFence: () => { throw new Error("spawn failed"); },
+      clearLabel: s.clearLabel, appendRearmEvent: s.appendRearmEvent,
+    });
+    expect(res.rearmed).toBe(false);
+    expect(res.reason).toBe("fence-reset-unconfirmed");
+    expect(s.calls.appendRearmEvent).toHaveLength(0);
+    expect(readTriageDispatchRecord(orchDir, "CTL-2111")?.cappedAt).toBe("2026-08-20T00:00:00Z");
+  });
+
+  // Positive control: the SAME harness with a CONFIRMED reset must re-arm, so the
+  // two assertions above are evidence of the gate and not of a broken fixture.
+  test("multi-host + fence reset CONFIRMED ({count:0}) → latch cleared, event emitted", () => {
+    seedCapped("CTL-2111", "2026-08-20T00:00:00Z");
+    const s = makeSpies();
+    const res = rearmTriageCapOnRequeue(orchDir, "CTL-2111", {
+      eventTs: "2026-08-21T00:00:00Z", multiHost: true,
+      resetFence: () => ({ count: 0 }),
+      clearLabel: s.clearLabel, appendRearmEvent: s.appendRearmEvent,
+    });
+    expect(res.rearmed).toBe(true);
+    expect(s.calls.appendRearmEvent).toHaveLength(1);
+    expect(readTriageDispatchRecord(orchDir, "CTL-2111")?.cappedAt).toBeFalsy();
+    expect(readTriageDispatchCount(orchDir, "CTL-2111")).toBe(0);
+  });
+
+  test("single-host → resetFence NOT called; host-local reset + event still happen", () => {
+    seedCapped("CTL-2111", "2026-08-20T00:00:00Z");
+    const s = makeSpies();
+    const res = rearmTriageCapOnRequeue(orchDir, "CTL-2111", {
+      eventTs: "2026-08-21T00:00:00Z", multiHost: false,
+      resetFence: s.resetFence, clearLabel: s.clearLabel, appendRearmEvent: s.appendRearmEvent,
+    });
+    expect(res.rearmed).toBe(true);
+    expect(s.calls.resetFence).toHaveLength(0); // no fence write single-host
+    expect(s.calls.clearLabel).toHaveLength(1);
+    expect(s.calls.appendRearmEvent).toHaveLength(1);
+    expect(readTriageDispatchCount(orchDir, "CTL-2111")).toBe(0);
+  });
+
+  // CTL-2111 (Codex #3824 P1): the NON-load-bearing seams stay fail-open — but the
+  // multi-host fence reset does NOT, because on multi-host the host-local reset
+  // un-gates nothing by itself (fleetTriageDispatchCount takes max(local, fence)).
+  // This test therefore pairs a CONFIRMED fence reset with two throwing auxiliary
+  // seams; the throwing-fence case is asserted separately above.
+  test("auxiliary seams throwing → still rearmed:true, never throws (fail-open)", () => {
+    seedCapped("CTL-2111", "2026-08-20T00:00:00Z");
+    const res = rearmTriageCapOnRequeue(orchDir, "CTL-2111", {
+      eventTs: "2026-08-21T00:00:00Z", multiHost: true,
+      resetFence: () => ({ count: 0 }), // confirmed — the load-bearing seam succeeded
+      clearLabel: () => { throw new Error("linear 500"); },
+      appendRearmEvent: () => { throw new Error("disk full"); },
+    });
+    expect(res.rearmed).toBe(true);
+    expect(readTriageDispatchCount(orchDir, "CTL-2111")).toBe(0);
+    expect(readTriageDispatchRecord(orchDir, "CTL-2111").cappedAt).toBeUndefined();
+  });
+
+  test("single-host: every seam throwing → still rearmed:true, never throws (fail-open)", () => {
+    seedCapped("CTL-2111", "2026-08-20T00:00:00Z");
+    const res = rearmTriageCapOnRequeue(orchDir, "CTL-2111", {
+      eventTs: "2026-08-21T00:00:00Z", multiHost: false, // no fence involved at all
+      resetFence: () => { throw new Error("fence down"); },
+      clearLabel: () => { throw new Error("linear 500"); },
+      appendRearmEvent: () => { throw new Error("disk full"); },
+    });
+    expect(res.rearmed).toBe(true);
+    expect(readTriageDispatchCount(orchDir, "CTL-2111")).toBe(0);
+    expect(readTriageDispatchRecord(orchDir, "CTL-2111").cappedAt).toBeUndefined();
+  });
+});
+
+// ── CTL-2111 (Codex #3824 round-2 P1): boot-gap drain must still re-arm ────────
+//
+// The defect: a human re-queues a CAPPED ticket while the daemon is down. On
+// restart, `startMonitor` resumes from its durable cursor and consumes that
+// `state_changed` with `foldOnly:true`. The re-arm used to sit INSIDE the
+// `!foldOnly` gate, so it was skipped — while the cursor advanced past the event
+// regardless. The startup sweep then read the unchanged cap and re-parked the
+// ticket, and because the event is never replayed with side effects the re-arm
+// could never happen: the ticket stayed capped until some later human transition
+// happened to land while the daemon was up.
+//
+// These drive the REAL `handleStateChangedEvent` against a temp registry
+// (CATALYST_DIR), so they exercise the actual call-site gate rather than the
+// helper in isolation.
+describe("handleStateChangedEvent — cap re-arm during the fold-only boot drain (CTL-2111 round-2 P1)", () => {
+  let dir;
+  let prevCatalystDir;
+
+  const TEAM = "CTL";
+  const TICKET = "CTL-2111";
+  const CAPPED_AT = "2026-08-21T10:00:00.000Z";
+  const REQUEUE_TS = "2026-08-21T11:00:00.000Z"; // NEWER than cappedAt
+
+  // A tripped-cap record: count at the cap plus the `cappedAt` latch.
+  const writeCapped = (orchDir) => {
+    const d = pathJoin(orchDir, ".triage-dispatch-counts");
+    mkdirSync(d, { recursive: true });
+    writeFileSync(
+      pathJoin(d, `${TICKET}.json`),
+      JSON.stringify({ count: 3, cappedAt: CAPPED_AT, lastDispatchAt: CAPPED_AT }),
+    );
+  };
+  const readCap = (orchDir) =>
+    JSON.parse(readFileSync(pathJoin(orchDir, ".triage-dispatch-counts", `${TICKET}.json`), "utf8"));
+
+  const stateEvent = (toState) => ({
+    ts: REQUEUE_TS,
+    name: "linear.issue.state_changed",
+    body: { payload: { ticket: TICKET, teamKey: TEAM, toState } },
+  });
+
+  beforeEach(() => {
+    dir = mkdtempSync(pathJoin(tmpdir(), "ctl2111-folddrain-"));
+    const orchDir = pathJoin(dir, "execution-core");
+    mkdirSync(orchDir, { recursive: true });
+    writeFileSync(
+      pathJoin(orchDir, "registry.json"),
+      JSON.stringify({
+        projects: [
+          { team: TEAM, repoRoot: dir, eligibleQuery: { status: "Todo", triageStatus: "Triage" } },
+        ],
+      }),
+    );
+    prevCatalystDir = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = dir;
+  });
+
+  afterEach(() => {
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // The seams that would otherwise reach Linear / spawn a worker.
+  const inertOpts = (orchDir, dispatched) => ({
+    orchDir,
+    dispatch: (...a) => dispatched.push(a),
+    applyTriageStatus: () => {},
+    appendEvent: () => {},
+    liveBackgroundCount: () => 0,
+    readMaxParallelFn: () => 4,
+    hosts: ["only-host"], // single-host → the fence reset is skipped entirely
+    hostName: "only-host",
+  });
+
+  for (const toState of ["Todo", "Triage"]) {
+    test(`foldOnly:true still re-arms a capped ticket on a newer →${toState} re-queue`, () => {
+      const orchDir = pathJoin(dir, "execution-core");
+      writeCapped(orchDir);
+      const dispatched = [];
+
+      handleStateChangedEvent(stateEvent(toState), {
+        ...inertOpts(orchDir, dispatched),
+        foldOnly: true,
+      });
+
+      // The latch is gone → the next sweep re-dispatches triage.
+      const rec = readCap(orchDir);
+      expect(rec.cappedAt).toBeUndefined();
+      expect(rec.count).toBe(0);
+      // …and CTL-731 is preserved: the drain still dispatched nothing.
+      expect(dispatched).toEqual([]);
+    });
+  }
+
+  test("foldOnly:true does NOT re-arm when the re-queue PRE-dates the cap (guard intact)", () => {
+    const orchDir = pathJoin(dir, "execution-core");
+    writeCapped(orchDir);
+    const dispatched = [];
+    const stale = { ...stateEvent("Todo"), ts: "2026-08-21T09:00:00.000Z" }; // older
+
+    handleStateChangedEvent(stale, { ...inertOpts(orchDir, dispatched), foldOnly: true });
+
+    expect(readCap(orchDir).cappedAt).toBe(CAPPED_AT); // latch retained
+    expect(dispatched).toEqual([]);
+  });
+
+  // Positive control: the same event on the LIVE path re-arms too, proving the
+  // assertions above are reading a real re-arm and not an artifact of foldOnly.
+  test("foldOnly:false re-arms as before (control)", () => {
+    const orchDir = pathJoin(dir, "execution-core");
+    writeCapped(orchDir);
+    const dispatched = [];
+
+    handleStateChangedEvent(stateEvent("Todo"), {
+      ...inertOpts(orchDir, dispatched),
+      foldOnly: false,
+    });
+
+    expect(readCap(orchDir).cappedAt).toBeUndefined();
+  });
+});
+
+// ── CTL-2111 (Codex #3824 round-3 P1): order on the SOURCE transition time ─────
+//
+// `buildCanonicalEvent` stamps the envelope `ts` with now() AND truncates
+// milliseconds, so `ts` is the feed's EMISSION time — late by the sweep latency
+// and coarser than the `cappedAt` it is compared against. Judged on `ts`, a
+// transition that genuinely PRE-dated a park can look newer and wrongly clear a
+// cap created after it. `buildIssueEvent` now carries `transitionedAt`
+// (history.created_at) and the re-arm prefers it.
+describe("handleStateChangedEvent — re-arm orders on the source transition time (CTL-2111 round-3 P1)", () => {
+  let dir;
+  let prevCatalystDir;
+  const TEAM = "CTL";
+  const TICKET = "CTL-2111";
+  const CAPPED_AT = "2026-08-21T10:00:00.000Z";
+
+  const writeCapped = (orchDir) => {
+    const d = pathJoin(orchDir, ".triage-dispatch-counts");
+    mkdirSync(d, { recursive: true });
+    writeFileSync(pathJoin(d, `${TICKET}.json`), JSON.stringify({ count: 3, cappedAt: CAPPED_AT }));
+  };
+  const capRec = (orchDir) =>
+    JSON.parse(readFileSync(pathJoin(orchDir, ".triage-dispatch-counts", `${TICKET}.json`), "utf8"));
+
+  const ev = ({ ts, transitionedAt }) => ({
+    ts,
+    name: "linear.issue.state_changed",
+    body: { payload: { ticket: TICKET, teamKey: TEAM, toState: "Todo", transitionedAt } },
+  });
+
+  beforeEach(() => {
+    dir = mkdtempSync(pathJoin(tmpdir(), "ctl2111-transition-"));
+    const orchDir = pathJoin(dir, "execution-core");
+    mkdirSync(orchDir, { recursive: true });
+    writeFileSync(
+      pathJoin(orchDir, "registry.json"),
+      JSON.stringify({
+        projects: [{ team: TEAM, repoRoot: dir, eligibleQuery: { status: "Todo", triageStatus: "Triage" } }],
+      }),
+    );
+    prevCatalystDir = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = dir;
+  });
+  afterEach(() => {
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const opts = (orchDir) => ({
+    orchDir,
+    dispatch: () => {},
+    applyTriageStatus: () => {},
+    appendEvent: () => {},
+    liveBackgroundCount: () => 0,
+    readMaxParallelFn: () => 4,
+    hosts: ["only-host"],
+    hostName: "only-host",
+    foldOnly: true, // fold path keeps the assertion about the re-arm alone
+  });
+
+  // THE DEFECT: a transition that happened BEFORE the cap, emitted after it.
+  test("a delayed pre-cap transition does NOT clear the cap, even though the envelope ts is newer", () => {
+    const orchDir = pathJoin(dir, "execution-core");
+    writeCapped(orchDir);
+    handleStateChangedEvent(
+      ev({ ts: "2026-08-21T10:05:00Z", transitionedAt: "2026-08-21T09:59:00.000Z" }),
+      opts(orchDir),
+    );
+    expect(capRec(orchDir).cappedAt).toBe(CAPPED_AT); // latch retained
+  });
+
+  test("a genuine post-cap transition DOES clear the cap (positive control)", () => {
+    const orchDir = pathJoin(dir, "execution-core");
+    writeCapped(orchDir);
+    handleStateChangedEvent(
+      ev({ ts: "2026-08-21T10:05:00Z", transitionedAt: "2026-08-21T10:01:00.000Z" }),
+      opts(orchDir),
+    );
+    expect(capRec(orchDir).cappedAt).toBeUndefined();
+  });
+
+  // CTL-2111 (Codex #3824 round-4 P1): the feed stores created_at as epoch
+  // MILLISECONDS, so a string-only accept made the round-3 fix inert in production
+  // — every real event fell back to the delayed envelope ts.
+  test("a NUMERIC (epoch ms) transitionedAt is honoured, not silently discarded", () => {
+    const orchDir = pathJoin(dir, "execution-core");
+    writeCapped(orchDir);
+    handleStateChangedEvent(
+      // 09:59 — genuinely BEFORE the 10:00 cap — as epoch ms, emitted at 10:05.
+      ev({ ts: "2026-08-21T10:05:00Z", transitionedAt: Date.parse("2026-08-21T09:59:00.000Z") }),
+      opts(orchDir),
+    );
+    expect(capRec(orchDir).cappedAt).toBe(CAPPED_AT); // latch retained
+  });
+
+  test("a NUMERIC post-cap transitionedAt still clears the cap (positive control)", () => {
+    const orchDir = pathJoin(dir, "execution-core");
+    writeCapped(orchDir);
+    handleStateChangedEvent(
+      ev({ ts: "2026-08-21T10:05:00Z", transitionedAt: Date.parse("2026-08-21T10:01:00.000Z") }),
+      opts(orchDir),
+    );
+    expect(capRec(orchDir).cappedAt).toBeUndefined();
+  });
+
+  // Back-compat: a producer that carries no transitionedAt still falls back to ts.
+  test("no transitionedAt → falls back to the envelope ts (back-compat)", () => {
+    const orchDir = pathJoin(dir, "execution-core");
+    writeCapped(orchDir);
+    handleStateChangedEvent(ev({ ts: "2026-08-21T10:05:00Z", transitionedAt: undefined }), opts(orchDir));
+    expect(capRec(orchDir).cappedAt).toBeUndefined();
   });
 });

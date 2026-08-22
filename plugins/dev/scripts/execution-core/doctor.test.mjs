@@ -4,7 +4,7 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test doctor.test.mjs
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync, mkdirSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 // CTL-1929: the consumed/suppressible name lists, from the zero-import leaf that
@@ -64,6 +64,7 @@ import {
   checkSelfEchoIdentityHistory,
   checkClusterSecretsPresent,
   checkNodeConfigPresent,
+  checkTriageCapParked,
 } from "./doctor.mjs";
 import { resolveSecret as resolveSecretReal } from "../lib/secret-contract.mjs";
 import { TICKET_KEY_RE } from "./ticket-key.mjs";
@@ -224,6 +225,320 @@ describe("checkHrwPartition", () => {
     expect(checks[0].name).toBe("hrw-partition");
     expect(checks[0].status).toBe(STATUS.WARN);
     expect(checks[0].detail).toContain("0/3");
+  });
+});
+
+// ─── CTL-2111: checkTriageCapParked ──────────────────────────────────────────
+
+describe("checkTriageCapParked (CTL-2111)", () => {
+  let capOrchDir;
+  beforeEach(() => {
+    capOrchDir = mkdtempSync(join(tmpdir(), "doctor-cap-"));
+  });
+  afterEach(() => {
+    try {
+      rmSync(capOrchDir, { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
+  });
+  function seedCap(ticket, rec) {
+    const dir = join(capOrchDir, ".triage-dispatch-counts");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${ticket}.json`), JSON.stringify(rec));
+  }
+
+  // ── CTL-2111 (Codex #3824 P1): a scan that COULD NOT LOOK must never render as
+  // "there is nothing there". Previously an unreadable dir / unparseable record
+  // produced the same empty list as a genuinely empty one, and the check PASSed
+  // "no triage-capped tickets" — certifying the exact negative it could not inspect.
+  it("INCONCLUSIVE (not PASS) when the cap directory exists but cannot be read", () => {
+    const checks = checkTriageCapParked({
+      orchDir: capOrchDir,
+      // EACCES — "could not look", NOT ENOENT ("nothing there").
+      listCapFiles: () => ({ entries: [], unreadable: [".triage-dispatch-counts (EACCES)"] }),
+      readEligibleIdentifiers: () => new Set(),
+      getRoster: () => ["mini"],
+      getHostName: () => "mini",
+      ownedBy: () => true,
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].status).toBe(STATUS.WARN);
+    expect(checks[0].detail).toMatch(/INCONCLUSIVE/);
+    expect(checks[0].detail).not.toMatch(/no triage-capped tickets/);
+  });
+
+  it("INCONCLUSIVE when a cap record file is unparseable (may or may not be capped)", () => {
+    const dir = join(capOrchDir, ".triage-dispatch-counts");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "CTL-9999.json"), "{ not json");
+    const checks = checkTriageCapParked({
+      orchDir: capOrchDir,
+      readEligibleIdentifiers: () => new Set(),
+      getRoster: () => ["mini"],
+      getHostName: () => "mini",
+      ownedBy: () => true,
+    });
+    expect(checks.some((c) => /INCONCLUSIVE/.test(c.detail))).toBe(true);
+    expect(checks.some((c) => c.status === STATUS.PASS)).toBe(false);
+  });
+
+  // Positive control for BOTH assertions above: a genuinely absent directory is a
+  // real negative and must still PASS, so the two tests prove the distinction
+  // rather than merely proving the check never passes.
+  it("PASSes when the cap directory is genuinely absent (ENOENT — a real negative)", () => {
+    const checks = checkTriageCapParked({
+      orchDir: join(capOrchDir, "no-such-dir"),
+      readEligibleIdentifiers: () => new Set(),
+      getRoster: () => ["mini"],
+      getHostName: () => "mini",
+      ownedBy: () => true,
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].status).toBe(STATUS.PASS);
+    expect(checks[0].detail).toMatch(/no triage-capped tickets/);
+  });
+
+  it("still reports a tripped cap AND the doubt when the scan is partially unreadable", () => {
+    const checks = checkTriageCapParked({
+      orchDir: capOrchDir,
+      listCapFiles: () => ({
+        entries: [{ ticket: "CTL-2111", cappedAt: "2026-08-20T00:00:00Z", path: "/p/CTL-2111.json" }],
+        unreadable: ["CTL-9999.json (unparseable)"],
+      }),
+      readEligibleIdentifiers: () => new Set(["CTL-2111"]),
+      getRoster: () => ["mini"],
+      getHostName: () => "mini",
+      ownedBy: () => true,
+    });
+    expect(checks.some((c) => c.name === "would-triage-capped")).toBe(true);
+    expect(checks.some((c) => /INCONCLUSIVE/.test(c.detail))).toBe(true);
+  });
+
+  // ── CTL-2111 (Codex #3824 round-2 P1): the ELIGIBILITY read must be three-valued
+  // too. It decides whether a tripped cap renders WARN ("board-eligible — this host
+  // will not triage it") or INFO ("not currently board-eligible — parked"), so a
+  // silent EACCES/EIO or an unparseable projection did not merely lose a ticket
+  // from a list: it DOWNGRADED a real alarm into a reassuring INFO asserting the
+  // very thing it could not check.
+  it("eligibility unreadable → WARN INCONCLUSIVE, never the reassuring 'not board-eligible' INFO", () => {
+    const checks = checkTriageCapParked({
+      orchDir: capOrchDir,
+      listCapFiles: () => ({
+        entries: [{ ticket: "CTL-2111", cappedAt: "2026-08-20T00:00:00Z", path: "/p/CTL-2111.json" }],
+        unreadable: [],
+      }),
+      // Present but unreadable — the ticket's absence from the set proves nothing.
+      readEligibleIdentifiers: () => ({
+        identifiers: new Set(),
+        unreadable: ["<eligibleDir> (EACCES)"],
+      }),
+      getRoster: () => ["mini"],
+      getHostName: () => "mini",
+      ownedBy: () => true,
+    });
+    const c = checks.find((x) => x.name === "would-triage-capped");
+    expect(c.status).toBe(STATUS.WARN);
+    expect(c.detail).toMatch(/INCONCLUSIVE/);
+    expect(c.detail).toMatch(/EACCES/);
+    expect(c.detail).not.toMatch(/not currently board-eligible/);
+  });
+
+  // Presence is positive evidence: found is found, even beside an unreadable
+  // sibling. Only an ABSENCE is in doubt.
+  it("eligibility partially unreadable but the ticket IS listed → conclusive WARN (not inconclusive)", () => {
+    const checks = checkTriageCapParked({
+      orchDir: capOrchDir,
+      listCapFiles: () => ({
+        entries: [{ ticket: "CTL-2111", cappedAt: "2026-08-20T00:00:00Z", path: "/p/CTL-2111.json" }],
+        unreadable: [],
+      }),
+      readEligibleIdentifiers: () => ({
+        identifiers: new Set(["CTL-2111"]),
+        unreadable: ["other-team.json (unparseable)"],
+      }),
+      getRoster: () => ["mini"],
+      getHostName: () => "mini",
+      ownedBy: () => true,
+    });
+    const c = checks.find((x) => x.name === "would-triage-capped");
+    expect(c.status).toBe(STATUS.WARN);
+    expect(c.detail).toContain("is board-eligible");
+    expect(c.detail).not.toMatch(/INCONCLUSIVE/);
+  });
+
+  // Positive control for the pair above — a FULLY readable projection that simply
+  // does not list the ticket is a real negative and must still render INFO/parked,
+  // so those tests prove the distinction rather than that the check never INFOs.
+  it("eligibility fully readable and ticket absent → INFO parked (real negative, control)", () => {
+    const checks = checkTriageCapParked({
+      orchDir: capOrchDir,
+      listCapFiles: () => ({
+        entries: [{ ticket: "CTL-2111", cappedAt: "2026-08-20T00:00:00Z", path: "/p/CTL-2111.json" }],
+        unreadable: [],
+      }),
+      readEligibleIdentifiers: () => ({ identifiers: new Set(), unreadable: [] }),
+      getRoster: () => ["mini"],
+      getHostName: () => "mini",
+      ownedBy: () => true,
+    });
+    const c = checks.find((x) => x.name === "would-triage-capped");
+    expect(c.status).toBe(STATUS.INFO);
+    expect(c.detail).toContain("not currently board-eligible");
+  });
+
+  // Back-compat: a seam returning a BARE Set carries no doubt and stays conclusive.
+  it("a bare Set from the eligibility seam stays conclusive (back-compat)", () => {
+    const checks = checkTriageCapParked({
+      orchDir: capOrchDir,
+      listCapFiles: () => ({
+        entries: [{ ticket: "CTL-2111", cappedAt: "2026-08-20T00:00:00Z", path: "/p/CTL-2111.json" }],
+        unreadable: [],
+      }),
+      readEligibleIdentifiers: () => new Set(),
+      getRoster: () => ["mini"],
+      getHostName: () => "mini",
+      ownedBy: () => true,
+    });
+    const c = checks.find((x) => x.name === "would-triage-capped");
+    expect(c.status).toBe(STATUS.INFO);
+    expect(c.detail).not.toMatch(/INCONCLUSIVE/);
+  });
+
+  it("WARNs for a tripped cap that is board-eligible and owned by self, with path + re-arm command", () => {
+    seedCap("CTL-2111", { count: 3, cappedAt: "2026-08-20T00:00:00Z", cap: 3 });
+    const checks = checkTriageCapParked({
+      orchDir: capOrchDir,
+      readEligibleIdentifiers: () => new Set(["CTL-2111"]),
+      getRoster: () => ["mini"],
+      getHostName: () => "mini",
+      ownedBy: () => true,
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].name).toBe("would-triage-capped");
+    expect(checks[0].status).toBe(STATUS.WARN);
+    expect(checks[0].detail).toContain("CTL-2111");
+    expect(checks[0].detail).toContain(".triage-dispatch-counts");
+    expect(checks[0].detail).toContain("re-arm");
+  });
+
+  it("INFO for a tripped cap not currently board-eligible", () => {
+    seedCap("CTL-2111", { count: 3, cappedAt: "2026-08-20T00:00:00Z", cap: 3 });
+    const checks = checkTriageCapParked({
+      orchDir: capOrchDir,
+      readEligibleIdentifiers: () => new Set(),
+      getRoster: () => ["mini"],
+      getHostName: () => "mini",
+      ownedBy: () => true,
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].status).toBe(STATUS.INFO);
+  });
+
+  // CTL-2111 (Codex #3824 round-3 P1): a peer-ownership verdict now ANNOTATES
+  // rather than SUPPRESSES. Production triage hashes over the live dispatch roster
+  // (entitled → liveness → deflap), which this sync bare-Node check cannot compute;
+  // when a peer is offline or entitlement-shed, the failed-over slice belongs to
+  // THIS host while a static HRW pass still names the peer. Dropping the record
+  // there made doctor report "no triage-capped tickets owned by this host" while
+  // this host's dispatcher was blocked by exactly that cap.
+  it("REPORTS (does not omit) a tripped cap that static HRW attributes to a peer", () => {
+    seedCap("CTL-2111", { count: 3, cappedAt: "2026-08-20T00:00:00Z", cap: 3 });
+    const checks = checkTriageCapParked({
+      orchDir: capOrchDir,
+      readEligibleIdentifiers: () => new Set(["CTL-2111"]),
+      getRoster: () => ["mini", "mac-studio"],
+      getHostName: () => "mini",
+      ownedBy: () => false, // static HRW says the other host owns it
+    });
+    const c = checks.find((x) => x.name === "would-triage-capped");
+    expect(c).toBeDefined();
+    expect(c.detail).toContain("CTL-2111");
+    expect(c.detail).toMatch(/attributes this ticket to a peer/);
+    // Reported at INFO — visible, but not the same alarm level as a cap this host
+    // definitively owns — and never a PASS that denies the record exists.
+    expect(c.status).toBe(STATUS.INFO);
+    expect(checks.some((x) => x.status === STATUS.PASS)).toBe(false);
+  });
+
+  // Positive control: an owned + eligible cap still WARNs and carries NO peer note,
+  // so the test above proves a distinction rather than that everything reads INFO.
+  it("an owned, board-eligible cap still WARNs with no peer annotation (control)", () => {
+    seedCap("CTL-2111", { count: 3, cappedAt: "2026-08-20T00:00:00Z", cap: 3 });
+    const checks = checkTriageCapParked({
+      orchDir: capOrchDir,
+      readEligibleIdentifiers: () => new Set(["CTL-2111"]),
+      getRoster: () => ["mini", "mac-studio"],
+      getHostName: () => "mini",
+      ownedBy: () => true,
+    });
+    const c = checks.find((x) => x.name === "would-triage-capped");
+    expect(c.status).toBe(STATUS.WARN);
+    expect(c.detail).not.toMatch(/attributes this ticket to a peer/);
+  });
+
+  it("PASS when there are no tripped cap files", () => {
+    const checks = checkTriageCapParked({
+      orchDir: capOrchDir,
+      readEligibleIdentifiers: () => new Set(),
+      getRoster: () => ["mini"],
+      getHostName: () => "mini",
+      ownedBy: () => true,
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].status).toBe(STATUS.PASS);
+    expect(checks[0].detail).toContain("no triage-capped");
+  });
+
+  it("a counter file WITHOUT cappedAt is not reported (only tripped caps count)", () => {
+    seedCap("CTL-2111", { count: 1, lastDispatchAt: "2026-08-20T00:00:00Z" });
+    const checks = checkTriageCapParked({
+      orchDir: capOrchDir,
+      readEligibleIdentifiers: () => new Set(["CTL-2111"]),
+      getRoster: () => ["mini"],
+      getHostName: () => "mini",
+      ownedBy: () => true,
+    });
+    expect(checks).toHaveLength(1);
+    expect(checks[0].status).toBe(STATUS.PASS);
+  });
+
+  it("malformed cap file is SURFACED as doubt (not silently skipped); a positive-control ticket in the same run still reports", () => {
+    const dir = join(capOrchDir, ".triage-dispatch-counts");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "CTL-BAD.json"), "not-json{");
+    seedCap("CTL-2111", { count: 3, cappedAt: "2026-08-20T00:00:00Z", cap: 3 });
+    const checks = checkTriageCapParked({
+      orchDir: capOrchDir,
+      readEligibleIdentifiers: () => new Set(["CTL-2111"]),
+      getRoster: () => ["mini"],
+      getHostName: () => "mini",
+      ownedBy: () => true,
+    });
+    // CTL-2111 still reported (positive control — proves the scan ran at all).
+    expect(checks.some((c) => c.status === STATUS.WARN && c.detail.includes("CTL-2111"))).toBe(true);
+    // CTL-2111 (Codex #3824 P1): CTL-BAD is no longer SILENTLY skipped. An
+    // unparseable record may or may not carry `cappedAt`, so the scan is partial and
+    // must say so — the old contract dropped it without a trace, which is how a
+    // "no capped tickets" pass could be certified over records nobody could read.
+    const details = checks.map((c) => c.detail);
+    expect(details.some((d) => d.includes("CTL-BAD"))).toBe(true);
+    expect(details.some((d) => /INCONCLUSIVE/.test(d))).toBe(true);
+  });
+
+  it("checksForClass(worker) registers the check thunk", () => {
+    const thunks = checksForClass({ class: "worker", recognized: true });
+    // Every thunk is callable; at least one resolves to a would-triage-capped/triage-cap-parked row.
+    const names = new Set();
+    for (const t of thunks) {
+      try {
+        const rows = t();
+        if (Array.isArray(rows)) for (const r of rows) names.add(r?.name);
+      } catch {
+        /* network/env-dependent checks may throw in a bare test env — ignore */
+      }
+    }
+    expect(names.has("triage-cap-parked") || names.has("would-triage-capped")).toBe(true);
   });
 });
 

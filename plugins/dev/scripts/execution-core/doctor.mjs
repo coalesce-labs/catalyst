@@ -63,6 +63,7 @@ import {
   // shows the full topology). Entitlement is reported separately by
   // checkEntitlementConsistency. `off` mode: getExistenceHosts() === getClusterHosts().
   getExistenceHosts,
+  getEntitledHosts, // CTL-2111 round-3 P1: the ownership-gate roster class (CTL-1785)
   resolveClusterHosts,
   hostMembershipWarning,
   getLivenessAnchorIssue,
@@ -113,6 +114,9 @@ import {
   // CTL-1210 Phase 5: advisory presence checks for the two new Layer-2 sibling files.
   resolveClusterSecretsPath,
   resolveNodeConfigPath,
+  // CTL-2111: the eligible-projection dir (node:fs, bare-node-safe) — cross-referenced
+  // by checkTriageCapParked to WARN only for a board-eligible tripped cap.
+  getEligibleDir,
 } from "./config.mjs";
 // CTL-1785: the TTL constants + enum, imported DIRECTLY from the zero-import leaf
 // (node built-ins only — safe under doctor's bare-Node runtime), same pattern as
@@ -6656,6 +6660,247 @@ export function checkGithubFeedReaderConsistency(deps = {}) {
   ];
 }
 
+// ─── CTL-2111: triage re-dispatch cap visibility ─────────────────────────────
+// defaultListCapFiles — enumerate <orchDir>/.triage-dispatch-counts/*.json and
+// return one {ticket, cappedAt, path} per file that carries a `cappedAt` (a
+// TRIPPED cap). node:fs only (bare-node-safe).
+//
+// CTL-2111 (Codex #3824 P1): the result is THREE-VALUED, not a bare array. A
+// missing directory is a genuine absence ("no caps"), but a readdir that fails on
+// permissions/IO, or a record file that will not read or parse, is "COULD NOT
+// LOOK" — and a record we cannot parse may or may not carry `cappedAt`. Collapsing
+// either into the same empty array let `checkTriageCapParked` return PASS
+// ("no triage-capped tickets") certifying the exact negative it was unable to
+// inspect — the false-clean shape AGENTS.md forbids. Each doubt is carried out in
+// `unreadable` so the caller can report INCONCLUSIVE instead of a clean pass.
+function defaultListCapFiles(orchDir) {
+  const dir = join(orchDir, ".triage-dispatch-counts");
+  let entries;
+  try {
+    entries = readdirSync(dir);
+  } catch (err) {
+    // ENOENT is the only conclusive absence: no cap dir means no capped tickets.
+    if (err?.code === "ENOENT") return { entries: [], unreadable: [] };
+    return { entries: [], unreadable: [`${dir} (${err?.code || "readdir failed"})`] };
+  }
+  const out = [];
+  const unreadable = [];
+  for (const f of entries) {
+    if (!f.endsWith(".json")) continue;
+    const path = join(dir, f);
+    try {
+      const rec = JSON.parse(readFileSync(path, "utf8"));
+      if (rec && typeof rec === "object" && rec.cappedAt) {
+        out.push({ ticket: f.slice(0, -5), cappedAt: rec.cappedAt, path });
+      }
+    } catch (err) {
+      // Unknown whether this record carries `cappedAt` — record the doubt rather
+      // than silently counting it as "not capped".
+      unreadable.push(`${f} (${err?.code || "unparseable"})`);
+    }
+  }
+  return { entries: out, unreadable };
+}
+
+// defaultReadEligibleIdentifiers — the set of board-eligible ticket identifiers,
+// read straight off the on-disk eligible projections (<eligibleDir>/*.json, shape
+// { tickets: [{identifier, ...}] }). node:fs only — the projection is the
+// bare-node-safe eligible source (never bun:sqlite).
+//
+// CTL-2111 (Codex #3824 round-2 P1): THREE-VALUED, for the same reason
+// `defaultListCapFiles` above is. This read decides whether a tripped cap renders
+// as WARN ("board-eligible — this host will not triage it") or INFO ("not
+// currently board-eligible — parked"), so a silent read failure does not merely
+// lose a ticket from a list: it DOWNGRADES a real alarm into a reassuring INFO
+// that asserts the very thing the reader could not check. A readdir that fails on
+// EACCES/EIO, or a projection file that will not read or parse, is "could not
+// look" — carried out in `unreadable` so the caller can say INCONCLUSIVE.
+// A MISSING directory stays conclusive: no projections means nothing is eligible.
+function defaultReadEligibleIdentifiers() {
+  const identifiers = new Set();
+  const unreadable = [];
+  const dir = getEligibleDir();
+  let files;
+  try {
+    files = readdirSync(dir);
+  } catch (err) {
+    // ENOENT is the only conclusive absence — nothing is projected as eligible.
+    if (err?.code === "ENOENT") return { identifiers, unreadable };
+    return { identifiers, unreadable: [`${dir} (${err?.code || "readdir failed"})`] };
+  }
+  for (const f of files) {
+    if (!f.endsWith(".json")) continue;
+    try {
+      const proj = JSON.parse(readFileSync(join(dir, f), "utf8"));
+      if (Array.isArray(proj?.tickets)) {
+        for (const t of proj.tickets) {
+          if (t && typeof t.identifier === "string") identifiers.add(t.identifier);
+        }
+      } else {
+        // Readable but not the expected shape — its tickets are unknown, not absent.
+        unreadable.push(`${f} (no tickets array)`);
+      }
+    } catch (err) {
+      unreadable.push(`${f} (${err?.code || "unparseable"})`);
+    }
+  }
+  return { identifiers, unreadable };
+}
+
+// checkTriageCapParked — report every tripped triage re-dispatch cap this host
+// owns (CTL-2111, Tier 2). A board-eligible tripped cap is a WARN (the human
+// re-queued it or it's ready and this host refuses to triage it); a tripped cap
+// that is not currently eligible is an INFO (parked, possibly legitimate). In a
+// multi-host cluster only the HRW owner reports a ticket (avoids N duplicate
+// alarms). No tripped/owned files → a single PASS. Every read is fail-open and
+// bare-node-safe (node:fs + the eligible projection, never bun:sqlite).
+export function checkTriageCapParked(deps = {}) {
+  const {
+    orchDir = getExecutionCoreDir(),
+    listCapFiles = () => defaultListCapFiles(orchDir),
+    readEligibleIdentifiers = defaultReadEligibleIdentifiers,
+    isEligible = null, // optional direct seam; else derived from readEligibleIdentifiers
+    // CTL-2111 (Codex #3824 round-3 P1): ENTITLEMENT, not existence. Per CTL-1785
+    // every dispatch / recovery / reclaim / HRW-ownership gate reads
+    // getEntitledHosts(); getExistenceHosts() is the topology/display roster. Using
+    // the existence roster here made doctor's ownership verdict disagree with the
+    // dispatcher's by construction whenever a peer was shed.
+    getRoster = getEntitledHosts,
+    getHostName: _getHostName = getHostName,
+    ownedBy: _ownedBy = ownedBy,
+  } = deps;
+
+  // CTL-2111 (Codex #3824 P1): accept BOTH the structured {entries, unreadable}
+  // shape and a bare array (an injected seam, or any caller that only has a list).
+  // A bare array carries no doubt, so it stays conclusive — unchanged behaviour.
+  const capRaw = listCapFiles();
+  const capped = Array.isArray(capRaw) ? capRaw : (capRaw?.entries ?? []);
+  const unreadable = Array.isArray(capRaw) ? [] : (capRaw?.unreadable ?? []);
+  // "I could not look" must never render as "there is nothing there".
+  const inconclusiveCheck = () =>
+    mkCheck(
+      "triage-cap-parked",
+      STATUS.WARN,
+      `INCONCLUSIVE — could not read ${unreadable.length} triage-cap record(s): ${unreadable.join(", ")}` +
+        " — a tripped cap may be present but unreadable; fix permissions/IO or remove the malformed record, then re-run",
+    );
+
+  if (capped.length === 0) {
+    if (unreadable.length > 0) return [inconclusiveCheck()];
+    return [mkCheck("triage-cap-parked", STATUS.PASS, "no triage-capped tickets on this host")];
+  }
+
+  // CTL-2111 (Codex #3824 round-2 P1): eligibility is THREE-VALUED — true /
+  // false / null ("could not look"). Accept both the structured
+  // {identifiers, unreadable} shape and a bare Set (an injected seam, which
+  // carries no doubt and so stays conclusive — unchanged behaviour).
+  const eligRaw = isEligible ? null : readEligibleIdentifiers();
+  const eligibleSet = eligRaw instanceof Set ? eligRaw : (eligRaw?.identifiers ?? null);
+  const eligibleUnreadable = eligRaw instanceof Set ? [] : (eligRaw?.unreadable ?? []);
+  const eligibleOf =
+    isEligible ??
+    ((t) => {
+      // PRESENCE is positive evidence regardless of any unreadable sibling file —
+      // the ticket was found. Only an ABSENCE is in doubt when part of the
+      // projection could not be read, because the missing file may be the one
+      // that listed it.
+      if (eligibleSet?.has(t)) return true;
+      return eligibleUnreadable.length > 0 ? null : false;
+    });
+  // CTL-2111 (Codex #3824 round-3 P1): resolve the roster DEFENSIVELY. The
+  // entitlement roster is a richer read than the existence roster it replaced
+  // (provider + cluster hosts + self, with an emit hook), and any of those can
+  // throw or be unavailable in a degraded or bare-Node environment. A doctor check
+  // must never throw — and least of all THIS one, whose whole job is to surface a
+  // cap record: a throw here would hide the very blockage it exists to report.
+  // Degrade entitlement → existence → empty, and treat an unresolvable roster as
+  // single-host, which makes ownership a no-op and reports every record.
+  let roster;
+  try {
+    roster = getRoster() ?? [];
+  } catch {
+    try {
+      roster = getExistenceHosts() ?? [];
+    } catch {
+      roster = [];
+    }
+  }
+  if (!Array.isArray(roster)) roster = [];
+  let self;
+  try {
+    self = _getHostName();
+  } catch {
+    self = null;
+  }
+  const multiHost = roster.length > 1;
+
+  const checks = [];
+  for (const { ticket, cappedAt, path } of capped) {
+    // CTL-2111 (Codex #3824 round-3 P1): ownership ANNOTATES, it no longer
+    // SUPPRESSES. Production triage hashes over the live DISPATCH roster
+    // (entitled → positive-liveness → restore-deflap, via resolveDispatchRoster),
+    // which this bare-Node check cannot compute: that resolver lives in
+    // scheduler.mjs and needs an async heartbeat read, and doctor's checks are
+    // sync and deliberately free of that dependency graph. So a `continue` here
+    // was a verdict this check is structurally unable to make correctly — when a
+    // peer is offline or entitlement-shed, the failed-over slice moves to THIS
+    // host while a static HRW pass still names the peer, and doctor then dropped
+    // the record and reported "no triage-capped tickets owned by this host" while
+    // this host's dispatcher was blocked by exactly that cap.
+    //
+    // Reporting instead of suppressing is also the right dedup trade: the cap
+    // record is HOST-LOCAL, written only by the host that actually refused to
+    // triage, so a peer without the file reports nothing regardless. The alarm
+    // fan-out the filter was protecting against is bounded by that already.
+    // Mirroring the dispatch roster would additionally re-introduce the very
+    // drift this finding is about, the next time either side changes.
+    const ownedHere = !multiHost || _ownedBy(ticket, roster, self);
+    const elig = eligibleOf(ticket);
+    const reArm =
+      `delete ${path} to re-arm` +
+      ` (also reset the fence via 'node cluster-claim.mjs reset-triage-attempt ${ticket}',` +
+      ` and if the per-ticket Linear write budget is exhausted, clear the needs-human label` +
+      ` + the linear-write-budget.json byTicket entry)`;
+    // CTL-2111 (Codex #3824 round-2 P1): `elig === null` is "could not determine
+    // eligibility", and it must NOT fall to the INFO/parked branch — that branch
+    // states a negative ("not currently board-eligible") the reader was unable to
+    // verify. Unknown is reported at WARN, naming the unreadable projections.
+    const eligUnknown = elig === null || elig === undefined;
+    // A cap this host holds but that static HRW attributes to a peer is still
+    // reported — at INFO, and saying so — because the two rosters can legitimately
+    // disagree (see above). It is never dropped.
+    const ownerNote = ownedHere
+      ? ""
+      : ` [static HRW attributes this ticket to a peer; the live dispatch roster may differ —` +
+        ` the cap record is nevertheless on THIS host, so this host's dispatcher is the one it blocks]`;
+    checks.push(
+      mkCheck(
+        "would-triage-capped",
+        !ownedHere ? STATUS.INFO : eligUnknown || elig ? STATUS.WARN : STATUS.INFO,
+        `${ticket} tripped its triage re-dispatch cap (cappedAt=${cappedAt})` + ownerNote +
+          (eligUnknown
+            ? ` — board-eligibility INCONCLUSIVE (could not read ${eligibleUnreadable.length} eligible projection(s): ${eligibleUnreadable.join(", ")});` +
+              ` this host may be refusing to triage a ready ticket`
+            : elig
+              ? " and is board-eligible — this host will not triage it"
+              : " (not currently board-eligible — parked)") +
+          ` — ${reArm}`,
+      ),
+    );
+  }
+
+  if (checks.length === 0) {
+    // CTL-2111 (round-3 P1): with ownership no longer suppressing, this branch is
+    // reachable only when `capped` was empty of reportable records. An unreadable
+    // record could still have been a real cap, so doubt outranks the pass.
+    if (unreadable.length > 0) return [inconclusiveCheck()];
+    return [mkCheck("triage-cap-parked", STATUS.PASS, "no triage-capped tickets owned by this host")];
+  }
+  // Report the tripped caps AND any doubt — a partial scan must not read as complete.
+  if (unreadable.length > 0) checks.push(inconclusiveCheck());
+  return checks;
+}
+
 // ─── Suite selection ─────────────────────────────────────────────────────────
 
 // checksForClass — build the check-thunk suite for a resolved node class. This is
@@ -6934,6 +7179,7 @@ export function checksForClass(nc, opts = {}) {
     () => checkIndexServingRoot(), // CTL-1935: is this node's catalyst-index serving root the PINNED release? evaluateDepSkew cannot answer it (the indexer is an on-demand CLI with no boot record) — advisory only (never FAIL)
     () => checkClusterSecretsPresent(), // CTL-1210: cluster-secrets.json present? (advisory — new nodes haven't run cluster-sync yet)
     () => checkNodeConfigPresent(), // CTL-1210: node.json present + host.name set? (advisory)
+    () => checkTriageCapParked(), // CTL-2111: this host holds a tripped triage re-dispatch cap for a board-eligible ticket? (advisory — WARN/INFO/PASS, never FAIL)
   ];
 }
 

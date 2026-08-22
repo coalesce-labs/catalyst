@@ -23,7 +23,7 @@ import {
   resolveAttachmentTransport,
 } from "./cluster-attachment-transport.mjs";
 import { createLinearWriteProxy } from "./linear-write-proxy.mjs";
-import { readLinearWriteProxyConfig, resolveLeaseAuthorityMode } from "./config.mjs";
+import { getHostName, readLinearWriteProxyConfig, resolveLeaseAuthorityMode } from "./config.mjs";
 // CTL-1786 — the lease-authority client half of CTC-410. The refusable claim path lives beside
 // the attachment soft-CAS here so `runCli`/`defaultTransport` can select it on the env gate with
 // ZERO change to any caller: it returns the same {won, generation} contract.
@@ -311,6 +311,78 @@ export async function bumpTriageAttemptCount(
     { post, transport, issueId, preserveClaimedAt: current.claimed_at },
   );
   return newCount;
+}
+
+// resetTriageAttemptCount — reset the fleet-wide triage attempt count on the
+// fence attachment back to 0 (CTL-2111). Used when a human re-queues a ticket
+// that had tripped its host-local triage re-dispatch cap, so the next sweep
+// re-dispatches triage instead of refusing forever. Preserves owner_host,
+// catalyst_generation, phase, and claimed_at (does NOT bump the generation —
+// this is not a takeover — and does NOT re-stamp the staleness clock). Returns
+// 0 on success, or null when no fence exists (best-effort no-op, fail-open).
+export async function resetTriageAttemptCount(
+  ticket,
+  { post = defaultPost, transport = null, issueId = null, hostName = null } = {},
+) {
+  const current = await readClaim(ticket, { post, transport });
+  if (!current) return null; // no fence — no-op, fail-open
+  // CTL-2111 (Codex #3824 round-3 P1): this is a read-then-write with no CAS, so a
+  // human re-queue racing an ownership change could read generation G, let a
+  // concurrent `claimTicket` write G+1, then unconditionally restore G and the OLD
+  // owner_host — invalidating the real winner's fencing token and making a
+  // superseded worker current again. That is a fleet-safety failure, and a count
+  // reset must never be able to cause it.
+  //
+  // Two guards, both failing to `null` ("unconfirmed"), which the caller already
+  // treats as "retain the local latch and retry on the next re-queue" — never as a
+  // completed re-arm. The fail direction is a deferred re-arm, never a broken fence.
+  //
+  // Guard 1 — NEVER rewrite another host's claim. The re-arm runs on the host that
+  // holds the (host-local) cap record, so the claim it is refreshing should be its
+  // own. If the fence names a different owner, a takeover has already happened:
+  // decline outright rather than restoring ourselves over the winner. This alone
+  // removes the reported harm — the stale owner_host can no longer be written back
+  // — because the only claim we will now rewrite is one we already own.
+  const nonEmpty = (v) => typeof v === "string" && v !== "";
+  // A fence with no recorded owner, or a host we cannot name, is not evidence of a
+  // takeover — fall through to the read-back guard rather than declining outright,
+  // so an unowned/legacy fence record stays resettable.
+  let self = hostName;
+  if (!nonEmpty(self)) {
+    try {
+      self = getHostName();
+    } catch {
+      self = null;
+    }
+  }
+  if (nonEmpty(current.owner_host) && nonEmpty(self) && current.owner_host !== self) {
+    return null;
+  }
+  await writeClaim(
+    ticket,
+    {
+      owner_host: current.owner_host,
+      generation: current.generation,
+      phase: current.phase,
+      triage_attempt_count: 0,
+    },
+    { post, transport, issueId, preserveClaimedAt: current.claimed_at },
+  );
+  // Guard 2 — confirm by read-back, the same soft-CAS shape `claimTicket` uses. If
+  // anything other than exactly what we wrote is there, a concurrent writer landed
+  // after us and holds the fence: report unconfirmed rather than claiming a reset.
+  // A generation that MOVED is the takeover case; note it can only have moved
+  // FORWARD (generations are monotonic), so the winner's claim survives our write.
+  const readback = await readClaim(ticket, { post, transport });
+  if (
+    !readback ||
+    readback.owner_host !== current.owner_host ||
+    readback.generation !== current.generation ||
+    readback.triage_attempt_count !== 0
+  ) {
+    return null;
+  }
+  return 0;
 }
 
 // ─── soft-CAS claim ──────────────────────────────────────────────────────────
@@ -702,10 +774,42 @@ export async function runCli(
       process.stdout.write(JSON.stringify({ count }) + "\n");
       return 0;
     }
+    case "reset-triage-attempt": {
+      const [ticket] = rest;
+      // CTL-2111 (Codex #3824 round-2 P1): under `enforce` the attachment counter is
+      // INAPPLICABLE, not merely absent. `claimViaLease` bypasses `writeClaim`, so no
+      // fence attachment is ever created and `resetTriageAttemptCount`'s `readClaim`
+      // returns null — reporting `{count:null}`, which is this CLI's word for "the
+      // reset did not happen". `rearmTriageCapOnRequeue` requires exactly 0 before it
+      // drops the host-local latch, so on a lease-enforced fleet a capped ticket could
+      // NEVER be re-armed by a human re-queue: every attempt returned
+      // `fence-reset-unconfirmed` forever.
+      //
+      // There is nothing to reset here, and that is a confirmed state rather than a
+      // failed write — the same counter is inert on the READ side too
+      // (`readTriageAttemptCount` finds no attachment, so `fleetTriageDispatchCount`
+      // fails open to the host-local count and the fence never gates anything under
+      // enforce). So report the reset as satisfied, with `inapplicable` naming WHY it
+      // was a no-op so the zero is never mistaken for a real attachment write.
+      //
+      // Deliberately NOT the `fence-check` treatment above: that throws because it
+      // would otherwise fabricate a STALE verdict that suppresses real writes — the
+      // fail-safe direction there is to decline. Here declining is what strands the
+      // ticket, and the honest answer ("no fleet counter exists to hold this cap") is
+      // available without inventing anything.
+      const mode = leaseMode ?? resolveLeaseAuthorityMode(env);
+      if (mode === "enforce") {
+        process.stdout.write(JSON.stringify({ count: 0, inapplicable: "lease-authority" }) + "\n");
+        return 0;
+      }
+      const count = await resetTriageAttemptCount(ticket, { post, transport: t });
+      process.stdout.write(JSON.stringify({ count }) + "\n");
+      return 0;
+    }
     default:
       process.stderr.write(
         `cluster-claim.mjs: unknown subcommand: ${cmd ?? "(none)"}\n` +
-          "usage: cluster-claim.mjs <claim <ticket> <host> <phase> [issueId] | fence-check <ticket> <gen> | resolve-issue-id <ticket> | read-triage-attempt <ticket> | bump-triage-attempt <ticket>>\n",
+          "usage: cluster-claim.mjs <claim <ticket> <host> <phase> [issueId] | fence-check <ticket> <gen> | resolve-issue-id <ticket> | read-triage-attempt <ticket> | bump-triage-attempt <ticket> | reset-triage-attempt <ticket>>\n",
       );
       return 1;
   }

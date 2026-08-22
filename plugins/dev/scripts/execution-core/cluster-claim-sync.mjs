@@ -560,3 +560,41 @@ export function bumpTriageAttemptCountSync(
     return { count: null };
   }
 }
+
+// resetTriageAttemptCountSync — spawn `node cluster-claim.mjs reset-triage-attempt
+// <ticket>` (CTL-2111). Used when a human re-queues a capped ticket: the fence
+// triage_attempt_count is reset to 0 so the next sweep re-dispatches triage.
+// Always invalidates the TTL cache for that ticket before the spawn (a reset
+// means the stored count is now stale — the next read must go live). Returns
+// `{ count: 0 }` on success, or `{ count: null }` on any failure (best-effort —
+// never throws).
+export function resetTriageAttemptCountSync(
+  { ticket },
+  {
+    spawn = spawnSync,
+    nodeBin = process.execPath,
+    cli = CLUSTER_CLAIM_CLI,
+    env = process.env,
+    timeout = CLAIM_TIMEOUT_MS,
+  } = {},
+) {
+  // Invalidate before the spawn: a reset means any cached count is now wrong,
+  // and the re-arm path is about to re-dispatch on the count having dropped.
+  triageAttemptCache.delete(ticket);
+  try {
+    const res = spawn(nodeBin, [cli, "reset-triage-attempt", ticket], {
+      encoding: "utf8",
+      env,
+      timeout,
+    });
+    if (!res || res.status !== 0 || typeof res.stdout !== "string") {
+      return { count: null };
+    }
+    const line = res.stdout.trim().split("\n").filter(Boolean).pop();
+    const parsed = JSON.parse(line);
+    const count = typeof parsed?.count === "number" ? parsed.count : null;
+    return { count };
+  } catch {
+    return { count: null };
+  }
+}

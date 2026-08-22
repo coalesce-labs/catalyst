@@ -43,6 +43,18 @@ describe("monitor.mjs parse* resolve through the boundary (CTL-1834)", () => {
     expect(out).not.toBeNull();
     expect(out.identifier).toBe("CTL-9");
     expect(out.toState).toBe("In Progress");
+    // CTL-2111: the event ts is surfaced so the cap re-arm can prove a re-queue
+    // post-dates the park.
+    expect(out.ts).toBe("2026-08-07T00:00:00.000Z");
+  });
+
+  test("parseStateChangedEvent surfaces ts=null when the event has no ts (CTL-2111)", () => {
+    const out = parseStateChangedEvent({
+      name: "linear.issue.state_changed",
+      detail: { ticket: "CTL-9", teamKey: "CTL", toState: "Todo" },
+    });
+    expect(out).not.toBeNull();
+    expect(out.ts).toBeNull();
   });
 
   test("parseIssueUpdatedEvent reads a v3-shaped line", () => {

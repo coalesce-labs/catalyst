@@ -404,3 +404,29 @@ describe("⭐ label changes are a named class, not 'nothing changed'", () => {
     expect(edgeDelta(h({ added_label_ids: "{not json" })).updatedFromKeys).not.toContain("labels");
   });
 });
+
+// ── CTL-2111 (Codex #3824 round-4 P1) ─────────────────────────────────────────
+describe("buildIssueEvent — transitionedAt normalization", () => {
+  const row = (createdAt) => ({
+    history: { id: "h1", issue_id: "i1", actor_id: "u1", created_at: createdAt, from_state: "Triage", to_state: "Todo" },
+    issue: { identifier: "CTL-2111", team_key: "CTL", id: "i1" },
+  });
+
+  test("an epoch-ms integer (the feed's storage type) is emitted as an ISO string", () => {
+    const ms = Date.parse("2026-08-21T09:59:00.000Z");
+    const ev = buildIssueEvent(row(ms));
+    expect(ev.body.payload.transitionedAt).toBe("2026-08-21T09:59:00.000Z");
+    expect(typeof ev.body.payload.transitionedAt).toBe("string");
+  });
+
+  test("an ISO string passes through", () => {
+    const ev = buildIssueEvent(row("2026-08-21T09:59:00.000Z"));
+    expect(ev.body.payload.transitionedAt).toBe("2026-08-21T09:59:00.000Z");
+  });
+
+  test("a missing or unusable created_at yields null (falls back to the envelope ts)", () => {
+    expect(buildIssueEvent(row(undefined)).body.payload.transitionedAt).toBeNull();
+    expect(buildIssueEvent(row("not-a-date")).body.payload.transitionedAt).toBeNull();
+    expect(buildIssueEvent(row(Number.NaN)).body.payload.transitionedAt).toBeNull();
+  });
+});

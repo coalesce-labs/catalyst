@@ -80,7 +80,8 @@ import {
   isClaimFailure,
   readTriageAttemptCountSync,
   bumpTriageAttemptCountSync,
-} from "./cluster-claim-sync.mjs"; // CTL-862: cross-host claim soft-CAS; CTL-1649: fleet-wide triage attempt count
+  resetTriageAttemptCountSync,
+} from "./cluster-claim-sync.mjs"; // CTL-862: cross-host claim soft-CAS; CTL-1649: fleet-wide triage attempt count; CTL-2111: cap re-arm on human re-queue
 import { listProjects, getProjectConfig, resolveEligibleQuery } from "./registry.mjs";
 import {
   runEligibleQuery,
@@ -115,6 +116,12 @@ import {
 import { routeStuckTicketToDelegate } from "./delegate-first.mjs"; // CTL-1609
 import { appendDelegateEvent as defaultAppendDelegateEvent } from "./delegate-event.mjs"; // CTL-1774
 import { appendTriageTransitionEvent as defaultAppendEvent } from "./triage-transition-event.mjs";
+// CTL-2111: durable, budget-independent triage-cap events (park + re-arm).
+import {
+  appendTriageCapParkedEvent,
+  appendTriageCapRearmedEvent,
+} from "./triage-cap-event.mjs";
+import { clearStalledLabel } from "./label-guard.mjs"; // CTL-2111: best-effort needs-human clear on re-arm
 import { countBackgroundAgents, resetLivenessCache } from "./claude-agents.mjs";
 import {
   readMaxParallel,
@@ -191,6 +198,22 @@ const DRAG_OUT_STATES = new Set(["Backlog", "Canceled", "Duplicate"]);
 // (attributes['event.name'] + body.payload) and the legacy flat shape
 // (event.event + event.detail). Returns null for anything that is not a
 // linear.issue.state_changed event with an extractable ticket identifier.
+// normalizeTransitionAt — coerce a source transition timestamp to an ISO string.
+// Accepts epoch milliseconds (the feed's storage type) or an ISO string; anything
+// unparseable yields null, which makes the caller fall back to the envelope ts
+// rather than assert a wrong ordering. See CTL-2111 round-4 P1.
+function normalizeTransitionAt(value) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const d = new Date(value);
+    return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  }
+  if (typeof value === "string" && value !== "") {
+    const ms = Date.parse(value);
+    return Number.isNaN(ms) ? null : value;
+  }
+  return null;
+}
+
 export function parseStateChangedEvent(event) {
   const name = getEventName(event); // CTL-1834: the shared boundary
   if (name !== "linear.issue.state_changed") return null;
@@ -202,6 +225,25 @@ export function parseStateChangedEvent(event) {
     identifier,
     teamKey: payload.teamKey ?? null,
     toState: payload.toState ?? null,
+    // CTL-2111: surface the event timestamp so the re-arm helper can prove a
+    // human re-queue is NEWER than the cap's cappedAt (only a re-queue that
+    // post-dates the park re-arms). null when absent → conservative no-op.
+    ts: typeof event?.ts === "string" ? event.ts : null,
+    // CTL-2111 (Codex #3824 round-3 P1): the SOURCE transition time — when Linear
+    // recorded the state change — as distinct from `ts`, the envelope EMISSION
+    // time. They are not interchangeable for an ordering comparison: the cloud
+    // feed (now the only ingestion leg, both webhook legs retired) stamps `ts`
+    // with `now()` at build time AND truncates milliseconds, so `ts` is late by
+    // the sweep latency and coarser than the `cappedAt` it is compared against.
+    // Judged on `ts`, a delayed transition that genuinely PRE-dated a park could
+    // appear newer and clear a cap that was created after it. Prefer the source
+    // time; `ts` remains the fallback for any producer that does not carry one.
+    // CTL-2111 (Codex #3824 round-4 P1): accept a NUMBER (epoch ms) as well as an
+    // ISO string. The feed stores `issue_history.created_at` as an integer, and a
+    // string-only test silently discarded it and fell back to the envelope ts — the
+    // round-3 fix was inert in production. The producer now normalizes to ISO, and
+    // this stays tolerant of both so an older or third-party producer still works.
+    transitionAt: normalizeTransitionAt(payload.transitionedAt),
     // CTL triage-entry fix (Phase 0): carry the projection-fold fields so a
     // →status transition can be folded into the eligible set from the event
     // payload (no Linear poll), the same way handleIssueUpdatedEvent does.
@@ -648,8 +690,37 @@ export function handleStateChangedEvent(
       // →Triage — one-shot dispatch the triage phase agent. NOT the eligible
       // set: a Triage ticket is never scheduler-pulled. Idempotent downstream
       // (phase-agent-dispatch no-ops an existing signal file).
-      // CTL-731: skipped during the fold-only boot drain (no eligible fold here,
-      // so the entire branch is a no-op when foldOnly).
+      // CTL-731: the DISPATCH is skipped during the fold-only boot drain (there is
+      // no eligible fold in this branch). The cap re-arm below is not a dispatch and
+      // deliberately still runs — see the round-2 note on it.
+      // CTL-2111: a human re-queue newer than the cap's cappedAt re-arms the
+      // tripped triage cap BEFORE the dispatch below, so the sweep proceeds.
+      // Fail-open, never blocks the dispatch; single-host skips the fence reset.
+      //
+      // CTL-2111 (Codex #3824 round-2 P1): deliberately OUTSIDE the `!foldOnly`
+      // gate. Re-arming is a state RECONCILIATION — it drops a stale local latch,
+      // exactly like the `upsertTicket` eligibility fold in the sibling branch
+      // below — not a dispatch, so CTL-731's "boot drain folds only, no dispatch"
+      // rule does not cover it. Gated, the boot-gap re-queue was lost outright:
+      // a human re-queues a capped ticket while the daemon is down, the resumed
+      // `startMonitor` consumes that state_changed with `foldOnly:true` and
+      // ADVANCES THE DURABLE CURSOR past it, so the one event that could re-arm
+      // the cap is never replayed with side effects. The startup sweep then read
+      // the unchanged cap and re-parked the ticket, leaving it stuck until some
+      // later human transition happened to arrive while the daemon was up.
+      //
+      // Safe to run during the drain because the helper is self-limiting and
+      // idempotent: it no-ops unless a `cappedAt` is present AND the event
+      // post-dates it, and the re-arm itself drops `cappedAt` — so every replayed
+      // event after the first returns `not-capped`. It starts no worker; the
+      // dispatch below stays gated.
+      if (orchDir) {
+        rearmTriageCapOnRequeue(orchDir, parsed.identifier, {
+          // Source transition time when the producer carries one; envelope ts otherwise.
+          eventTs: parsed.transitionAt ?? parsed.ts,
+          multiHost: (hosts ?? getExistenceHosts()).length > 1,
+        });
+      }
       if (!foldOnly) {
         dispatchTriage(parsed.identifier, {
           dispatch,
@@ -702,6 +773,21 @@ export function handleStateChangedEvent(
           state: parsed.toState,
           priority: parsed.toPriority,
           project: parsed.toProject ?? null,
+        });
+      }
+      // CTL-2111: a human re-queue to Todo/Ready newer than the cap's cappedAt
+      // re-arms the tripped triage cap. Placed BEFORE the hasTriageArtifact gate
+      // so it re-arms even when a stale triage.json is present (the CTC-750 case:
+      // the ticket had a triage.json but was capped and re-queued). Fail-open;
+      // never blocks the dispatch below.
+      // CTL-2111 (Codex #3824 round-2 P1): `!foldOnly` dropped here for the same
+      // reason as the →Triage branch above — a boot-gap re-queue is consumed by
+      // the fold-only drain, which advances the cursor and never replays it.
+      if (orchDir && parsed.toState === query.status) {
+        rearmTriageCapOnRequeue(orchDir, parsed.identifier, {
+          // Source transition time when the producer carries one; envelope ts otherwise.
+          eventTs: parsed.transitionAt ?? parsed.ts,
+          multiHost: (hosts ?? getExistenceHosts()).length > 1,
         });
       }
       if (
@@ -1133,6 +1219,10 @@ function dispatchTriage(
     // Single-host paths never call these.
     readFenceTriageAttempt = readTriageAttemptCountSync,
     bumpFenceTriageAttempt = bumpTriageAttemptCountSync,
+    // CTL-2111: durable, budget-independent park event emitted at the cap-park
+    // site regardless of the Linear needs-human label-write outcome. Injectable
+    // so tests assert the append without a real event-log write.
+    appendTriageCapParked = appendTriageCapParkedEvent,
   }
 ) {
   if (!orchDir) {
@@ -1229,6 +1319,27 @@ function dispatchTriage(
         { identifier, cap: TRIAGE_DISPATCH_CAP },
         "ctl-1441: triage re-dispatch cap reached — parked needs-human; delete .triage-dispatch-counts/<ticket>.json to re-arm"
       );
+      // CTL-2111 (Tier 3): surface the park DURABLY in the local event log,
+      // budget-independent. The needs-human label write above is subject to the
+      // per-ticket Linear write budget (CTC-750: an exhausted budget refused the
+      // label and the park was invisible everywhere). This append bypasses that
+      // budget entirely. Gated on markTriageCapped (the one-way first-park latch)
+      // so it fires exactly once per park episode, mirroring the WARN — a human
+      // re-queue clears cappedAt (re-arm), so a genuine re-park emits a fresh
+      // event. Fail-open: visibility must never wedge admission.
+      try {
+        appendTriageCapParked({
+          ticket: identifier,
+          orchId,
+          cap: TRIAGE_DISPATCH_CAP,
+          count: fleetTriageDispatchCount(orchDir, identifier, {
+            multiHost,
+            readFenceCount: readFenceTriageAttempt,
+          }),
+        });
+      } catch {
+        /* fail-open — visibility must never wedge admission */
+      }
     }
     // CTL-2090: this was the ONE remaining silent exit in triage admission — the
     // markTriageCapped WARN above fires once per park episode, and every later
@@ -1705,6 +1816,94 @@ export function markTriageCapped(orchDir, ticket, { now = () => new Date().toISO
     cap: TRIAGE_DISPATCH_CAP,
   });
   return true;
+}
+
+// ── CTL-2111: re-arm the triage cap on a human re-queue ──────────────────────
+// defaultClearNeedsHumanLabel — a best-effort Linear write clearing the sticky
+// needs-human label AND its `.applied`/`.skipped` once-markers on a CONFIRMED
+// removal (via clearStalledLabel's onRemoved semantics). Subject to the same
+// write budget as any Linear write — re-arm correctness NEVER depends on it (the
+// counter/fence reset + durable event are the load-bearing parts).
+function defaultClearNeedsHumanLabel(orchDir, ticket) {
+  clearStalledLabel(orchDir, ticket, "needs-human", { removeLabel });
+}
+
+// rearmTriageCapOnRequeue — pure, fail-open helper that resets a tripped triage
+// re-dispatch cap when a human re-queues the ticket (CTL-2111, Tier 1). A
+// re-queue is a `state_changed` event NEWER than the record's `cappedAt`; the
+// webhook drops bot-authored issue events before the log, so any such event is
+// by construction not orchestrator-authored (we rely on that upstream, we do not
+// re-check an actor here). Resets the host-local counter (drops `count`+`cappedAt`),
+// resets the fence `triage_attempt_count` (multi-host only), best-effort clears
+// the needs-human label, and emits a durable `triage.cap.rearmed.<T>` event.
+// Every side-effecting seam is wrapped so a throw degrades to a no-op — the
+// helper never throws into the event-handling path. Returns {rearmed, reason?}.
+export function rearmTriageCapOnRequeue(
+  orchDir,
+  ticket,
+  {
+    eventTs,
+    multiHost = false,
+    resetFence = resetTriageAttemptCountSync,
+    clearLabel = defaultClearNeedsHumanLabel,
+    appendRearmEvent = appendTriageCapRearmedEvent,
+  } = {}
+) {
+  const rec = readTriageDispatchRecord(orchDir, ticket);
+  if (!rec?.cappedAt) return { rearmed: false, reason: "not-capped" };
+  const capMs = Date.parse(rec.cappedAt);
+  const evMs = eventTs ? Date.parse(eventTs) : NaN;
+  // Only a re-queue that POST-DATES the park re-arms. Missing/unparseable ts, or
+  // a cappedAt we cannot parse, is a conservative no-op (cannot prove newer).
+  if (!Number.isFinite(evMs) || !Number.isFinite(capMs) || evMs <= capMs)
+    return { rearmed: false, reason: "not-newer" };
+  // CTL-2111 (Codex #3824 P1): on multi-host the FENCE reset must be CONFIRMED
+  // before the host-local latch is dropped. `resetTriageAttemptCountSync` reports
+  // ordinary write failures as `{count:null}` rather than throwing, and the old
+  // order cleared `cappedAt` first and then discarded that result. The next sweep
+  // therefore read the still-capped fleet fence (`fleetTriageDispatchCount` takes
+  // max(host-local, fence)) and re-parked the ticket, while every later
+  // state_changed saw no local `cappedAt` and returned "not-capped" — so the reset
+  // was never retried and the emitted event nevertheless claimed a re-arm. The
+  // host-local reset is NOT a fail-open here: on multi-host it un-gates nothing on
+  // its own. Retaining the latch keeps the re-arm retryable on the next re-queue
+  // and keeps the durable audit record honest.
+  if (multiHost) {
+    let fenceCount = null;
+    try {
+      fenceCount = resetFence({ ticket })?.count ?? null;
+    } catch {
+      // A throwing seam is indistinguishable from a failed reset — both are
+      // "unconfirmed", never "reset".
+      fenceCount = null;
+    }
+    if (fenceCount !== 0) {
+      log.warn(
+        { ticket, cappedAt: rec.cappedAt, eventTs },
+        "ctl-2111: triage cap re-arm DEFERRED — fence reset unconfirmed; local latch retained for retry"
+      );
+      return { rearmed: false, reason: "fence-reset-unconfirmed" };
+    }
+  }
+  // Reset the host-local counter — drop `count` and `cappedAt` so the next sweep
+  // re-dispatches triage (rewrite rather than unlink so a concurrent reader never
+  // sees a transient absent file).
+  writeTriageDispatchRecord(orchDir, ticket, { count: 0, lastDispatchAt: null });
+  try {
+    clearLabel(orchDir, ticket);
+  } catch {
+    /* fail-open — label clear is best-effort, budget-subject, non-load-bearing */
+  }
+  try {
+    appendRearmEvent({ ticket, orchId: ticket, eventTs, cappedAt: rec.cappedAt });
+  } catch {
+    /* fail-open — the durable event is an audit tap, never load-bearing */
+  }
+  log.warn(
+    { ticket, cappedAt: rec.cappedAt, eventTs },
+    "ctl-2111: triage cap re-armed on human re-queue — counter/fence reset"
+  );
+  return { rearmed: true };
 }
 
 // fleetTriageDispatchCount — the CTL-1649 fleet-wide dispatch count for a ticket.

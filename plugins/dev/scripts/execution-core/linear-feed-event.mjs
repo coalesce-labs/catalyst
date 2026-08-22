@@ -106,6 +106,33 @@ const hasIds = (raw) => parseIds(raw).length > 0;
  * `docs`/the ticket's binding conditions. Two history rows must always produce two
  * events.
  */
+// isoFromFeedTimestamp — normalize a feed timestamp to an ISO-8601 string.
+//
+// CTL-2111 (Codex #3824 round-4 P1): `issue_history.created_at` is stored and
+// selected as an INTEGER of epoch milliseconds (see linear-feed-source.mjs, whose
+// cursor compares `created_at > $sinceMs`), not a string. Copying it verbatim made
+// the round-3 fix INERT in production: `parseStateChangedEvent` accepts
+// `transitionedAt` only when it is a string, so every real event fell straight back
+// to the delayed envelope `ts` and a pre-cap transition emitted later could still
+// clear a newer cap. Normalizing at the producer keeps the wire shape one type, so
+// no consumer has to know the storage representation.
+//
+// Accepts a number (epoch ms) or an already-ISO string; anything else, and any
+// value that does not round-trip through Date, yields null — the conservative
+// answer, since a null simply falls back to the envelope ts rather than asserting
+// a wrong time.
+export function isoFromFeedTimestamp(value) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const d = new Date(value);
+    return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  }
+  if (typeof value === "string" && value !== "") {
+    const ms = Date.parse(value);
+    return Number.isNaN(ms) ? null : new Date(ms).toISOString();
+  }
+  return null;
+}
+
 export function historyEventId(history) {
   const id = history?.id;
   return typeof id === "string" && id !== "" ? id : null;
@@ -271,6 +298,15 @@ export function buildIssueEvent({ history, issue, actor, assignee, project, labe
         // line, and so an operator reading the log later can too.
         source: "cloud-feed",
         historyId: historyEventId(history),
+        // CTL-2111 (Codex #3824 round-3 P1): the SOURCE transition time, carried so
+        // consumers can order against when Linear actually recorded the change
+        // rather than when this feed emitted the envelope. `buildCanonicalEvent`
+        // stamps `ts` with now() AND truncates milliseconds, so the envelope time
+        // is both delayed (by sweep latency) and coarser than the timestamps it is
+        // compared against. The triage-cap re-arm gate is the first consumer that
+        // needs the real edge time: judged on `ts`, a delayed PRE-cap transition can
+        // look newer than a cap it actually preceded and wrongly clear it.
+        transitionedAt: isoFromFeedTimestamp(history?.created_at),
       },
     },
     seams,

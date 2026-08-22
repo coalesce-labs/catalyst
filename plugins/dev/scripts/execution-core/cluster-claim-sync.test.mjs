@@ -16,6 +16,7 @@ import {
   clearIssueIdCache,
   readTriageAttemptCountSync,
   bumpTriageAttemptCountSync,
+  resetTriageAttemptCountSync,
   clearTriageAttemptCacheSync,
 } from "./cluster-claim-sync.mjs";
 
@@ -718,5 +719,65 @@ describe("bumpTriageAttemptCountSync — argv + parsing (CTL-1649)", () => {
     now += 1_000;
     readTriageAttemptCountSync({ ticket: "CTL-1649" }, { spawn, env, now: () => now });
     expect(calls).toBe(2);
+  });
+});
+
+describe("resetTriageAttemptCountSync — argv + parsing (CTL-2111)", () => {
+  beforeEach(() => {
+    clearTriageAttemptCacheSync();
+  });
+
+  it("builds the right argv: node <cli> reset-triage-attempt <ticket>", () => {
+    let captured;
+    const spawn = (bin, args) => {
+      captured = { bin, args };
+      return { status: 0, stdout: JSON.stringify({ count: 0 }) + "\n" };
+    };
+    resetTriageAttemptCountSync(
+      { ticket: "CTL-2111" },
+      { spawn, nodeBin: "/usr/bin/node", cli: "/x/cluster-claim.mjs" },
+    );
+    expect(captured.bin).toBe("/usr/bin/node");
+    expect(captured.args).toEqual(["/x/cluster-claim.mjs", "reset-triage-attempt", "CTL-2111"]);
+  });
+
+  it("returns { count: 0 } on success", () => {
+    const spawn = () => ({ status: 0, stdout: JSON.stringify({ count: 0 }) + "\n" });
+    expect(resetTriageAttemptCountSync({ ticket: "CTL-2111" }, { spawn })).toEqual({ count: 0 });
+  });
+
+  it("non-zero exit → { count: null } (best-effort, never throws)", () => {
+    const spawn = () => ({ status: 1, stdout: "" });
+    expect(resetTriageAttemptCountSync({ ticket: "CTL-2111" }, { spawn })).toEqual({ count: null });
+  });
+
+  it("non-string stdout → { count: null }", () => {
+    const spawn = () => ({ status: 0, stdout: null });
+    expect(resetTriageAttemptCountSync({ ticket: "CTL-2111" }, { spawn })).toEqual({ count: null });
+  });
+
+  it("spawn throws → { count: null } (never propagates)", () => {
+    const spawn = () => { throw new Error("ETIMEDOUT"); };
+    expect(resetTriageAttemptCountSync({ ticket: "CTL-2111" }, { spawn })).toEqual({ count: null });
+  });
+
+  it("invalidates the cache for that ticket before the spawn (next read goes live)", () => {
+    let spawnCalls = 0;
+    const spawn = () => {
+      spawnCalls++;
+      return { status: 0, stdout: JSON.stringify({ count: 0 }) + "\n" };
+    };
+    const env = { CATALYST_TRIAGE_ATTEMPT_CACHE_MS: "30000" };
+    let now = 1_000_000;
+    // Populate cache
+    readTriageAttemptCountSync({ ticket: "CTL-2111" }, { spawn, env, now: () => now });
+    expect(spawnCalls).toBe(1);
+    // Reset invalidates cache
+    resetTriageAttemptCountSync({ ticket: "CTL-2111" }, { spawn, env });
+    expect(spawnCalls).toBe(2); // reset spawned
+    // Next read goes live (cache was invalidated)
+    now += 1_000;
+    readTriageAttemptCountSync({ ticket: "CTL-2111" }, { spawn, env, now: () => now });
+    expect(spawnCalls).toBe(3); // fresh spawn after invalidation
   });
 });
