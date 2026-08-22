@@ -30,7 +30,7 @@
     "lucide-react": "^1.17.0",
     "marked": "^18.0.0",
     "marked-highlight": "^2",
-    "motion": "^12.40.0",
+    "motion": "^13.1.0",
     "radix-ui": "^1.4.3",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
