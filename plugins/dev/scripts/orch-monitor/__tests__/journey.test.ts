@@ -1,12 +1,13 @@
 // CTL-1100 Phase 5: journey.mjs unit tests — hops/dedupe/gate/verdict/unblock/host/degradation.
 
-import { describe, it, expect, beforeAll, afterAll } from "bun:test";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "fs";
-import { tmpdir } from "os";
-import { join } from "path";
+import { homedir, tmpdir } from "os";
+import { isAbsolute, join } from "path";
 
 // Load journey functions via computed specifier (bun:sqlite-free but guards module graph).
 const journeyMod = await import(["../lib/journey.mjs"].join("")) as {
+  eventLogPathFor: (catalystDir: string, now?: Date) => string;
   scanHops: (ticket: string, opts: { eventLogPath: string }) => Array<{
     phase: string; eventType: string; ts: string; host: string;
     bg_job_id?: string; reason?: string; targetPhase?: string; blockers?: unknown[];
@@ -35,7 +36,7 @@ const journeyMod = await import(["../lib/journey.mjs"].join("")) as {
     hosts: string[];
   }>;
 };
-const { scanHops, dedupeHops, buildGateChecklist, readVerifyVerdictDetail, collectUnblockHints, assembleJourney } = journeyMod;
+const { eventLogPathFor, scanHops, dedupeHops, buildGateChecklist, readVerifyVerdictDetail, collectUnblockHints, assembleJourney } = journeyMod;
 
 // Import deriveAdvancement + readPhaseSignals for backed-by-code assertions.
 const schedMod = await import(["../../execution-core/scheduler.mjs"].join("")) as {
@@ -74,6 +75,42 @@ function writeSignal(dir: string, phase: string, status: string, extra: Record<s
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, `phase-${phase}.json`), JSON.stringify({ status, ...extra }));
 }
+
+describe("event log path resolution", () => {
+  const originalCatalystDir = process.env.CATALYST_DIR;
+
+  beforeEach(() => {
+    process.env.CATALYST_DIR = originalCatalystDir;
+  });
+
+  afterEach(() => {
+    if (originalCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = originalCatalystDir;
+  });
+
+  it("resolves the current UTC month below an injected catalyst dir", () => {
+    const now = new Date();
+    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    expect(eventLogPathFor("/tmp/x")).toBe(join("/tmp/x", "events", `${ym}.jsonl`));
+  });
+
+  it("uses UTC and zero-pads a fixed month", () => {
+    expect(eventLogPathFor("/tmp/x", new Date("2026-01-05T00:00:00Z")))
+      .toBe(join("/tmp/x", "events", "2026-01.jsonl"));
+  });
+
+  it("the test preload pins CATALYST_DIR away from the host catalyst dir", () => {
+    const catalystDir = process.env.CATALYST_DIR;
+    expect(catalystDir).toBeDefined();
+    if (catalystDir === undefined) throw new Error("test preload did not set CATALYST_DIR");
+    expect(isAbsolute(catalystDir)).toBe(true);
+    expect(catalystDir).not.toBe(join(homedir(), "catalyst"));
+  });
+
+  it("scanHops degrades to empty for a missing injected event log", () => {
+    expect(scanHops("CTL-9001", { eventLogPath: join(tmpDir, "missing.jsonl") })).toEqual([]);
+  });
+});
 
 // ─── 1. scanHops / dedupeHops — suffix collision guard ──────────────────────
 

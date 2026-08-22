@@ -46,6 +46,8 @@ import { join } from "node:path";
 
 const hermeticDir = mkdtempSync(join(tmpdir(), "orch-monitor-hermetic-"));
 process.env.CATALYST_LAYER2_CONFIG_FILE = join(hermeticDir, "absent-layer2-config.json");
+// CAT-216: keep event-log reads and writes out of the host's ~/catalyst tree.
+process.env.CATALYST_DIR = join(hermeticDir, "catalyst");
 
 // Belt: even if some other resolution path is somehow reached, no app-actor
 // (or personal) token can already be sitting in env for a test to

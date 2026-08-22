@@ -1,7 +1,7 @@
 // CTL-1100 Phase 5: GET /api/journey/:ticket — HTTP integration tests.
 
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
-import { mkdtempSync, rmSync } from "fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { createServer } from "../server";
@@ -53,6 +53,52 @@ describe("GET /api/journey/:ticket", () => {
     const body = await res.json() as Record<string, unknown>;
     for (const key of ["ticket", "hops", "gates", "verifyVerdict", "remediateCycles", "unblockHints", "hosts"]) {
       expect(key in body).toBe(true);
+    }
+  });
+});
+
+describe("GET /api/journey/:ticket event-log injection", () => {
+  it("reads hops from the injected catalystDir", async () => {
+    const scopedTmp = mkdtempSync(join(tmpdir(), "journey-event-log-test-"));
+    const catalystDir = join(scopedTmp, "catalyst");
+    const now = new Date();
+    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const eventsDir = join(catalystDir, "events");
+    mkdirSync(eventsDir, { recursive: true });
+    writeFileSync(join(eventsDir, `${ym}.jsonl`), `${JSON.stringify({
+      ts: now.toISOString(),
+      attributes: { "event.name": "phase.implement.complete.CTL-7777" },
+      body: { payload: {} },
+    })}\n`);
+    const scopedServer = createServer({
+      port: 0, startWatcher: false, wtDir: scopedTmp,
+      dbPath: join(scopedTmp, "catalyst.db"), catalystDir,
+    });
+    try {
+      const body = await (await fetch(`http://localhost:${scopedServer.port}/api/journey/CTL-7777`)).json() as {
+        hops: Array<{ phase: string; eventType: string }>;
+      };
+      expect(body.hops).toEqual([expect.objectContaining({ phase: "implement", eventType: "complete" })]);
+    } finally {
+      void scopedServer.stop(true);
+      rmSync(scopedTmp, { recursive: true, force: true });
+    }
+  });
+
+  it("does not read the host log when catalystDir is empty", async () => {
+    const scopedTmp = mkdtempSync(join(tmpdir(), "journey-empty-log-test-"));
+    const scopedServer = createServer({
+      port: 0, startWatcher: false, wtDir: scopedTmp,
+      dbPath: join(scopedTmp, "catalyst.db"), catalystDir: join(scopedTmp, "empty-catalyst"),
+    });
+    try {
+      const body = await (await fetch(`http://localhost:${scopedServer.port}/api/journey/CTL-7777`)).json() as {
+        hops: unknown[];
+      };
+      expect(body.hops).toEqual([]);
+    } finally {
+      void scopedServer.stop(true);
+      rmSync(scopedTmp, { recursive: true, force: true });
     }
   });
 });
