@@ -2832,9 +2832,10 @@ export function convergeHeldLabel(
         (r) => {
           const removed = r?.removed !== false;
           if (removed) clearMarker(label);
-          // CTL-2083: a budget/rate refusal arms the same cool-down the apply
-          // side uses so the next tick does not re-issue this doomed removal.
-          else maybeArmRemoveCooldown(orchDir, ticket, label, r, now());
+          // CTL-2083/CTL-2027 Phase 1: a budget/rate refusal arms the same
+          // cool-down the apply side uses so the next tick does not re-issue
+          // this doomed removal, and counts toward the retry cap.
+          else settleRefusedRemoval(orchDir, ticket, label, r, now(), { cap: retryCap, exhaustedMs: retryExhaustedMs, onRetryExhausted });
           onRemoveResult?.(label, removed);
         },
         (err) => {
@@ -2849,12 +2850,24 @@ export function convergeHeldLabel(
     }
     const removed = res?.removed !== false;
     if (removed) clearMarker(label);
-    // CTL-2083: sync path (test doubles) — arm the cool-down on a refusal too.
-    else maybeArmRemoveCooldown(orchDir, ticket, label, res, now());
+    // CTL-2083/CTL-2027 Phase 1: sync path (test doubles) — arm the cool-down
+    // and count toward the retry cap on a refusal too.
+    else settleRefusedRemoval(orchDir, ticket, label, res, now(), { cap: retryCap, exhaustedMs: retryExhaustedMs, onRetryExhausted });
     onRemoveResult?.(label, removed);
   };
   for (const label of HELD_LABELS_REMOVABLE) {
     if (label !== desired && have.has(label)) {
+      // CTL-2027 Phase 1 (AC3 extended to removals): cap gate — after N
+      // cool-down cycles STOP re-issuing this removal for the long back-off
+      // window (one self-heal probe once it elapses). Before the ordinary
+      // per-window cool-down gate, so the cap wins over the time gate — same
+      // ordering as the apply-side gate above.
+      if (
+        orchDir &&
+        labelRetryCapBlocks(orchDir, ticket, label, now(), { cap: retryCap, exhaustedMs: retryExhaustedMs })
+      ) {
+        continue;
+      }
       // CTL-2083: skip a removal still inside its per-(ticket,label) cool-down.
       // A cooled-down label is a true no-op tick (no writes++, no onRemoveResult),
       // matching the apply gate's early `return 0` at scheduler.mjs:2709.
@@ -2996,6 +3009,14 @@ export function convergeDispositionLabel(
   // applied) so a mid-rollout ticket cannot keep it alongside the new "queued".
   for (const label of [...TICK_CONVERGED_DISPOSITIONS, LEGACY_HELD_LABEL_WAITING]) {
     if (label !== desired && have.has(label)) {
+      // CTL-2027 Phase 1 (AC3 extended to removals): cap gate — before the
+      // ordinary per-window cool-down, mirroring convergeHeldLabel's ordering.
+      if (
+        orchDir &&
+        labelRetryCapBlocks(orchDir, ticket, label, now(), { cap: retryCap, exhaustedMs: retryExhaustedMs })
+      ) {
+        continue;
+      }
       // CTL-2083: skip a removal still inside its cool-down window.
       if (orchDir && inLabelCooldown(orchDir, ticket, label, now())) continue;
       // CTL-2083: capture the result instead of discarding it via safeWrite —
@@ -3015,7 +3036,7 @@ export function convergeDispositionLabel(
       }
       if (res != null && typeof res.then === "function") {
         res.then(
-          (r) => maybeArmRemoveCooldown(orchDir, ticket, label, r, now()),
+          (r) => settleRefusedRemoval(orchDir, ticket, label, r, now(), { cap: retryCap, exhaustedMs: retryExhaustedMs, onRetryExhausted }),
           (err) =>
             log.warn(
               { ticket, phase: "admission", label, err: err?.message },
@@ -3023,7 +3044,7 @@ export function convergeDispositionLabel(
             )
         );
       } else {
-        maybeArmRemoveCooldown(orchDir, ticket, label, res, now());
+        settleRefusedRemoval(orchDir, ticket, label, res, now(), { cap: retryCap, exhaustedMs: retryExhaustedMs, onRetryExhausted });
       }
       writes++;
     }
@@ -3189,10 +3210,19 @@ export function labelRetryState(marker, now, { cap, exhaustedMs } = {}) {
 // pins that distinction. Both convergers call this single helper so the
 // thenable/sync handling and the operator-legible log line live in ONE place.
 // Fail-open: a missing orchDir or a null result is a no-op, matching the apply gate.
-function maybeArmRemoveCooldown(orchDir, ticket, label, res, now) {
+//
+// CTL-2027 Phase 1: renamed from maybeArmRemoveCooldown — this now has a SECOND
+// responsibility (arm the cool-down AND escalate once the retry cap is
+// crossed), so the name is updated to match. `{ cap, exhaustedMs,
+// onRetryExhausted }` is threaded through rather than read from module state
+// so the two convergers keep passing their own injected knobs (test doubles
+// use tiny caps/windows; production uses the real ones) and both the sync and
+// thenable call sites in both convergers funnel through this ONE place —
+// guaranteeing they cannot drift apart on the escalation behavior either.
+function settleRefusedRemoval(orchDir, ticket, label, res, now, { cap, exhaustedMs, onRetryExhausted } = {}) {
   if (!orchDir || res == null) return;
   if (res.removed === false && shouldCoolDownLabel(res.reason)) {
-    recordLabelCooldown(orchDir, ticket, label, now);
+    const attempts = recordLabelCooldown(orchDir, ticket, label, now);
     // COORD-236: the two failure classes get DIFFERENT sentences — an operator
     // reading "unrecoverable" for a budget refusal would go hunting for a label
     // that is not actually missing.
@@ -3203,6 +3233,7 @@ function maybeArmRemoveCooldown(orchDir, ticket, label, res, now) {
         ? "coord-236/ctl-2083: held-label REMOVE THROTTLED (host write budget / rate limit) — backing off; this removal is not re-issued until the cool-down elapses"
         : "ctl-2083: held-label remove unrecoverable — backing off (cool-down)"
     );
+    maybeEscalateRetryExhausted({ ticket, label, attempts, reason: res.reason, cap, onRetryExhausted }); // CTL-2027 Phase 1 (AC3 extended to removals)
   }
 }
 

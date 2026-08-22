@@ -393,6 +393,115 @@ describe("CTL-2083: convergeDispositionLabel's REMOVE loop backs off (stops disc
   });
 });
 
+// ── CTL-2027 Phase 1 — the bounded control on REMOVALS (retry cap) ───────────
+// CTL-2083 gave removals one attempt per cool-down window, forever — Ask 3's
+// "at most one further attempt per backoff window", minus the "at most" part.
+// This mirrors CTL-2052's apply-side cap onto the remove loop of BOTH
+// convergers, keyed on `label` (the label being REMOVED), not `desired` —
+// using `desired` here would be the same argument-substitution defect CTL-2052
+// avoided for applies.
+describe("CTL-2027 Phase 1: the REMOVE loop is bounded — at most one attempt per window, then stop", () => {
+  test("cap reached → the 4th window issues ZERO removeLabel calls", () => {
+    const w = failingRemover("budget:ticket-cap");
+    let clock = 4_000_000;
+    const opts = { orchDir, now: () => clock, retryCap: 3, retryExhaustedMs: 1_800_000 };
+    for (let i = 0; i < 3; i++) {
+      convergeHeldLabel("CTL-40", ["queued"], null, w, opts);
+      clock += 61_000;
+    }
+    expect(w.calls.length).toBe(3); // reached the cap
+    convergeHeldLabel("CTL-40", ["queued"], null, w, opts); // 4th window: capped
+    expect(w.calls.length).toBe(3);
+  });
+
+  test("escalation is edge-triggered — fires exactly ONCE across ≥3 windows past the cap", () => {
+    const w = failingRemover("budget:ticket-cap");
+    const events = [];
+    let clock = 4_000_000;
+    const opts = {
+      orchDir,
+      now: () => clock,
+      retryCap: 3,
+      retryExhaustedMs: 1_800_000,
+      onRetryExhausted: (info) => events.push(info),
+    };
+    for (let i = 0; i < 6; i++) {
+      convergeHeldLabel("CTL-41", ["queued"], null, w, opts);
+      clock += 61_000;
+    }
+    expect(events.length).toBe(1);
+    expect(events[0]).toMatchObject({
+      ticket: "CTL-41",
+      label: "queued",
+      attempts: 3,
+      reason: "budget:ticket-cap",
+    });
+  });
+
+  test("REGRESSION SHAPE: an effectively-uncapped run reports 60, not the capped 3 — the harness really ticks 60 windows", () => {
+    // A "zero further writes" assertion above is only evidence if the same
+    // harness is proven to keep ticking when nothing stops it.
+    const w = failingRemover("budget:ticket-cap");
+    let clock = 4_000_000;
+    const opts = { orchDir, now: () => clock, retryCap: 1000, retryExhaustedMs: 1_800_000 };
+    for (let i = 0; i < 60; i++) {
+      convergeHeldLabel("CTL-42", ["queued"], null, w, opts);
+      clock += 61_000;
+    }
+    expect(w.calls.length).toBe(60);
+  });
+
+  test("self-heal probe: after the long window exactly one removal is let through, then re-arms — never permanently abandoned", () => {
+    const w = failingRemover("budget:ticket-cap");
+    let clock = 4_000_000;
+    const opts = { orchDir, now: () => clock, retryCap: 3, retryExhaustedMs: 1_800_000 };
+    for (let i = 0; i < 3; i++) {
+      convergeHeldLabel("CTL-43", ["queued"], null, w, opts);
+      clock += 61_000;
+    }
+    expect(w.calls.length).toBe(3);
+    convergeHeldLabel("CTL-43", ["queued"], null, w, opts); // still inside the long window
+    expect(w.calls.length).toBe(3);
+    clock += 1_800_001; // past the exhausted window → one self-heal probe
+    convergeHeldLabel("CTL-43", ["queued"], null, w, opts);
+    expect(w.calls.length).toBe(4);
+    // refused again → the cap re-arms rather than probing forever
+    clock += 61_000;
+    convergeHeldLabel("CTL-43", ["queued"], null, w, opts);
+    expect(w.calls.length).toBe(5);
+  });
+
+  test("cap is per (ticket, label) — a capped `queued` removal does not suppress `blocked` on the same ticket, nor `queued` on another ticket", () => {
+    const w = failingRemover("budget:ticket-cap");
+    let clock = 4_000_000;
+    const opts = { orchDir, now: () => clock, retryCap: 2, retryExhaustedMs: 1_800_000 };
+    for (let i = 0; i < 2; i++) {
+      convergeHeldLabel("CTL-44", ["queued"], null, w, opts);
+      clock += 61_000;
+    }
+    expect(w.calls.length).toBe(2);
+    convergeHeldLabel("CTL-44", ["queued"], null, w, opts); // capped
+    expect(w.calls.length).toBe(2);
+    convergeHeldLabel("CTL-44", ["blocked"], null, w, opts); // different label, same ticket
+    expect(w.calls.length).toBe(3);
+    convergeHeldLabel("CTL-45", ["queued"], null, w, opts); // different ticket
+    expect(w.calls.length).toBe(4);
+  });
+
+  test("convergeDispositionLabel's REMOVE loop enforces the same cap", () => {
+    const w = failingRemover("budget:ticket-cap");
+    let clock = 4_000_000;
+    const opts = { orchDir, now: () => clock, retryCap: 2, retryExhaustedMs: 1_800_000 };
+    for (let i = 0; i < 2; i++) {
+      convergeDispositionLabel("CTL-46", ["queued"], null, w, opts);
+      clock += 61_000;
+    }
+    expect(w.calls.length).toBe(2);
+    convergeDispositionLabel("CTL-46", ["queued"], null, w, opts);
+    expect(w.calls.length).toBe(2);
+  });
+});
+
 describe("⛔ COORD-236: labelOnce must NOT treat a throttled reason as permanent", () => {
   // The asymmetry is the whole point of two predicates. `.skipped` is forever;
   // a budget refusal is not. Folding them would permanently abandon a
@@ -443,15 +552,17 @@ describe("COORD-236 wiring: the cool-down is armed by the WIDE predicate", () =>
     }
   });
 
-  // ── CTL-2083 ────────────────────────────────────────────────────────────────
+  // ── CTL-2083 / CTL-2027 Phase 1 ───────────────────────────────────────────────
   // The remove side re-issued a doomed removeLabel every ~2–5 s with no cool-down.
-  // The remove arms live in ONE shared helper (maybeArmRemoveCooldown) called from
-  // both convergers, and each converger gates its remove loop on the SAME per-label
-  // window. Pin BOTH so a future refactor cannot silently drop exactly the backoff
-  // this ticket adds — the same defense the two apply arms above already have.
+  // The remove arms live in ONE shared helper (settleRefusedRemoval, renamed from
+  // maybeArmRemoveCooldown by CTL-2027 Phase 1 when it grew a second
+  // responsibility — arm AND escalate) called from both convergers, and each
+  // converger gates its remove loop on the SAME per-label window. Pin BOTH so a
+  // future refactor cannot silently drop exactly the backoff this ticket adds —
+  // the same defense the two apply arms above already have.
   test("CTL-2083: the REMOVE path arms the SAME cool-down via the shared helper", () => {
     const lines = SCHED.split("\n");
-    // The single arm CALL site inside maybeArmRemoveCooldown keys on `label`,
+    // The single arm CALL site inside settleRefusedRemoval keys on `label`,
     // guarded by shouldCoolDownLabel just above it. Exclude the `function
     // recordLabelCooldown(orchDir, ticket, label, now)` DEFINITION line — it
     // carries the same token but is not an arm site.
@@ -477,10 +588,22 @@ describe("COORD-236 wiring: the cool-down is armed by the WIDE predicate", () =>
     // sites — held has a sync + thenable branch, disposition has its own two).
     const helperRefs = lines.filter(
       (l) =>
-        l.includes("maybeArmRemoveCooldown(orchDir, ticket, label") &&
+        l.includes("settleRefusedRemoval(orchDir, ticket, label") &&
         !l.trimStart().startsWith("function ")
     ).length;
     expect(helperRefs).toBeGreaterThanOrEqual(2);
+  });
+
+  // ── CTL-2027 Phase 1 ───────────────────────────────────────────────────────
+  // The cap gate + escalation helper generalize from apply-only to apply+remove.
+  // Pinning the exact counts (rather than ">=") is deliberate: the plan states
+  // these numbers as its own automated verification, and a future removal-loop
+  // change that silently drops a call site should fail here, not in production.
+  test("CTL-2027 Phase 1: the cap gate and escalation helper are wired into BOTH remove loops", () => {
+    const capBlockCalls = (SCHED.match(/labelRetryCapBlocks/g) ?? []).length;
+    expect(capBlockCalls).toBe(5); // 1 definition + 2 apply-side + 2 remove-side
+    const escalateCalls = (SCHED.match(/maybeEscalateRetryExhausted/g) ?? []).length;
+    expect(escalateCalls).toBe(4); // 1 definition + 2 apply-side + 1 shared remove-side
   });
 
   test("neither file re-declares its own copy of the terminal set", () => {
