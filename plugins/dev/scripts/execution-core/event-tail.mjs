@@ -472,3 +472,96 @@ export function tailParsedEvents({
   }
   return []; // unreachable — the final attempt always uses fromOffset 0
 }
+
+// ── CTL-1216: the rollover drain ────────────────────────────────────────────
+//
+// WHY THIS EXISTS. Every long-lived tail of the unified event log used to
+// abandon the file it was reading the instant its resolved path changed:
+//
+//     if (logPath !== lastLogPath) { lastLogPath = logPath; leftover = "";
+//                                    offset = <size of the NEW file>; return; }
+//
+// That drops events twice over. The UNREAD TAIL of the old file — every byte
+// appended between the reader's last poll and the boundary — is never read by
+// anyone, ever. And the two readers that seeded at the new file's CURRENT SIZE
+// (broker/tailer.mjs, execution-core/monitor.mjs) also skipped its HEAD, i.e.
+// everything written to the new file before their first poll of it.
+//
+// The blast radius is not cosmetic. The broker routes every filter.wake and
+// every phase-lifecycle terminal through that path; the monitor routes
+// dispatchTriage, the eligible projection fold, and the CTL-768 comment-wake.
+// A dropped line there is dropped WORK, not a dropped metric.
+//
+// Monthly rotation gave 12 of these windows a year. Weekly gives 52. The
+// ticket's own acceptance criterion says the log must roll over "without
+// dropping events", which is what makes this in scope rather than a nice-to-have.
+//
+// BOUNDED, AND IT SAYS SO. An unbounded drain would let one enormous unread
+// remainder wedge a 1 s tick loop. On truncation the result reports
+// `truncated: true` rather than quietly reading less — a drain that cannot
+// report a shortfall is a check that cannot fail.
+export const DEFAULT_DRAIN_MAX_BYTES = 8 * 1024 * 1024;
+
+/**
+ * drainAndSwitch — read `oldPath` from `oldOffset` to EOF before a reader
+ * retargets, handing each COMPLETE line to `onLines`.
+ *
+ * The trailing fragment is deliberately DISCARDED rather than returned: this is
+ * the last read of this file, so a partial line here will never be completed by
+ * a later append. It is not counted as a torn line either — an in-flight write
+ * caught mid-append is a healthy writer, and CTL-1809's whole point is that a
+ * torn-line counter which counts healthy writes is not a torn-line counter.
+ *
+ * Fail-open: a missing/unreadable old file drains nothing and never throws, so
+ * a reader can always complete its switch.
+ *
+ * @returns {{drained: number, lines: number, truncated: boolean}}
+ */
+export function drainAndSwitch({
+  oldPath,
+  oldOffset = 0,
+  leftover = "",
+  onLines,
+  maxBytes = DEFAULT_DRAIN_MAX_BYTES,
+}) {
+  if (!oldPath) return { drained: 0, lines: 0, truncated: false };
+
+  let fd;
+  try {
+    fd = openSync(oldPath, "r");
+  } catch {
+    return { drained: 0, lines: 0, truncated: false };
+  }
+
+  try {
+    const { size } = fstatSync(fd);
+    if (size <= oldOffset) return { drained: 0, lines: 0, truncated: false };
+
+    const remaining = size - oldOffset;
+    const toRead = Math.min(remaining, maxBytes);
+    const truncated = toRead < remaining;
+
+    const buf = Buffer.alloc(toRead);
+    readSync(fd, buf, 0, toRead, oldOffset);
+
+    // Decode through StringDecoder so a multi-byte character straddling the
+    // byte cap is not turned into a replacement char mid-line.
+    const decoder = new StringDecoder("utf8");
+    const text = leftover + decoder.write(buf) + decoder.end();
+    const lines = text.split("\n");
+    lines.pop(); // the trailing fragment — see the note above
+
+    const complete = lines.filter((l) => l.length > 0);
+    if (complete.length > 0 && typeof onLines === "function") onLines(complete);
+
+    return { drained: toRead, lines: complete.length, truncated };
+  } catch {
+    return { drained: 0, lines: 0, truncated: false };
+  } finally {
+    try {
+      closeSync(fd);
+    } catch {
+      /* already closed */
+    }
+  }
+}
