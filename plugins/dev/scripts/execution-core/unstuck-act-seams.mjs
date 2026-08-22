@@ -43,6 +43,7 @@ import { clearStalledLabel, inRemovalBackoff } from "./label-guard.mjs";
 // phase-agent-emit-complete sits two directories up from execution-core/
 // (mirrors recovery.mjs:86 — the canonical synthetic-complete emitter).
 const EMIT_COMPLETE_BIN = fileURLToPath(new URL("../phase-agent-emit-complete", import.meta.url));
+const DRAFT_PR_LIB = fileURLToPath(new URL("../lib/draft-pr.sh", import.meta.url));
 
 // ─── default IO seams ───────────────────────────────────────────────────────
 // Each is overridable via deps; the production defaults shell to real git / fs /
@@ -51,6 +52,16 @@ const EMIT_COMPLETE_BIN = fileURLToPath(new URL("../phase-agent-emit-complete", 
 
 function defaultRunGit(args) {
   return spawnSync("git", args, { encoding: "utf8" });
+}
+
+function defaultResolvePushRemote(worktreePath) {
+  const script = `source "$1"; _draft_pr_push_remote`;
+  const res = spawnSync("bash", ["-c", script, "bash", DRAFT_PR_LIB], {
+    cwd: worktreePath,
+    encoding: "utf8",
+  });
+  if (res?.error || (res?.status ?? 1) !== 0) return "origin";
+  return String(res.stdout ?? "").trim() || "origin";
 }
 
 function defaultReadPorcelain(worktreePath, runGit) {
@@ -203,6 +214,7 @@ export function buildSourceConflictActSeam(deps = {}) {
     runGit = defaultRunGit,
     writeMarker = defaultWriteMarker,
     markerExists = defaultMarkerExists,
+    resolvePushRemote = defaultResolvePushRemote,
     orchDir = null,
   } = deps;
 
@@ -249,6 +261,8 @@ export function buildSourceConflictActSeam(deps = {}) {
       throw new Error(`source-conflict: ${decision.reason ?? "gate-failed"} (${ticket})`);
     }
 
+    const pushRemote = resolvePushRemote(worktreePath);
+
     // Disable hooks for the push (mechanical action; no local hook side-effects).
     const push = runGit([
       "-C",
@@ -258,7 +272,7 @@ export function buildSourceConflictActSeam(deps = {}) {
       "push",
       "--force-with-lease",
       "-u",
-      "origin",
+      pushRemote,
       "HEAD",
     ]);
     if (push?.error || (push?.status ?? 1) !== 0) {
