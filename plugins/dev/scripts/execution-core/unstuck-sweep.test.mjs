@@ -16,6 +16,9 @@ import {
   emitUnstuckEvent,
 } from "./unstuck-sweep.mjs";
 import { buildUnstuckActSeams } from "./unstuck-act-seams.mjs";
+// CTL-1216: resolve through the production leaf so this fixture follows the
+// ACTIVE scheme rather than pinning the monthly one.
+import { eventLogBasenameFor, resolveRotationScheme } from "../lib/event-log-paths.mjs";
 
 // ---------------------------------------------------------------------------
 // classifyStalledTicket — pure top-level router (CTL-1064)
@@ -532,7 +535,7 @@ describe("emitUnstuckEvent — dedicated unified-log emitter (CTL-1064)", () => 
   let SCRATCH, LOG_PATH, prevDir;
   beforeEach(() => {
     SCRATCH = mkdtempSync(join(tmpdir(), "unstuck-emit-"));
-    const ym = `${new Date().getUTCFullYear()}-${String(new Date().getUTCMonth() + 1).padStart(2, "0")}`;
+    const ym = eventLogBasenameFor(new Date(), resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
     LOG_PATH = join(SCRATCH, "events", `${ym}.jsonl`);
     prevDir = process.env.CATALYST_DIR;
     process.env.CATALYST_DIR = SCRATCH;

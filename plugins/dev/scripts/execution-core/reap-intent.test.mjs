@@ -3,13 +3,17 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+// CTL-1216: resolve the event-log filename through the production leaf so this
+// fixture follows the ACTIVE scheme. A pinned monthly name addresses a file the
+// code under test never opens.
+import { eventLogBasenameFor, resolveRotationScheme } from "../lib/event-log-paths.mjs";
 
 let SCRATCH;
 let LOG_PATH;
 
 beforeEach(() => {
   SCRATCH = mkdtempSync(join(tmpdir(), "reap-intent-"));
-  const yyyymm = new Date().toISOString().slice(0, 7);
+  const yyyymm = eventLogBasenameFor(new Date(), resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
   LOG_PATH = join(SCRATCH, "events", `${yyyymm}.jsonl`);
   process.env.CATALYST_DIR = SCRATCH;
 });

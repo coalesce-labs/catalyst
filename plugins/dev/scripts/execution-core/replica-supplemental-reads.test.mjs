@@ -15,6 +15,10 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createReplicaReader, synthesizeStateType } from "./replica-read.mjs";
+// CTL-1216: resolve the event-log filename through the production leaf so this
+// fixture follows the ACTIVE scheme. A pinned monthly name addresses a file the
+// code under test never opens.
+import { eventLogBasenameFor, resolveRotationScheme } from "../lib/event-log-paths.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -575,7 +579,7 @@ describe("linear-estimation-method — CTL-1806 D1: the degraded fetch is LABELL
 
   function readEvents(dir) {
     const now = new Date();
-    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const ym = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
     const p = join(dir, "events", `${ym}.jsonl`);
     let raw;
     try {

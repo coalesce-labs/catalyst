@@ -462,9 +462,13 @@ describe("usage", () => {
 // Proves the emit fires END-TO-END through main() on both success and failure,
 // landing a canonical line in the hermetic event log (CATALYST_DIR/events/…).
 import { readFileSync as _readFileSync, existsSync as _existsSync } from "node:fs";
+// CTL-1216: resolve the event-log filename through the production leaf so this
+// fixture follows the ACTIVE scheme. A pinned monthly name addresses a file the
+// code under test never opens.
+import { eventLogBasenameFor, resolveRotationScheme } from "../lib/event-log-paths.mjs";
 function readLinearReadEvents() {
   const now = new Date();
-  const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+  const ym = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
   const path = join(process.env.CATALYST_DIR, "events", `${ym}.jsonl`);
   if (!_existsSync(path)) return [];
   return _readFileSync(path, "utf8")

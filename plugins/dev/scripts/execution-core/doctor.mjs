@@ -179,14 +179,9 @@ import { listProjects } from "./registry.mjs";
 import { collectConfigDump } from "./config-dump.mjs";
 import { probePublishCapability, resolvePushRemote } from "./publish-preflight.mjs"; // CAT-60: worker write-capability gate
 import { resolvePublishPreflightMode } from "./config.mjs";
-// CTL-1216: THE event-log window resolver. A zero-npm-import leaf, which is
-// what lets bare-Node `catalyst doctor` import it with no node_modules.
-import {
-  resolveEventLogPathsForWindow,
-  eventLogBasenameFor,
-  resolveRotationScheme,
-  parseEventLogBasename,
-} from "../lib/event-log-paths.mjs";
+// CTL-1216: the event-log window resolver for the sdk-bg-fallback scan. Lives in
+// its own module rather than inline HERE — see doctor-event-log-window.mjs.
+import { eventLogPathsForWindow } from "./doctor-event-log-window.mjs";
 
 // readLinearBotUserIds — inlined from daemon.mjs to avoid pulling in the full
 // daemon dependency chain (which includes bun: protocol imports incompatible
@@ -2316,55 +2311,6 @@ function procIsDaemon(psText, pidFilePath) {
   return /(?:^|\s|\/)daemon\.mjs(?:\s|$)/.test(psText) && psText.includes(`--pid-file ${pidFilePath}`);
 }
 
-// eventLogPathsForWindow — every log file overlapping [sinceMs, nowMs], oldest
-// -first. CTL-1216: this replaces monthlyLogPath + a hand-built "current, plus
-// the previous month if the cutoff crossed a boundary" pair (Codex P2: a
-// fallback written just before the boundary is still inside 24h but lives in
-// the previous file). That pair covers the window only while a file is about a
-// month long; the resolver enumerates the directory instead, so it stays correct
-// under weekly rotation and across a scheme change, where a YYYY-MM.jsonl and a
-// YYYY-Www.jsonl sit side by side and neither computed name finds the other.
-function eventLogPathsForWindow(eventsDir, nowMs, windowMs) {
-  const dir = resolve(eventsDir);
-  const sinceMs = nowMs - windowMs;
-  const scheme = resolveRotationScheme({ env: process.env });
-
-  // The COMPUTED floor: the file holding the cutoff and the file holding now.
-  // This is exactly the pair the pre-CTL-1216 code built, and it is kept as a
-  // floor rather than replaced, because enumeration answers "" for a directory
-  // it cannot read — and a check whose job is to DETECT something must never
-  // conclude "clean" from an empty input set. `[].every(p)` is `true`, and a
-  // zero-path loop printing an all-clear is a false-clean this repo has shipped
-  // before. It also keeps the resolver honest under an injected scan seam, where
-  // there is no real directory to enumerate at all.
-  const floor = [
-    join(dir, eventLogBasenameFor(new Date(sinceMs), scheme)),
-    join(dir, eventLogBasenameFor(new Date(nowMs), scheme)),
-  ];
-
-  // The ENUMERATED set: everything actually on disk that overlaps the window.
-  // This is the generalization — a weekly window can span more than two files,
-  // and across a scheme change a YYYY-MM.jsonl sits beside a YYYY-Www.jsonl
-  // where neither computed name finds the other.
-  const found = resolveEventLogPathsForWindow({
-    eventsDir: dir,
-    sinceMs,
-    nowMs,
-    env: process.env,
-  });
-
-  // Union, oldest-first. Sorting by the interval each NAME encodes, never
-  // lexically: "2026-08.jsonl" and "2026-W34.jsonl" do not sort chronologically
-  // as strings.
-  const seen = new Map();
-  for (const pth of [...floor, ...found]) {
-    const abs = resolve(pth);
-    if (seen.has(abs)) continue;
-    const iv = parseEventLogBasename(basename(abs));
-    seen.set(abs, iv ? iv.startMs : 0);
-  }
-  return [...seen.entries()].sort((a, b) => a[1] - b[1]).map(([abs]) => abs);
-}
 
 // scanRecentBgFallback — CTL-1396 item A (3): the daemon-boot auth gate
 // (resolveSdkBootExecutor) emits `execution-core.executor.bg-fallback` to the

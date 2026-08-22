@@ -2,6 +2,10 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+// CTL-1216: resolve the event-log filename through the production leaf so this
+// fixture follows the ACTIVE scheme. A pinned monthly name addresses a file the
+// code under test never opens.
+import { eventLogBasenameFor, resolveRotationScheme } from "../../lib/event-log-paths.mjs";
 
 const CLOUD_SYNC = resolve(import.meta.dir, "../cloud-sync.mjs");
 const scratch = [];
@@ -41,7 +45,7 @@ function runCloudSync({ catalystDir = tempDir(), token } = {}) {
 
 function eventsFrom(dir) {
   const now = new Date();
-  const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+  const ym = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
   const text = readFileSync(join(dir, "events", `${ym}.jsonl`), "utf8");
   return text.trim().split("\n").map(JSON.parse);
 }

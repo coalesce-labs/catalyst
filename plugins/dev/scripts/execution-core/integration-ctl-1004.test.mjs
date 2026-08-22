@@ -9,6 +9,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { schedulerTick, __resetForTests } from "./scheduler.mjs";
 import { openBeliefsDb } from "./beliefs/schema.mjs";
+// CTL-1216: resolve through the production leaf so this fixture follows the
+// ACTIVE scheme rather than pinning the monthly one.
+import { eventLogBasenameFor, resolveRotationScheme } from "../lib/event-log-paths.mjs";
 
 const NOW = Date.parse("2026-06-11T12:00:00Z");
 
@@ -306,7 +309,7 @@ describe("CTL-1005/CTL-1056 J3 integration — the real emitter accepts janitor.
 
   // Read every event the unified log captured under the redirected CATALYST_DIR.
   function readEvents() {
-    const ym = new Date(NOW).toISOString().slice(0, 7);
+    const ym = eventLogBasenameFor(new Date(NOW), resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
     const logPath = join(orchDir, "events", `${ym}.jsonl`);
     if (!existsSync(logPath)) return [];
     return readFileSync(logPath, "utf8")
@@ -484,7 +487,7 @@ describe("CTL-1242 J4 integration — real emitter accepts janitor.signals.gc / 
   }
 
   function readEvents() {
-    const ym = new Date(NOW).toISOString().slice(0, 7);
+    const ym = eventLogBasenameFor(new Date(NOW), resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
     const logPath = join(orchDir, "events", `${ym}.jsonl`);
     if (!existsSync(logPath)) return [];
     return readFileSync(logPath, "utf8")

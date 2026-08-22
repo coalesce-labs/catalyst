@@ -153,7 +153,7 @@ function writeSignalRaw(ticket, phase, obj) {
 // and returns parsed event objects. Returns [] on missing/empty log.
 function readEventLog() {
   const now = new Date();
-  const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+  const ym = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
   const logPath = join(catalystDir, "events", `${ym}.jsonl`);
   try {
     return readFileSync(logPath, "utf8")
@@ -172,7 +172,7 @@ function appendToEventLog(line) {
   const dir = join(catalystDir, "events");
   mkdirSync(dir, { recursive: true });
   const now = new Date();
-  const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+  const ym = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
   appendFileSync(join(dir, `${ym}.jsonl`), line);
 }
 
@@ -3705,7 +3705,7 @@ describe("schedulerTick — CTL-657 live-count concurrency & predecessor reap", 
 
   function readEventLog() {
     const now = new Date();
-    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const ym = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
     const p = join(catalystDir, "events", `${ym}.jsonl`);
     if (!existsSync(p)) return [];
     return readFileSync(p, "utf8")
@@ -6636,7 +6636,7 @@ describe("CTL-653: schedulerTick verify⇄remediate cycle (end-to-end)", () => {
 // envelope.
 function readEventLogLines() {
   const now = new Date();
-  const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+  const ym = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
   const logPath = join(catalystDir, "events", `${ym}.jsonl`);
   if (!existsSync(logPath)) return [];
   return readFileSync(logPath, "utf8")
@@ -7264,6 +7264,10 @@ describe("CTL-660: phase.dispatch.requested/launched emission (scheduler)", () =
 
 // ─── CTL-705 Phase 2: stageRankForTicket, readWorkerPriority, writeWorkerPriority, buildGlobalRanking ───
 import { PHASES } from "../lib/phase-fsm.mjs";
+// CTL-1216: resolve the event-log filename through the production leaf so this
+// fixture follows the ACTIVE scheme. A pinned monthly name addresses a file the
+// code under test never opens.
+import { eventLogBasenameFor, resolveRotationScheme } from "../lib/event-log-paths.mjs";
 
 describe("STAGE_RANK (CTL-705)", () => {
   test("keys are exactly PHASES + 'remediate'", () => {

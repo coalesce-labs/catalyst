@@ -20,6 +20,10 @@ import {
 import { dirname as pathDirname, join as pathJoin } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+// CTL-1216: resolve the event-log filename through the production leaf so this
+// fixture follows the ACTIVE scheme. A pinned monthly name addresses a file the
+// code under test never opens.
+import { eventLogBasenameFor, resolveRotationScheme } from "../lib/event-log-paths.mjs";
 
 const CLI = fileURLToPath(new URL("./recovery-emit.mjs", import.meta.url));
 
@@ -31,7 +35,7 @@ let linearisCallsFile; // CTL-1568: every stub linearis invocation, one per line
 
 function eventLogPath() {
   const now = new Date();
-  const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+  const ym = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
   return pathJoin(catalystDir, "events", `${ym}.jsonl`);
 }
 

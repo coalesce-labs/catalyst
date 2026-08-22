@@ -28,6 +28,10 @@ import {
   runPrelaunch,
 } from "./sdk-run-phase-agent.mjs";
 import { ASSERTED_BY } from "./assertion-evidence.mjs"; // CTL-1789: terminal-writer attribution
+// CTL-1216: resolve the event-log filename through the production leaf so this
+// fixture follows the ACTIVE scheme. A pinned monthly name addresses a file the
+// code under test never opens.
+import { eventLogBasenameFor, resolveRotationScheme } from "../lib/event-log-paths.mjs";
 
 // ── Fakes ───────────────────────────────────────────────────────────────────
 
@@ -2063,7 +2067,7 @@ describe("defaultAppendEventLog — CTL-1488 stamps the coordination stream clas
     try {
       defaultAppendEventLog({ phase: "implement", ticket: "CTL-1", status: "failed", reason: "sdk-threw" });
       const now = new Date();
-      const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+      const ym = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
       const logPath = join(dir, "events", `${ym}.jsonl`);
       const line = readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean).pop();
       const ev = JSON.parse(line);
@@ -2222,7 +2226,7 @@ describe("CTL-1814 — the fallback terminal event carries its orchestrator", ()
     try {
       defaultAppendEventLog(args);
       const now = new Date();
-      const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+      const ym = eventLogBasenameFor(now, resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
       const line = readFileSync(join(dir, "events", `${ym}.jsonl`), "utf8")
         .trim()
         .split("\n")

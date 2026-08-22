@@ -5,6 +5,9 @@ import { describe, test, expect, beforeEach } from "bun:test";
 import { mkdtempSync, mkdirSync, appendFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+// CTL-1216: resolve through the production leaf so this fixture follows the
+// ACTIVE scheme rather than pinning the monthly one.
+import { eventLogBasenameFor, resolveRotationScheme } from "../lib/event-log-paths.mjs";
 
 let catalystDir;
 let logPath;
@@ -17,7 +20,7 @@ function appendFlat(obj) {
 
 beforeEach(async () => {
   catalystDir = mkdtempSync(join(tmpdir(), "reap-metrics-"));
-  const ym = `${new Date().getUTCFullYear()}-${String(new Date().getUTCMonth() + 1).padStart(2, "0")}`;
+  const ym = eventLogBasenameFor(new Date(), resolveRotationScheme({ env: process.env })).replace(/\.jsonl$/, "");
   logPath = join(catalystDir, "events", `${ym}.jsonl`);
   // Reset the incremental index so each test starts from a clean slate.
   const { __resetReaperMetricsIndexForTest } = await import(
