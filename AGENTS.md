@@ -136,8 +136,16 @@ replica-read rule below is absolute).
   - **Escalate inward, never outward:** instrument → steward → concierge → human (as an ask). An agent or
     instrument that pages a human directly is a defect, and a bare label in a human's queue is a defect.
   - **A stuck agent is a request for help, NOT an escalation — and the steward's job is to answer it.**
-    The steward holds the broader context and has the standing mandate to *unblock*, not to relay. Before
-    anything reaches a human they must answer three questions: **can I decide this myself?** (technical
+    The steward holds the broader context and has the standing mandate to *unblock*, not to relay.
+    ⛔ **Gate zero — do you even know WHY it is stuck?** "Why has this not moved?" is **never** an
+    escalation; it is a diagnosis job you **dispatch yourself, automatically**, the moment you notice a
+    stall, a no-pickup, a phase that will not advance, or a PR that will not merge. Never file an ask
+    whose options amount to *investigate vs don't investigate* or *wait vs look* — that spends a human's
+    attention authorising work the agent could simply have done. When you do escalate afterwards, lead
+    with **the cause**: an ask carrying a diagnosis is worth a human's time, an ask carrying a question
+    mark usually is not. (Ryan, 2026-08-21, on an ask that offered him "leave it — it will pick up on its
+    own" versus "investigate", and then held a P1 as his top blocking item for ~13h.)
+    Only once the cause is known do the next three questions apply: **can I decide this myself?** (technical
     calls — which approach, retry-or-abandon, rebase-or-re-cut — are theirs, not the human's); **does this
     need to block at all?** (if a sane default exists, take it and record it — see the ask rule above);
     and **who else can move this?** They may pull in another agent, another steward, or the human, and
