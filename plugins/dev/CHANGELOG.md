@@ -1,5 +1,12 @@
 # Changelog
 
+## [12.64.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.63.0...catalyst-dev-v12.64.0) (2026-08-22)
+
+
+### Features
+
+* **dev:** CTL-1890 — single locked seam for ~/.claude.json mutations ([#3420](https://github.com/coalesce-labs/catalyst/issues/3420)) ([5060613](https://github.com/coalesce-labs/catalyst/commit/506061366827efe49cba149ce8b83c08a430ea85))
+
 ## [12.63.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.62.0...catalyst-dev-v12.63.0) (2026-08-22)
 
 
