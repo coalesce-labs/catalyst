@@ -226,9 +226,9 @@ printf '{"state":"MERGED","mergedAt":"2026-01-01T00:00:00Z","number":9999}\n'
 GH1
 chmod +x "$STUB_BIN/gh"
 
-MONTH=$(date -u +%Y-%m)
+MONTH=$(_ctl1216_active_log_basename)
 mkdir -p "$FAKE_HOME/catalyst/events"
-: > "$FAKE_HOME/catalyst/events/${MONTH}.jsonl"
+: > "$FAKE_HOME/catalyst/events/${MONTH}"
 
 (
   cd "$WT_PATH" || exit 1
@@ -323,7 +323,7 @@ fi
 
 # 1f. Emitted event
 EMITTED="$(jq -r '.attributes."event.name" // empty' \
-  "$FAKE_HOME/catalyst/events/${MONTH}.jsonl" 2>/dev/null | grep '^phase\.teardown\.' | tail -1)"
+  "$FAKE_HOME/catalyst/events/${MONTH}" 2>/dev/null | grep '^phase\.teardown\.' | tail -1)"
 assert_eq "case1: emitted phase.teardown.complete event" \
   "phase.teardown.complete.CTL-9999" "$EMITTED"
 
@@ -357,9 +357,9 @@ linear_comment_post_stub_install "$STUB_BIN2" "$C2/linear-comment-calls.log"
 install_linear_transition_stub "$PLUGIN_ROOT2" "$C2/linear-transition-calls.log"
 install_presweep_stub "$PLUGIN_ROOT2"
 
-MONTH2=$(date -u +%Y-%m)
+MONTH2=$(_ctl1216_active_log_basename)
 mkdir -p "$FAKE_HOME2/catalyst/events"
-: > "$FAKE_HOME2/catalyst/events/${MONTH2}.jsonl"
+: > "$FAKE_HOME2/catalyst/events/${MONTH2}"
 
 (
   cd "$WT_PATH2" || exit 1
@@ -396,7 +396,7 @@ fi
 
 # Emitted failed event
 FAIL_EVENT2="$(jq -r '.attributes."event.name" // empty' \
-  "$FAKE_HOME2/catalyst/events/${MONTH2}.jsonl" 2>/dev/null | grep '^phase\.teardown\.' | tail -1)"
+  "$FAKE_HOME2/catalyst/events/${MONTH2}" 2>/dev/null | grep '^phase\.teardown\.' | tail -1)"
 assert_eq "case2: emits phase.teardown.failed event" \
   "phase.teardown.failed.CTL-9999" "$FAIL_EVENT2"
 
@@ -449,9 +449,9 @@ chmod +x "$STUB_BIN3/gh"
 jq -nc --arg s "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{status:"running",startedAt:$s}' \
   > "$WORKER3/phase-teardown.json"
 
-MONTH3=$(date -u +%Y-%m)
+MONTH3=$(_ctl1216_active_log_basename)
 mkdir -p "$FAKE_HOME3/catalyst/events"
-: > "$FAKE_HOME3/catalyst/events/${MONTH3}.jsonl"
+: > "$FAKE_HOME3/catalyst/events/${MONTH3}"
 
 (
   cd "$WT_PATH3" || exit 1
@@ -536,9 +536,9 @@ run_prior_artifact_case() {
   install_linear_transition_stub "$PLUGIN_ROOTX" "$CDIR/linear-transition-calls.log"
   install_presweep_stub "$PLUGIN_ROOTX"
 
-  local MONTHX; MONTHX=$(date -u +%Y-%m)
+  local MONTHX; MONTHX=$(_ctl1216_active_log_basename)
   mkdir -p "$FAKE_HOMEX/catalyst/events"
-  : > "$FAKE_HOMEX/catalyst/events/${MONTHX}.jsonl"
+  : > "$FAKE_HOMEX/catalyst/events/${MONTHX}"
 
   (
     cd "$WT_PATHX" || exit 1
@@ -568,7 +568,7 @@ run_prior_artifact_case() {
 
   local EVX
   EVX="$(jq -r '.attributes."event.name" // empty' \
-    "$FAKE_HOMEX/catalyst/events/${MONTHX}.jsonl" 2>/dev/null | grep '^phase\.teardown\.' | tail -1)"
+    "$FAKE_HOMEX/catalyst/events/${MONTHX}" 2>/dev/null | grep '^phase\.teardown\.' | tail -1)"
   assert_eq "$label: emits phase.teardown.failed event" \
     "phase.teardown.failed.CTL-9999" "$EVX"
 
@@ -635,9 +635,9 @@ setup_b_case() {
   linear_comment_post_stub_install "$STUB_BINB" "$CDIR/linear-comment-calls.log"
   install_linear_transition_stub "$PLUGIN_ROOTB" "$CDIR/linear-transition-calls.log"
   install_presweep_stub "$PLUGIN_ROOTB"
-  local MONTHB; MONTHB=$(date -u +%Y-%m)
+  local MONTHB; MONTHB=$(_ctl1216_active_log_basename)
   mkdir -p "$FAKE_HOMEB/catalyst/events"
-  : > "$FAKE_HOMEB/catalyst/events/${MONTHB}.jsonl"
+  : > "$FAKE_HOMEB/catalyst/events/${MONTHB}"
 }
 
 run_b_case() {

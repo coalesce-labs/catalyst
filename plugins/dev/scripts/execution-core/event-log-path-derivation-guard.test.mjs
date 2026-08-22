@@ -44,11 +44,15 @@ const SCAN_BARE = new Set(["catalyst-events", "catalyst-stack", "catalyst-comms"
 //   JS/TS:  `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2,"0")}`
 //   JS/TS:  d.toISOString().slice(0, 7)
 //   bash:   $(date -u +%Y-%m)
+// ⚠️ `-u` is OPTIONAL in these two. The first cut required it and therefore
+// MISSED god-gather.sh, a production site spelling it `$(date +%Y-%m)` — a
+// scanner narrower than the thing it scans for is the same class of defect as
+// the one this guard exists to catch, one level up.
 const DERIVATION_PATTERNS = [
   /getUTCMonth\(\)\s*\+\s*1/,
   /toISOString\(\)\.slice\(0,\s*7\)/,
-  /date\s+-u\s+\+%Y-%m\)/,
-  /date\s+-u\s+\+%G-W%V\)/,
+  /date\s+(?:-u\s+)?\+%Y-%m\)/,
+  /date\s+(?:-u\s+)?\+%G-W%V\)/,
 ];
 
 // Files that OWN the derivation — the leaf, its bash mirror, and their tests.
@@ -136,6 +140,7 @@ const ALLOWED_REMAINING = [
   "lib/emit-reap-intent.sh",
   "catalyst-stack",
   "catalyst-hud-classic.sh",
+  "god-gather.sh",
 
   // ── standalone helper scripts, outside the ticket's declared blast radius ─
   // Neither writes to nor reads the live fleet log on any production path.
@@ -170,6 +175,8 @@ test("the scanner detects each derivation shape, not just the first (positive co
     "a.mjs": 'const ym = `${y}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;\n',
     "b.ts": 'const ym = d.toISOString().slice(0, 7);\n',
     "c.sh": 'f="$dir/$(date -u +%Y-%m).jsonl"\n',
+    // The -u-LESS spelling. god-gather.sh used it and the first regex missed it.
+    "e.sh": 'f="$dir/$(date +%Y-%m).jsonl"\n',
     "d.sh": 'f="$dir/$(date -u +%G-W%V).jsonl"\n',
   };
   for (const [name, body] of Object.entries(shapes)) {

@@ -22,6 +22,16 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# CTL-1216: resolve the event-log basename through the SAME mirror the code under
+# test uses. Fails LOUD on a bad path — a silent fallback to the monthly name
+# reproduces the old behaviour while looking like it resolved.
+_ctl1216_active_log_basename() {
+  local _lib="${SCRIPT_DIR}/../lib/catalyst-event-log-paths.sh"
+  [[ -r "$_lib" ]] || { echo "FATAL: event-log path mirror not readable at $_lib" >&2; exit 1; }
+  ( . "$_lib" >/dev/null 2>&1 && catalyst_event_log_basename )
+}
+
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 # write-phase-thoughts-doc.sh writes a CWD-relative path; cases that don't
 # explicitly `cd` (Case 1) write under whatever directory this script itself
@@ -46,8 +56,8 @@ assert_file_exists() { if [ -f "$2" ]; then ok "$1"; else fail "$1" "missing fil
 # $CATALYST_EVENTS_FILE). Read the last phase event line from a case's catalyst dir.
 read_phase_event_line() {
   local catalyst_dir="$1" month
-  month=$(date -u +%Y-%m)
-  local logfile="${catalyst_dir}/events/${month}.jsonl"
+  month=$(_ctl1216_active_log_basename)
+  local logfile="${catalyst_dir}/events/${month}"
   [ -f "$logfile" ] || { echo ""; return 1; }
   grep -F '"event.name":"phase.' "$logfile" | tail -1
 }
@@ -196,8 +206,8 @@ EOF
   local catalyst_dir="$case_dir/catalyst"
   mkdir -p "$catalyst_dir/events"
   local month
-  month=$(date -u +%Y-%m)
-  : > "$catalyst_dir/events/${month}.jsonl"
+  month=$(_ctl1216_active_log_basename)
+  : > "$catalyst_dir/events/${month}"
 
   (
     PATH="$case_dir/bin:$PATH" \
@@ -399,9 +409,9 @@ fi
 
 # CTL-512: skipped now flows through phase-agent-emit-complete, which emits
 # to $CATALYST_DIR/events/YYYY-MM.jsonl rather than $CATALYST_EVENTS_FILE.
-SKIP_MONTH=$(date -u +%Y-%m)
+SKIP_MONTH=$(_ctl1216_active_log_basename)
 SKIP_EVENT="$(jq -r '.attributes."event.name" // empty' \
-              "$CASE_DIR3/catalyst/events/${SKIP_MONTH}.jsonl" 2>/dev/null \
+              "$CASE_DIR3/catalyst/events/${SKIP_MONTH}" 2>/dev/null \
               | grep '^phase\.monitor-deploy\.' | tail -1)"
 assert_eq "skipped: emitted skipped event" \
   "phase.monitor-deploy.skipped.CTL-9999" "$SKIP_EVENT"
