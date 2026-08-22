@@ -1015,7 +1015,20 @@ export function createLinearWriteProxy({
       if (!verdict.applied) return fail(verdict.reason, verdict.status, verdict.detail ?? null);
       counts.applied += 1;
       emit(EVENT_APPLIED, { ticket, routeId, reason: null, status: verdict.status, applied: true, caller, labels });
-      return { handled: true, applied: true, reason: null, status: verdict.status };
+      // CTL-2098: surface `converged` (this route's own already-converged verdict —
+      // e.g. an already-absent label on a `remove`) ADDITIVELY. Ryan's decision
+      // 2026-08-21: do not repurpose `applied`, and do not introduce a `wrote:false`
+      // here — every existing caller already reads `applied:true` as "request
+      // accepted/converged" and changing that risks retry storms. This is a new,
+      // purely additive fact for callers that need to distinguish a no-op from a
+      // real write (label-guard's marker-retention gate).
+      return {
+        handled: true,
+        applied: true,
+        reason: null,
+        status: verdict.status,
+        ...(verdict.converged ? { converged: true } : {}),
+      };
     },
 
     /**
