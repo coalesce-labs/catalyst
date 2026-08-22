@@ -4448,6 +4448,52 @@ describe("escalateExhaustedIntents — transient-infra exemption (CTL-1563)", ()
     }
   });
 
+  test("the envelope promotes the refunded/blocked BOOLEANS, not just the numbers", () => {
+    // `num`/`str` (promoteNumericAttrs' only helpers) both REJECT a boolean, so
+    // these two need their own promotion — and they are the pair that tells a
+    // refunding defer from a throttled one, which is the whole point of the
+    // backoff being observable. Asserted through buildRecoveryEnvelope because
+    // otel-forward ships attributes only; body.payload is stripped off-machine.
+    const refunding = buildRecoveryEnvelope(
+      {
+        type: "recovery.transient-defer",
+        ticket: "CTL-E1",
+        reason: "sdk-overloaded-exhausted",
+        details: {
+          transientReason: "sdk-overloaded-exhausted",
+          attemptsBefore: 2,
+          attemptsAfter: 1,
+          refunded: true,
+          backoffBlocked: false,
+        },
+      },
+      { now: () => "2026-07-29T12:00:00Z" },
+    );
+    expect(refunding.attributes["event.name"]).toBe("recovery.transient-defer");
+    expect(refunding.attributes["event.label"]).toBe("CTL-E1");
+    expect(refunding.attributes["recovery.transient_reason"]).toBe("sdk-overloaded-exhausted");
+    expect(refunding.attributes["recovery.attempts_before"]).toBe(2);
+    expect(refunding.attributes["recovery.attempts_after"]).toBe(1);
+    expect(refunding.attributes["recovery.refunded"]).toBe(true);
+    expect(refunding.attributes["recovery.backoff_blocked"]).toBe(false);
+
+    const throttled = buildRecoveryEnvelope(
+      {
+        type: "recovery.transient-defer",
+        ticket: "CTL-E2",
+        details: { attemptsBefore: 2, attemptsAfter: 2, refunded: false, backoffBlocked: true },
+      },
+      { now: () => "2026-07-29T12:00:00Z" },
+    );
+    expect(throttled.attributes["recovery.refunded"]).toBe(false);
+    expect(throttled.attributes["recovery.backoff_blocked"]).toBe(true);
+    // …and the two postures are distinguishable from attributes ALONE, which is
+    // all a Loki/Grafana consumer ever sees.
+    expect(refunding.attributes["recovery.refunded"]).not.toBe(
+      throttled.attributes["recovery.refunded"],
+    );
+  });
+
   test("the refund FLOORS at zero — a transient exemption never writes a negative attempt count", () => {
     const t0 = 1_000_000_000_000;
     // maxAttempts:1 makes a 1-attempt ledger sweepable, so the refund arithmetic

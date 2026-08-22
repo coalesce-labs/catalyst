@@ -1781,17 +1781,6 @@ function promoteNumericAttrs(type, details) {
     num("recovery.terminal_skipped", details.terminalSkipped?.length);
     str("recovery.mode", details.mode);
   } else if (type === "recovery.transient-defer") {
-    // CTL-1563. otel-forward ships ONLY `attributes` off-host — a detail left
-    // here un-promoted is invisible to Loki/Grafana, which is exactly how CAT-170's
-    // shadow event ended up carrying nothing but its own name. `refunded` is
-    // promoted as a STRING because `str`/`num` are the only promoters and a
-    // boolean would be silently dropped; it is the operationally interesting bit
-    // (a burst that is still buying retries vs one that has backed off).
-    str("recovery.transient_reason", details.transientReason);
-    num("recovery.attempts_before", details.attemptsBefore);
-    num("recovery.attempts_after", details.attemptsAfter);
-    str("recovery.transient_refunded", details.refunded === true ? "true" : "false");
-  } else if (type === "recovery.transient-defer") {
     // CTL-1563. otel-forward ships ONLY `attributes` off-machine (`body.payload` is
     // stripped), so every field an operator needs to attribute an overload burst
     // must be promoted here. Un-promoted, this event would reach Loki/Grafana as a
