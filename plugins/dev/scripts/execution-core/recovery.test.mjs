@@ -409,9 +409,97 @@ describe("defaultStatJob", () => {
     expect(defaultStatJob("job-still-read")?.state).toBe("running");
   });
 
-  // The classification the reclaim path consumes when there is genuinely no job.
-  test("CTL-2110: jobLifecycle(null) is dead-gone rather than a throw", () => {
+  // A UNIT-level guard only. Codex review on PR #3936 correctly noted that this
+  // calls jobLifecycle directly and so BYPASSES the production classifier — on its
+  // own it cannot tell us whether the fix reaches production. It is kept because
+  // the guard it covers is real, but the load-bearing assertion is the end-to-end
+  // one below ("the shape the fleet actually produces"), which drives
+  // reclaimDeadWorkIfPossible with no seam on the liveness decision at all.
+  test("CTL-2110 (unit): jobLifecycle(null) is dead-gone rather than a throw", () => {
     expect(jobLifecycle(null)).toBe("dead-gone");
+  });
+});
+
+// --- CTL-2110 — END-TO-END through the production classifier ----------------
+//
+// Answers the Codex P1 on PR #3936 directly: "classifyWorker branches on
+// !live?.value BEFORE it can call jobLifecycle … consequently this change does
+// not alter slot reclamation."
+//
+// That is true for the "unknown" verdict and FALSE for the "dead" one, which is
+// the fleet's case. The hop chain, all in this repo:
+//
+//   scheduler.mjs:6667  hands EVERY in-flight signal to reclaimDeadWork
+//   recovery.mjs:2833   reclaimDeadWorkIfPossible calls classifyWorker itself
+//   recovery.mjs:441    bg-less branch -> classifyDispatchDeadline
+//   recovery.mjs:452    `return verdict.expired ? "dead" : "unknown"`
+//   recovery.mjs:2838   `if (klass === "terminal" || klass === "unknown") return "noop"`
+//                       <- "dead" is NOT caught here; execution continues
+//   recovery.mjs:3358   the liveness decision — where the null id used to throw
+//
+// So being classified dead is exactly what routes a signal INTO the crashing
+// line, not around it. Classification is not reclamation.
+//
+// This test uses NO seam on the liveness decision — no sdkWorkerLive, no
+// statJob, no jobLifecycle override. On clean origin/main it throws
+// `The "paths[1]" property must be of type string, got object`; here it must
+// reach a real reclaim outcome.
+describe("CTL-2110 end-to-end — the shape the fleet actually produces", () => {
+  let dir;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "exec-core-ctl2110-e2e-"));
+    mkdirSync(join(dir, "workers", "CTL-2104"), { recursive: true });
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  test("an expired executor:sdk signal with bg_job_id null is reclaimed, not thrown on", () => {
+    // Boot stamped AFTER the dispatch fires Rule 1 (dispatch-predates-boot,
+    // phase-dispatch-deadline.mjs:243) — an in-process SDK worker cannot survive
+    // its daemon's restart. This is the real CTL-2104/implement shape, down to
+    // generation 11.
+    writeFileSync(
+      join(dir, "daemon-boot.json"),
+      JSON.stringify({ bootedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString() }),
+    );
+    const startedAt = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+    const raw = {
+      ticket: "CTL-2104",
+      phase: "implement",
+      status: "dispatched",
+      executor: "sdk",
+      bg_job_id: null,
+      orchestrator: "CTL-2104",
+      attempt: 1,
+      generation: 11,
+      startedAt,
+      updatedAt: startedAt,
+    };
+    const signalPath = join(dir, "workers", "CTL-2104", "phase-implement.json");
+    writeFileSync(signalPath, JSON.stringify(raw, null, 2));
+    const signal = { ticket: "CTL-2104", phase: "implement", status: "dispatched", signalPath, raw };
+
+    // Pin the premise the whole argument rests on: the production classifier
+    // calls this signal DEAD, so recovery.mjs:2838 does not short-circuit it.
+    const bootedMs = Date.now() - 60 * 60 * 1000;
+    expect(classifyWorker(signal, { bootedMs })).toBe("dead");
+
+    let threw = null;
+    let outcome;
+    try {
+      outcome = reclaimDeadWorkIfPossible(dir, signal, {
+        // Only the SIDE EFFECTS are stubbed. Nothing on the liveness decision.
+        killBgJob: () => true,
+        reviveDispatch: () => true,
+        applyStalledLabel: () => true,
+        appendEscalatedEvent: () => true,
+      });
+    } catch (err) {
+      threw = err;
+    }
+    expect(threw).toBeNull();
+    // Reaching a real outcome IS the slot being freed — "noop" would mean the
+    // signal was skipped again, which is the bug.
+    expect(String(outcome)).not.toBe("noop");
   });
 });
 
