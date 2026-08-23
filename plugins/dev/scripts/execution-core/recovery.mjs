@@ -46,6 +46,13 @@ import {
   MAX_DISPATCHED_MS,
   MIN_DISPATCH_AGE_MS,
 } from "../lib/phase-dispatch-deadline.mjs";
+// CTL-2110: the SDK-native liveness probe for a worker that has no bg_job_id.
+// sdk-worker-registry.mjs's own header names reclaim as a consumer ("the watchdog,
+// preemption cancel, and reclaim/boot-resume all consume") — recovery.mjs simply
+// never imported it, so the bg-keyed death trigger was the only probe here and it
+// is structurally blind to an in-process worker. The registry is a LEAF module
+// (node:fs/node:path only), so importing it introduces no cycle.
+import { isSdkWorkerLive, isSdkWorkerLiveOnDisk } from "./sdk-worker-registry.mjs";
 import {
   getJobsRoot,
   getEventLogPath,
@@ -309,6 +316,29 @@ export function detectSessionRateLimitHit(
 // sweep), deliberately NOT a death trigger — the turn-zero gate keys on the
 // transcript + fresh agents-snapshot state instead.
 export function defaultStatJob(bgJobId) {
+  // CTL-2110 — a bg-less signal must read as "job gone", not blow up the tick.
+  //
+  // `join()` rejects a non-string segment, and `typeof null === "object"`, so
+  // `join(jobsRoot, null, "state.json")` threw
+  //   The "paths[1]" property must be of type string, got object
+  // OUTSIDE the try below. That throw propagated out of jobLifecycle →
+  // reclaimDeadWorkIfPossible → the scheduler's per-worker reclaim step, whose
+  // CTL-702 isolation caught it, logged "per-worker step failed — skipping
+  // signal", and moved on. The consequence is the opposite of a no-op: a signal
+  // with `bg_job_id: null` could NEVER be reclaimed, so it held its dispatch slot
+  // forever. Measured on mini 2026-08-22 21:20 CT — FIVE such signals (CTC-235
+  // teardown, CTC-254 remediate, CTL-1550 monitor-merge, CTL-2011 + CTL-2094
+  // monitor-deploy), all `dispatched` with no live process for ~20 h, pinned
+  // inFlightCount at 5 of maxParallel 6 while `ps` showed ZERO claude processes.
+  // mini-2 held a sixth (CTL-1216 remediate, ~16 h).
+  //
+  // Returning null is the classification the rest of the module already expects
+  // for this case: jobLifecycle maps null → "dead-gone", and classifyWorker's own
+  // header documents a bg-less `dispatched` signal ("an orphan `dispatched`
+  // signal written before claude --bg was spawned") as a state the reclaim path
+  // is meant to handle. The empty string is rejected for the same reason — it
+  // would resolve `join()` to the jobs root itself.
+  if (typeof bgJobId !== "string" || bgJobId === "") return null;
   const file = join(getJobsRoot(), bgJobId, "state.json");
   let st;
   try {
@@ -2578,6 +2608,21 @@ export function reclaimDeadWorkIfPossible(
     // eventually-consistent `claude agents` snapshot reader (livenessForBgJob),
     // which is no longer consulted by the reclaim/death path at all.
     jobLifecycle: jobLifecycleFn = jobLifecycle,
+    // CTL-2110 — SDK-native liveness for a bg-LESS signal. An in-process SDK
+    // worker has `bg_job_id: null` for its whole life, so jobLifecycle (and every
+    // other bg-keyed probe) is structurally blind to it — sdk-worker-registry.mjs
+    // says so in its own header and names reclaim as a consumer, but recovery.mjs
+    // never imported it. Measured 2026-08-22: 442 of 443 phase signals across
+    // mini + mini-2 are `executor:"sdk"` with a null bg_job_id, so this is the
+    // NORMAL shape of a healthy worker, not an anomaly.
+    //
+    // In-process first (authoritative for THIS daemon — the query promise lives on
+    // this event loop), then the disk projection, which is what survives for a
+    // worker registered before a restart. Either saying "live" is enough: a false
+    // "alive" only defers reclaim by one tick, whereas a false "dead" re-dispatches
+    // on top of a running worker — which is the duplicate-launch failure this
+    // ticket exists to stop. Injectable so tests can drive both answers.
+    sdkWorkerLive = (t) => isSdkWorkerLive(t) || isSdkWorkerLiveOnDisk(orchDir, t),
     // CTL-809 — GHOST BREAKER seams. agentsSnapshot returns the FRESH `claude
     // agents` snapshot {agents,isFresh,ageMs}; production reads the warm
     // getAgentsCached, tests inject a fake. ghostGraceMs is the just-dispatched
@@ -3316,7 +3361,27 @@ export function reclaimDeadWorkIfPossible(
   // synchronous `claude agents` starvation. A degraded rollback that misfires in
   // the very incident it would be used for is a footgun; the real rollback for a
   // state.json regression is reverting this change.)
-  const lifecycle = jobLifecycleFn(prevBgJobId, { statJob });
+  // CTL-2110 — a bg-LESS signal never reaches the bg-keyed death trigger.
+  //
+  // Before this branch, `jobLifecycleFn(null)` threw out of defaultStatJob
+  // (`join()` rejects a non-string segment and `typeof null === "object"`), the
+  // scheduler's CTL-702 per-worker isolation swallowed it as "per-worker step
+  // failed — skipping signal", and the signal was therefore NEVER reclaimed:
+  // it held its dispatch slot forever and was re-dispatched generation after
+  // generation. Measured on mini-2: one such throw every 4-12 s, across three
+  // daemon pids, on CTL-2104/implement — the phase that ran to generation 11.
+  //
+  // Merely not throwing is NOT the fix, and is in fact worse: with 442 of 443
+  // fleet signals carrying a null id, mapping null -> "dead-gone" would route
+  // every in-flight SDK worker into the dead branch on every tick (the reclaim
+  // loop at scheduler.mjs hands it EVERY in-flight signal — it does not
+  // pre-filter by classifyWorker). Ask the SDK registry instead, which is the
+  // liveness source that actually knows about in-process workers.
+  const lifecycle = prevBgJobId
+    ? jobLifecycleFn(prevBgJobId, { statJob })
+    : sdkWorkerLive(ticket)
+      ? "alive"
+      : "dead-gone";
 
   // ── alive: NEVER auto-reclaimed. The job's state.json lifecycle is
   //    non-terminal (`working`, or an unreadable-but-present state.json). The
