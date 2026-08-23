@@ -56,7 +56,7 @@ definition. Use `--force-with-lease` to avoid clobbering anyone else's push.
      "${SIGNAL_FILE}" > "${SIGNAL_FILE}.tmp" && mv "${SIGNAL_FILE}.tmp" "${SIGNAL_FILE}"
    ```
    The rescue timer will see `status=rescue-stalled` on the next tick and escalate to
-   `needs-human` with the conflict file list. Do NOT create a new Linear ticket.
+   an escalation carrying the conflict file list. Do NOT create a new Linear ticket.
 
 6. **Run quality gates** — read `.catalyst/config.json:catalyst.qualityGates` (if present)
    and run each gate command in order. They must all pass before pushing. If a gate fails,

@@ -55,6 +55,7 @@ The core daemons start **monitor → broker → execution-core** (CTL-1084 known
 | `uninstall-services` | Unload and remove the auto-start LaunchAgents (leaves running daemons up). |
 | `services-status` | Show whether the auto-start LaunchAgents are installed and loaded. |
 | `claude-account status\|switch\|sync` | Inspect and control the fleet's active Claude OAuth account (see below). |
+| `codex-account status\|switch\|sync` | Inspect and control the fleet's active Codex account (see below). |
 
 ## `claude-account` (CTL-1650)
 
@@ -72,6 +73,104 @@ Fleet-wide Claude OAuth-account control, one command. Reads the durable `setup-t
 `~/.config/catalyst/claude-accounts.env` target file. The same token-free posture is surfaced
 headlessly by the orch-monitor `GET /api/accounts` endpoint (see the
 [orch-monitor API](/reference/orch-monitor-api/)).
+
+## `codex-account` (CTL-2072)
+
+Fleet-wide Codex account control — the Codex twin of `claude-account`, but a materially
+different mechanism. Reads the `codex app-server` account plane and (for `switch`) the
+encrypted **selector** in the `catalyst-cluster` repo's `secrets/node-secret-files.sops.json`.
+
+| Subcommand | Description |
+|------------|-------------|
+| `status` | Run `codex-accounts-usage.mjs` and print, per provisioned account, the email, plan, every rate-limit window's used-% and reset time, and which account is **ACTIVE**. Exits nonzero if no account reported limits. |
+| `switch <handle> [--yes]` | Flip the fleet's active Codex account (handle form `acctN`, e.g. `acct2`). Guards on the local age key + a clean `catalyst-cluster` clone, **refuses when this host pins `CODEX_HOME`** (see below), **probes the target before switching**, flips the `_catalyst_active_codex_home` selector via a non-interactive `sops edit`, commits + pushes the cluster repo, re-materializes `codex-account.env`, repoints the local `~/catalyst/codex-home` symlink, and verifies. |
+| `sync [--yes]` | For another node after a switch was pushed elsewhere: `git pull` the cluster repo, re-materialize `codex-account.env`, repoint the symlink, and verify. |
+
+### It costs zero tokens
+
+`status` spawns one short-lived `codex app-server` child per account and asks
+`account/read` + `account/rateLimits/read`. No inference call is made. This is why the Codex
+tool can afford a 10-minute alarm cadence while the Claude side — which must spend one
+`max_tokens:1` call per account, because a durable `setup-token` is refused by the account
+usage API — cannot.
+
+### ⚠️ No restart is required
+
+`codexConfig()` resolves `codexHome` fresh on **every dispatch**, and with no pin set it
+returns a constant path that is a *symlink*. Repointing that symlink changes the account the
+next `codex exec` child uses. Neither `switch` nor `sync` restarts the stack — unlike
+`claude-account switch`, which must, because the SDK executor captures its token at boot.
+
+### ⚠️ A pin overrides the selector — and `switch` will refuse
+
+`codexConfig()` resolves `codexHome` in this order:
+
+1. `CATALYST_CODEX_HOME` (environment)
+2. Layer-1 `catalyst.orchestration.codex.codexHome`
+3. `${catalystDir()}/codex-home` — the selector symlink
+
+The symlink is only the **third** rung. If either pin is set, repointing the symlink changes
+nothing, so `switch` and `sync` **fail loudly and name the pin** rather than reporting a
+change that did not take effect. Unset the variable, or remove the Layer-1 key, then retry.
+
+A host whose `~/catalyst/codex-home` is a **real directory** rather than a symlink is also
+refused — that directory is not the tool's to delete. Converting it is the one-time operator
+step in the runbook below.
+
+### No credentials travel between hosts
+
+The SOPS bundle entry carries a **handle name only**:
+
+```sh
+# Catalyst Codex account selector (CTL-2072). NOT a credential — a handle name.
+_catalyst_active_codex_home="acct2"
+```
+
+Codex subscription credentials cannot be shared the way a durable Claude `setup-token` can:
+`auth.json` is rotation-bound, and a copy goes stale the moment the original refreshes —
+OpenAI's single-use refresh-token rotation would exhaust the fork. Each host therefore runs
+`codex login` per account into its own `CODEX_HOME`, and only the *choice* of account is
+fleet state.
+
+### Operator runbook — provisioning an account
+
+Per account, **per host**:
+
+```bash
+CODEX_HOME=~/catalyst/codex-home-acctN codex login
+```
+
+Then confirm the host can see it:
+
+```bash
+catalyst-stack codex-account status     # acctN should appear with its email and plan
+```
+
+One-time, fleet-wide: add a `codex-account.env` entry to the cluster repo's
+`secrets/node-secret-files.sops.json` with the selector line shown above. `syncSecretFiles`
+materializes it to `~/.config/catalyst/codex-account.env` on every node with **no
+cluster-sync code change** — it materializes every entry in that map.
+
+One-time, per host with a pinned selector: if `~/catalyst/codex-home` is a real directory,
+move it aside and re-create it as a symlink to the account you want:
+
+```bash
+mv ~/catalyst/codex-home ~/catalyst/codex-home.was-a-directory
+ln -s ~/catalyst/codex-home-acct2 ~/catalyst/codex-home
+```
+
+The tooling is arity-agnostic — it discovers `codex-home-acct*` — so adding a third account
+needs no code change. As of 2026-08-22 **two** Codex accounts are provisioned
+(`codex-home-acct1` and `codex-home-acct2`); note `~/.codex` and `codex-home-acct1` resolve to
+the *same* account, so the fleet has two distinct accounts, not three.
+
+### Exhaustion alarm
+
+`catalyst-codex-usage-page.sh` pages before an account exhausts, reading the same
+zero-token source. Schedule it on its own supervised `KeepAlive`/`StartInterval` LaunchAgent
+(never from a `catalyst-stack start` reconciler tick). Not seeing quota is itself a page: a
+missing source, an unparseable payload, or a payload with **zero accounts** all page DARK
+through the same sinks rather than reporting "under threshold".
 
 ## Flags
 

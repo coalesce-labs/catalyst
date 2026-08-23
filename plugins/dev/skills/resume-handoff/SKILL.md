@@ -26,10 +26,21 @@ fi
 #   2. workflow-context.sh recent handoffs (interactive flows).
 #   3. (handled later in Step 4) interactive picker.
 RECENT_HANDOFF=""
+HANDOFF_MISSING=""
 if [[ -n "${CATALYST_HANDOFF_PATH:-}" && -f "$CATALYST_HANDOFF_PATH" ]]; then
   RECENT_HANDOFF="$CATALYST_HANDOFF_PATH"
 elif [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ]]; then
   RECENT_HANDOFF=$("${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent handoffs)
+fi
+# CTL-2104: guard EVERY path source, not just the env var. workflow-context
+# returns a remembered path, and a remembered path is exactly what goes stale —
+# `thoughts/shared` is a per-project symlink, so a path recorded in one worktree
+# can resolve to a different physical subtree here, and a sync that aborted may
+# mean the file never arrived at all. An unguarded read of a phantom path yields
+# an empty document that reads like an empty handoff.
+if [[ -n "$RECENT_HANDOFF" && ! -f "$RECENT_HANDOFF" ]]; then
+  HANDOFF_MISSING="$RECENT_HANDOFF"
+  RECENT_HANDOFF=""
 fi
 if [[ -n "$RECENT_HANDOFF" ]]; then
   if [[ "${CATALYST_IS_CONTINUATION:-}" == "true" ]]; then
@@ -37,10 +48,28 @@ if [[ -n "$RECENT_HANDOFF" ]]; then
   else
     echo "📋 Auto-discovered recent handoff: $RECENT_HANDOFF"
   fi
+elif [[ -n "$HANDOFF_MISSING" ]]; then
+  echo "⚠️ Cited handoff is not on disk: $HANDOFF_MISSING"
+  echo "   The channel is authoritative — recover from the last turn's text (see below)."
 else
   echo "⚠️ No recent handoff found in workflow context or filesystem"
 fi
 ```
+
+### When a cited handoff is missing on disk
+
+A broken citation is **not** lost work, and it is not a reason to stop. In every observed
+occurrence (CTL-2104) the content still existed — in a sibling project's `thoughts/shared`
+subtree, or on the writing host pending the next sync tick.
+
+1. **The channel is authoritative.** Recover the handoff's substance from the last turns of
+   the channel / ticket thread. That text is the record; the file is a convenience.
+2. **Prefer an absolute path** when one was cited — `thoughts/shared` is a per-project
+   symlink, so a *relative* citation is ambiguous across worktrees and may simply be
+   resolving in the wrong tree. If you only have a relative path, search for the basename
+   across the sibling subtrees before concluding it is absent.
+3. **Never treat the missing file as lost work**, and never re-do landed work on that
+   assumption — re-doing it is the more expensive failure.
 
 ## Configuration Note
 

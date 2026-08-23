@@ -13,7 +13,7 @@ import type { HeldRun } from "./respond-ticket.d.mts";
  * "a failed post … must restore the row — never silently lose the item").
  *
  * - replied      → 200 (a real, human-authored comment is live; CTL-1567 clears
- *                  `needs-human` via the webhook within seconds)
+ *                  the escalation hold via the webhook within seconds)
  * - empty_body   → 400 (nothing typed; never reached Linear)
  * - not_found    → 404 (no such Linear issue — e.g. a synthesized orphan-PR row)
  * - bot_identity → 502 (REFUSED before posting: this node's token is an app actor,

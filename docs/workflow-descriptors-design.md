@@ -156,7 +156,7 @@ A worked example for the current pipeline (abridged — every step shown structu
   "cycles": [
     { "id": "verify-remediate", "members": ["verify", "remediate"], "cap": 3,
       "countBy": "event", "countEvent": "phase.remediate.complete.${ticket}",
-      "onExhaust": "escalate-needs-human",
+      "onExhaust": "escalate",
       "reset": { "signals": ["phase-verify.json", "phase-remediate.json", "verify.json"],
                  "releaseClaims": true } }
   ]
@@ -185,7 +185,7 @@ Key schema decisions:
 - **`workDoneProbe` is a string name resolved against the `WORK_DONE_PROBES` registry**; probe
   *functions* stay in `work-done-probes.mjs` (behavior-in-modules, data-in-JSON). **Validation
   HARD-FAILS any step without a registered probe** — a probe-less step false-deads into the
-  `no-probe-for-phase` → needs-human escalation, defeating autonomy. This is a completeness gate, not
+  `no-probe-for-phase` → an escalation, defeating autonomy. This is a completeness gate, not
   a warning.
 - **`input`** mirrors `prior_artifact_for_phase()`: `null` | `{ "signal": "x.json" }` |
   `{ "glob": "...-${ticket}.md" }`.
@@ -689,7 +689,7 @@ the schema.
    no worker** (`phase-agent-dispatch:528-541`).
 4. `verifyDispatched` then reads a missing signal ⇒ `{ok:false, reason:"signal_missing"}` ⇒ the
    scheduler demotes it to a **dispatch failure + cooldown** (`scheduler.mjs:1766+`), accruing toward
-   `escalateDispatchExhausted → needs-human`. The second verify never runs; the loop is dead.
+   `escalateDispatchExhausted → escalate`. The second verify never runs; the loop is dead.
 
 **Why no test caught it.** Coverage exercises the cycle only at the `.mjs` signal layer
 (`scheduler.test.mjs:1027-1042`, no `.claim.*` created). Worse, `phase-agent-dispatch.test.sh` Test 43

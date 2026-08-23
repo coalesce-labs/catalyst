@@ -39,7 +39,8 @@ import {
 import { getEventLogPath, log as defaultLog } from "./config.mjs";
 
 // The alert KIND (event.label) for a stuck-but-alive daemon. Extends the
-// alert-emit taxonomy (system_down / needs_human_pileup) without importing it.
+// alert-emit taxonomy (system_down / provider_degraded / rate_limit_exhausted /
+// capacity_unavailable — CTL-2156) without importing it.
 export const DAEMON_STUCK_KIND = "daemon_stuck";
 
 // Local copies of the alert event names. Deliberately NOT imported from

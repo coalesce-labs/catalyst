@@ -4,7 +4,7 @@
 //
 // HOME5 is the only MUTATING path in HOME and the payoff of the whole Inbox: one
 // verb on the needs-you row both records the human's response AND resumes the
-// paused agent (the BFF12 endpoint clears the needs-human marker + emits the
+// paused agent (the BFF12 endpoint clears the ask marker + emits the
 // resume event that drives CTL-876's loop). This module is the React-/DOM-free
 // spine the React surface renders through — same pattern as home-inbox.ts /
 // reading-pane-model.ts, so `bun test` can unit it directly from outside the

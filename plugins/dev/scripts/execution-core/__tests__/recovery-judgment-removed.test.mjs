@@ -21,7 +21,7 @@
 //      injected `boardHealth.act` spy AND `recoveryPass: { mode: "enforce" }`
 //      (both historically the "make the judgment layer run" knobs) — assert
 //      the spy is never called and no `.recovery-intents` ledger is written,
-//      while the ticket still receives its needs-human label directly.
+//      while the ticket is still escalated directly through the chokepoint.
 //   2. Source-scan guards: read the edited files' text and assert the deleted
 //      call sites do not exist. This is the same technique the plan's own
 //      "no-dangling-import guard" (Phase 2+) and this repo's
@@ -35,6 +35,11 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { schedulerTick } from "../scheduler.mjs";
+// Derived, never hand-typed: the label name and the once-marker path are owned by
+// escalation-publish / label-guard, so a rename cannot leave this file asserting
+// a string nothing writes any more.
+import { labelMarkerBase } from "../label-guard.mjs";
+import { ESCALATION_MARKER_LABEL } from "../escalation-publish.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const EXEC_CORE_DIR = join(__dirname, "..");
@@ -66,7 +71,7 @@ function writeSignal(ticket, phase, status) {
 }
 
 describe("CTL-2141 Phase 1 — runTick does not invoke the judgment loops", () => {
-  test("a stuck ticket still lands needs-human directly; the board-health act seam and the recovery-pass mode are both inert", () => {
+  test("a stuck ticket is still escalated directly; the board-health act seam and the recovery-pass mode are both inert", () => {
     // CTL-764: a terminal (non-terminal-Linear-state, i.e. still-open) stalled
     // ticket is exactly the shape that used to feed BOTH judgment loops (Pass
     // 0r's rSigs filter and the board-health act's candidate cohort).
@@ -121,10 +126,25 @@ describe("CTL-2141 Phase 1 — runTick does not invoke the judgment loops", () =
     // No recovery-intent ledger was ever created — Pass 0r's recordIntent
     // write is the thing that would have created this directory.
     expect(existsSync(join(orchDir, ".recovery-intents"))).toBe(false);
-    // The stuck ticket still got escalated — via the direct Phase-1
-    // chokepoint (labelNeedsHumanUnlessBeliefOwner → labelOnce →
-    // writeStatus.applyLabel), not via a delegate/board-health path.
-    expect(applied).toContainEqual({ ticket: "CTL-2141-STUCK", label: "needs-human" });
+    // The stuck ticket still got escalated — via the direct Phase-1 chokepoint,
+    // not via a delegate/board-health path.
+    //
+    // ⛔ CTL-2159 re-aimed this assertion. It used to read the escalation off a
+    // escalation label write; that label is deleted (CTL-2156…CTL-2161), so
+    // the observable is now the chokepoint's own durable record plus the
+    // once-marker every retry loop keys on. Asserting the label here would pin
+    // the very artifact the epic removes.
+    expect(applied.filter((a) => a.label === ESCALATION_MARKER_LABEL)).toEqual([]);
+    const record = JSON.parse(
+      readFileSync(
+        join(orchDir, "workers", "CTL-2141-STUCK", "phase-recovery-pass.json"),
+        "utf8"
+      )
+    );
+    expect(typeof record.stallClass).toBe("string");
+    expect(
+      existsSync(`${labelMarkerBase(orchDir, "CTL-2141-STUCK", ESCALATION_MARKER_LABEL)}.applied`)
+    ).toBe(true);
   });
 });
 

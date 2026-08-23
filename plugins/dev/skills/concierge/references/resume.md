@@ -19,6 +19,13 @@ exists to end.
    that comes back silently is indistinguishable from one that never went down, which makes the restart
    invisible to everyone debugging the fleet.
 
+> ⚠️ **If a cited handoff file is missing on disk, the channel is authoritative.** Recover from the
+> last turn's text; never treat the missing file as lost work. `thoughts/shared` is a *per-project
+> symlink*, so a relative citation written in another worktree resolves elsewhere here, and an
+> aborted sync leaves the file on the writing host until the next tick — the content is almost
+> always still there. A fresh `create-handoff` cites an absolute path and returns a `synced` /
+> `local-only` verdict, so it tells you which case you are in (CTL-2104).
+
 ## While running
 
 - **Heartbeat is liveness; the status doc is not** (ruling). Never infer one from the other: a role can be

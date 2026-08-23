@@ -1,16 +1,25 @@
 // unstuck-stale-label.mjs — CTL-1064 Category D pure classifier.
 //
 // Classifies a terminal (Canceled/Duplicate/Done) ticket that still carries an
-// attention label (needs-human / blocked / waiting) as 'clear-label'. Uses
+// attention label (blocked / waiting) as 'clear-label'. Uses
 // gateway.listLabeledTickets (NOT listStartedTickets, which excludes terminal
 // tickets — the documented enumeration gap). The act seam delegates to
-// clearStalledLabel (label-guard.mjs:124), which removes the Linear label AND
-// deletes both .linear-label-<label>.applied/.skipped markers together —
-// closing the suppression trap.
+// clearStalledLabel (label-guard.mjs `clearStalledLabel`), which removes the
+// Linear label AND deletes both .linear-label-<label>.applied/.skipped markers
+// together — closing the suppression trap.
+//
+// ⛔ CTL-2161 — WHY THIS FILE SURVIVED ITS OWN DELETION ORDER. The consumer
+// phase's brief listed this module for deletion outright. It is NOT a
+// needs-human-only classifier: it clears stale `blocked` and `waiting` labels
+// too, and BOTH of those labels survive this epic (the worker-status group goes
+// from four members to three, and `blocked`/`queued` are the admission-gate pair,
+// a different axis entirely). Deleting the file would have silently stopped a
+// terminal ticket's stale admission-gate label from ever being cleared. So only
+// the `needs-human` MEMBER is removed.
 
-// ATTENTION_LABELS — the three attention labels the sweep can clear from
-// terminal tickets. Keep in sync with deriveAttention (orch-monitor/board-data.mjs).
-export const ATTENTION_LABELS = Object.freeze(["needs-human", "blocked", "waiting"]);
+// ATTENTION_LABELS — the attention labels the sweep can clear from terminal
+// tickets. CTL-2161: `needs-human` removed with the label itself.
+export const ATTENTION_LABELS = Object.freeze(["blocked", "waiting"]);
 
 // TERMINAL_LINEAR_STATES — ticket states in which stale labels should be cleared.
 export const TERMINAL_LINEAR_STATES = Object.freeze(["Canceled", "Duplicate", "Done"]);

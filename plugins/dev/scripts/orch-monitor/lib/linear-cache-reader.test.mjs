@@ -3,7 +3,13 @@
 // Run: cd plugins/dev/scripts/orch-monitor && bun test lib/linear-cache-reader.test.mjs
 
 import { describe, test, expect } from "bun:test";
-import { readLinearCache } from "./linear-cache-reader.mjs";
+import { readLinearCache, ATTENTION_LABELS, ASK_LABELS } from "./linear-cache-reader.mjs";
+// Parity: the canonical taxonomy source (imported in TEST only — the module
+// deliberately mirrors the strings locally, see the note above the constant).
+import {
+  ATTENTION_LABELS_ASK,
+  ATTENTION_LABEL_NEEDS_INPUT,
+} from "./board-data.mjs";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -72,7 +78,7 @@ describe("readLinearCache replica-first (CTC-133 Phase 2)", () => {
 
   test("falls back to ticket_state facts when replica returns a miss (absent id)", async () => {
     const ticketStateReader = async () => ({
-      "CTL-3": tsRow({ priority: 2, estimate: 5, labels: ["needs-human"], linearState: "Stuck" }),
+      "CTL-3": tsRow({ priority: 2, estimate: 5, labels: ["catalyst-ask"], linearState: "Stuck" }),
     });
     const eligibleReader = async () => ({});
     const replicaReader = async () => ({}); // miss — CTL-3 not in replica result
@@ -80,7 +86,7 @@ describe("readLinearCache replica-first (CTC-133 Phase 2)", () => {
     const result = await readLinearCache({ ticketStateReader, eligibleReader, replicaReader });
     expect(result["CTL-3"].priority).toBe(2);
     expect(result["CTL-3"].estimate).toBe(5);
-    expect(result["CTL-3"].labels).toEqual(["needs-human"]);
+    expect(result["CTL-3"].labels).toEqual(["catalyst-ask"]);
     expect(result["CTL-3"].linearState).toBe("Stuck");
   });
 
@@ -146,5 +152,29 @@ describe("readLinearCache replica-first (CTC-133 Phase 2)", () => {
     // Only thing we can assert without a real DB: it doesn't throw and ticket_state data comes through
     expect(result["CTL-8"]).toBeDefined();
     expect(result["CTL-8"].linearState).toBe("Verify");
+  });
+});
+
+// ── CTL-2156: the LAST ask taxonomy copy, pinned ─────────────────────
+describe("ask label taxonomy parity (CTL-2156, was CTL-1123)", () => {
+  test("ATTENTION_LABELS matches board-data's canonical ATTENTION_LABEL* exports", () => {
+    // The broker used to carry this pin (broker/alert-emit.test.mjs) against its
+    // own copy of the taxonomy. That copy and its pile-up alert are retired, and
+    // an independent audit flagged THIS copy as the surviving unpinned one — so
+    // the pin moves here. Without it, a rename in board-data silently empties the
+    // parked-ask inbox instead of failing loudly.
+    expect(new Set(ATTENTION_LABELS)).toEqual(
+      new Set([...ATTENTION_LABELS_ASK, ATTENTION_LABEL_NEEDS_INPUT]),
+    );
+  });
+
+  test("ASK_LABELS is exactly board-data's ask half — no `needs-human` survivor", () => {
+    // ⛔ CTL-2161 NEGATIVE CONTROL. The failure this pins is not a rename, it is a
+    // SURVIVOR: leaving "needs-human" in this list after producers stop writing it
+    // would keep ~69 already-labelled tickets rendering as parked attention rows
+    // forever — the bin, with the producers gone. Asserting the exact set (not
+    // `includes`) is what makes that visible.
+    expect(ASK_LABELS).toEqual([...ATTENTION_LABELS_ASK]);
+    expect(ATTENTION_LABELS).not.toContain("needs-human");
   });
 });

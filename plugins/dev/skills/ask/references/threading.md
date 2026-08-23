@@ -20,7 +20,7 @@ never another reply. So:
   `createAsUser=<role>`.
 - ⛔ **Never post under the human's identity.** `linearis issues discuss` uses the personal token and
   posts *as* the human — and a human-identity comment is what the fleet reads as "the human decided",
-  which clears `needs-human` (CTL-1567). It is not a style preference; it corrupts state.
+  which clears the escalation hold (CTL-1567). It is not a style preference; it corrupts state.
 - ⛔ **An agent never answers the human's own note as the human.** If a human comment needs a decision
   only that human can make, it comes back as an ask ticket, not as a reply written in their voice.
 

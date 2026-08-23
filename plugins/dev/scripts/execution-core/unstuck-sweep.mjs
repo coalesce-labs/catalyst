@@ -19,6 +19,9 @@ import { log, getEventLogPath } from "./config.mjs";
 import { UNSTUCK_SWEEP_EVENT_TYPES } from "./unstuck-sweep-event-types.mjs";
 import { isTicketKey } from "./ticket-key.mjs";
 import { postLinearCommentAsSpawnResult } from "./linear-comment-write.mjs"; // CTL-1889 inc 2
+// CTL-2158: THE stall classifier. Owns the "an escalation already exists — stay
+// quiet" disposition that used to live here as four hand-typed reason rows.
+import { stallSweepDisposition } from "./stall-class.mjs";
 // CTL-1795: shared v1→superset envelope serializer (with its degrade-to-v1 fallback).
 import { dualEnvelopeOrV1 } from "./reap-intent.mjs";
 
@@ -90,27 +93,27 @@ export const STALL_CATEGORY_MAP = Object.freeze({
   source_conflict_ctl708_unavailable: { category: "source-conflict", action: "force-push-if-clean" },
   "orphan-sweep-stale":               { category: "orphan-stale",   action: "emit-phase-complete-if-merged" },
   "remediate-cycle-cap-exhausted":    { category: "remediate-cap",  action: "escalate" },
-  // CTL-1442 (Codex R5): a ticket parked by the no-progress escalation ask-cap
-  // is ALREADY terminally escalated (needs-human + brief + final event) — the
-  // unstuck sweep must stay quiet, not re-escalate it every interval (that
-  // would recreate the ask loop through a different subsystem).
-  "escalation-ask-cap":               { category: "skip",           action: "skip" },
-  // CTL-1443: a gate-expired park is already surfaced (brief + label via the
-  // terminal sweep + alert) and is waiting on an operator approval — the
-  // unstuck sweep must stay quiet, not re-escalate it every interval.
-  "boot-resume-gate-expired":         { category: "skip",           action: "skip" },
-  // PROJ-1657 Codex P2 (round 4): a probe-less phase (recovery-pass today) is
-  // parked terminal on its FIRST occurrence via markEscalationCapTerminal —
-  // same "already fully escalated" shape as escalation-ask-cap above — so the
-  // unstuck sweep must stay quiet here too, not re-escalate every interval.
-  "no-probe-for-phase":               { category: "skip",           action: "skip" },
-  // CTL-1552: the normalized human handoff (recovery-emit's mergeExplanationIntoSignal
-  // and recovery-reasoning both write stalled + stalledReason "needs_human") is a
-  // COMPLETED escalation — label, brief and Linear comment are already posted. Without
-  // an entry here it routes to unknown/escalate, whose path bypasses the intent gate,
-  // so every sweep interval would post another authored Linear comment on a ticket a
-  // human is already holding. Same "already fully escalated" shape as the three above.
-  needs_human:                        { category: "skip",           action: "skip" },
+  // ⛔ CTL-2158 — FOUR SKIP ROWS USED TO LIVE HERE AND ARE NOW DERIVED.
+  //   escalation-ask-cap        (CTL-1442)   boot-resume-gate-expired (CTL-1443)
+  //   no-probe-for-phase        (PROJ-1657)  needs_human              (CTL-1552)
+  // All four said the same thing in four hand-typed strings: a COMPLETE escalation
+  // (label + brief + Linear comment) already exists, so the sweep must stay quiet.
+  // Without that gate the ticket routes to unknown/escalate, a path that BYPASSES
+  // the intent gate — so every sweep interval posts another authored Linear comment
+  // on a ticket a human is already holding (the CTL-638 write-budget failure class).
+  //
+  // The gate now lives in stall-class.mjs and keys on an explicit signal FIELD —
+  // `escalationPublished`, stamped by the four producers that actually publish a
+  // complete escalation — with the legacy tokens kept only to recognise signals
+  // already on disk. That is the point: when the `needs_human` producer is deleted,
+  // a row keyed on the string would silently stop matching and the comment-spam
+  // loop would come back; a gate keyed on the stamp does not.
+  //
+  // ⛔ And it is NOT keyed on `signal.explanation != null`, tempting as that is:
+  // scheduler.mjs's generic stall writer attaches a coerced explanation to EVERY
+  // stall it records, so that version would silence this sweep's repair actions
+  // wholesale while looking like a tidy refactor.
+  // See classifyStalledTicket below — it consults the classifier BEFORE this map.
 });
 
 // classifyStalledTicket — PURE top-level router (Phase 1). No IO.
@@ -123,6 +126,12 @@ export function classifyStalledTicket(evidence = {}) {
   if (evidence.linearTerminal) {
     return { category: "skip", action: "skip", reason: "linear-terminal" };
   }
+  // CTL-2158: the classifier owns the "already fully escalated" disposition —
+  // see the note where the four hand-typed skip rows used to sit. Consulted
+  // BEFORE the map so a signal that carries an escalation payload is quiet even
+  // when its reason token is one the map would otherwise act on.
+  const alreadyEscalated = stallSweepDisposition(evidence);
+  if (alreadyEscalated) return alreadyEscalated;
   const mapped = STALL_CATEGORY_MAP[evidence.reason];
   if (mapped) return mapped;
   return { category: "unknown", action: "escalate" };

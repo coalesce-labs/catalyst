@@ -294,3 +294,31 @@ describe("CTL-1131: killHungWorker stamps needsHumanSince on failed signal", () 
     expect(onDisk.needsHumanSince).toBe("2026-06-14T06:00:00Z");
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CTL-2159 — the watchdog forwards its stall reason to the classifier.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("killHungWorker — the escalation carries a CLASS (CTL-2159)", () => {
+  test("a hung-worker kill classifies SYSTEM, not HELD", async () => {
+    // ⛔ This site passed only `{env, site:"watchdog-kill", log}`. `site` is
+    // advisory on the verdict and is NEVER classified from — a site says WHO
+    // escalated, not WHY — so every hung-worker kill hit the classifier's
+    // `no-reason` rule and came out HELD. A wedged executor is the textbook
+    // SYSTEM stall: it retries with backoff and the fleet alert names it.
+    const sig = writeSignal("running");
+    await killHungWorker(orchDir, T, sig, {
+      elapsedMin: 1080,
+      commitCount: 0,
+      writeStatus: { applyLabel: recorder({ applied: true }) },
+      emit: recorder(Promise.resolve(true)),
+      now: () => 1_000_000,
+      env: { CATALYST_ESCALATION_ASK: "off" },
+    });
+    const escalationSignal = JSON.parse(
+      readFileSync(join(orchDir, "workers", T, "phase-recovery-pass.json"), "utf8")
+    );
+    expect(escalationSignal.stallClass).toBe("system");
+    // the rule names the token, so a future rename of the reason is caught here
+    expect(escalationSignal.stallClassRule).toBe("prefix:hung-no-progress:");
+  });
+});

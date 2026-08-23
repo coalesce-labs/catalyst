@@ -6,7 +6,7 @@
 //      summary, the loud "can I just reply?" line, and one-click suggested replies
 //      that PREFILL the box (still editable — a chip is a shortcut, not a submit).
 //   2. THE REPLY BOX — posts a real Linear comment authored as the operator. That
-//      post IS the resolution mechanism (CTL-1567 clears `needs-human` on a human
+//      post IS the resolution mechanism (CTL-1567 clears the escalation hold on a human
 //      comment within seconds), so this is the payoff of the whole surface.
 //   3. THE THREAD — the last few comments, NEWEST FIRST, agent and human visibly
 //      distinct, long bodies clamped with expand-in-place.

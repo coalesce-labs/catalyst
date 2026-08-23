@@ -31,9 +31,8 @@ import {
   DETERMINISTIC_INTEREST_TYPES,
   isIngestionRecencyEnabled,
   isAlertEmitEnabled,
-  PILEUP_THRESHOLD,
-  PILEUP_PERSISTENCE_MS,
-  PILEUP_COOLDOWN_MS,
+  SYSTEM_TROUBLE_POLICY,
+  ACCOUNT_EXHAUSTED_PCT,
   MONITOR_RECENCY_DEGRADED_MS,
   MONITOR_RECENCY_DOWN_MS,
   GITHUB_RECENCY_DEGRADED_MS,
@@ -90,7 +89,6 @@ import {
   upsertWaitingSession,
   clearWaitingSession,
   hasActiveWorkers,
-  getAllTicketDescriptors,
 } from "./broker-state.mjs";
 import { sessionLiveness } from "./session-liveness.mjs";
 import {
@@ -138,12 +136,13 @@ import { CHANNEL_WATCHER_HEARTBEAT_EVENT } from "../channel-watcher/lib/heartbea
 // stable catalyst.alert.* topic in the event log (delivery is a separate story).
 import {
   ALERT_KIND_SYSTEM_DOWN,
-  ALERT_KIND_NEEDS_HUMAN_PILEUP,
-  NEEDS_HUMAN_LABELS,
   emitAlertEvent,
-  initialPileupState,
-  nextPileupAlarmState,
+  initialAlarmState,
+  nextLevelAlarmState,
 } from "./alert-emit.mjs";
+// CTL-2156: the SYSTEM-trouble detector — provider/rate-limit/capacity conditions
+// folded into ONE fleet-scoped auto-clearing alert per kind (never one per ticket).
+import { SYSTEM_TROUBLE_KINDS, makeSystemTroubleWindow } from "./system-trouble.mjs";
 import { scanEventsChunked } from "../execution-core/event-tail.mjs";
 
 // Identity-stable aliases for the shared maps — the router mutates these; the
@@ -428,18 +427,41 @@ export { sweepEmittedWakeCache };
 // it can never observe its own death.
 const _lastSeenByService = new Map(); // service.name -> { ts: epochMs, id: string|null }
 
-// CTL-1123: the needs_human_pileup LEVEL-alarm state (a single broker-wide count,
-// not per-source). Advanced each watchdog tick by checkNeedsHumanPileup.
-let _pileupState = initialPileupState();
+// CTL-2156: the SYSTEM-trouble LEVEL-alarm state — ONE alarm per KIND, advanced
+// each watchdog tick by checkSystemTrouble. Replaces the retired single
+// _pileupState (which counted needs-human LABELS, i.e. the per-ticket escalation
+// artifact, so one provider outage read as N human asks).
+const _troubleAlarms = new Map(); // kind -> initialAlarmState() shape
 
-// CTL-1123: terminal Linear states excluded from the needs-human pile-up count —
-// a Done/Canceled ticket can still carry a stale needs-human label in the cache
-// (cache-drift, CTL-1161), which would pin the count above threshold forever.
-// These mirror the stateMap done/canceled mappings in .catalyst/config.json; if
-// the team renames those Linear states, update here too (config-drives-behavior —
-// a drift would silently stop excluding terminal tickets → a never-clearing
-// false pile-up). Review #10.
-const TERMINAL_LINEAR_STATES = new Set(["Done", "Canceled"]);
+// The trailing distinct-key window the alarms read their LEVEL from. Fed inline
+// off the live tail (processEvent) and off the boot seed scan, exactly like
+// _lastSeenByService — zero extra I/O, and a broker that restarts mid-outage
+// re-learns the condition from the log tail instead of failing open.
+const _troubleWindow = makeSystemTroubleWindow({
+  windowMsByKind: Object.fromEntries(
+    Object.entries(SYSTEM_TROUBLE_POLICY).map(([kind, p]) => [kind, p.windowMs])
+  ),
+  accountExhaustedPct: ACCOUNT_EXHAUSTED_PCT,
+});
+
+// troubleAlarmFor — lazily materialize (and store) a kind's alarm state so a
+// never-ticked kind still reads as the initial state via the test seams.
+function troubleAlarmFor(kind) {
+  let state = _troubleAlarms.get(kind);
+  if (!state) {
+    state = initialAlarmState();
+    _troubleAlarms.set(kind, state);
+  }
+  return state;
+}
+
+// observeSystemTrouble — fold one ingested event into the trouble window.
+// Non-consuming, never throws (classifySystemTrouble swallows malformed events),
+// and cheap: a Map lookup on event.name for the overwhelming majority of events
+// that match no rule.
+function observeSystemTrouble(event, nowMs = Date.now()) {
+  return _troubleWindow.observeEvent(event, nowMs);
+}
 
 // CTL-1122 PR2: per-source alarm state. PR1 keyed a single _monitorRecencyAlarm;
 // the watchdog now judges several sources (monitor + the activity-gated
@@ -612,6 +634,16 @@ function scanLogTailInto(logPath, seedBytes) {
         // last heartbeat gives the tracker a stale last-seen so the very next tick
         // detects the outage — mirroring the seedLastSeenByService monitor path.
         if (getEventName(e) === CHANNEL_WATCHER_HEARTBEAT_EVENT) observeWatcherHeartbeat(e);
+        // CTL-2156: seed the system-trouble window from the tail too. Without
+        // this a broker that restarts DURING a provider outage starts blind, the
+        // count reads 0, and the outage goes unalerted until a fresh overload
+        // event happens to arrive — the same restart-blindness the monitor path
+        // fixed above. Timestamped from the EVENT, not now(), so a stale tail
+        // entry ages out of the window instead of faking a live condition.
+        {
+          const seedMs = Date.parse(e?.ts ?? "");
+          if (!Number.isNaN(seedMs)) observeSystemTrouble(e, seedMs);
+        }
       },
     });
   } catch (err) {
@@ -773,74 +805,74 @@ function checkSourceRecency(source, now) {
   return emit;
 }
 
-// countNeedsHumanTickets — the surviving-process pile-up signal: how many
-// active/non-terminal tickets carry a needs-human/needs-input label in the
-// broker's OWN filter-state.db. Reads the SAME label source as deriveAttention
-// (board-data.mjs) but does NOT fork it — it deliberately omits the monitor-only
-// prStuck/phaseFailed signals (not in filter-state.db), so this UNDERCOUNTS the
-// dashboard inbox. Scoped to non-removed, non-terminal tickets so a stale
-// needs-human label on a Done/Canceled ticket (cache-drift, CTL-1161) can't pin
-// the count above threshold forever. Best-effort: a db read failure → 0 (no false
-// pile-up alert), consistent with the detector's no-false-alarm posture.
-function countNeedsHumanTickets() {
-  try {
-    let n = 0;
-    for (const d of getAllTicketDescriptors()) {
-      if (d.removed) continue;
-      if (d.state && TERMINAL_LINEAR_STATES.has(d.state)) continue;
-      const labels = Array.isArray(d.labels) ? d.labels : [];
-      if (labels.some((l) => NEEDS_HUMAN_LABELS.includes(l))) n += 1;
-    }
-    return n;
-  } catch {
-    return 0;
-  }
-}
-
-// checkNeedsHumanPileup — one watchdog-tick evaluation of the needs-human pile-up
-// LEVEL signal → edge-triggered catalyst.alert.{raised,cleared}. Kill-switched
-// (isAlertEmitEnabled). The threshold + persistence + cooldown debounce lives in
-// nextPileupAlarmState; this wires the broker count into it and emits. Returns the
-// emit decision for the wiring test.
-function checkNeedsHumanPileup(now) {
+// checkSystemTrouble — one watchdog-tick evaluation of EVERY system-trouble kind
+// (CTL-2156). For each kind: read the current distinct-key count out of the
+// trailing window, run it through the shared level machine, and emit at most ONE
+// catalyst.alert.{raised,cleared} on the edge.
+//
+// THE WHOLE POINT IS THE FAN-IN. N tickets hit by the same provider outage are N
+// KEYS under ONE kind, so they produce ONE `raised` — not N. And the clear is
+// automatic: the condition ending (a retraction, or every key ageing out of the
+// window) drops the count below threshold and emits ONE `cleared`. No ticket is
+// labelled, no ask is filed, no comment is written — the affected tickets simply
+// wait and resume by themselves.
+//
+// Kill-switched (isAlertEmitEnabled). Returns a kind→emit map for the wiring test.
+function checkSystemTrouble(now) {
+  // Sweep expired keys even when emitting is off, so the maps stay bounded on a
+  // host that has the kill-switch flipped.
+  _troubleWindow.prune(now);
   if (!isAlertEmitEnabled()) return null;
-  const count = countNeedsHumanTickets();
-  const prev = _pileupState;
-  const { state, emit } = nextPileupAlarmState(prev, {
-    count,
-    threshold: PILEUP_THRESHOLD,
-    nowMs: now,
-    persistenceMs: PILEUP_PERSISTENCE_MS,
-    cooldownMs: PILEUP_COOLDOWN_MS,
-  });
-  if (emit) {
-    const raised = emit === "raised";
-    // raised: how long the count had been above threshold; cleared: how long the
-    // alert had been open. Read from prev (pre-advance) so it reflects the elapsed
-    // condition, clamped against clock skew.
-    const sinceMs = raised
-      ? prev.aboveSince != null
-        ? Math.max(0, now - prev.aboveSince)
-        : null
-      : prev.raisedAt != null
-        ? Math.max(0, now - prev.raisedAt)
-        : null;
-    const ok = emitAlertEvent({
-      action: raised ? "raised" : "cleared",
-      kind: ALERT_KIND_NEEDS_HUMAN_PILEUP,
-      reason: raised
-        ? `${count} active tickets need a human (>= ${PILEUP_THRESHOLD})`
-        : `needs-human pile-up cleared (${count} < ${PILEUP_THRESHOLD})`,
+  const emits = {};
+  for (const kind of SYSTEM_TROUBLE_KINDS) {
+    const policy = SYSTEM_TROUBLE_POLICY[kind];
+    if (!policy) continue;
+    const count = _troubleWindow.count(kind, now);
+    const prev = troubleAlarmFor(kind);
+    const { state, emit } = nextLevelAlarmState(prev, {
       count,
-      threshold: PILEUP_THRESHOLD,
-      sinceMs,
+      threshold: policy.threshold,
+      nowMs: now,
+      persistenceMs: policy.persistenceMs,
+      cooldownMs: policy.cooldownMs,
     });
-    // Append failed → do NOT advance the level-alarm state; the next tick
-    // re-attempts (a sustained pile-up is never reduced to one lost line).
-    if (!ok) return null;
+    if (emit) {
+      const raised = emit === "raised";
+      // raised: how long the count had been above threshold; cleared: how long
+      // the alert had been open. Read from prev (pre-advance), clamped against
+      // clock skew.
+      const sinceMs = raised
+        ? prev.aboveSince != null
+          ? Math.max(0, now - prev.aboveSince)
+          : null
+        : prev.raisedAt != null
+          ? Math.max(0, now - prev.raisedAt)
+          : null;
+      const detail = _troubleWindow.reason(kind);
+      const ok = emitAlertEvent({
+        action: raised ? "raised" : "cleared",
+        kind,
+        reason: raised
+          ? `${kind}: ${count} affected (>= ${policy.threshold})${detail ? ` — ${detail}` : ""}`
+          : `${kind} cleared (${count} < ${policy.threshold})`,
+        // The affected keys, so the operator sees WHAT is in trouble without a
+        // per-ticket artifact ever being written.
+        source: raised ? _troubleWindow.keys(kind, now).join(",") || null : null,
+        count,
+        threshold: policy.threshold,
+        sinceMs,
+      });
+      // Append failed → do NOT advance this kind's alarm state; the next tick
+      // re-attempts (a sustained outage is never reduced to one lost line).
+      if (!ok) {
+        emits[kind] = null;
+        continue;
+      }
+    }
+    _troubleAlarms.set(kind, state);
+    emits[kind] = emit;
   }
-  _pileupState = state;
-  return emit;
+  return emits;
 }
 
 // fleetActivity — the activity reading shared by the gated recency sources and the
@@ -912,19 +944,28 @@ export function __getMonitorRecencyAlarmForTest() {
 export function __getRecencyAlarmForTest(serviceName) {
   return recencyAlarmFor(serviceName);
 }
-// CTL-1123: needs-human pile-up alert-state seams.
+// CTL-2156: system-trouble alert-state seams.
 export function __clearAlertStateForTest() {
-  _pileupState = initialPileupState();
+  _troubleAlarms.clear();
+  _troubleWindow.clear();
 }
-export function __getPileupStateForTest() {
-  return _pileupState;
+export function __getTroubleAlarmForTest(kind) {
+  return troubleAlarmFor(kind);
 }
-// Lets the wiring test position the level machine at an edge (e.g. pre-set
+// Lets the wiring test position a kind's level machine at an edge (e.g. pre-set
 // aboveSince in the past so persistence is satisfied) without driving real
 // wall-clock time through runWatchdogTick — the timing logic itself is covered by
-// the pure nextPileupAlarmState unit tests.
-export function __setPileupStateForTest(state) {
-  _pileupState = { ...initialPileupState(), ...state };
+// the pure nextLevelAlarmState unit tests.
+export function __setTroubleAlarmForTest(kind, state) {
+  _troubleAlarms.set(kind, { ...initialAlarmState(), ...state });
+}
+// Feed one synthetic event through the SAME classifier + window the live tail
+// uses, so a wiring test exercises the real detector rather than a stub.
+export function __observeSystemTroubleForTest(event, nowMs = Date.now()) {
+  return observeSystemTrouble(event, nowMs);
+}
+export function __troubleWindowCountForTest(kind, nowMs = Date.now()) {
+  return _troubleWindow.count(kind, nowMs);
 }
 
 // CTL-357: one-shot startup event. If the Groq prose path is gated off (the
@@ -2458,10 +2499,11 @@ export function runWatchdogTick({ liveness = sessionLiveness } = {}) {
   // CTL-1423 Phase 5: evaluate per-watcher dead-man's switches on every watchdog tick.
   tickWatcherRecency(now);
 
-  // CTL-1123: needs-human pile-up → catalyst.alert.{raised,cleared}. A LEVEL
-  // signal (a count) with its own threshold + persistence + cooldown debounce —
-  // distinct from the per-source recency edges above.
-  checkNeedsHumanPileup(now);
+  // CTL-2156: system trouble (provider overload / rate-limit exhaustion / no
+  // capacity) → ONE fleet-scoped catalyst.alert.{raised,cleared} per kind. LEVEL
+  // signals (distinct-key counts) with their own threshold + persistence +
+  // cooldown debounce — distinct from the per-source recency edges above.
+  checkSystemTrouble(now);
 
   let watchdogWoke = false;
 
@@ -2672,6 +2714,11 @@ export function processEvent(event) {
   // dead-man's switch trackers. Non-consuming side-channel; runs above all gates
   // so heartbeats are recorded even when no interest matches.
   if (name === CHANNEL_WATCHER_HEARTBEAT_EVENT) observeWatcherHeartbeat(event);
+
+  // CTL-2156: fold provider/rate-limit/capacity telemetry into the system-trouble
+  // window. Non-consuming side-channel, ABOVE all gates — these events carry no
+  // interest and would otherwise be dropped before the detector ever saw them.
+  observeSystemTrouble(event);
 
   // CTL-532: fold every event into the worker-state projection (best-effort,
   // non-consuming — the projection is a side-channel observer and never
