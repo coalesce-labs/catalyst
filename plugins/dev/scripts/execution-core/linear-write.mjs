@@ -154,6 +154,10 @@ function routeThroughProxy(proxy, { routeId, ticket, buildPayload, caller = null
       applied: res.applied === true,
       reason: res.reason ?? null,
       ...(res.detail ? { detail: res.detail } : {}),
+      // CTL-2098: additive — carries the proxy's own already-converged verdict
+      // (e.g. removing an already-absent label) through to removeLabel/applyLabel,
+      // which otherwise lose this routeId-specific fact. Never overrides `applied`.
+      ...(res.converged ? { converged: true } : {}),
     },
     routeId
   );
@@ -706,8 +710,17 @@ export async function removeLabel(
       },
     });
     if (proxiedRemove) {
+      // CTL-2098: `wrote` is UNCHANGED — the deliberately-chosen Codex #2970 r3
+      // contract every existing caller already reads as "request
+      // accepted/converged"; repurposing it risks retry storms and quota burn
+      // across the fleet, the exact failure class this ticket exists to reduce.
+      // `converged` is a NEW additive field: true only when the proxy itself
+      // reported the label was already absent (a genuine no-op), reaching
+      // label-guard's marker-retention gate on enforce cloud-proxy hosts, where
+      // `wrote:false` was never reachable (enforce short-circuits before the
+      // direct-path read that produces it).
       return proxiedRemove.applied
-        ? { removed: true, wrote: true }
+        ? { removed: true, wrote: true, ...(proxiedRemove.converged ? { converged: true } : {}) }
         : { removed: false, wrote: false, reason: proxiedRemove.reason };
     }
 

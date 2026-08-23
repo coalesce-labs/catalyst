@@ -21,7 +21,6 @@ import {
   ALL_NODES,
   isNodeInScope,
   resolveNodeScope,
-  type NodeScope,
 } from "../ui/src/lib/node-scope";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -163,7 +162,7 @@ describe("node-scope contract (CTL-898 / SHELL8)", () => {
     expect(resolveNodeScope("mini", roster)).toBe("mini");
     expect(resolveNodeScope("all", roster)).toBe("all");
     // a node that went away → don't strand the operator on an empty view
-    expect(resolveNodeScope("ghost" as NodeScope, roster)).toBe("all");
+    expect(resolveNodeScope("ghost", roster)).toBe("all");
   });
 });
 

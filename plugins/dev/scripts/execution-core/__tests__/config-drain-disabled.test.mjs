@@ -205,6 +205,7 @@ describe("writeDaemonRuntimeEnv / readDaemonRuntimeEnv", () => {
       startedAt: "2026-08-07T00:00:00.000Z",
       drainDisabled: true,
       bootDrained: false,
+      writeBudget: null,
     });
     const read = readDaemonRuntimeEnv(tmp, { isPidAlive: () => true, readDaemonPid: () => 4242 });
     expect(read).toEqual(payload);

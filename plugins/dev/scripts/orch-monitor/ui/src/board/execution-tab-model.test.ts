@@ -102,10 +102,10 @@ describe("buildNowCard", () => {
   });
 
   it("surfaces attention when present on ticket", () => {
-    const t = ticket({ attention: "needs-human", attentionSince: "2026-06-13T09:00:00.000Z" });
+    const t = ticket({ attention: "ask", attentionSince: "2026-06-13T09:00:00.000Z" });
     const card = buildNowCard(t, null);
     expect(card).not.toBeNull();
-    expect(card!.attention).toBe("needs-human");
+    expect(card!.attention).toBe("ask");
   });
 
   it("returns null when ticket is undefined", () => {

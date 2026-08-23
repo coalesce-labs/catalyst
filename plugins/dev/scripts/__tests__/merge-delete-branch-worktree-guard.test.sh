@@ -28,13 +28,27 @@ assert_not_contains() {
 }
 
 # Files to check — add new call sites here as a one-line addition.
+# CTL-2141: recovery-pass/SKILL.md removed (its judgment layer was deleted).
 CHECKED_FILES=(
   "plugins/dev/skills/merge-pr/SKILL.md"
-  "plugins/dev/skills/recovery-pass/SKILL.md"
   "plugins/dev/skills/triage-aging-prs/SKILL.md"
   "plugins/dev/templates/followup-prompt.md"
   "plugins/dev/templates/fixup-prompt.md"
 )
+
+# Read the composed skill body: SKILL.md + any references/*.md in the same directory.
+# Skills that have moved implementation prose to references/ still satisfy the invariants
+# checked below — the composed body is what the agent reads at runtime.
+_skill_body() {
+  local f="$1"
+  local dir
+  dir="$(dirname "$f")"
+  cat "$f"
+  if [[ -d "${dir}/references" ]]; then
+    # Glob may be empty (no .md files). Use find to avoid a failing null-glob in strict mode.
+    find "${dir}/references" -maxdepth 1 -name '*.md' -exec cat {} \; 2>/dev/null || true
+  fi
+}
 
 echo "CTL-56: model-invoked skills and templates — worktree-safe merge (cross-site)"
 echo ""
@@ -44,7 +58,7 @@ for REL_FILE in "${CHECKED_FILES[@]}"; do
   LABEL="$(basename "$(dirname "$FILE")")/$(basename "$FILE")"
   echo "  ── ${LABEL}"
   if [[ -f "$FILE" ]]; then
-    BODY="$(cat "$FILE")"
+    BODY="$(_skill_body "$FILE")"
     assert_not_contains "$BODY" "--delete-branch" \
       "CTL-56: ${LABEL} drops --delete-branch (worktree-safe)"
     assert_contains "$BODY" "git/refs/heads/" \
@@ -60,7 +74,7 @@ done
 echo "CTL-56: merge-pr Step 11 — linked-worktree guard on local git checkout"
 MERGE_PR="${REPO_ROOT}/plugins/dev/skills/merge-pr/SKILL.md"
 if [[ -f "$MERGE_PR" ]]; then
-  BODY="$(cat "$MERGE_PR")"
+  BODY="$(_skill_body "$MERGE_PR")"
   assert_contains "$BODY" "git-common-dir" \
     "merge-pr Step 11 has linked-worktree guard (git-common-dir divergence check)"
   # CTL-56 remediation: both sides of the divergence check MUST be absolute, else the
@@ -82,8 +96,7 @@ echo "CTL-56: automated merge sites gate branch delete on an executable REST .me
 # merge+delete site. (CTL-56 Codex round-1 P1: merge-pr was previously excluded as "interactive and
 # human-gated", but human-gating gates the merge DECISION, not the merge-queue race — with a queue,
 # `gh pr merge` enqueues and returns success and the next line would delete a still-open PR's head
-# ref. So merge-pr now carries the executable `.merged` gate too; recovery-pass carries its own
-# cross-repo REST-confirm prose.)
+# ref. So merge-pr now carries the executable `.merged` gate too.)
 CONFIRM_GATED_FILES=(
   "plugins/dev/skills/merge-pr/SKILL.md"
   "plugins/dev/skills/triage-aging-prs/SKILL.md"
@@ -94,7 +107,7 @@ for REL_FILE in "${CONFIRM_GATED_FILES[@]}"; do
   FILE="${REPO_ROOT}/${REL_FILE}"
   LABEL="$(basename "$(dirname "$FILE")")/$(basename "$FILE")"
   if [[ -f "$FILE" ]]; then
-    BODY="$(cat "$FILE")"
+    BODY="$(_skill_body "$FILE")"
     assert_contains "$BODY" ".merged" \
       "CTL-56: ${LABEL} gates branch delete on an executable REST .merged confirm (not a comment)"
   else

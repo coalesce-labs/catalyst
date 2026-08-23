@@ -151,7 +151,6 @@ on:
       # confined to any of those files would otherwise skip this workflow.
       - "plugins/dev/skills/phase-monitor-merge/**"
       - "plugins/dev/skills/merge-pr/**"
-      - "plugins/dev/skills/recovery-pass/**"
       - "plugins/dev/skills/triage-aging-prs/**"
       - "plugins/dev/templates/**"
       - "plugins/legacy/skills/oneshot/**"
@@ -169,6 +168,17 @@ on:
       - "package.json"
       - "bun.lock"
       - "turbo.json"
+      # CTL-2162: THE TRIGGER MUST MATCH THE SCAN (same doctrine as the
+      # plugins/dev/scripts/** and plugins/*/skills/** entries above, on the docs
+      # axis). needs-human-deleted.test.sh scans the WHOLE repo for the deleted
+      # label; 11 of its 168 pinned survivor files live under docs/ and website/.
+      # Without these two globs a PR that reintroduces `needs-human` in a doc —
+      # including references/event-schema.md's off-machine event contract, which
+      # consumers outside this repo read — skips this job entirely and the guard
+      # never fires. Widening a required check only ever costs CI minutes;
+      # narrowing it costs correctness.
+      - "docs/**"
+      - "website/**"
 
 jobs:
   # Always runs (see the PR-TRIGGER NOTE above) so `execution-core-unit-tests`'s
@@ -182,7 +192,7 @@ jobs:
       relevant: ${{ steps.filter.outputs.relevant }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
@@ -231,13 +241,17 @@ jobs:
               - "plugins/*/*/skills/**"
               - "plugins/dev/skills/phase-monitor-merge/**"
               - "plugins/dev/skills/merge-pr/**"
-              - "plugins/dev/skills/recovery-pass/**"
               - "plugins/dev/skills/triage-aging-prs/**"
               - "plugins/dev/templates/**"
               - "plugins/legacy/skills/oneshot/**"
               # CTL-56: mirror the push-path entry above — the repo-wide guard scans the legacy
               # orchestrate skill, so a change confined to it must mark the PR relevant.
               - "plugins/legacy/skills/orchestrate/**"
+              # CTL-2162: mirror the two globs from on.push.paths — see the note
+              # there. needs-human-deleted.test.sh scans the whole repo, so a
+              # docs-only PR that reintroduces the label must mark the PR relevant.
+              - "docs/**"
+              - "website/**"
 
   execution-core-unit-tests:
     needs: detect-changes
@@ -263,6 +277,24 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      # ⛔ ripgrep is NOT preinstalled on ubuntu-latest, and two suites here are built entirely on
+      # `rg --no-ignore --hidden`: the CTL-2162 deletion ratchet and
+      # linear-comment-post.test.sh. Without it every scan reads an EMPTY TREE, which does not
+      # error — it silently returns no matches. On 2026-08-22 that made the CTL-2162 guard report
+      # "5 passed, 5 failed": every assertion that must FIND something failed, every assertion
+      # that merely asserts ABSENCE passed, and the ratchet claimed 168 survivor files had
+      # "shrank or vanished". The guard had never once passed in CI.
+      #
+      # It was only visible because those suites plant positive controls. A guard that scans for
+      # the absence of a token, with no planted control, would have gone GREEN here while checking
+      # nothing at all — which is the failure this whole epic is about.
+      - name: Install ripgrep (required by the scan-based suites)
+        working-directory: .
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ripgrep
+          rg --version
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -625,10 +657,6 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/gh-pr-comment.test.sh
 
-      - name: recovery-pass pr_not_merged remediation test (CTL-1496)
-        working-directory: plugins/dev/scripts
-        run: bash __tests__/recovery-pass-pr-not-merged.test.sh
-
       - name: review-comments headless resolution test (CTL-1496)
         working-directory: plugins/dev/scripts
         run: bash __tests__/review-comments-headless.test.sh
@@ -692,6 +720,33 @@ jobs:
         # pre-fix guard.
         working-directory: plugins/dev/scripts
         run: bash lib/__tests__/cluster-fence-guard.test.sh
+
+      - name: handoff-durability write-then-cite unit tests (CTL-2104)
+        # ⛔ PINNED BECAUSE IT WAS NOT. lib/handoff-durability.sh is the entire
+        # runtime half of CTL-2104 — the mechanical stamp, the absolute-realpath
+        # resolution through the per-project thoughts/shared symlink, the
+        # read-back after install, and the five-valued sync verdict. Its own
+        # suite is the ONLY coverage for any of that. The ticket pinned its
+        # sibling shape suite in skills-gate.yml but not this one, and this job
+        # runs an ENUMERATED list of shell suites — there is no glob runner and
+        # no run-tests.sh here (see the note at the catalyst-account-usage-page
+        # step) — so the suite would have run only in the local full gate.
+        #
+        # Verified before adding this step: `grep -rn handoff-durability
+        # .github/workflows/` returned NOTHING. The same grep for
+        # `handoff-contract` returns skills-gate.yml's line — that is the
+        # SHAPE suite over the prose skills, not this one — and the same grep
+        # for `cluster-fence-guard.test.sh` (right above, same lib/__tests__
+        # directory) returns its own run line. Both are positive controls that
+        # the instrument reports a pin when a pin exists.
+        #
+        # What it guards: a false `synced` verdict, which is exactly the claim
+        # that made six real handoff files look like phantoms. Case 5 is a
+        # positive control that `synced` is reachable at all, so a suite that
+        # could only ever return local-only cannot pass vacuously.
+        # Measured 22 pass / 0 fail.
+        working-directory: plugins/dev/scripts
+        run: bash lib/__tests__/handoff-durability.test.sh
 
       - name: worktree-salvage destroy-site wiring tests (CTL-1639)
         # Deterministic source-order invariant: each destructive bash site
@@ -814,6 +869,105 @@ jobs:
         working-directory: plugins/dev/scripts/lib
         run: bun test event-name.test.mjs
 
+      - name: codex account-plane core unit tests (bun, CTL-2072)
+        # lib/codex-account-plane.mjs is the pure core behind `catalyst-stack
+        # codex-account` — window derivation, bucket normalization, and the
+        # four-valued account verdict. Its own step (not the "Run stable unit
+        # tests" allowlist below) because that step's working-directory is
+        # execution-core/ and this is a deliberately ZERO-IMPORT leaf outside
+        # that tree — the same rationale the deployment-mode, entitlement, and
+        # event-name steps above carry.
+        #
+        # Registered in the SAME change that adds the suite, because CI runs an
+        # ENUMERATED list and an unpinned suite is an inert suite. This is not
+        # hypothetical here: the model this command is patterned on is itself
+        # CI-dark — `grep -c 'catalyst-stack-claude-account'` over this file
+        # returns 0, while the positive control
+        # `grep -c 'catalyst-account-usage-page.test.sh'` returns 1.
+        #
+        # ⚠️ Run it BY NAME, never via a bare `bun test` in that directory:
+        # agent-liveness.test.mjs calls process.exit(), which terminates bun's
+        # runner before the `Ran N tests` summary and returns rc=0 even when
+        # another file failed (measured 2026-08-22 — it masked a real
+        # fsm-descriptor.test.mjs failure exactly that way).
+        #
+        # Measured 40 pass / 0 fail on this branch; the file does not exist at
+        # the merge base, so there is no pre-existing red to import.
+        working-directory: plugins/dev/scripts/lib
+        run: bun test codex-account-plane.test.mjs
+
+      - name: codex app-server client unit tests (bun, CTL-2072)
+        # The transport half, driven against an INJECTED spawn seam — no real
+        # `codex`, no network, no token spend. Same zero-import-leaf rationale
+        # and same by-name run requirement as the step above.
+        #
+        # Two of these tests pin protocol facts measured live rather than
+        # inferred from schema: the server interleaves an id-less
+        # `remoteControl/status/changed` notification between replies (so
+        # replies must be matched by JSON-RPC id, not arrival order), and it
+        # REALPATH-RESOLVES CODEX_HOME (so the echo-vs-request positive control
+        # must compare resolved paths — the fleet selector ~/catalyst/codex-home
+        # is itself a symlink, and a raw string compare would report a home
+        # mismatch on every healthy read).
+        #
+        # Measured 25 pass / 0 fail on this branch.
+        working-directory: plugins/dev/scripts/lib
+        run: bun test codex-account-client.test.mjs
+
+      - name: codex-accounts-usage CLI contract (CTL-2072)
+        # Output/exit-code contract + secrets hygiene, against a FAKE codex that
+        # speaks the measured app-server protocol. The hygiene checks plant a
+        # token-shaped string in the fixture's auth.json and carry their own
+        # POSITIVE CONTROLS (the secret really is in the fixture; the human
+        # table really is non-empty), so a refutation cannot pass on an empty
+        # haystack.
+        #
+        # Measured 23 pass / 0 fail on this branch.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/codex-accounts-usage.test.sh
+
+      - name: catalyst-codex-usage-page alarm contract (CTL-2072)
+        # The paging half. What is pinned here is NOT "does it fire at 80%" — it
+        # is that every way of being unable to SEE Codex quota renders as
+        # UNOBSERVABLE and pages through the SAME sinks, never as "under
+        # threshold". Includes the `[].every(p) is true` false-clean directly: a
+        # payload with zero accounts must page DARK, and must never print the
+        # under-threshold all-clear.
+        #
+        # Also pinned: a REJECTED account pages regardless of percentage (the
+        # rate-limits RPC succeeds on a throttled account, so a purely numeric
+        # pager calls a dead account healthy), a weekly-only account pages as
+        # `weekly` and never as a fabricated 5-hour window, and a page NO SINK
+        # ACCEPTED is not recorded so the next run retries.
+        #
+        # Measured 24 pass / 0 fail on this branch.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-codex-usage-page.test.sh
+
+      - name: catalyst-stack codex-account contract (CTL-2072)
+        # The operator surface: handle validation, selector parsing, the sops
+        # sed flip, the local symlink apply, the pin guard, and probe/verify.
+        # Hermetic — no real sops, cluster repo, network, or `codex` binary.
+        #
+        # Two checks here are behavioural rather than textual and pin bugs that
+        # were found by running them, not by reading the code:
+        #   * the selector replace must not DEREFERENCE the old symlink. On macOS
+        #     a plain `mv -f newlink selector` follows the link and buries the new
+        #     link inside the OLD account's home while returning 0 — a silent
+        #     no-op reporting success. BSD needs `mv -h`, GNU needs `mv -T`, and
+        #     neither accepts the other, so BOTH are required: this job runs on
+        #     ubuntu-latest while the fleet runs macOS.
+        #   * the pin guard must REFUSE when CATALYST_CODEX_HOME or Layer-1
+        #     codexHome is set, because those outrank the symlink in
+        #     codexConfig()'s ladder and the switch would otherwise report a
+        #     change that never took effect. It carries positive controls so it
+        #     cannot pass by always refusing.
+        #
+        # Measured 48 pass / 0 fail on this branch; the sibling
+        # catalyst-stack-claude-account.test.sh stays 55/55 (unchanged block).
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-stack-codex-account.test.sh
+
       - name: deployment-mode Bash resolver unit test (CTL-1617)
         # The Bash mirror's own standalone suite (lib/catalyst-deployment-mode.sh) —
         # see the bun step above for why this suite was previously ungated.
@@ -927,7 +1081,16 @@ jobs:
         # step documents). Measured green on origin/main (9 pass) and this branch
         # (10 pass), so it imports no pre-existing red like fence-held-fold would.
         working-directory: plugins/dev/scripts/broker
-        run: bun test worker-state-projection.test.mjs tailer-torn.test.mjs event-name-fold.test.mjs namespace-parity.test.mjs event-leak-guard.test.mjs
+        # CTL-2159: system-trouble.test.mjs joins the same hand-enumerated list. It
+        # now gates the `system_stall` rule — the ONLY alert path for the ~30 SYSTEM
+        # reason tokens that have no telemetry producer (spent retry budgets,
+        # watchdog kills, wedged workers). Those tokens stopped writing a per-ticket
+        # artifact in CTL-2159; if this rule regresses they produce NO artifact and
+        # NO alert, which is silent and strictly worse than the bin the epic deletes.
+        # `grep -rn system-trouble .github/workflows/` returned NOTHING before this;
+        # positive control: the same grep for `worker-state-projection` returned the
+        # `run:` line below. Measured 39 pass / 0 fail on this branch.
+        run: bun test worker-state-projection.test.mjs tailer-torn.test.mjs event-name-fold.test.mjs namespace-parity.test.mjs event-leak-guard.test.mjs system-trouble.test.mjs
 
       - name: plugin-refresh + lock-resolution-audit tests (CTL-1831)
         # `grep plugin-refresh .github/workflows/` returned only two COMMENTS
@@ -1115,12 +1278,31 @@ jobs:
         run: bash __tests__/oneshot-merge-worktree-guard.test.sh
 
       - name: cross-site worktree-safe merge guard — model-invoked skills and templates (CTL-56)
-        # Guards that merge-pr, recovery-pass, triage-aging-prs, followup-prompt, and
-        # fixup-prompt all use worktree-safe merge (no --delete-branch; checkout-free
-        # remote-ref delete). File list is an array in the test; a 6th call site is a
-        # one-line add.
+        # Guards that merge-pr, triage-aging-prs, followup-prompt, and fixup-prompt all
+        # use worktree-safe merge (no --delete-branch; checkout-free remote-ref delete).
+        # File list is an array in the test; a 5th call site is a one-line add.
         working-directory: plugins/dev/scripts
         run: bash __tests__/merge-delete-branch-worktree-guard.test.sh
+
+      - name: needs-human deletion guard (CTL-2162)
+        # CTL-2162: the label `needs-human` is deleted (CTL-2156…CTL-2161). This is the
+        # guard that stops it coming back — a ratchet over a frozen survivor manifest
+        # plus four hard-zero properties (no setup script creates the label; no runtime
+        # writer stamps it as a phase-signal status; the orch-monitor attention taxonomy
+        # excludes it; the retired broker reconcile event name has no producer).
+        #
+        # Every zero in it is paired with a PLANTED-OCCURRENCE control, because the
+        # plan's own version of the runtime-writer case scanned the schema enums —
+        # where the value had never appeared — and so passed vacuously before any work
+        # was done. Read the header of the test before changing it.
+        #
+        # CTL-2076 applies: this workflow allowlists shell suites by name rather than
+        # globbing __tests__/, so a new suite runs in required CI only once registered
+        # here. The matching trigger widening (docs/**, website/**) is in on.push.paths
+        # and detect-changes — THE TRIGGER MUST MATCH THE SCAN, or the label comes back
+        # in a tree this job never runs for.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/needs-human-deleted.test.sh
 
       - name: Run stable unit tests
         # CTL-1789 round-1 P2 (Codex): assertion-evidence.test.mjs and
@@ -1177,6 +1359,82 @@ jobs:
         #   file in the list below — it drives readNewEvents directly and calls
         #   stopMonitor() before every append, so it arms no timer and no watcher
         #   (measured max 1.6 s per case locally, vs bun's 5 000 ms default).
+        #
+        #   CTL-2157 NOTE, the same shape one rung out: because daemon.test.mjs
+        #   is excluded, a handleCommentWake case added THERE would never run
+        #   here. The ask→work wake is the hard prerequisite of the needs-human
+        #   deletion (an ask nothing consumes piles up as the label did), so
+        #   its cases live in ask-wake-daemon.test.mjs, listed below. Like
+        #   monitor-torn it arms no timer and no watcher: it calls
+        #   handleCommentWake directly against tmp worker dirs with every seam
+        #   injected — no replica read, no Linear call (13 pass, 228 ms).
+        #   ask-wake.test.mjs is the pure resolver plus the ASK_LABEL_NAMES
+        #   parity pin against scripts/ask.mjs (26 pass, 51 ms).
+        #   Registered in the SAME change that adds both suites — the
+        #   four-times-burned allowlist lesson the ask-verb / event-name /
+        #   replica-path steps each document. Instrument (a `run:`-anchored grep
+        #   is invalid for this multi-line block — see the event-name step):
+        #   `grep -n ask-wake .github/workflows/` returned NOTHING before this
+        #   edit, against a positive control of `assertion-evidence-parity`,
+        #   which returns its list line.
+        #
+        #   CTL-2158 NOTE: stall-class.test.mjs (the pure S/A/M/HELD classifier)
+        #   and stall-class-wiring.test.mjs (the unstuck-sweep quiet-gate + the
+        #   escalation producers' output re-target) are listed for the same
+        #   reason, and registered in the SAME change that adds them. What they
+        #   guard is a gate whose failure is INVISIBLE in both directions: lose
+        #   it one way and every sweep interval posts another authored Linear
+        #   comment on a ticket a human is already holding (CTL-638); lose it the
+        #   other way and an unclassifiable stall goes silent — no label, no ask,
+        #   no alert, no retry. Both suites are pure + tmpdir only: no timer, no
+        #   watcher, no Linear call (60 pass, ~60 ms combined). Instrument (a
+        #   `run:`-anchored grep is invalid for this multi-line block — see the
+        #   event-name step): `grep -rn stall-class .github/workflows/` returned
+        #   NOTHING before this edit, against the same positive control of
+        #   `assertion-evidence-parity`, which returns its list line.
+        #
+        #   CTL-2160 NOTE: needs-human-migration-sweep.test.mjs is REGISTERED here
+        #   deliberately. Its most important case is that an UNAVAILABLE `blocks`
+        #   relation source ABORTS the sweep instead of passing — the audit found
+        #   that rule, as originally specified, could not run on the data source it
+        #   named and would have silently auto-cleared the tickets it exists to
+        #   protect. A safety rule that only runs when someone remembers to run its
+        #   test is not a safety rule.
+        #   CTL-2159 NOTE: escalation-publish.test.mjs is the PRODUCER SWEEP's
+        #   proof — per producer, that its own trigger no longer writes the Linear
+        #   `needs-human` label and that the correct replacement fired. It is
+        #   registered in the SAME change that adds it because this repo has now
+        #   shipped an unlisted (therefore inert) suite five times, and this one
+        #   guards a property no grep can: six of the producers reach the label
+        #   only through routeStuckTicketToDelegate and match none of the tokens a
+        #   producer sweep would grep for, so a regression there passes every
+        #   textual check. Pure + tmpdir only; no timer, no Linear call (24 pass,
+        #   ~130 ms). Instrument (a `run:`-anchored grep is invalid for this
+        #   multi-line block — see the event-name step):
+        #   `grep -rn escalation-publish .github/workflows/` returned NOTHING
+        #   before this edit, against the same positive control of
+        #   `assertion-evidence-parity`, which returns its list line.
+        #
+        #   CTL-2159 ROUND 2: delegate-first.test.mjs and durable-escalation.test.mjs
+        #   join for the same reason. delegate-first is the seam SIX producers reach
+        #   the escalation through — including the volume producer — and it now
+        #   carries the stall CLASS out to four scheduler sites that gate a durable
+        #   per-ticket `worker.transition {toDisposition:"needs-human"}` on it;
+        #   durable-escalation is the SECOND per-ticket artifact store (the board
+        #   renders every record as a needs-human card) and now carries the class
+        #   that keeps SYSTEM stalls off it. `grep -rn 'delegate-first.test\|durable
+        #   -escalation.test' .github/workflows/` returned NOTHING before this edit;
+        #   positive control: the same grep for `label-guard.test.mjs` returns its
+        #   list line. Measured 24 + 17 pass / 0 fail on this branch.
+        #
+        #   ⛔ DELIBERATELY NOT ADDED: delegate-emit-wiring.test.mjs and
+        #   delegate-shadow-e2e.test.mjs. Both are RED on origin/main and on this
+        #   branch alike (4 failures, all in stale-pr-rescue's defaultEscalate
+        #   emitting an EXTRA delegate event — verified pre-existing by checking out
+        #   HEAD~1 and re-running: same 4 by name). Registering a red suite makes the
+        #   gate red on arrival and teaches the next author to skip it. They belong
+        #   in CI the moment that defect is fixed; it is out of this change's scope
+        #   and is stated here rather than left as a silent omission.
         run: |
           bun test \
             beliefs/advance-rules.test.mjs \
@@ -1202,14 +1460,20 @@ jobs:
             abort-worker.test.mjs \
             assertion-evidence.test.mjs \
             assertion-evidence-parity.test.mjs \
+            ask-wake.test.mjs \
+            ask-wake-daemon.test.mjs \
+            stall-class.test.mjs \
+            stall-class-wiring.test.mjs \
+            escalation-publish.test.mjs \
+            needs-human-migration-sweep.test.mjs \
+            delegate-first.test.mjs \
+            durable-escalation.test.mjs \
             cli-header-backtick-guard.test.mjs \
             agent-session-narrator.test.mjs \
             linear-comment-write.test.mjs \
             autotune-decision.test.mjs \
             autotune-lifecycle.test.mjs \
             autotune-writeback.test.mjs \
-            board-health.test.mjs \
-            board-health-seam.test.mjs \
             dispatch-readiness.test.mjs \
             stall-janitor-throttle.test.mjs \
             clear-stall-empty-dir.test.mjs \
@@ -1252,10 +1516,6 @@ jobs:
             config-node-class.test.mjs \
             config-cloud-token-env.test.mjs \
             config.test.mjs \
-            delegate-config-event.test.mjs \
-            delegate-queue.test.mjs \
-            delegate-runner.test.mjs \
-            delegate-slot-reservation.test.mjs \
             diagnostician.test.mjs \
             cloud-sync-telemetry.test.mjs \
             cloud-sync-log.test.mjs \
@@ -1399,15 +1659,9 @@ jobs:
             worktree-refresh-timer.test.mjs \
             worktree-safety.test.mjs \
             worktree.test.mjs \
-            recovery-reasoning.test.mjs \
-            recovery-fix-backoff.test.mjs \
-            recovery-orphan-stale-e2e.test.mjs \
             recovery-seam-deps.test.mjs \
             pr-block-probe.test.mjs \
-            recovery-emit.test.mjs \
-            sweep-stale-recovery-intents.test.mjs \
             triage-redispatch-guard.test.mjs \
-            recovery-evidence.test.mjs \
             unstuck-act-seams.test.mjs \
             unstuck-orphan-merge.test.mjs \
             orphan-sweep-explain.test.mjs \

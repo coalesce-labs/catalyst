@@ -24,7 +24,7 @@
 // ── what actually resolves the ask ───────────────────────────────────────────
 // The Linear comment IS the resolution. Once it lands, Linear's webhook →
 // orch-monitor's Linear handler → a `linear.comment.created` event carrying the
-// REAL human author → the daemon's comment-wake path clears `needs-human`
+// REAL human author → the daemon's comment-wake path clears the escalation hold
 // unconditionally and first (CTL-1567). Measured end-to-end at ~4 seconds.
 //
 // This module therefore does NOT synthesize a resume event. Doing so would be both
@@ -33,14 +33,14 @@
 // verified path do its job.
 //
 // ── local best-effort hygiene ────────────────────────────────────────────────
-// After a successful post we clear the local `needs-human` once-marker, re-arming
+// After a successful post we clear the local escalation once-marker, re-arming
 // the daemon's labelOnce guard. This is the SAFE half of the known CTL-1552
 // half-mutation: clearing the marker without the label lets the daemon re-apply if
 // the ticket is genuinely still held, whereas clearing the label without the marker
 // would wedge the guard. It is strictly best-effort — a ticket with no worker dir
 // has no marker, which is not an error, and never affects the result.
 
-import { clearNeedsHumanMarker, findHeldRun, recordResponse } from "./respond-ticket.mjs";
+import { clearEscalationMarker, findHeldRun, recordResponse } from "./respond-ticket.mjs";
 import { postOperatorComment } from "./linear-comment.mjs";
 
 /**
@@ -51,7 +51,7 @@ import { postOperatorComment } from "./linear-comment.mjs";
  * restore the row — never silently lose the item"):
  *
  *   { status: "replied", ticket, commentId, author, phase }
- *        → the comment is live and human-authored. `needs-human` clears via the
+ *        → the comment is live and human-authored. The escalation hold clears via the
  *          webhook within seconds; the UI marks the row resolved optimistically and
  *          reconciles against the label on the next frame.
  *   { status: "empty_body" }        → 400: nothing typed.
@@ -73,7 +73,7 @@ export async function replyToTicket(
     post = postOperatorComment,
     findHeld = findHeldRun,
     record = recordResponse,
-    clearMarker = clearNeedsHumanMarker,
+    clearMarker = clearEscalationMarker,
     env = process.env,
     config = null,
     /** Layer-2 project config — carries the personal `linear.apiToken` that is the

@@ -126,7 +126,7 @@ async function runWithConcurrencyLimit<T>(
           if (idx >= items.length) return;
           const item = items[idx];
           if (item === undefined) return;
-          await worker(item as T);
+          await worker(item);
         }
       })(),
     );

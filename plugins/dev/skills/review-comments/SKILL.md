@@ -164,11 +164,11 @@ mode safe for `claude --bg` workers (no stdin available):
   {"prNumber":42,"threadId":"T1","path":"a.ts","line":5,"finding":"…","why":"…"}
   ```
   (Resolve `CATALYST_ORCHESTRATOR_DIR` **first** — a `claude --bg` worker receives that var, not
-  `ORCH_DIR`, which is only exported inside the recovery-pass skill's own prelude. Keying off
-  `ORCH_DIR` alone wrote the record to `./workers/<ticket>` in the worktree, where the recovery-pass
-  caller could never find it — CTL-1496.) The caller (recovery-pass worker) reads
-  `.review-escalations.jsonl` from that same path to author a curated escalation brief — one line per
-  genuine judgment call — and escalates only those, with the PR number and thread linked.
+  `ORCH_DIR` — CTL-1496. Keying off `ORCH_DIR` alone wrote the record to `./workers/<ticket>` in the
+  worktree instead of the shared orchestrator dir.) CTL-2141 removed this file's only consumer (the
+  recovery-pass skill, which read `.review-escalations.jsonl` to author a curated escalation brief);
+  the write here is retained as a durable record for manual triage, but nothing currently reads it
+  automatically.
 - **Interactive path preserved** — when neither `CATALYST_PHASE` is set nor `--headless` is
   passed, the existing `[y/N]` prompt behaviour is unchanged.
 

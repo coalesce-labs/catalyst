@@ -151,7 +151,7 @@ describe("mergeSummaryIntoTicket", () => {
   test("CTL-1110: preserves the explanation field across the summary merge", () => {
     const expl = { call_to_action: "Decide.", outcome: null, problem: "X.",
                    why_you: null, why_not_auto: null, what_to_do: null };
-    const ticket = makeTicket({ attention: "needs-human" as const, explanation: expl });
+    const ticket = makeTicket({ attention: "ask" as const, explanation: expl });
     const merged = mergeSummaryIntoTicket(ticket, { enabled: true, ask: "new ask", summary: null });
     expect(merged.explanation).toEqual(expl);
     expect(merged.ask).toBe("new ask");

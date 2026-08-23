@@ -167,7 +167,7 @@ export function ExecutionTab({ ticket, id, artifacts }: ExecutionTabProps) {
               <span
                 style={{
                   font: `10px ${C.mono}`,
-                  color: nowCard.attention === "needs-human" ? C.red : C.yellow,
+                  color: nowCard.attention === "ask" ? C.red : C.yellow,
                   marginLeft: nowCard.nextLabel ? 8 : "auto",
                 }}
               >

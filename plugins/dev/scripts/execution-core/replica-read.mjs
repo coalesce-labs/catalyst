@@ -38,6 +38,13 @@ export { isReplicaFresh };
 // caller falls through to the live read, never a stale terminal verdict).
 const TERMINAL_SELECT = `SELECT state, completed_at, canceled_at FROM issues WHERE identifier = ? AND removed_at IS NULL LIMIT 1`;
 
+// CTL-2129: the scope-key read. A ticket's Linear project id (issues.project_id)
+// is the steward scope key the escalation router keys off — a steward owns a
+// PROJECT, so an instrument must page resolveSteward(projectId), never
+// resolveSteward(ticketId). Index-backed by idx_issues_identifier; removed_at IS
+// NULL excludes tombstones, matching TERMINAL_SELECT.
+const PROJECT_ID_SELECT = `SELECT project_id FROM issues WHERE identifier = ? AND removed_at IS NULL LIMIT 1`;
+
 // CTL-1366: the cheap freshness probe. One aggregate scan of the replica's
 // `issues` table → the newest mirror timestamp + the row count. Drives the
 // catalyst.linear.replica.staleness gauge (now − maxUpdatedAtMs). Deliberately
@@ -325,6 +332,44 @@ const SEED_COMPLETE_SELECT = `SELECT 1 FROM sync_meta WHERE key = 'cursor' AND v
 // fetchTicketAssignee live-confirms every NULL delegate and trusts only a NON-NULL
 // (actor-set) delegate, so a stale null can never self-delegate + claim, and a quiet
 // feed still serves the authoritative non-null case Linear-free.
+
+/**
+ * readProjectId(identifier) — CTL-2129. The ticket → scope-key read: the Linear
+ * project id (issues.project_id) for a ticket, or null.
+ *
+ * Standalone (opens its OWN readonly handle and closes it) rather than a method
+ * on createReplicaReader, because it runs on the rare escalation path — a stalled
+ * PR that could not be rescued — not the hot per-signal terminal loop, so a
+ * long-lived handle would buy nothing.
+ *
+ * Fail-open to null: an absent ticket, a ticket with no project (NULL
+ * project_id), a missing/locked db, or any throw all return null — so the caller
+ * (scopeForTicket) falls back to the raw ticket id → no steward match →
+ * concierge, the correct fail direction (never a crash, never a human label).
+ *
+ * @param {string} identifier
+ * @param {{dbPath?: string}} [opts]
+ * @returns {string|null}
+ */
+export function readProjectId(identifier, { dbPath = getReplicaDbPath() } = {}) {
+  if (!identifier) return null;
+  let db = null;
+  try {
+    db = new Database(dbPath, { readonly: true });
+    db.run("PRAGMA busy_timeout = 250");
+    const row = db.prepare(PROJECT_ID_SELECT).get(identifier);
+    const pid = row?.project_id;
+    return typeof pid === "string" && pid.length > 0 ? pid : null;
+  } catch {
+    return null; // file absent / schema mismatch / lock — fall back to the ticket id
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      /* already closed */
+    }
+  }
+}
 
 export function createReplicaReader({ dbPath = getReplicaDbPath() } = {}) {
   let db = null;

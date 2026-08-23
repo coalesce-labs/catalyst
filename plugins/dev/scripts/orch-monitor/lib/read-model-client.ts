@@ -49,12 +49,6 @@ import type { BoardPayload } from "./board-data.d.mts";
 export type {
   BoardPayload,
   BoardWorker,
-  BoardTicket,
-  BoardQueueItem,
-  BoardConfig,
-  BoardPhaseCost,
-  BoardPhaseTiming,
-  BoardActiveState,
 } from "./board-data.d.mts";
 
 /**

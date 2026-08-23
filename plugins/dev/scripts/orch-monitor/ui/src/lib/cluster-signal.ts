@@ -33,7 +33,7 @@ export interface ClusterSignalNode {
    *  labels. Populated from the heartbeat's active_tickets attribute. */
   tickets?: string[];
   /** CTL-1581: running/dispatched subset — the slot-OCCUPANCY count. inFlightCount
-   *  also counts parked (needs-human) dirs, which hold no slot; consumers prefer
+   *  also counts parked (attention) dirs, which hold no slot; consumers prefer
    *  this and fall back to inFlightCount on old-daemon peers. */
   activeCount?: number;
   /** CTL-1322: local node's new-work admission from its heartbeat. ABSENT ⇒ unknown

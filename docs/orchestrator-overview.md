@@ -169,7 +169,7 @@ when `verify` produces a verdict-fail (`verify.json.regression_risk ≥ 5` OR an
 the code, commits, emits `phase.remediate.complete`, and the router cycles back
 to a fresh `verify`. The loop repeats up to **3** times (a counter distinct from
 the revive budget, event-counted via `phase.remediate.complete.<ticket>`); only a
-verdict-fail *after* the budget is spent escalates to `stalled` → `needs-human`.
+verdict-fail *after* the budget is spent escalates to `stalled` → the escalation guard.
 
 | Phase | Sub-skill / agent | Linear state | Prior artifact | Default model | Turn cap |
 |---|---|---|---|---|---|
@@ -199,7 +199,7 @@ divergence surfaces at dispatch instead of riding all the way to `monitor-merge`
 It is local-only (never pushes, never touches the PR) and mechanical: a clean
 rebase falls through to the normal launch; a textual **conflict** aborts, parks
 the ticket (`status:"stalled"` + `failureReason:"rebase_conflict_with_origin_main"`,
-`phase.<phase>.failed` emitted) and routes it to `needs-human` without launching a
+`phase.<phase>.failed` emitted) and routes it to the escalation guard without launching a
 worker — conflicts are never auto-resolved. Resume dispatches (CTL-658) and the
 non-build phases (`triage`/`pr`/`remediate`/`monitor-merge`/`monitor-deploy`/`teardown`) skip
 the rebase; the `monitor-*` and `teardown` phases operate on the PR / merged SHA and keep their
@@ -218,7 +218,7 @@ stateDiagram-v2
   verify --> review: verdict-pass (risk<5, no high finding)
   verify --> remediate: verdict-fail & cycle<3 (CTL-653)
   remediate --> verify: re-verify (reset signals, cycle++)
-  verify --> stalled: verdict-fail & cycle≥3 → needs-human
+  verify --> stalled: verdict-fail & cycle≥3 → escalate
   review --> pr: phase.review.complete
   pr --> monitor_merge: phase.pr.complete
   monitor_merge --> monitor_deploy: phase.monitor-merge.complete
@@ -401,13 +401,51 @@ during active work). See the configuration reference for the env knobs.
 `catalyst.ingestion.*` events above are low-level; the broker promotes the
 operator-actionable subset into a stable `catalyst.alert.{raised,cleared}` topic
 (`event.label` = the alert kind). `system_down` is promoted from a critical source's
-sustained `catalyst.ingestion.stale` (a dead monitor); `needs_human_pileup` is a level
-alert over the count of active, non-terminal tickets carrying a `needs-human`/`needs-input`
-label in `filter-state.db` (debounced by threshold + persistence + cooldown). These alert
-events ride the same event log → `otel-forward` → OTel collector → fan-out (Loki, dash0),
+sustained `catalyst.ingestion.stale` (a dead monitor).
+
+**System trouble is ONE fleet-scoped, auto-clearing alert — never one per ticket
+(CTL-2156).** Three kinds — `provider_degraded` (429/529 provider overload),
+`rate_limit_exhausted` (a Claude account / Linear / GitHub budget spent) and
+`capacity_unavailable` (a node with no execution slots) — are detected by
+`broker/system-trouble.mjs` from telemetry the fleet already emits
+(`execution-core.sdk.overloaded`, `account.status.changed`,
+`account.ratelimit.{sampled,unsampled}`, `linear.write.proxy.budget-exhausted`,
+`linear.label.retry-exhausted`, `node.capacity.changed`). Each kind's LEVEL is the
+number of *distinct* affected things (tickets / accounts / nodes) inside a trailing
+window, debounced by threshold + persistence + cooldown, so a provider outage
+touching forty tickets raises exactly **one** alert and writes **zero** per-ticket
+artifacts — the tickets simply wait and resume by themselves. The alert clears
+itself when the condition ends, either because a producer retracts (capacity
+restored, account no longer rejected) or because every affected key ages out of the
+window. This replaces the retired `needs_human_pileup` kind, which counted
+escalation LABELS — the per-ticket artifact — rather than the
+condition. These alert events ride the same event log → `otel-forward` → OTel collector → fan-out (Loki, dash0),
 where a downstream alert rule routes them to a channel. **Delivery is a separate concern**
 — the broker emits intent only; no channel or credential lives in the daemon, so the
 alerter survives a monitor death without depending on it.
+
+**Every stall resolves to exactly ONE class — or is HELD (CTL-2158).**
+`execution-core/stall-class.mjs` is the single classifier: `classifyStall(evidence)`
+maps a stall reason to **S — system** (provider overload, rate/account limits, tokens
+exhausted, connectivity, executor or worker death, an artifact written late,
+retry/cycle caps, an untidy working copy, fence/zombie trips, orphan-sweep staleness
+→ retry with backoff; if persistent, the ONE fleet alert above, and **zero**
+per-ticket artifacts), **A — ask** (scope, priority, approval, a credential or
+dashboard action only a person can take, design sign-off → one ask ticket carrying
+`blocks`), or **M — moot** (already done, superseded, no actionable plan → close).
+An exact table is tried first, then prefix rules, then three family patterns; if two
+families match, or none does, the verdict is **HELD** — not a fourth disposition but
+the *absence* of one. A held stall is never dropped, never guessed at, never
+auto-retried forever and never auto-cleared, because both possible defaults are
+expensive: defaulting to *ask* re-creates the bin (of 86 items flagged as waiting on
+a human, 3 genuinely were), and defaulting to *system* strands a real judgment call
+silently. `needs_human` itself classifies as HELD by construction — it records
+*that* an escalation happened and nothing about *why*. The verdict is stamped onto
+the phase signal (`stallClass`, `stallClassRule`, `stallClassManufactured`) by the
+four producers that publish a complete escalation, alongside `escalationPublished`,
+which is what `unstuck-sweep.mjs`'s quiet-gate now keys on — a property, not the
+`stalledReason:"needs_human"` token — so a ticket a human is already holding never
+receives a second authored Linear comment once that token goes away.
 
 **The execution-core daemon reaper (CTL-649) is the second producer-and-consumer.**
 It consumes the reap-intent requests appended by the reap-intent producers

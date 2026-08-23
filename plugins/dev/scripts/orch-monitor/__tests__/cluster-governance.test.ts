@@ -15,25 +15,7 @@ import {
 } from "../lib/node-liveness.mjs";
 
 const clusterGov = await import("../lib/cluster-governance.mjs");
-const { readClusterGovernance } = clusterGov as {
-  readClusterGovernance: (opts?: {
-    logPath?: string;
-    roster?: string[];
-    now?: number;
-    intervalMs?: number;
-    graceMs?: number;
-  }) => {
-    singleHost: boolean;
-    generatedAt: string;
-    nodes: Array<{
-      host: string;
-      governance: Record<string, unknown> | null;
-      reportedAt: string | null;
-      ageMs: number | null;
-      status: "live" | "degraded" | "offline";
-    }>;
-  };
-};
+const { readClusterGovernance } = clusterGov;
 
 const INTERVAL = DEFAULT_HEARTBEAT_INTERVAL_MS;
 const GRACE = DEFAULT_LIVENESS_GRACE_MS;
@@ -65,8 +47,6 @@ function makeHeartbeatLine(host: string, ts: string, gov: Record<string, unknown
 }
 
 let tmpDir: string;
-let logPath: string;
-
 // Create a fresh temp dir + logPath for each describe block sharing setup.
 function setup(lines: string[]): string {
   tmpDir = mkdtempSync(join(tmpdir(), "ctl1104-"));
