@@ -102,6 +102,45 @@ else
   bad "absent issue path (rc=${LAST_RC}, out=${LAST_OUT})"
 fi
 
+# --- CTL-2204: --body may never be a path; --body-file is the recipe (network-free cases) ---
+BODY_TMP="$(mktemp -d)"
+printf '# a real comment body\nwith two lines\n' >"${BODY_TMP}/real.md"
+
+# (a) path-as-body → exit 2 naming --body-file. Exit 2 (usage family) not 1 (REFUSED family).
+run_tool - "$DB_WITH" CTL-1 --as COORD --body "${BODY_TMP}/real.md"
+if [[ "$LAST_RC" -eq 2 ]] && printf '%s' "$LAST_OUT" | grep -q -- "--body-file"; then
+  ok "path-as-body → exit 2 naming --body-file"
+else
+  bad "path-as-body guard (rc=${LAST_RC}, out=${LAST_OUT})"
+fi
+
+# (b) an absolute path that does NOT exist stays a legitimate body (guard is existence-gated,
+#     so it must fall through to the ordinary refuse path, exit 1 / REFUSED — not exit 2).
+run_tool - "$DB_WITH" CTL-1 --as COORD --body "${BODY_TMP}/nope.md"
+if [[ "$LAST_RC" -ne 2 ]]; then
+  ok "non-existent path is not treated as path-as-body"
+else
+  bad "non-existent path wrongly refused as a path (out=${LAST_OUT})"
+fi
+
+# (c) --body-file pointing at nothing → exit 2 naming the path
+run_tool - "$DB_WITH" CTL-1 --as COORD --body-file "${BODY_TMP}/gone.md"
+if [[ "$LAST_RC" -eq 2 ]] && printf '%s' "$LAST_OUT" | grep -q "gone.md"; then
+  ok "--body-file missing → exit 2 naming the path"
+else
+  bad "--body-file missing (rc=${LAST_RC}, out=${LAST_OUT})"
+fi
+
+# (d) whitespace-only body → exit 2
+run_tool - "$DB_WITH" CTL-1 --as COORD --body "   "
+if [[ "$LAST_RC" -eq 2 ]]; then ok "whitespace-only --body → exit 2"
+else bad "whitespace-only body (rc=${LAST_RC}, out=${LAST_OUT})"; fi
+
+# (e) both flags → exit 2
+run_tool - "$DB_WITH" CTL-1 --as COORD --body "hi" --body-file "${BODY_TMP}/real.md"
+if [[ "$LAST_RC" -eq 2 ]]; then ok "--body + --body-file → exit 2 (ambiguous)"
+else bad "ambiguous flags (rc=${LAST_RC}, out=${LAST_OUT})"; fi
+
 # ============================ MOCK CLOUD (success path) ============================
 MOCK_DIR="$(mktemp -d)"
 MOCK_JS="${MOCK_DIR}/mock.mjs"
@@ -213,11 +252,43 @@ else
   else
     bad "eyes-clear best-effort (rc=${LAST_RC}, out=${LAST_OUT})"
   fi
+  # (CTL-2204) THE NEGATIVE CONTROL. Under enforce + a REACHABLE mock, an unguarded tool
+  # would really post. Two assertions, in this order:
+  #   1. POSITIVE CONTROL — a good body DOES produce an /agent/issue-comment capture, so an
+  #      empty capture below means "refused", not "the mock is broken". (run_mock truncates
+  #      $CAP_FILE on every call, so the two runs cannot contaminate each other.)
+  #   2. the path-as-body run leaves ZERO captures.
+  echo "200" >"$CTRL_FILE"
+  run_mock "$DB_DEF" CTL-1 --as COORD --body "control body"
+  if [[ "$LAST_RC" -eq 0 ]] && [[ -n "$(comment_capture)" ]]; then
+    ok "positive control: a good body DOES reach /agent/issue-comment under the mock"
+    run_mock "$DB_DEF" CTL-1 --as COORD --body "${BODY_TMP}/real.md"
+    if [[ "$LAST_RC" -eq 2 ]] \
+       && [[ -z "$(comment_capture)" ]] \
+       && printf '%s' "$LAST_OUT" | grep -q -- "--body-file"; then
+      ok "path-as-body under ENFORCE: exit 2, NOTHING posted (no /agent/issue-comment capture)"
+    else
+      bad "path-as-body must post nothing under enforce (rc=${LAST_RC}, cap=$(comment_capture), out=${LAST_OUT})"
+    fi
+  else
+    bad "positive control FAILED — the no-capture assertion below would be untrustworthy"
+  fi
+
+  # (CTL-2204) --body-file posts the file's CONTENTS, and never the path.
+  run_mock "$DB_DEF" CTL-1 --as COORD --body-file "${BODY_TMP}/real.md"
+  CAP="$(comment_capture)"
+  if [[ "$LAST_RC" -eq 0 ]] && cap_has 'a real comment body' && cap_lacks "${BODY_TMP}"; then
+    ok "--body-file → the comment carries the file CONTENTS, not the path"
+  else
+    bad "--body-file contents (rc=${LAST_RC}, cap=${CAP})"
+  fi
+
   rm -f "$DB_DEF" "$DB_PAIR"
 fi
 # =================================================================================
 
 rm -f "$DB_WITH" "$DB_NOISSUE"
+rm -rf "$BODY_TMP"
 
 echo ""
 echo "Results: ${PASS} passed, ${FAIL} failed"

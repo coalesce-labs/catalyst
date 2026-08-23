@@ -8,8 +8,10 @@
 //   • the agent tag rendered in the BODY (see the identity note below).
 //
 // Usage:
-//   node linear-reply.mjs <ISSUE-ID> --as <AGENT> --body <markdown> [--parent <commentId>|--top] [--keep-eyes]
-//   (body may also come from stdin: --body -)
+//   node linear-reply.mjs <ISSUE-ID> --as <AGENT> (--body <markdown|-> | --body-file <path>) [--parent <commentId>|--top] [--keep-eyes]
+//   (body may also come from stdin: --body -; or from a file's CONTENTS: --body-file <path>)
+//   ⛔ CTL-2204: --body REFUSES a path to an existing file (exit 2, naming --body-file) — a
+//   path is never a valid comment body. Use --body-file <path> to post that file's contents.
 // Without --parent/--top: threads under the ROOT of the most recent comment authored by a
 // HUMAN (non-bot) user on the issue; if none exists, posts top-level.
 // Prints JSON {ok, via, parentId, eyesCleared} on success; non-zero exit + message on failure.
@@ -39,22 +41,45 @@
 import { readFileSync } from "node:fs";
 import { readReplyContext, readIssueId, readCommentThreadRoot, isReplicaCurrent } from "./execution-core/replica-comment-read.mjs";
 import { getReplicaDbPath } from "./execution-core/config.mjs";
+import { resolveCommentBody } from "./lib/comment-body-arg.mjs";
 
 function arg(name, dflt) {
   const i = process.argv.indexOf(name);
   return i >= 0 ? process.argv[i + 1] : dflt;
 }
+
+const USAGE =
+  "usage: linear-reply.mjs <ISSUE-ID> --as <AGENT> (--body <markdown|-> | --body-file <path>) " +
+  "[--parent <id>|--top] [--keep-eyes]";
+
 const issueKey = process.argv[2];
 const asAgent = arg("--as", "COORD");
-let body = arg("--body", "");
 const parentArg = arg("--parent", null);
 const top = process.argv.includes("--top");
 const keepEyes = process.argv.includes("--keep-eyes");
-if (!issueKey || !body) {
-  console.error("usage: linear-reply.mjs <ISSUE-ID> --as <AGENT> --body <markdown|-> [--parent <id>|--top] [--keep-eyes]");
+if (!issueKey) {
+  console.error(USAGE);
   process.exit(2);
 }
-if (body === "-") body = readFileSync(0, "utf8");
+
+// CTL-2204: ONE rule for what the body is, shared with ask.mjs. Refuses a path passed to
+// --body BEFORE the replica read and BEFORE any proxy call — a path is never a comment body.
+const resolved = resolveCommentBody({
+  body: arg("--body", undefined),
+  bodyFile: arg("--body-file", undefined),
+});
+if (!resolved.ok) {
+  console.error(`linear-reply: ${resolved.message}`);
+  console.error(USAGE);
+  process.exit(2);
+}
+let body = resolved.stdin ? readFileSync(0, "utf8") : resolved.body;
+// A stdin body is resolved here, so re-check emptiness on the bytes we actually got.
+if (!body.trim()) {
+  console.error("linear-reply: comment body is empty (stdin produced nothing)");
+  process.exit(2);
+}
+
 // Identity-loss mitigation (see header): the cloud posts as a generic app actor, so keep the
 // agent tag visible in the body itself.
 const postBody = `${body}\n\n— _${asAgent}_`;
