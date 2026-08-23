@@ -11,7 +11,6 @@ import {
   emitAnnotationChange,
   type MonitorEventEnvelope,
   type SSEFilter,
-  type MonitorEventType,
 } from "../lib/events";
 import { subscribe } from "../lib/event-bus";
 
@@ -77,8 +76,8 @@ describe("parseFilter", () => {
     const url = new URL("http://localhost/events?filter=snapshot,worker-update");
     const filter = parseFilter(url);
     expect(filter.types).toBeDefined();
-    expect(filter.types!.has("snapshot" as MonitorEventType)).toBe(true);
-    expect(filter.types!.has("worker-update" as MonitorEventType)).toBe(true);
+    expect(filter.types!.has("snapshot")).toBe(true);
+    expect(filter.types!.has("worker-update")).toBe(true);
     expect(filter.types!.size).toBe(2);
   });
 
@@ -86,7 +85,7 @@ describe("parseFilter", () => {
     const url = new URL("http://localhost/events?filter=snapshot,bogus");
     const filter = parseFilter(url);
     expect(filter.types!.size).toBe(1);
-    expect(filter.types!.has("snapshot" as MonitorEventType)).toBe(true);
+    expect(filter.types!.has("snapshot")).toBe(true);
   });
 
   it("returns undefined types when all filter values are invalid", () => {
@@ -120,7 +119,7 @@ describe("parseFilter", () => {
       "http://localhost/events?filter=session-update&session=s1&workspace=ws1",
     );
     const filter = parseFilter(url);
-    expect(filter.types!.has("session-update" as MonitorEventType)).toBe(true);
+    expect(filter.types!.has("session-update")).toBe(true);
     expect(filter.sessionId).toBe("s1");
     expect(filter.workspace).toBe("ws1");
   });
@@ -157,7 +156,7 @@ describe("matchesFilter", () => {
 
   it("filters by event type", () => {
     const filter: SSEFilter = {
-      types: new Set(["snapshot" as MonitorEventType]),
+      types: new Set(["snapshot"]),
     };
     expect(matchesFilter(snapshotEvent, filter)).toBe(true);
     expect(matchesFilter(sessionEvent, filter)).toBe(false);
@@ -167,8 +166,8 @@ describe("matchesFilter", () => {
   it("filters by multiple event types", () => {
     const filter: SSEFilter = {
       types: new Set([
-        "snapshot" as MonitorEventType,
-        "worker-update" as MonitorEventType,
+        "snapshot",
+        "worker-update",
       ]),
     };
     expect(matchesFilter(snapshotEvent, filter)).toBe(true);
@@ -191,7 +190,7 @@ describe("matchesFilter", () => {
 
   it("combines type and sessionId filters (AND logic)", () => {
     const filter: SSEFilter = {
-      types: new Set(["session-update" as MonitorEventType]),
+      types: new Set(["session-update"]),
       sessionId: "sess-1",
     };
     expect(matchesFilter(sessionEvent, filter)).toBe(true);

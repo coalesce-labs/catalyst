@@ -2251,7 +2251,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     return {
       ...board,
       serviceHealth: { generatedAt: snap.generatedAt, outages },
-    } as BoardPayload;
+    };
   };
 
   const unsubscribers: Array<() => void> = [];
@@ -5911,7 +5911,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
       }
     }
     return originalStop(closeActiveConnections);
-  }) as typeof server.stop;
+  });
 
   // CTL-1224: undocumented `__`-prefixed debug seams used ONLY by the
   // server-activity test suite to assert the shared-ring fan-out + leak
