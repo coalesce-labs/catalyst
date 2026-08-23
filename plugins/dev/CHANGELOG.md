@@ -1,5 +1,22 @@
 # Changelog
 
+## [12.64.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.63.0...catalyst-dev-v12.64.0) (2026-08-23)
+
+
+### Features
+
+* **dev:** CTL-1890 — single locked seam for ~/.claude.json mutations ([#3420](https://github.com/coalesce-labs/catalyst/issues/3420)) ([5060613](https://github.com/coalesce-labs/catalyst/commit/506061366827efe49cba149ce8b83c08a430ea85))
+* **dev:** CTL-2043 give labelOnce a time-boxed cool-down (never .skipped) ([#3915](https://github.com/coalesce-labs/catalyst/issues/3915)) ([aa6fb04](https://github.com/coalesce-labs/catalyst/commit/aa6fb0487c21bd32ed0ebc5e048895ef01659ebb))
+* **dev:** CTL-2072 — catalyst-stack codex-account (status | switch | sync) + zero-token quota alarm ([#3931](https://github.com/coalesce-labs/catalyst/issues/3931)) ([4bb7d3e](https://github.com/coalesce-labs/catalyst/commit/4bb7d3e81c552345313920b982cbec1c05237f6c))
+* **dev:** CTL-2104 — mechanical, self-verifying handoff write-then-cite path ([#3933](https://github.com/coalesce-labs/catalyst/issues/3933)) ([bd6fc33](https://github.com/coalesce-labs/catalyst/commit/bd6fc337a5996f2c627c41cceb50fff959971eb5))
+* **dev:** CTL-2156..2162 — delete needs-human; system problems alert once, asks stay tickets ([#3927](https://github.com/coalesce-labs/catalyst/issues/3927)) ([fa7d78c](https://github.com/coalesce-labs/catalyst/commit/fa7d78c187c6bdf6ca5a0670d1da099241cfba6d))
+
+
+### Bug Fixes
+
+* **execution-core:** CTL-2110 — a bg-less signal reads as gone instead of throwing, so its dispatch slot is freed ([#3936](https://github.com/coalesce-labs/catalyst/issues/3936)) ([8aeee83](https://github.com/coalesce-labs/catalyst/commit/8aeee831fdba5267f2e342f050c2010dc8382ac2))
+* **orch-monitor:** CTL-2187 — the degraded Linear reads resolve the scoped app-actor credential ([#3945](https://github.com/coalesce-labs/catalyst/issues/3945)) ([1e7667b](https://github.com/coalesce-labs/catalyst/commit/1e7667b3e6c5b0f79deecb7b23766484f0b80985))
+
 ## [12.63.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.62.0...catalyst-dev-v12.63.0) (2026-08-22)
 
 
