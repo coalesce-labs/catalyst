@@ -1309,13 +1309,30 @@ export async function sdkRunPhaseAgent(
           if (!childPidResolved) {
             childPidResolved = true;
             try {
-              const discovered = discoverSdkChildPid({
+              const found = discoverSdkChildPid({
                 before: childPidsBefore,
                 after: listChildPids(process.pid),
                 cwdOf: cwdOfPid,
                 worktreePath: spec.worktreePath ?? worktreePath,
               });
-              reg.setChildPid?.(discovered); // optional-chained: Phase B test fakes lack it
+              // ⛔ Stamp ONLY on a conclusive verdict. `setChildPid(null)` records
+              // "we looked and there is no child", which the oracle later reads as
+              // DEAD — so stamping an INCONCLUSIVE scan (no usable ps/lsof, or two
+              // generations sharing the worktree) would mark a running worker
+              // reapable. Leaving it unstamped keeps the verdict `unknown`, which
+              // is the honest answer and today's behaviour.
+              if (found?.conclusive) {
+                reg.setChildPid?.(found.pid); // optional-chained: Phase B test fakes lack it
+              } else {
+                // `log` is not imported in this module (see defaultEmitEvent's
+                // dependency-free stderr line) — ride the same seam so the
+                // inconclusive population is measurable rather than invisible.
+                emitEvent("execution-core.sdk.child-pid-inconclusive", {
+                  ticket,
+                  phase,
+                  reason: found?.reason ?? "unknown",
+                });
+              }
             } catch {
               /* discovery is best-effort; the run continues either way */
             }

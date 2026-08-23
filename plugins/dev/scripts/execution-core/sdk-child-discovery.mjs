@@ -47,19 +47,25 @@ function defaultLsof(pid) {
 }
 
 /**
- * Every pid whose ppid is `parentPid`. Returns [] on any failure — this is a
- * liveness nicety, never a gate.
- * @returns {number[]}
+ * Every pid whose ppid is `parentPid`.
+ *
+ * TRI-STATE, deliberately: `[]` means "ps ran and this pid has no children";
+ * `null` means "I COULD NOT LOOK". Collapsing them is how a host with no usable
+ * process table would record every live worker as childless — and a childless
+ * record is what the liveness oracle later reads as DEAD, which re-claims a
+ * running worker. Same discipline as the oracle itself.
+ *
+ * @returns {number[]|null}
  */
 export function listChildPids(parentPid, { ps = defaultPs } = {}) {
-  if (!Number.isInteger(parentPid) || parentPid <= 0) return [];
+  if (!Number.isInteger(parentPid) || parentPid <= 0) return null;
   let out;
   try {
     out = ps();
   } catch {
-    return [];
+    return null;
   }
-  if (!out || out.status !== 0 || typeof out.stdout !== "string") return [];
+  if (!out || out.status !== 0 || typeof out.stdout !== "string") return null;
   const kids = [];
   for (const line of out.stdout.split("\n")) {
     // `ps` RIGHT-ALIGNS the pid column, so the line starts with padding. Split
@@ -98,36 +104,61 @@ export function cwdOfPid(pid, { lsof = defaultLsof } = {}) {
  * The pure diff: of the pids present in `after` but not `before`, the ONE whose
  * cwd is exactly `worktreePath`.
  *
- * Returns null — never a guess — when two or more new children share that cwd.
- * Two generations in one worktree is precisely the state this ticket is about,
- * and recording either pid would attribute a process we cannot justify owning.
+ * THREE-VALUED, like every other liveness read in this ticket. `conclusive`
+ * separates "I looked and there is no child of mine" from "I could not look",
+ * because only the FIRST justifies the `childPidResolved` stamp that the oracle
+ * reads as DEAD. The inconclusive reasons are each a real host condition:
  *
- * @returns {number|null}
+ *   enumerator-unusable       — `ps` failed; `after` is null.
+ *   cwd-unreadable            — new children exist but EVERY cwd probe failed
+ *                               (the systematic case: no usable `lsof`).
+ *   ambiguous-multiple-matches— two new children share the worktree, i.e. two
+ *                               generations. Never a guess, and never a "no
+ *                               child" claim — that would let the oracle read
+ *                               one of them dead and mint a third.
+ *   no-worktree-path          — nothing to join on.
+ *
+ * @returns {{pid: number|null, conclusive: boolean, reason: string}}
  */
 export function discoverSdkChildPid({ before, after, cwdOf, worktreePath } = {}) {
-  if (typeof worktreePath !== "string" || worktreePath === "") return null;
-  if (!Array.isArray(after) || typeof cwdOf !== "function") return null;
+  if (typeof worktreePath !== "string" || worktreePath === "") {
+    return { pid: null, conclusive: false, reason: "no-worktree-path" };
+  }
+  if (!Array.isArray(after) || typeof cwdOf !== "function") {
+    return { pid: null, conclusive: false, reason: "enumerator-unusable" };
+  }
   const seen = new Set(Array.isArray(before) ? before : []);
+  const fresh = after.filter((pid) => !seen.has(pid));
+  if (fresh.length === 0) return { pid: null, conclusive: true, reason: "no-new-children" };
+
   const matches = [];
-  for (const pid of after) {
-    if (seen.has(pid)) continue;
+  let anyCwdRead = false;
+  for (const pid of fresh) {
     let cwd;
     try {
       cwd = cwdOf(pid);
     } catch {
       continue; // one unreadable pid must not abort the scan
     }
+    if (typeof cwd !== "string" || cwd === "") continue;
+    anyCwdRead = true;
     // Exact match, no trailing-slash normalisation — the same semantics
     // hasLiveBgWorker documents for its own `cwd === worktreePath` compare.
     if (cwd === worktreePath) matches.push(pid);
   }
-  return matches.length === 1 ? matches[0] : null;
+  if (matches.length === 1) return { pid: matches[0], conclusive: true, reason: "matched" };
+  if (matches.length > 1) return { pid: null, conclusive: false, reason: "ambiguous-multiple-matches" };
+  // Zero matches. That is only evidence if we actually READ at least one cwd.
+  return anyCwdRead
+    ? { pid: null, conclusive: true, reason: "no-match" }
+    : { pid: null, conclusive: false, reason: "cwd-unreadable" };
 }
 
 /**
  * Convenience wrapper for the runner: snapshot → run → diff, with the real
- * probes wired. Never throws.
- * @returns {number|null}
+ * probes wired. Never throws; a throw degrades to INCONCLUSIVE, never to a
+ * conclusive "no child".
+ * @returns {{pid: number|null, conclusive: boolean, reason: string}}
  */
 export function discoverSdkChildPidLive({ before, parentPid = process.pid, worktreePath, ps, lsof } = {}) {
   try {
@@ -138,6 +169,6 @@ export function discoverSdkChildPidLive({ before, parentPid = process.pid, workt
       worktreePath,
     });
   } catch {
-    return null;
+    return { pid: null, conclusive: false, reason: "threw" };
   }
 }

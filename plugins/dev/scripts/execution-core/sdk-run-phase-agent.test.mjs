@@ -772,9 +772,18 @@ describe("sdkRunPhaseAgent — 429/529 backoff", () => {
     expect(events.filter(([n]) => n === "execution-core.sdk.phase-turns")).toHaveLength(1);
     expect(
       events.every(([n]) =>
-        n === "execution-core.sdk.overloaded" || n === "execution-core.sdk.phase-turns",
+        n === "execution-core.sdk.overloaded" ||
+        n === "execution-core.sdk.phase-turns" ||
+        // CTL-2192: this test injects no process-table probes, so the real ones
+        // run against the bun test process and the child-pid scan may legitimately
+        // conclude nothing. At most ONE such breadcrumb per run (the discovery is
+        // one-shot), asserted below.
+        n === "execution-core.sdk.child-pid-inconclusive",
       ),
     ).toBe(true);
+    expect(
+      events.filter(([n]) => n === "execution-core.sdk.child-pid-inconclusive").length,
+    ).toBeLessThanOrEqual(1);
     expect(backstops.length).toBe(0); // success → no backstop
   });
 
@@ -2537,5 +2546,114 @@ describe("sdkRunPhaseAgent — CTL-2192 child-pid discovery", () => {
     });
     expect(r.code).toBe(0);
     expect(state.resolvedCalls).toBe(1);
+  });
+});
+
+describe("sdkRunPhaseAgent — CTL-2192 inconclusive child-pid discovery", () => {
+  const spyReg = () => {
+    const state = { childPids: [], calls: 0 };
+    const registerWorker = () => ({
+      setAbortController() {},
+      touch() {},
+      setSessionId() {},
+      setChildPid(pid) {
+        state.childPids.push(pid);
+        state.calls += 1;
+      },
+      deregister() {},
+    });
+    return { registerWorker, state };
+  };
+
+  const oneMessageRun = () =>
+    (async function* () {
+      yield { type: "assistant", message: {} };
+      yield resultMsg();
+    })();
+
+  test("⛔ an UNUSABLE process table does NOT stamp the projection", async () => {
+    // `setChildPid(null)` records "we looked and there is no child", which the
+    // liveness oracle reads as DEAD. Stamping that when we could not look would
+    // mark every live worker on such a host reapable — the exact false-clean the
+    // three-valued design exists to prevent.
+    const { spawn } = spawnReturningSpec();
+    const { registerWorker, state } = spyReg();
+    const events = [];
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH,
+      spawn,
+      runQuery: oneMessageRun,
+      registerWorker,
+      emitEvent: (n, p) => events.push([n, p]),
+      listChildPids: () => null, // ps unusable
+      cwdOfPid: () => "/wt/CTL-100",
+    });
+    expect(r.code).toBe(0);
+    expect(state.calls).toBe(0); // NOT stamped
+    const bc = events.filter(([n]) => n === "execution-core.sdk.child-pid-inconclusive");
+    expect(bc).toHaveLength(1);
+    expect(bc[0][1].reason).toBe("enumerator-unusable");
+  });
+
+  test("⛔ UNREADABLE cwds do NOT stamp the projection (the no-lsof host)", async () => {
+    const { spawn } = spawnReturningSpec();
+    const { registerWorker, state } = spyReg();
+    const events = [];
+    await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH,
+      spawn,
+      runQuery: oneMessageRun,
+      registerWorker,
+      emitEvent: (n, p) => events.push([n, p]),
+      listChildPids: (() => {
+        let n = 0;
+        return () => (n++ === 0 ? [11] : [11, 4242]);
+      })(),
+      cwdOfPid: () => null, // every cwd probe fails
+    });
+    expect(state.calls).toBe(0);
+    expect(events.find(([n]) => n === "execution-core.sdk.child-pid-inconclusive")[1].reason).toBe("cwd-unreadable");
+  });
+
+  test("⛔ TWO generations sharing the worktree do NOT stamp the projection", async () => {
+    const { spawn } = spawnReturningSpec();
+    const { registerWorker, state } = spyReg();
+    const events = [];
+    await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH,
+      spawn,
+      runQuery: oneMessageRun,
+      registerWorker,
+      emitEvent: (n, p) => events.push([n, p]),
+      listChildPids: (() => {
+        let n = 0;
+        return () => (n++ === 0 ? [11] : [11, 4242, 4243]);
+      })(),
+      cwdOfPid: () => "/wt/CTL-100", // both new children in the same worktree
+    });
+    expect(state.calls).toBe(0);
+    expect(events.find(([n]) => n === "execution-core.sdk.child-pid-inconclusive")[1].reason).toBe(
+      "ambiguous-multiple-matches",
+    );
+  });
+
+  test("a CONCLUSIVE 'no child' DOES stamp (null pid) — that is the case the marker is for", async () => {
+    const { spawn } = spawnReturningSpec();
+    const { registerWorker, state } = spyReg();
+    const events = [];
+    await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH,
+      spawn,
+      runQuery: oneMessageRun,
+      registerWorker,
+      emitEvent: (n, p) => events.push([n, p]),
+      listChildPids: (() => {
+        let n = 0;
+        return () => (n++ === 0 ? [11] : [11, 4242]);
+      })(),
+      cwdOfPid: () => "/some/other/worktree", // readable, just not ours
+    });
+    expect(state.childPids).toEqual([null]);
+    expect(events.filter(([n]) => n === "execution-core.sdk.child-pid-inconclusive")).toHaveLength(0);
   });
 });

@@ -17,14 +17,14 @@ import { discoverSdkChildPid, listChildPids, cwdOfPid } from "./sdk-child-discov
 const MODULE_PATH = fileURLToPath(new URL("./sdk-child-discovery.mjs", import.meta.url));
 
 describe("discoverSdkChildPid — the pure before/after diff", () => {
-  test("returns the single NEW child whose cwd equals the worktreePath", () => {
+  test("returns the single NEW child whose cwd equals the worktreePath, CONCLUSIVELY", () => {
     const got = discoverSdkChildPid({
       before: [10, 11],
       after: [10, 11, 42],
       cwdOf: (pid) => (pid === 42 ? "/wt/CTL-1" : "/somewhere/else"),
       worktreePath: "/wt/CTL-1",
     });
-    expect(got).toBe(42);
+    expect(got).toEqual({ pid: 42, conclusive: true, reason: "matched" });
   });
 
   test("ignores a PRE-EXISTING child even when its cwd matches", () => {
@@ -36,22 +36,24 @@ describe("discoverSdkChildPid — the pure before/after diff", () => {
       cwdOf: () => "/wt/CTL-1",
       worktreePath: "/wt/CTL-1",
     });
-    expect(got).toBe(42);
+    expect(got).toEqual({ pid: 42, conclusive: true, reason: "matched" });
   });
 
-  test("returns null — never a guess — when TWO new children share the cwd", () => {
+  test("⛔ AMBIGUOUS, not 'no child', when TWO new children share the cwd", () => {
     // Two generations racing in one worktree is the case this ticket is about.
-    // Picking either one records a pid we cannot justify.
+    // Picking either one records a pid we cannot justify — and recording "no
+    // child" would let the liveness oracle later read one of them as DEAD and
+    // mint a third generation. Ambiguity must stay INCONCLUSIVE.
     const got = discoverSdkChildPid({
       before: [10],
       after: [10, 42, 43],
       cwdOf: () => "/wt/CTL-1",
       worktreePath: "/wt/CTL-1",
     });
-    expect(got).toBe(null);
+    expect(got).toEqual({ pid: null, conclusive: false, reason: "ambiguous-multiple-matches" });
   });
 
-  test("returns null when no new child matches the worktreePath", () => {
+  test("CONCLUSIVE 'no child' when new children exist, cwds are readable, and none match", () => {
     expect(
       discoverSdkChildPid({
         before: [10],
@@ -59,13 +61,44 @@ describe("discoverSdkChildPid — the pure before/after diff", () => {
         cwdOf: () => "/elsewhere",
         worktreePath: "/wt/CTL-1",
       }),
-    ).toBe(null);
+    ).toEqual({ pid: null, conclusive: true, reason: "no-match" });
   });
 
-  test("returns null when there are no new children at all", () => {
+  test("CONCLUSIVE 'no child' when there are no new children at all", () => {
     expect(
       discoverSdkChildPid({ before: [10, 11], after: [10, 11], cwdOf: () => "/wt/CTL-1", worktreePath: "/wt/CTL-1" }),
-    ).toBe(null);
+    ).toEqual({ pid: null, conclusive: true, reason: "no-new-children" });
+  });
+
+  test("⛔ INCONCLUSIVE when the enumerator itself failed (after === null)", () => {
+    // `ps` unavailable is "I could not look", not "there is no child". Stamping
+    // the latter would make every worker on such a host read DEAD after a bounce.
+    expect(
+      discoverSdkChildPid({ before: [10], after: null, cwdOf: () => "/wt/CTL-1", worktreePath: "/wt/CTL-1" }),
+    ).toEqual({ pid: null, conclusive: false, reason: "enumerator-unusable" });
+  });
+
+  test("⛔ INCONCLUSIVE when EVERY new child's cwd is unreadable", () => {
+    // The systematic case: no `lsof` on the host. Every cwd probe returns null,
+    // so we learn nothing — and must not claim there was no child.
+    expect(
+      discoverSdkChildPid({
+        before: [10],
+        after: [10, 42, 43],
+        cwdOf: () => null,
+        worktreePath: "/wt/CTL-1",
+      }),
+    ).toEqual({ pid: null, conclusive: false, reason: "cwd-unreadable" });
+  });
+
+  test("a PARTIALLY readable scan still concludes when at least one cwd was read", () => {
+    const got = discoverSdkChildPid({
+      before: [],
+      after: [42, 43],
+      cwdOf: (pid) => (pid === 43 ? "/wt/CTL-1" : null),
+      worktreePath: "/wt/CTL-1",
+    });
+    expect(got).toEqual({ pid: 43, conclusive: true, reason: "matched" });
   });
 
   test("a cwdOf that THROWS for one pid skips that pid — the scan still considers the others", () => {
@@ -78,7 +111,7 @@ describe("discoverSdkChildPid — the pure before/after diff", () => {
       },
       worktreePath: "/wt/CTL-1",
     });
-    expect(got).toBe(43);
+    expect(got).toEqual({ pid: 43, conclusive: true, reason: "matched" });
   });
 
   test("cwd match is EXACT — no trailing-slash normalisation (mirrors hasLiveBgWorker)", () => {
@@ -89,17 +122,25 @@ describe("discoverSdkChildPid — the pure before/after diff", () => {
         cwdOf: () => "/wt/CTL-1/",
         worktreePath: "/wt/CTL-1",
       }),
-    ).toBe(null);
+    ).toEqual({ pid: null, conclusive: true, reason: "no-match" });
   });
 
-  test("returns null on a missing/empty worktreePath rather than matching everything", () => {
-    expect(discoverSdkChildPid({ before: [], after: [42], cwdOf: () => "", worktreePath: "" })).toBe(null);
-    expect(discoverSdkChildPid({ before: [], after: [42], cwdOf: () => null, worktreePath: null })).toBe(null);
+  test("⛔ a missing/empty worktreePath is INCONCLUSIVE, never a match-everything", () => {
+    expect(discoverSdkChildPid({ before: [], after: [42], cwdOf: () => "", worktreePath: "" })).toEqual({
+      pid: null,
+      conclusive: false,
+      reason: "no-worktree-path",
+    });
+    expect(discoverSdkChildPid({ before: [], after: [42], cwdOf: () => null, worktreePath: null })).toEqual({
+      pid: null,
+      conclusive: false,
+      reason: "no-worktree-path",
+    });
   });
 
-  test("tolerates non-array inputs without throwing", () => {
-    expect(discoverSdkChildPid({ before: null, after: null, cwdOf: () => "/x", worktreePath: "/x" })).toBe(null);
-    expect(discoverSdkChildPid()).toBe(null);
+  test("tolerates malformed inputs without throwing, and stays INCONCLUSIVE", () => {
+    expect(discoverSdkChildPid({ before: null, after: null, cwdOf: () => "/x", worktreePath: "/x" }).conclusive).toBe(false);
+    expect(discoverSdkChildPid().conclusive).toBe(false);
   });
 });
 
@@ -121,23 +162,24 @@ describe("listChildPids — the process enumerator", () => {
     }
   });
 
-  test("returns [] for a parent with no children (and never throws)", () => {
-    // pid 1 is launchd/init; asking for children of an implausible pid must be
-    // an empty answer, not a crash.
+  test("returns [] — a CONCLUSIVE empty — for a real parent with no children", () => {
     expect(listChildPids(9_999_999)).toEqual([]);
-    expect(listChildPids(null)).toEqual([]);
-    expect(listChildPids(-1)).toEqual([]);
   });
 
-  test("an enumerator that fails degrades to [] rather than throwing", () => {
-    expect(listChildPids(process.pid, { ps: () => ({ status: 1, stdout: "" }) })).toEqual([]);
+  test("⛔ returns null (not []) when it COULD NOT LOOK — invalid input or a failing ps", () => {
+    // [] means "ps ran and this pid has no children"; null means "I could not
+    // look". Collapsing them is how a host without a usable process table would
+    // stamp every live worker as childless, and therefore reapable.
+    expect(listChildPids(null)).toBe(null);
+    expect(listChildPids(-1)).toBe(null);
+    expect(listChildPids(process.pid, { ps: () => ({ status: 1, stdout: "" }) })).toBe(null);
     expect(
       listChildPids(process.pid, {
         ps: () => {
           throw new Error("no ps");
         },
       }),
-    ).toEqual([]);
+    ).toBe(null);
   });
 
   test("parses whitespace-padded ps output (pid is RIGHT-ALIGNED by ps)", () => {
