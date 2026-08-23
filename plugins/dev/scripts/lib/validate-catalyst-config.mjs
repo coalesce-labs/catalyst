@@ -87,6 +87,26 @@ export const RELOCATED_LAYER1_KEYS = Object.freeze([
 ]);
 
 /**
+ * LAYER1_ERROR_CODES — the hard-error CLASSES validateLayer1Config can report.
+ *
+ * CTL-1214 remediation: `errors` is a flat string[], so its only consumer
+ * (doctor's checkConfigScopeLeak) graded FAIL on `errors.length > 0` and thereby
+ * reported a malformed `catalyst.schemaVersion` as a *scope leak*, with a message
+ * that named no leaked key and asserted a schemaVersion the config did not have.
+ * That FAIL is not cosmetic: runDoctor returns the FAIL count as its exit code and
+ * catalyst-join.sh gates member activation on exit 0.
+ *
+ * `errorDetails` carries the same errors tagged with one of these codes so a
+ * consumer can grade per class. `errors` keeps its exact prior shape and content —
+ * this is additive, and the two are built from one push so they cannot drift.
+ */
+export const LAYER1_ERROR_CODES = Object.freeze({
+  MISSING_ROOT: "missing-catalyst-root",
+  SCHEMA_VERSION: "schema-version-malformed",
+  NODE_SCOPE_LEAK: "node-scope-leak",
+});
+
+/**
  * Read a dotted path out of an object without throwing on missing intermediate
  * nodes. Returns `undefined` when any segment is absent or a non-object is
  * encountered mid-walk.
@@ -141,22 +161,33 @@ function getPath(obj, dottedPath) {
  *   - `valid`: true when there are no hard errors (deprecated keys / missing schemaVersion do not affect this);
  *   - `deprecatedKeys`: dotted paths (relative to `catalyst.`) that have relocated;
  *   - `errors`: human-readable hard-validation failures;
+ *   - `errorDetails`: the same failures as `{code, message}`, `code` drawn from
+ *     LAYER1_ERROR_CODES, so a caller can grade per error class instead of on
+ *     `errors.length`;
  *   - `recommendations`: non-failing migration signals (e.g. a missing schemaVersion).
  */
 export function validateLayer1Config(obj) {
   /** @type {string[]} */
   const errors = [];
+  /** @type {Array<{code: string, message: string}>} */
+  const errorDetails = [];
   /** @type {string[]} */
   const deprecatedKeys = [];
   /** @type {string[]} */
   const recommendations = [];
 
+  // One push site for both lists, so `errors` and `errorDetails` can never drift.
+  const addError = (code, message) => {
+    errors.push(message);
+    errorDetails.push({ code, message });
+  };
+
   const root = obj != null && typeof obj === "object" && !Array.isArray(obj) ? obj : {};
   const catalyst = root.catalyst;
 
   if (catalyst == null || typeof catalyst !== "object" || Array.isArray(catalyst)) {
-    errors.push("missing top-level `catalyst` object");
-    return { valid: false, deprecatedKeys, errors, recommendations };
+    addError(LAYER1_ERROR_CODES.MISSING_ROOT, "missing top-level `catalyst` object");
+    return { valid: false, deprecatedKeys, errors, errorDetails, recommendations };
   }
 
   // Back-compat (CTL-1214): catalyst.schemaVersion is RECOMMENDED, not required.
@@ -172,7 +203,8 @@ export function validateLayer1Config(obj) {
     !Number.isInteger(schemaVersion) ||
     schemaVersion < 1
   ) {
-    errors.push(
+    addError(
+      LAYER1_ERROR_CODES.SCHEMA_VERSION,
       `catalyst.schemaVersion must be an integer >= 1 (got ${JSON.stringify(schemaVersion)})`,
     );
   }
@@ -188,7 +220,8 @@ export function validateLayer1Config(obj) {
     if (getPath(catalyst, entry.path) === undefined) continue;
     deprecatedKeys.push(entry.path);
     if (optedIn && entry.scope === "node") {
-      errors.push(
+      addError(
+        LAYER1_ERROR_CODES.NODE_SCOPE_LEAK,
         `catalyst.${entry.path} is node-scoped and must not appear in a schemaVersion ` +
           `>= 1 Layer-1 config — relocate it to ${entry.destination} by running ` +
           `\`catalyst-config-migrate\``,
@@ -196,5 +229,5 @@ export function validateLayer1Config(obj) {
     }
   }
 
-  return { valid: errors.length === 0, deprecatedKeys, errors, recommendations };
+  return { valid: errors.length === 0, deprecatedKeys, errors, errorDetails, recommendations };
 }

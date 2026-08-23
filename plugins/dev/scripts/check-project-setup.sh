@@ -197,6 +197,20 @@ if [[ -n $CONFIG_PATH ]]; then
 	# registry entry exists for the team. Local-only — no API call. Gaps are
 	# warnings, consistent with every other linear-config issue here.
 	DISPATCH_MODE=$(jq -r '.catalyst.orchestration.dispatchMode // empty' "$CONFIG_PATH" 2>/dev/null)
+	# CTL-1214: Layer-2 fallback — the same rung orchestrate-dispatch-next and
+	# orchestrate-register-interests carry. Without it a slimmed Layer-1 resolves
+	# empty here and this entire contract check silently stops running for
+	# execution-core repos: a skipped check reads exactly like a passing one.
+	# Layer-1 still wins when present. `|| true` because this script runs under
+	# `set -e` and a miss must stay a miss, not abort the whole setup check.
+	if [[ -z $DISPATCH_MODE ]]; then
+		_cps_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/catalyst-layer2-read.sh"
+		if [[ -r $_cps_lib ]]; then
+			# shellcheck disable=SC1090
+			. "$_cps_lib"
+			DISPATCH_MODE="$(catalyst_layer2_json '.catalyst.orchestration.dispatchMode' || true)"
+		fi
+	fi
 	if [[ $DISPATCH_MODE == "execution-core" ]]; then
 		# The contract states this check expects. Mirrors contract_states() in
 		# setup-execution-core-states.sh — keep the two in sync (different

@@ -15,7 +15,7 @@
 // three schemas actually use.
 
 import { describe, test, expect } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -382,6 +382,49 @@ describe("config.template.json is sanitized (CTL-1214)", () => {
     expect("botUserId" in template.catalyst.monitor.linear).toBe(true);
     expect(template.catalyst.thoughts).toBeDefined();
   });
+});
+
+// CTL-1214 remediation — the sanitization assertion above read ONE of the two
+// SHIPPED templates. config-template-statemap.test.sh treats both as maintained
+// artifacts, and the .claude/ one still carried monitor.github.repoColors (a
+// RELOCATED_LAYER1_KEYS path) with no schemaVersion — so the "template is
+// sanitized" AC was satisfied by a file while its sibling re-leaked. Both paths
+// are now asserted from ONE list, so adding a third template surfaces here rather
+// than silently going uncovered.
+describe("every shipped config template is sanitized (CTL-1214)", () => {
+  const SHIPPED_TEMPLATES = [
+    ["plugins/dev/templates/config.template.json", join(import.meta.dir, "..", "..", "templates", "config.template.json")],
+    [".claude/config.template.json", join(import.meta.dir, "..", "..", "..", "..", ".claude", "config.template.json")],
+  ];
+
+  // Positive control on the LIST itself: a path typo would otherwise make the
+  // loop below iterate over a file that does not exist, and a `[].every(p)`-style
+  // clean pass is exactly the false-clean this repo keeps closing.
+  test("every listed template path exists on disk", () => {
+    expect(SHIPPED_TEMPLATES.length).toBeGreaterThan(1);
+    for (const [label, path] of SHIPPED_TEMPLATES) {
+      expect(existsSync(path), `${label} missing`).toBe(true);
+    }
+  });
+
+  for (const [label, path] of SHIPPED_TEMPLATES) {
+    test(`${label} ships no node-scoped relocated key and declares schemaVersion`, () => {
+      const tpl = JSON.parse(readFileSync(path, "utf8"));
+      const r = validateLayer1Config(tpl);
+      expect(tpl.catalyst.schemaVersion).toBe(1);
+      // Node-scoped leaks only: monitor.linear.teams is cluster-scoped (CTL-1885)
+      // and stays lenient by design, so asserting on `errors` (which is
+      // schemaVersion-gated to the node scope) is the right instrument.
+      expect(r.errors).toEqual([]);
+      expect(tpl.catalyst.monitor?.github?.repoColors).toBeUndefined();
+      expect(tpl.catalyst.feedback).toBeUndefined();
+      expect(tpl.catalyst.sweep).toBeUndefined();
+      expect(tpl.catalyst.orchestration?.dispatchMode).toBeUndefined();
+      expect(tpl.catalyst.orchestration?.executionCore).toBeUndefined();
+      expect(tpl.catalyst.orchestration?.worktreeRefresh).toBeUndefined();
+      expect(tpl.catalyst.orchestration?.reconcile).toBeUndefined();
+    });
+  }
 });
 
 // CTL-1214 Phase 5 (D3) — schemaVersion is the SELF-GATING opt-in to strictness.

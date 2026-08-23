@@ -138,7 +138,13 @@ const report = {
   nodePath,
   dryRun: opts.dryRun,
   changed: plan.changed,
-  moved: plan.moves.map((m) => ({ path: m.path, value: m.value })),
+  // CTL-1214: `from`/`reason` are carried for the one RE-HOMED leaf
+  // (executionCore.maxParallel → executionCore.targetParallel). The docs tell
+  // operators to keep this report as the record of what went where, so dropping
+  // the rename here would make the report claim a straight move that never
+  // happened. Both are undefined for an ordinary move and JSON.stringify omits
+  // them, so the report shape is unchanged for every other row.
+  moved: plan.moves.map((m) => ({ path: m.path, value: m.value, from: m.from, reason: m.reason })),
   kept: plan.kept.map((k) => ({ path: k.path, existingValue: k.existingValue, reason: k.reason })),
   dropped: plan.dropped,
   wrote: result.wrote,
@@ -153,7 +159,8 @@ if (opts.json) {
     process.stdout.write(`${tag}nothing to do — already migrated\n`);
   } else {
     for (const m of report.moved) {
-      process.stdout.write(`${tag}  moved   ${m.path} = ${JSON.stringify(m.value)}\n`);
+      const via = m.from ? ` (re-homed from ${m.from} — ${m.reason})` : "";
+      process.stdout.write(`${tag}  moved   ${m.path} = ${JSON.stringify(m.value)}${via}\n`);
     }
     for (const k of report.kept) {
       process.stdout.write(

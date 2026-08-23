@@ -73,6 +73,86 @@ describe("checkConfigScopeLeak grading (CTL-1214 D3/D4)", () => {
     expect(one({ ...noHosts, readLayer1: () => "" }).status).not.toBe(STATUS.FAIL);
   });
 
+  // ── CTL-1214 remediation: a malformed schemaVersion is NOT a scope leak ────
+  //
+  // `hard = errors.length > 0` conflated two unrelated error classes, so a
+  // malformed `catalyst.schemaVersion` FAILED this check with a message that
+  // named no leaked key and asserted a schemaVersion the config did not have.
+  // runDoctor returns the FAIL count as its exit code and catalyst-join.sh gates
+  // member activation on exit 0, so that mislabel fail-closed the join gate on a
+  // hand-edit typo. The scope-leak verdict now keys off the error CLASS, and the
+  // schema error gets its own named check.
+  describe("malformed schemaVersion is graded as a schema problem, not a scope leak", () => {
+    const byName = (checks, name) => checks.find((c) => c.name === name);
+
+    // The exact shape this repo's own committed config has today: the ONLY leak
+    // is the cluster-scoped roster (CTL-1885 owns it), which is never FAIL-able.
+    const CLUSTER_ONLY_LEAK = {
+      monitor: { linear: { teams: [{ key: "CTL", vcsRepo: "coalesce-labs/catalyst" }] } },
+    };
+
+    for (const bad of [0, "1", 1.5, -1]) {
+      test(`schemaVersion ${JSON.stringify(bad)} + cluster-only leak -> scope-leak is NOT FAIL`, () => {
+        const checks = checkConfigScopeLeak({
+          ...noHosts,
+          readLayer1: () => cfg(CLUSTER_ONLY_LEAK, { schemaVersion: bad }),
+        });
+        const leak = byName(checks, "config-scope-leak");
+        expect(leak).toBeDefined();
+        expect(leak.status).not.toBe(STATUS.FAIL);
+        // and the message no longer claims a schemaVersion the config lacks
+        expect(leak.detail).not.toContain("declares schemaVersion >= 1");
+      });
+
+      test(`schemaVersion ${JSON.stringify(bad)} is SURFACED under its own check`, () => {
+        const checks = checkConfigScopeLeak({
+          ...noHosts,
+          readLayer1: () => cfg(CLUSTER_ONLY_LEAK, { schemaVersion: bad }),
+        });
+        const schema = byName(checks, "config-layer1-schema");
+        expect(schema).toBeDefined();
+        expect(schema.status).toBe(STATUS.WARN);
+        expect(schema.detail).toContain("catalyst.schemaVersion");
+        // never FAIL: it must not become a second back door into the join gate
+        expect(schema.status).not.toBe(STATUS.FAIL);
+      });
+    }
+
+    // NEGATIVE CONTROLS. Without these, every assertion above could pass from a
+    // check that never emits and a verdict that is never FAIL.
+    test("a WELL-FORMED schemaVersion emits NO schema check", () => {
+      for (const good of [1, 2]) {
+        const checks = checkConfigScopeLeak({
+          ...noHosts,
+          readLayer1: () => cfg(CLUSTER_ONLY_LEAK, { schemaVersion: good }),
+        });
+        expect(byName(checks, "config-layer1-schema")).toBeUndefined();
+        expect(byName(checks, "config-scope-leak").status).toBe(STATUS.WARN);
+      }
+    });
+
+    test("the FAIL path still fires for a real node-scoped leak under schemaVersion 1", () => {
+      const checks = checkConfigScopeLeak({
+        ...noHosts,
+        readLayer1: () => cfg({ sweep: { idleHours: 48 } }, { schemaVersion: 1 }),
+      });
+      expect(byName(checks, "config-scope-leak").status).toBe(STATUS.FAIL);
+      expect(byName(checks, "config-layer1-schema")).toBeUndefined();
+    });
+
+    test("a malformed schemaVersion does NOT suppress a real node-scoped leak's WARN", () => {
+      // A bogus version does not opt in, so the node leak is a deprecation, not
+      // a hard error — but it must still be reported, alongside the schema WARN.
+      const checks = checkConfigScopeLeak({
+        ...noHosts,
+        readLayer1: () => cfg({ sweep: { idleHours: 48 } }, { schemaVersion: 0 }),
+      });
+      expect(byName(checks, "config-scope-leak").status).toBe(STATUS.WARN);
+      expect(byName(checks, "config-scope-leak").detail).toContain("sweep");
+      expect(byName(checks, "config-layer1-schema").status).toBe(STATUS.WARN);
+    });
+  });
+
   test("a hosts.json roster leak is cluster-scoped -> WARN, never FAIL", () => {
     const c = one({ hostsJsonExists: () => true, readLayer1: () => cfg({}) });
     expect(c.status).toBe(STATUS.WARN);

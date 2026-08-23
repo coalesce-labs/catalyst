@@ -66,20 +66,86 @@ const keptPaths = (plan) => plan.kept.map((k) => k.path).sort();
 
 describe("planLayer1Migration — the non-clobber rule (D1)", () => {
   it("does NOT write a key the merged Layer-2 already defines, and names it kept", () => {
-    // This host's real state: maxParallel:4 is machine-canonical in Layer-2
-    // (CTL-678). node.json outranks it, so a blind copy of the Layer-1 seed
+    // This host's real state: salvagePush is machine-canonical in Layer-2.
+    // node.json outranks the legacy file, so a blind copy of the Layer-1 seed
     // would SHADOW the operator's value.
     const plan = planLayer1Migration({
       layer1: FULL_LAYER1(),
-      mergedLayer2: { catalyst: { orchestration: { executionCore: { maxParallel: 4 } } } },
+      mergedLayer2: { catalyst: { sweep: { maxRemovalsPerRun: 20 } } },
     });
-    expect(movedPaths(plan)).not.toContain("orchestration.executionCore.maxParallel");
-    expect(movedPaths(plan)).toContain("orchestration.executionCore.minParallel");
-    expect(movedPaths(plan)).toContain("orchestration.executionCore.maxParallelCeiling");
+    expect(movedPaths(plan)).not.toContain("sweep.maxRemovalsPerRun");
+    expect(movedPaths(plan)).toContain("sweep.idleHours");
+    expect(movedPaths(plan)).toContain("sweep.intervalHours");
 
-    const kept = plan.kept.find((k) => k.path === "orchestration.executionCore.maxParallel");
+    const kept = plan.kept.find((k) => k.path === "sweep.maxRemovalsPerRun");
     expect(kept).toBeDefined();
-    expect(kept.existingValue).toBe(4);
+    expect(kept.existingValue).toBe(20);
+  });
+
+  // ── CTL-1214 remediation: the executionCore.maxParallel special case ──────
+  //
+  // maxParallel is the ONE relocated leaf that must never LAND in node.json (it
+  // would permanently shadow writeLayer2MaxParallel's runtime mirror in the
+  // legacy Layer-2 file, which node.json outranks) AND whose Layer-1 value must
+  // not be dropped (it is the operator's committed setpoint — the value CTL-750's
+  // recovery-to-layer1 and CTL-770's resolveTargetSetpoint both read). It is
+  // re-homed to the never-tuner-written `targetParallel` key instead.
+  describe("executionCore.maxParallel is re-homed to targetParallel", () => {
+    const withL2 = (mergedLayer2) => planLayer1Migration({ layer1: FULL_LAYER1(), mergedLayer2 });
+
+    it("never writes maxParallel into node.json, even with an EMPTY Layer-2", () => {
+      // The pre-remediation code took the `moves` arm here and wrote maxParallel
+      // straight into node.json — the shadowing case, invisible on a host that
+      // happened to already carry a Layer-2 maxParallel.
+      const plan = withL2({ catalyst: {} });
+      expect(movedPaths(plan)).not.toContain("orchestration.executionCore.maxParallel");
+      expect(plan.nodePatch.catalyst.orchestration.executionCore.maxParallel).toBeUndefined();
+    });
+
+    it("seeds targetParallel from the Layer-1 maxParallel (empty Layer-2)", () => {
+      const plan = withL2({ catalyst: {} });
+      expect(movedPaths(plan)).toContain("orchestration.executionCore.targetParallel");
+      expect(plan.nodePatch.catalyst.orchestration.executionCore.targetParallel).toBe(4);
+      const move = plan.moves.find((m) => m.path === "orchestration.executionCore.targetParallel");
+      expect(move.from).toBe("orchestration.executionCore.maxParallel");
+      expect(move.scope).toBe("node");
+    });
+
+    it("seeds targetParallel even when Layer-2 already carries the runtime maxParallel mirror", () => {
+      // This host's real state (measured): legacy Layer-2 carries maxParallel:4,
+      // written by the autotuner. That must NOT suppress the setpoint seed —
+      // suppressing it is exactly how setpoint went 4 → undefined after slimming.
+      const plan = withL2({ catalyst: { orchestration: { executionCore: { maxParallel: 4 } } } });
+      expect(plan.nodePatch.catalyst.orchestration.executionCore.targetParallel).toBe(4);
+      expect(plan.nodePatch.catalyst.orchestration.executionCore.maxParallel).toBeUndefined();
+    });
+
+    it("does NOT overwrite an operator-declared targetParallel", () => {
+      const plan = withL2({
+        catalyst: { orchestration: { executionCore: { targetParallel: 9 } } },
+      });
+      expect(movedPaths(plan)).not.toContain("orchestration.executionCore.targetParallel");
+      const kept = plan.kept.find((k) => k.path === "orchestration.executionCore.maxParallel");
+      expect(kept).toBeDefined();
+      expect(kept.existingValue).toBe(9);
+    });
+
+    it("still strips maxParallel from the slimmed Layer-1 in every branch", () => {
+      for (const l2 of [
+        { catalyst: {} },
+        { catalyst: { orchestration: { executionCore: { maxParallel: 4 } } } },
+        { catalyst: { orchestration: { executionCore: { targetParallel: 9 } } } },
+      ]) {
+        const plan = planLayer1Migration({ layer1: FULL_LAYER1(), mergedLayer2: l2 });
+        expect(plan.slimmedLayer1.catalyst.orchestration).toBeUndefined();
+      }
+    });
+
+    it("the sibling executionCore leaves still relocate normally", () => {
+      const plan = withL2({ catalyst: {} });
+      expect(plan.nodePatch.catalyst.orchestration.executionCore.minParallel).toBe(1);
+      expect(plan.nodePatch.catalyst.orchestration.executionCore.maxParallelCeiling).toBe(40);
+    });
   });
 
   it("writes a whole stanza the merged Layer-2 defines nothing for", () => {
@@ -272,6 +338,63 @@ describe("applyLayer1Migration — atomic writes and ordering", () => {
     expect(() => applyLayer1Migration({ plan, layer1Path: l1, nodePath: node })).toThrow();
     chmodSync(d, 0o755);
     expect(readFileSync(l1, "utf8")).toBe(before);
+  });
+
+  // ── CTL-1214 remediation: the DESTINATION file fails closed too ──────────
+  //
+  // The plan already refuses a malformed Layer-1 INPUT (planLayer1Migration
+  // throws). The destination read swallowed every error to `{}`, so an existing
+  // but malformed/unreadable node.json was silently REPLACED by the patch instead
+  // — losing every other node-scoped key the operator had there. ENOENT is the
+  // only "start fresh" case.
+  it("refuses to overwrite a MALFORMED node.json, and leaves Layer-1 unslimmed", () => {
+    const { d, l1, node } = setup(FULL_LAYER1());
+    writeFileSync(node, "{ this is not json");
+    const before = readFileSync(l1, "utf8");
+    const plan = planLayer1Migration({ layer1: FULL_LAYER1(), mergedLayer2: { catalyst: {} } });
+    expect(() => applyLayer1Migration({ plan, layer1Path: l1, nodePath: node })).toThrow(
+      /refusing to overwrite malformed config/,
+    );
+    // Both halves: the destination is intact AND the ordering guarantee holds.
+    expect(readFileSync(node, "utf8")).toBe("{ this is not json");
+    expect(readFileSync(l1, "utf8")).toBe(before);
+    expect(d).toBeDefined();
+  });
+
+  it("refuses a node.json that parses to a NON-OBJECT (malformed, not empty)", () => {
+    const { l1, node } = setup(FULL_LAYER1());
+    writeFileSync(node, "[1,2,3]");
+    const plan = planLayer1Migration({ layer1: FULL_LAYER1(), mergedLayer2: { catalyst: {} } });
+    expect(() => applyLayer1Migration({ plan, layer1Path: l1, nodePath: node })).toThrow(
+      /not a JSON object/,
+    );
+  });
+
+  it("refuses an UNREADABLE node.json rather than replacing it", () => {
+    const { l1, node } = setup(FULL_LAYER1(), { catalyst: { host: { name: "mini-2" } } });
+    chmodSync(node, 0o000);
+    const plan = planLayer1Migration({ layer1: FULL_LAYER1(), mergedLayer2: { catalyst: {} } });
+    let threw = false;
+    try {
+      applyLayer1Migration({ plan, layer1Path: l1, nodePath: node });
+    } catch (err) {
+      threw = true;
+      expect(err.message).toMatch(/refusing to overwrite unreadable config/);
+    }
+    chmodSync(node, 0o600);
+    // POSITIVE CONTROL: running as root would make the read succeed and this
+    // assertion vacuous, so assert the file is still the operator's, not the patch.
+    expect(JSON.parse(readFileSync(node, "utf8")).catalyst.host.name).toBe("mini-2");
+    expect(threw).toBe(true);
+  });
+
+  // NEGATIVE CONTROL for the three above: an ABSENT node.json must still be the
+  // start-fresh path, or the fail-closed change would break every first migration.
+  it("an ABSENT node.json is still start-fresh, not a refusal", () => {
+    const { l1, node } = setup(FULL_LAYER1());
+    const plan = planLayer1Migration({ layer1: FULL_LAYER1(), mergedLayer2: { catalyst: {} } });
+    expect(() => applyLayer1Migration({ plan, layer1Path: l1, nodePath: node })).not.toThrow();
+    expect(existsSync(node)).toBe(true);
   });
 
   it("re-running is a no-op: second apply writes nothing", () => {

@@ -66,13 +66,24 @@ node-scoped `~/.config/catalyst/node.json`:
 | Layer-1 key (relative to `catalyst.`)                                       | Scope     | Destination                                          |
 | --------------------------------------------------------------------------- | --------- | ---------------------------------------------------- |
 | `orchestration.dispatchMode`                                                 | node      | `node.json` → `catalyst.orchestration.dispatchMode`   |
-| `orchestration.executionCore.*`                                              | node      | `node.json` → `catalyst.orchestration.executionCore.*`|
+| `orchestration.executionCore.*`                                              | node      | `node.json` → `catalyst.orchestration.executionCore.*` (but see `maxParallel` below) |
 | `orchestration.worktreeRefresh.*`                                            | node      | `node.json` → `catalyst.orchestration.worktreeRefresh.*` |
 | `orchestration.reconcile.*`                                                  | node      | `node.json` → `catalyst.orchestration.reconcile.*`    |
 | `feedback.*`                                                                 | node      | `node.json` → `catalyst.feedback.*`                   |
 | `sweep.*`                                                                    | node      | `node.json` → `catalyst.sweep.*`                      |
 | `monitor.github.repoColors`                                                  | node      | `node.json` → `catalyst.monitor.github.repoColors`    |
 | `monitor.linear.teams`                                                       | cluster   | `catalyst-cluster/cluster.json` → `projects[]` (CTL-1885, **not yet moved**) |
+
+⚠️ **`orchestration.executionCore.maxParallel` is re-homed, not moved.** It is the one relocated
+leaf the migration never writes into `node.json`, because the autotuner's *runtime mirror* lives in
+`catalyst.orchestration.executionCore.maxParallel` of the **legacy** `~/.config/catalyst/config.json`
+(written every adjusted tick by `writeLayer2MaxParallel`) and `node.json` outranks that file — a
+copy there would permanently freeze host capacity at whatever the migration happened to snapshot.
+But the Layer-1 value must not simply be dropped either: it is the operator's committed *setpoint*,
+the value the autotuner's recovery jump and setpoint-convergence branches seek to. The migration
+therefore writes it to `node.json` → `catalyst.orchestration.executionCore.targetParallel`, the key
+that names exactly this and which the tuner never writes. An operator-declared `targetParallel`
+already present in Layer-2 always wins and is never overwritten.
 
 ⚠️ **`catalyst.orchestration` as a whole is NOT machine-scoped.** Only the four subpaths above
 relocate. `executor`, `executorByPhase`, `codex`, `publishPreflight`, `fleetHealth`,
@@ -105,6 +116,35 @@ fallbacks.
 ⛔ **Never run it against a host running an older plugin checkout.** That host has no Layer-2
 fallbacks, so a slimmed config silently reverts `dispatchMode` to `oneshot-legacy` and halves the
 sweep cadence. Update the checkout first.
+
+⛔ **Run it on EVERY roster host BEFORE the slimming commit reaches them — the CLI cannot recover
+the values afterwards.** `node.json` is per-host and is never committed, but the slimming ships to
+the whole fleet through git. The migration derives its moves from the **Layer-1 content it finds**,
+so the moment `main` carries the slimmed config the CLI is a **no-op** on every host that has not
+already run it: there is nothing left to read, and the values are then recoverable only from git
+history. Measured against an empty Layer-2, that no-op costs:
+
+| Knob                                      | Before | After an un-migrated host pulls the slimming |
+| ----------------------------------------- | ------ | --------------------------------------------- |
+| `orchestration.dispatchMode`              | `phase-agents` | `oneshot-legacy` — the wrong orchestration mode |
+| `orchestration.executionCore`             | `{maxParallel: 4, minParallel: 1, maxParallelCeiling: 40}` | `{}` — autotuner setpoint unresolved |
+| `sweep.intervalHours`                     | 1      | 2 — sweep cadence halved                      |
+| `sweep.maxRemovalsPerRun`                 | 10     | 20                                            |
+
+(`orchestration.worktreeRefresh` and `reconcile.intervalSeconds` are a wash — the code defaults
+equal the Layer-1 values.)
+
+**The operator checklist, in this order:**
+
+1. On **every** host in `cluster.json` → `roster`, from a checkout that still has the un-slimmed
+   Layer-1: `plugins/dev/scripts/catalyst-config-migrate --json` — keep each report.
+2. Verify per host that `~/.config/catalyst/node.json` carries the relocated keys
+   (`jq '.catalyst | {orchestration, sweep, feedback, monitor}' ~/.config/catalyst/node.json`).
+3. Only then merge the slimming commit.
+
+If a host is already past step 3 with no `node.json`, seed it by hand from the `--json` report of a
+host that did migrate, or from `git show <pre-slim-sha>:.catalyst/config.json` — re-running the CLI
+there will not help.
 
 **`catalyst.schemaVersion` is a self-gating opt-in, not a global requirement.**
 

@@ -39,6 +39,37 @@ export const DEAD_LAYER1_PATHS = Object.freeze([
   },
 ]);
 
+/**
+ * AUTOTUNER_MIRROR_LEAF / AUTOTUNER_SETPOINT_LEAF — CTL-1214 remediation.
+ *
+ * `orchestration.executionCore.maxParallel` is the ONE relocated leaf that must
+ * NOT be written to node.json, and whose Layer-1 value must NOT simply be
+ * dropped either. Both halves are load-bearing:
+ *
+ *  - It must not LAND in node.json. The autotuner's runtime mirror is written by
+ *    writeLayer2MaxParallel (autotune.mjs:432) into the LEGACY Layer-2
+ *    `config.json`, and node.json OUTRANKS that file in readLayer2MergedFrom. A
+ *    maxParallel in node.json would therefore permanently shadow every value the
+ *    tuner writes — freezing host capacity at whatever the migration happened to
+ *    copy, with the tuner still logging adjustments nothing reads.
+ *
+ *  - Its VALUE must survive. In Layer-1 that number is the operator's committed
+ *    seek-to target: it is what CTL-750's `readLayer1Concurrency` feeds to RULE 7
+ *    (recovery-to-layer1) and what CTL-770's `resolveTargetSetpoint` falls back
+ *    to for the RULE 2 / RULE 9 setpoint branches. Slimming it away with no
+ *    destination measured setpoint 4 -> undefined and layer1Max 4 -> null, which
+ *    silently no-ops four control-law branches.
+ *
+ * `targetParallel` is the key CTL-770 created for exactly this value ("the
+ * autotuner's seek-to setpoint, separate from maxParallel, which the autotuner
+ * clobbers every tick as its live runtime mirror"). It is never tuner-written, so
+ * re-homing the committed target there preserves the setpoint AND leaves the live
+ * mirror alone. This is the shape the plan's own Layer-2 target model describes
+ * (`{maxParallel, minParallel, maxParallelCeiling, targetParallel}`).
+ */
+const AUTOTUNER_MIRROR_LEAF = "orchestration.executionCore.maxParallel";
+const AUTOTUNER_SETPOINT_LEAF = "orchestration.executionCore.targetParallel";
+
 const isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 
 function getPath(obj, dotted) {
@@ -173,6 +204,35 @@ export function planLayer1Migration({ layer1, mergedLayer2 } = {}) {
 
     for (const leaf of leafPaths(present, entry.path, [])) {
       const value = getPath(slimmed.catalyst, leaf);
+      if (leaf === AUTOTUNER_MIRROR_LEAF) {
+        // Re-home to targetParallel instead of moving in place — see the
+        // AUTOTUNER_MIRROR_LEAF block above. Never falls through to the generic
+        // arms below: writing maxParallel to node.json is the failure mode.
+        if (definedInLayer2(mergedCatalyst, AUTOTUNER_SETPOINT_LEAF)) {
+          kept.push({
+            path: leaf,
+            existingValue: getPath(mergedCatalyst, AUTOTUNER_SETPOINT_LEAF),
+            reason:
+              "the Layer-2 view already declares orchestration.executionCore.targetParallel — " +
+              "that host setpoint wins; maxParallel is the autotuner's runtime mirror and is " +
+              "never written to node.json",
+          });
+        } else {
+          moves.push({
+            path: AUTOTUNER_SETPOINT_LEAF,
+            value,
+            scope: entry.scope,
+            from: leaf,
+            reason:
+              "maxParallel in node.json would shadow the autotuner's runtime mirror in the " +
+              "legacy Layer-2 file; the committed target is re-homed to the CTL-770 " +
+              "targetParallel setpoint key, which the autotuner never writes",
+          });
+          setPath(nodePatch.catalyst, AUTOTUNER_SETPOINT_LEAF, value);
+        }
+        deletePath(slimmed.catalyst, leaf);
+        continue;
+      }
       if (definedInLayer2(mergedCatalyst, leaf)) {
         // Non-clobber (D1): node.json OUTRANKS the legacy Layer-2 file in
         // readLayer2Merged, so writing this key would shadow a value that
@@ -216,13 +276,41 @@ function deepMerge(target, source) {
   return out;
 }
 
-function readJson(path) {
+// readJsonDestination — read the file we are about to DEEP-MERGE INTO.
+//
+// CTL-1214: this used to swallow every error to `{}`, so an existing but
+// malformed or unreadable node.json was silently REPLACED by the migration's
+// patch rather than refused — the exact asymmetry the plan set for a malformed
+// Layer-1 INPUT (non-zero exit, no write) was missing on the destination side,
+// where the cost is higher: the operator's other node-scoped keys are gone.
+// ENOENT (and a missing-file ENOTDIR on a broken parent) means "start fresh" and
+// stays a `{}`. Anything else — a parse error, EACCES, EISDIR — throws, matching
+// catalyst-stack's "refusing to overwrite malformed config at <path>" posture.
+// A file that parses to a non-object is malformed too, not empty.
+function readJsonDestination(path) {
+  let raw;
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf8"));
-    return isPlainObject(parsed) ? parsed : {};
-  } catch {
-    return {};
+    raw = readFileSync(path, "utf8");
+  } catch (err) {
+    if (err?.code === "ENOENT" || err?.code === "ENOTDIR") return {};
+    throw new Error(
+      `migrate-layer1-config: refusing to overwrite unreadable config at ${path} (${err?.code ?? err?.message})`,
+    );
   }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(
+      `migrate-layer1-config: refusing to overwrite malformed config at ${path} (${err.message})`,
+    );
+  }
+  if (!isPlainObject(parsed)) {
+    throw new Error(
+      `migrate-layer1-config: refusing to overwrite malformed config at ${path} (not a JSON object)`,
+    );
+  }
+  return parsed;
 }
 
 // atomicWrite — tmp + rename in the SAME directory (rename is only atomic within
@@ -267,7 +355,7 @@ export function applyLayer1Migration({ plan, layer1Path, nodePath, dryRun = fals
   // 1. node.json — deep-merged into whatever is already there, never replaced.
   //    0600: it sits beside cluster-secrets.json in the machine-local config dir.
   if (plan.moves.length > 0) {
-    const merged = deepMerge(readJson(nodePath), plan.nodePatch);
+    const merged = deepMerge(readJsonDestination(nodePath), plan.nodePatch);
     atomicWrite(nodePath, `${JSON.stringify(merged, null, 2)}\n`, 0o600);
     wrote.push(nodePath);
   }

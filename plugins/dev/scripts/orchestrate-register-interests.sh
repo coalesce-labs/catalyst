@@ -67,10 +67,25 @@ fi
 # Read dispatchMode from config (default: oneshot-legacy — matches the
 # original SKILL.md gate; phase_lifecycle interests only emit in phase-agents).
 DISPATCH_MODE="oneshot-legacy"
+DISPATCH_MODE_RAW=""
 if [ -n "$CONFIG_PATH" ] && [ -f "$CONFIG_PATH" ]; then
-  DISPATCH_MODE=$(jq -r '.catalyst.orchestration.dispatchMode // "oneshot-legacy"' \
-    "$CONFIG_PATH" 2>/dev/null || echo "oneshot-legacy")
+  DISPATCH_MODE_RAW=$(jq -r '.catalyst.orchestration.dispatchMode // empty' \
+    "$CONFIG_PATH" 2>/dev/null || echo "")
 fi
+# CTL-1214: Layer-2 fallback — the SAME rung orchestrate-dispatch-next carries
+# (orchestrate-dispatch-next.sh:168-173). Without it, a slimmed Layer-1 makes
+# this read return nothing and the default silently resolves to
+# "oneshot-legacy", which drops the per-ticket phase_lifecycle interest — the
+# exact failure this script's own header (:2-9) exists to prevent: phase-agent
+# completions land in the event log with zero matching interests and are
+# dropped by broker/index.mjs:1782. Layer-1 still WINS when present; Layer-2
+# answers only when Layer-1 is silent.
+if [ -z "$DISPATCH_MODE_RAW" ] && [ -r "${SCRIPT_DIR}/lib/catalyst-layer2-read.sh" ]; then
+  # shellcheck disable=SC1090
+  . "${SCRIPT_DIR}/lib/catalyst-layer2-read.sh"
+  DISPATCH_MODE_RAW="$(catalyst_layer2_json '.catalyst.orchestration.dispatchMode')"
+fi
+[ -n "$DISPATCH_MODE_RAW" ] && DISPATCH_MODE="$DISPATCH_MODE_RAW"
 
 # Compute the active ticket / PR set from worker signal files.
 shopt -s nullglob

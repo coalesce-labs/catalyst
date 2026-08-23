@@ -1,5 +1,5 @@
 import { readFileSync } from "fs";
-import { join, basename } from "path";
+import { join, basename, dirname } from "path";
 import { homedir } from "os";
 import { readClusterProjects } from "./cluster-roster";
 
@@ -111,6 +111,21 @@ export function loadMonitorConfig(
   readRepoColorsInto(repoColors, configPath);
   if (layer2ConfigPath && layer2ConfigPath !== configPath) {
     readRepoColorsInto(repoColors, layer2ConfigPath);
+  }
+  // CTL-1214 remediation: node.json, LAST, because it outranks the legacy Layer-2
+  // file in the merged Layer-2 view the JS readers use (readLayer2MergedFrom:
+  // config.json < node.json). It is also where the migration actually PUTS this
+  // key — RELOCATED_LAYER1_KEYS names
+  // `~/.config/catalyst/node.json → catalyst.monitor.github.repoColors` as the
+  // destination — so reading only config.json measured
+  // {"coalesce-labs/catalyst":"green"} → {} on an already-migrated host. Resolved
+  // off layer2ConfigPath's own directory, the same way readLayer2MergedFrom
+  // resolves its siblings, so CATALYST_LAYER2_CONFIG_FILE keeps working in tests.
+  if (layer2ConfigPath) {
+    const nodeConfigPath = join(dirname(layer2ConfigPath), "node.json");
+    if (nodeConfigPath !== configPath && nodeConfigPath !== layer2ConfigPath) {
+      readRepoColorsInto(repoColors, nodeConfigPath);
+    }
   }
 
   // --- roster-derived FALLBACK repoOwners (CTL-961, CTL-1214 Phase 2) ---

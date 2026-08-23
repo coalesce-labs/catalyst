@@ -153,7 +153,11 @@ import { assertSdkAuth } from "./sdk-run-phase-agent.mjs";
 // CTL-1214: reuse the single-source-of-truth Layer-1 scope-leak validator
 // (pure, no-I/O) shared with the Phase-1 config-schema tests. Lives in
 // plugins/dev/scripts/lib/ (sibling of execution-core/).
-import { validateLayer1Config, RELOCATED_LAYER1_KEYS } from "../lib/validate-catalyst-config.mjs";
+import {
+  validateLayer1Config,
+  RELOCATED_LAYER1_KEYS,
+  LAYER1_ERROR_CODES,
+} from "../lib/validate-catalyst-config.mjs";
 import { resolvePluginCheckoutRoots } from "../broker/plugin-refresh.mjs"; // CTL-1421: same resolver the workers use
 
 // CTL-1931: doctor.mjs lives at <repo>/plugins/dev/scripts/execution-core/, so the repo's
@@ -4431,8 +4435,41 @@ export function checkConfigScopeLeak(deps = {}) {
     }
   }
 
-  const { deprecatedKeys, errors } = validateLayer1Config(parsed ?? {});
+  const { deprecatedKeys, errorDetails } = validateLayer1Config(parsed ?? {});
   const hostsLeak = hostsJsonExists();
+
+  // CTL-1214 remediation: the SCHEMA errors are graded as their own check rather
+  // than folded into the scope-leak verdict. Before this, `hard = errors.length > 0`
+  // made a malformed `catalyst.schemaVersion` — or a missing `catalyst` root —
+  // FAIL this check with a message that named no leaked key and asserted a
+  // schemaVersion the config did not have. Both classes are WARN here on purpose:
+  // runDoctor returns the FAIL count as its exit code and catalyst-join.sh gates
+  // member activation on exit 0, and by the validator's own rule a bogus
+  // schemaVersion is not a back door into strict mode — so it must not be a back
+  // door into a fail-closed join gate either. It is now VISIBLE and correctly
+  // named, which is what was actually missing (this is the sole doctor consumer of
+  // validateLayer1Config, so these errors had no other surface).
+  // Gated on `body` because an ABSENT Layer-1 ("" → parsed null) validates as
+  // MISSING_ROOT, and "there is no config here" is not a schema complaint — it is
+  // the pre-existing absent case this check has always graded PASS.
+  const schemaErrors = body
+    ? errorDetails.filter(
+        (e) =>
+          e.code === LAYER1_ERROR_CODES.SCHEMA_VERSION || e.code === LAYER1_ERROR_CODES.MISSING_ROOT,
+      )
+    : [];
+  if (schemaErrors.length > 0) {
+    checks.push(
+      mkCheck(
+        "config-layer1-schema",
+        STATUS.WARN,
+        `Layer-1 .catalyst/config.json fails schema validation: ${schemaErrors
+          .map((e) => e.message)
+          .join("; ")}. This is a schema problem, not a scope leak — a well-formed ` +
+          `\`catalyst.schemaVersion\` (integer >= 1) is what opts the config into the slimmed contract.`,
+      ),
+    );
+  }
 
   if (deprecatedKeys.length === 0 && !hostsLeak) {
     checks.push(
@@ -4458,10 +4495,11 @@ export function checkConfigScopeLeak(deps = {}) {
     );
   }
 
-  // The validator only produces hard errors for a config that declared
-  // schemaVersion >= 1 and still carries a NODE-scoped relocated key — see the
-  // grading note in this function's header for why that is the one FAIL-able state.
-  const hard = errors.length > 0;
+  // The ONE FAIL-able state: a config that declared schemaVersion >= 1 and still
+  // carries a NODE-scoped relocated key — see the grading note in this function's
+  // header. Gated on the error CLASS, not on `errors.length`, so no other
+  // validation failure can borrow this check's FAIL (and its join-gate exit code).
+  const hard = errorDetails.some((e) => e.code === LAYER1_ERROR_CODES.NODE_SCOPE_LEAK);
 
   checks.push(
     mkCheck(
