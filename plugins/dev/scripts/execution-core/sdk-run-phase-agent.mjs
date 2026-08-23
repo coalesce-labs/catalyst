@@ -68,7 +68,10 @@ import { getEventLogPath } from "./config.mjs";
 import { classifyEventStream } from "../lib/event-stream-class.mjs"; // CTL-1488: stamp stream class on the direct terminal-fallback writer
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 import { nodeClass } from "./lib/node-class.mjs";
-import { registerSdkWorker as defaultRegisterSdkWorker } from "./sdk-worker-registry.mjs";
+import {
+  registerSdkWorker as defaultRegisterSdkWorker,
+  isPreemptionAbort, // CTL-2192: distinguish the scheduler's preemption abort from a genuine failure
+} from "./sdk-worker-registry.mjs";
 // CTL-2192 (Phase 2): the worker's OWN child pid — the only liveness fact that
 // survives a daemon bounce (the projection's `pid` is the daemon's).
 import {
@@ -586,8 +589,9 @@ export function flipSignalAbandonedOnUndeclaredExit(signalFile, generation, opts
       return;
     }
     // CTL-736 generation fence (adversarial-review catch, CTL-1410 Phase A): an
-    // in-process query cannot be killed (preemption's killBgJob(null) is a no-op,
-    // the per-attempt AbortController is not externally wired), so a preempt→
+    // in-process query could not be killed before CTL-2192 (preemption's
+    // killBgJob(null) is a no-op; the per-attempt AbortController is NOW externally
+    // wired via cancelSdkRun, but an unregistered run still leaks), so a preempt→
     // re-dispatch or revive leaves a stale gen-N query floating while gen-N+1 owns
     // the SAME signal path. That stale worker's skill correctly bows out at the
     // wrapper's fence — this flip must not override that refusal by flipping the
@@ -1361,6 +1365,36 @@ export async function sdkRunPhaseAgent(
         }
       } catch (err) {
         thrown = err;
+      }
+
+      // ⛔ CTL-2192: the scheduler PREEMPTED us — resolve cleanly, write nothing.
+      //
+      // cancelSdkRun aborts this very controller with the PREEMPTION_ABORT_REASON
+      // sentinel and then, in the SAME synchronous scheduler block, parks the signal
+      // as status:"preempted". This rejection is delivered on a later turn, so
+      // WITHOUT this branch it falls to `thrown && !result` → emitBackstop(failed)
+      // → defaultWriteSignalStalled, whose clobber guard only covers
+      // SIGNAL_TERMINAL_STATUSES — "preempted" is NOT in that set. The park is
+      // overwritten with "stalled" and a phase.<phase>.failed.<TICKET> terminal is
+      // emitted: the resume sweep (which gates on PREEMPTED_STATUS) never resumes the
+      // victim, and the terminal sweep escalates it instead. Preemption would
+      // DESTROY the work it exists to defer.
+      //
+      // Mirrors the codex runner's `if (res.aborted) return {...}` early return —
+      // no signal write, no terminal event, the canceller owns the signal. The
+      // resolution is CLEAN, so dispatch's backstopOnRejection (rejection-only) is a
+      // no-op too, and the `finally` below still closes the session + deregisters.
+      if (ac.signal.aborted && (isPreemptionAbort(ac.signal.reason) || isPreemptionAbort(thrown))) {
+        emitEvent("execution-core.sdk.preempted", {
+          ticket, phase, generation: spec.generation ?? null, attempt: i,
+        });
+        return {
+          code: 1,
+          stdout: "",
+          stderr: "sdk: preempted by the scheduler (CTL-705/CTL-2192)",
+          signal: "SIGTERM",
+          aborted: true,
+        };
       }
 
       // 429/529 → bounded backoff + retry. Check BOTH a thrown error AND a captured

@@ -28,6 +28,9 @@ import {
   runPrelaunch,
 } from "./sdk-run-phase-agent.mjs";
 import { ASSERTED_BY } from "./assertion-evidence.mjs"; // CTL-1789: terminal-writer attribution
+// CTL-2192 (review): the REAL preemption canceller — a fake would have passed
+// against the very wiring gap this covers.
+import { cancelSdkRun, abortSdkWorker } from "./sdk-worker-registry.mjs";
 
 // ── Fakes ───────────────────────────────────────────────────────────────────
 
@@ -2401,6 +2404,101 @@ describe("CTL-1814 — the fallback terminal event carries its orchestrator", ()
 // daemon as a PID-1 orphan (measured: 14 min). Discovery is a ONE-SHOT at the
 // first streamed message, and the marker is stamped whatever it returns.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// CTL-2192 (review) — a PREEMPTION abort must not clobber the scheduler's park.
+//
+// cancelSdkRun aborts the live controller with the PREEMPTION_ABORT_REASON
+// sentinel and the scheduler then parks the signal `preempted` in the SAME
+// synchronous block. The rejection lands a turn later, so before this fix it fell
+// to `thrown && !result` → emitBackstop(failed) → defaultWriteSignalStalled, whose
+// clobber guard covers SIGNAL_TERMINAL_STATUSES only — "preempted" is NOT in that
+// set. The park became "stalled" + a phase.*.failed terminal, so the resume sweep
+// (gated on PREEMPTED_STATUS) never resumed the victim and the terminal sweep
+// escalated it: preemption destroying the work it exists to defer.
+//
+// These use the REAL registry + REAL cancelSdkRun on purpose. The bug was that the
+// sentinel had no consumer on the runner side, so a test against a fake canceller
+// would have passed while production stayed broken.
+// ---------------------------------------------------------------------------
+describe("sdkRunPhaseAgent — CTL-2192 preemption abort", () => {
+  const setup = () => {
+    const orchDir = mkdtempSync(join(tmpdir(), "sdk-preempt-"));
+    const wdir = join(orchDir, "workers", "CTL-100");
+    mkdirSync(wdir, { recursive: true });
+    const signalFile = join(wdir, "phase-implement.json");
+    writeFileSync(signalFile, JSON.stringify({
+      status: "dispatched", bg_job_id: null, ticket: "CTL-100", phase: "implement", generation: 2,
+    }));
+    return { orchDir, signalFile };
+  };
+
+  // The scheduler's exact sequence: cancelSdkRun(...) then, synchronously, park.
+  const preemptThenPark = (signalFile, generation) => {
+    const res = cancelSdkRun({ ticket: "CTL-100", generation });
+    const sig = JSON.parse(readFileSync(signalFile, "utf8"));
+    writeFileSync(signalFile, JSON.stringify({
+      ...sig, status: "preempted", parkedFrom: "implement", attentionReason: "preempted-by-priority",
+    }));
+    return res;
+  };
+
+  test("the park SURVIVES — no stalled clobber, no terminal event, aborted:true", async () => {
+    const { orchDir, signalFile } = setup();
+    const spec = makeSpec({ signalFile, generation: 2 });
+    const { spawn, calls } = spawnReturningSpec({ spec, signalFile });
+    let cancelRes = null;
+    // Yield one message (the run is underway and the controller is registered),
+    // then do what the scheduler does, then surface the abort as the SDK would.
+    const runQuery = () =>
+      (async function* () {
+        yield { type: "assistant", message: {} };
+        cancelRes = preemptThenPark(signalFile, 2);
+        throw Object.assign(new Error("aborted"), { name: "AbortError" });
+      })();
+
+    const r = await sdkRunPhaseAgent(
+      { orchDir, ticket: "CTL-100", phase: "implement", worktreePath: "/wt/CTL-100", generation: 2 },
+      { ...GOOD_AUTH, spawn, runQuery },
+    );
+
+    // The cancel really reached a live registered controller (positive control:
+    // a no-op cancel would report found:false and prove nothing below).
+    expect(cancelRes).toEqual({ found: true, stale: false, aborted: true });
+    expect(r.aborted).toBe(true);
+    // ⛔ THE REGRESSION: this read "stalled" before the fix.
+    const after = JSON.parse(readFileSync(signalFile, "utf8"));
+    expect(after.status).toBe("preempted");
+    expect(after.parkedFrom).toBe("implement");
+    expect(after.assertedBy).toBeUndefined(); // no infrastructure terminal was asserted
+    // ...and no phase.<phase>.failed.<TICKET> terminal was emitted. The backstop
+    // emits by spawning phase-agent-emit-complete; assert nothing was spawned for it.
+    const emitCalls = calls.filter((c) => String(c.bin).endsWith("phase-agent-emit-complete"));
+    expect(emitCalls).toEqual([]);
+    rmSync(orchDir, { recursive: true, force: true });
+  });
+
+  test("a NON-preemption abort still backstops (the branch is not a blanket abort swallow)", async () => {
+    const { orchDir, signalFile } = setup();
+    const spec = makeSpec({ signalFile, generation: 2 });
+    const { spawn } = spawnReturningSpec({ spec, signalFile });
+    const runQuery = () =>
+      (async function* () {
+        yield { type: "assistant", message: {} };
+        // A genuine failure abort — NOT the preemption sentinel.
+        abortSdkWorker("CTL-100", "watchdog-kill");
+        throw Object.assign(new Error("aborted"), { name: "AbortError" });
+      })();
+    const r = await sdkRunPhaseAgent(
+      { orchDir, ticket: "CTL-100", phase: "implement", worktreePath: "/wt/CTL-100", generation: 2 },
+      { ...GOOD_AUTH, spawn, runQuery },
+    );
+    expect(r.aborted).toBeUndefined();
+    expect(r.code).toBe(1);
+    expect(JSON.parse(readFileSync(signalFile, "utf8")).status).toBe("stalled");
+    rmSync(orchDir, { recursive: true, force: true });
+  });
+});
 
 describe("sdkRunPhaseAgent — CTL-2192 child-pid discovery", () => {
   const childPidRegistry = () => {
