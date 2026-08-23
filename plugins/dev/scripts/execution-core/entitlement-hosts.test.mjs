@@ -40,15 +40,16 @@ test("getEntitledHosts honors an injected hosts array in off mode", () => {
 // accessor — getEntitledHosts() (who-may-take-work) or getExistenceHosts()
 // (topology/observability) — never the raw getClusterHosts(). This asserts the
 // reclassification stuck: the modules below no longer invoke getClusterHosts() as
-// a roster source. (recovery* → entitlement; heartbeat-publisher/stale-pr-rescue
-// → existence topology; all four dropped getClusterHosts entirely.)
+// a roster source. (recovery.mjs → entitlement; heartbeat-publisher/stale-pr-rescue
+// → existence topology; all three dropped getClusterHosts entirely. CTL-2141
+// deleted recovery-pass-context.mjs, the fourth reclassified module, wholesale —
+// nothing left to check.)
 test("every reclassified roster module dropped getClusterHosts() as a roster source", () => {
   // Modules whose roster source was reclassified in Phase 2. After it, none may
   // call getClusterHosts() as a roster source — a bare invocation with parens.
   // Comment/import lines that merely name the symbol are stripped before the check.
   const reclassifiedModules = [
     "recovery.mjs",
-    "recovery-pass-context.mjs",
     "stale-pr-rescue-timer.mjs",
     "cluster-heartbeat-publisher.mjs",
   ];
