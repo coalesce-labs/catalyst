@@ -66,6 +66,7 @@ permission), then:
 
 ```bash
 node "$CLAUDE_PLUGIN_ROOT/scripts/ask.mjs" accept CTL-NNNN --as <ROLE> --body "accepted — …"
+#   --body-file <path>  for anything longer than a one-line body; --body REFUSES a path (CTL-2204)
 ```
 
 It replies in-thread as the app actor and moves the ticket to Done. The two deliberate refusals, the
