@@ -278,6 +278,7 @@ import {
   readCostCapConfig,
   readEmptyWorkerDirGraceMs,
   EMPTY_WORKER_DIR_GRACE_DEFAULT_MS,
+  readLayer2MergedFrom,
 } from "./config.mjs";
 // CTL-1137: cost-cap watcher (Pass 0c) — out-of-process per-session $ preemption.
 import {
@@ -1735,19 +1736,25 @@ export function readExecutionCoreConcurrency(configPath) {
 // overrides are out of scope today (see CTL-678 plan, Decision 1).
 export function readExecutionCoreConcurrencyLayer2(layer2Path) {
   if (!layer2Path) return {};
-  let parsed;
+  // CTL-1214: read the MERGED Layer-2 view (config.json < node.json <
+  // cluster-secrets.json) rather than the legacy file alone, so a value the
+  // migration wrote to node.json is visible here. readLayer2MergedFrom resolves
+  // the two siblings off layer2Path's own directory and swallows an
+  // absent/malformed layer per file, so this keeps the same never-throw,
+  // {}-on-any-miss contract — and with no node.json present (every host today)
+  // the result is byte-identical to the previous single-file read.
+  let block;
   try {
-    parsed = JSON.parse(readFileSync(layer2Path, "utf8"));
+    block = readLayer2MergedFrom(layer2Path)?.catalyst?.orchestration?.executionCore;
   } catch (err) {
-    if (err?.code !== "ENOENT") {
-      log.warn(
-        { layer2Path, err: err.message },
-        "execution-core: Layer-2 concurrency config unreadable; using Layer-1"
-      );
-    }
+    log.warn(
+      { layer2Path, err: err.message },
+      "execution-core: Layer-2 concurrency config unreadable; using Layer-1"
+    );
     return {};
   }
-  return parsed?.catalyst?.orchestration?.executionCore ?? {};
+  if (!block || typeof block !== "object" || Array.isArray(block)) return {};
+  return block;
 }
 
 // mergeExecutionCoreConcurrency — per-field merge of Layer-1 (committed

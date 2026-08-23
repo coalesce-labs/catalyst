@@ -1046,6 +1046,30 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/deployment-mode-parity.test.sh
 
+      - name: Layer-2 merged-read tests + cross-stack parity (CTL-1214)
+        # ⛔ PINNED IN THE SAME CHANGE THAT ADDED THE SUITES. CI here runs an
+        # EXPLICIT list, never a glob, so a suite that merely exists in the tree
+        # gates nothing. Verified before adding this step:
+        # `grep -n 'catalyst-layer2-read\|layer2-read-parity' .github/workflows/`
+        # returned NOTHING; positive control: the same grep for
+        # `deployment-mode-parity` returns the run line directly above.
+        #
+        # These carry CTL-1214 Phase 1, whose whole point is that four relocated
+        # config categories were read from Layer-1 ONLY behind fail-open readers —
+        # so slimming the committed config does not error, it SILENTLY reverts each
+        # knob to a code default. A regression here is invisible by construction,
+        # which is exactly the class that must not be left ungated.
+        #
+        # The parity suite additionally self-checks that its JS driver actually
+        # runs before trusting a matrix of empty answers: a driver that fails to
+        # start returns "" for every cell, which is indistinguishable from a real
+        # absence and would report a false green.
+        # Both need jq, preinstalled on ubuntu-latest runners.
+        working-directory: plugins/dev/scripts
+        run: |
+          bash __tests__/catalyst-layer2-read.test.sh
+          bash __tests__/layer2-read-parity.test.sh
+
       - name: Broker tests (CTL-1529, CTL-1809)
         # CTL-1529 round 2: broker/worker-state-projection.test.mjs guards the
         # bounded event-log scan in broker/projection.mjs (replayWorkerStateProjection),
@@ -1660,6 +1684,7 @@ jobs:
             wait-watcher.test.mjs \
             work-done-probes.test.mjs \
             worktree-refresh-timer.test.mjs \
+            layer2-fallback.test.mjs \
             worktree-safety.test.mjs \
             worktree.test.mjs \
             recovery-seam-deps.test.mjs \

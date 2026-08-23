@@ -294,3 +294,98 @@ describe("readWorktreeRefreshConfig", () => {
     expect(readWorktreeRefreshConfig("")).toEqual({});
   });
 });
+
+// CTL-1214 Phase 1: the Layer-2 fallback. catalyst.orchestration.worktreeRefresh
+// was a Layer-1-ONLY read that fails open to {}, so slimming the committed config
+// would have silently reverted the knob to its code defaults. Layer-2 now supplies
+// it, Layer-2 winning per field (D8).
+describe("readWorktreeRefreshConfig Layer-2 fallback (CTL-1214)", () => {
+  let dirs = [];
+  afterEach(() => {
+    for (const d of dirs) rmSync(d, { recursive: true, force: true });
+    dirs = [];
+  });
+
+  // Layer-2 siblings resolve off the given layer2Path's DIRECTORY, exactly as
+  // resolveNodeConfigPath() does — so a fixture dir stays hermetic (no node.json
+  // there) instead of reaching into the real ~/.config/catalyst.
+  const mkLayer2 = ({ legacy, node }) => {
+    const dir = mkdtempSync(join(tmpdir(), "ctl1214-l2-"));
+    dirs.push(dir);
+    const path = join(dir, "config.json");
+    writeFileSync(path, JSON.stringify(legacy ?? {}));
+    if (node !== undefined) writeFileSync(join(dir, "node.json"), JSON.stringify(node));
+    return path;
+  };
+  const mkLayer1 = (obj) => {
+    const dir = mkdtempSync(join(tmpdir(), "ctl1214-l1-"));
+    dirs.push(dir);
+    const path = join(dir, "config.json");
+    writeFileSync(path, JSON.stringify(obj));
+    return path;
+  };
+
+  it("Layer-1 present, Layer-2 absent -> Layer-1 value (un-slimmed repo)", () => {
+    const l1 = mkLayer1({
+      catalyst: { orchestration: { worktreeRefresh: { enabled: true, intervalSeconds: 300 } } },
+    });
+    const l2 = mkLayer2({ legacy: {} });
+    expect(readWorktreeRefreshConfig(l1, l2)).toEqual({ enabled: true, intervalSeconds: 300 });
+  });
+
+  it("Layer-1 absent, node.json present -> node.json value (the slimmed repo)", () => {
+    const l1 = mkLayer1({ catalyst: { projectKey: "x" } });
+    const l2 = mkLayer2({
+      legacy: {},
+      node: { catalyst: { orchestration: { worktreeRefresh: { enabled: true, intervalSeconds: 300, quietSeconds: 30 } } } },
+    });
+    expect(readWorktreeRefreshConfig(l1, l2)).toEqual({
+      enabled: true,
+      intervalSeconds: 300,
+      quietSeconds: 30,
+    });
+  });
+
+  it("both present, differing fields -> Layer-2 wins per field, Layer-1 fills the rest (D8)", () => {
+    const l1 = mkLayer1({
+      catalyst: {
+        orchestration: { worktreeRefresh: { enabled: true, intervalSeconds: 300, quietSeconds: 30 } },
+      },
+    });
+    const l2 = mkLayer2({
+      legacy: {},
+      node: { catalyst: { orchestration: { worktreeRefresh: { intervalSeconds: 60 } } } },
+    });
+    expect(readWorktreeRefreshConfig(l1, l2)).toEqual({
+      enabled: true,
+      intervalSeconds: 60,
+      quietSeconds: 30,
+    });
+  });
+
+  it("both absent -> {} (unchanged)", () => {
+    const l1 = mkLayer1({ catalyst: {} });
+    const l2 = mkLayer2({ legacy: {} });
+    expect(readWorktreeRefreshConfig(l1, l2)).toEqual({});
+  });
+
+  it("Layer-2 malformed -> Layer-1 preserved, never a throw", () => {
+    const l1 = mkLayer1({
+      catalyst: { orchestration: { worktreeRefresh: { enabled: true, intervalSeconds: 300 } } },
+    });
+    const dir = mkdtempSync(join(tmpdir(), "ctl1214-l2bad-"));
+    dirs.push(dir);
+    const l2 = join(dir, "config.json");
+    writeFileSync(l2, "{ not json");
+    writeFileSync(join(dir, "node.json"), "{ also not json");
+    expect(() => readWorktreeRefreshConfig(l1, l2)).not.toThrow();
+    expect(readWorktreeRefreshConfig(l1, l2)).toEqual({ enabled: true, intervalSeconds: 300 });
+  });
+
+  it("the one-argument signature still works (daemon.mjs:3149 call site)", () => {
+    const l1 = mkLayer1({
+      catalyst: { orchestration: { worktreeRefresh: { enabled: false } } },
+    });
+    expect(readWorktreeRefreshConfig(l1)).toEqual({ enabled: false });
+  });
+});
