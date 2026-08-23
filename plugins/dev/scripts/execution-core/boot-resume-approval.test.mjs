@@ -81,6 +81,74 @@ describe("processApprovedResumes (CTL-644)", () => {
     expect(existsSync(bootResumeApprovedPath(orchDir, "CTL-50"))).toBe(false);
   });
 
+  // ── CTL-2192 remediation: the ADJACENT DOOR ──────────────────────────────
+  //
+  // reconcileBoot excludes tickets whose boot-time orphan reap could not be
+  // confirmed. processApprovedResumes runs eight lines later in startDaemon and
+  // used to dispatch on the two sentinels ALONE, so a ticket the line above had
+  // just refused walked straight through here — "never dispatch beside an
+  // unconfirmed orphan" held only on the path that was tested.
+  test("⛔ an approved ticket whose orphan reap is UNCONFIRMED is NOT dispatched", () => {
+    writePendingMarker(orchDir, "CTL-60", "implement", "/wt/CTL-60");
+    writeApprovedMarker(orchDir, "CTL-60");
+
+    const reviveDispatch = makeReviveDispatch(0);
+    const res = processApprovedResumes({
+      orchDir,
+      reviveDispatch,
+      dispatch: () => {},
+      appendEvent: () => true,
+      reapFailedTickets: new Set(["CTL-60"]),
+    });
+
+    expect(reviveDispatch.calls.length).toBe(0);
+    expect(res.dispatched).toBe(0);
+    expect(res.reapBlocked).toBe(1);
+    // BOTH sentinels retained: the approval is still valid, it is just not
+    // actionable on this boot. Clearing them would silently DROP the resume.
+    expect(existsSync(bootResumePendingPath(orchDir, "CTL-60"))).toBe(true);
+    expect(existsSync(bootResumeApprovedPath(orchDir, "CTL-60"))).toBe(true);
+  });
+
+  test("⛔ the block survives an UNREADABLE pending marker (checked before the read)", () => {
+    // An unreadable marker must not mask the guard — otherwise a corrupt file
+    // downgrades a safety refusal into an unrelated "skipping" warn.
+    writePendingMarker(orchDir, "CTL-61", "implement", "/wt/CTL-61");
+    writeFileSync(bootResumePendingPath(orchDir, "CTL-61"), "{not json");
+    writeApprovedMarker(orchDir, "CTL-61");
+
+    const reviveDispatch = makeReviveDispatch(0);
+    const res = processApprovedResumes({
+      orchDir,
+      reviveDispatch,
+      dispatch: () => {},
+      appendEvent: () => true,
+      reapFailedTickets: new Set(["CTL-61"]),
+    });
+
+    expect(reviveDispatch.calls.length).toBe(0);
+    expect(res.reapBlocked).toBe(1);
+  });
+
+  // ⛔ POSITIVE CONTROL. Without this the test above would pass just as well if
+  // the guard had disabled approved-resume dispatch outright.
+  test("positive control — a ticket NOT in the reap-failed set still dispatches", () => {
+    writePendingMarker(orchDir, "CTL-62", "implement", "/wt/CTL-62");
+    writeApprovedMarker(orchDir, "CTL-62");
+
+    const reviveDispatch = makeReviveDispatch(0);
+    const res = processApprovedResumes({
+      orchDir,
+      reviveDispatch,
+      dispatch: () => {},
+      appendEvent: () => true,
+      reapFailedTickets: new Set(["CTL-999"]), // a DIFFERENT ticket
+    });
+
+    expect(reviveDispatch.calls.map((c) => c[0].ticket)).toContain("CTL-62");
+    expect(res.reapBlocked).toBe(0);
+  });
+
   test("pending marker present but no approval sentinel — no dispatch, marker retained", () => {
     writePendingMarker(orchDir, "CTL-51", "review", "/wt/CTL-51");
     // No approved sentinel written

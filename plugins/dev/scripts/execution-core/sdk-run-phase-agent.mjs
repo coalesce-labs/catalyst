@@ -1279,7 +1279,11 @@ export async function sdkRunPhaseAgent(
   // so the child this run spawns is the one that shows up in the diff. Taken
   // after sem.acquire() to keep the window tight. Whole thing is fail-open — a
   // liveness nicety must never take down a dispatch.
-  let childPidsBefore = [];
+  // ⛔ `null`, not `[]`, is the failure value: listChildPids returns null to mean
+  // "I could not look", and discoverSdkChildPid turns that into an INCONCLUSIVE
+  // `before-unavailable`. Seeding `[]` would assert the daemon had no children,
+  // which promotes every pre-existing sibling into the `fresh` set.
+  let childPidsBefore = null;
   try {
     childPidsBefore = listChildPids(process.pid);
   } catch {

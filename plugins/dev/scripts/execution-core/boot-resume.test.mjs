@@ -24,6 +24,13 @@ import {
   isBootResumeEligible,
   supersededByTerminalPhase,
 } from "./boot-resume.mjs";
+// CTL-2192 (remediation): the REAL oracle, so the `live` arm is evidenced
+// against the production function rather than only against an injected stub.
+import {
+  classifySdkWorkerLiveness,
+  registerSdkWorker,
+  resetSdkWorkerRegistry,
+} from "./sdk-worker-registry.mjs";
 
 let orchDir;
 
@@ -1610,5 +1617,195 @@ describe("selectBootResumeCandidates — SDK liveness arm (CTL-2192 Phase 4)", (
     expect(out.map((c) => c.ticket)).toEqual(["CTL-OK"]);
     // The oracle is never consulted for a ticket an earlier guard already dropped.
     expect(calls).toEqual(["CTL-OK"]);
+  });
+});
+
+// ─── CTL-2192 (remediation): the Phase-4 guard is only real if it is WIRED ───
+//
+// Verify measured the gap precisely: 0 of 38 reconcileBootResume call sites in
+// the exec-core test files passed `reapFailedTickets` or `sdkLiveness`, while
+// `sdkSessionHarvest` appeared in 5 (the positive control proving the search
+// worked). Both seams default to inert values — `new Set()` and
+// `() => ({state:"unknown"})` — so DELETING either wiring line left the entire
+// guard a silent no-op with all seven of the ticket's new test files still
+// green. These tests thread them for real.
+describe("reconcileBootResume — reapFailedTickets is wired, not merely defaulted (CTL-2192)", () => {
+  test("⛔ a ticket whose orphan reap could NOT be confirmed is never dispatched", () => {
+    writeSignal(orchDir, "CTL-1", "plan", { worktreePath: "/wt/CTL-1", status: "running" });
+    writeMaxParallel(orchDir, 4);
+    const dispatched = [];
+    const res = reconcileBootResume({
+      orchDir,
+      report: { coldStart: true },
+      agents: [],
+      reviveDispatch: (a) => { dispatched.push(a); return { code: 0 }; },
+      dispatch: () => ({ code: 0 }),
+      appendEvent: () => {},
+      reapFailedTickets: new Set(["CTL-1"]),
+    });
+    expect(dispatched).toHaveLength(0);
+    expect(res.dispatched).toBe(0);
+  });
+
+  // ⛔ POSITIVE CONTROL. Without it the assertion above would pass equally well
+  // if boot-resume had simply stopped dispatching anything.
+  test("positive control — the SAME ticket with an EMPTY reap-failed set does dispatch", () => {
+    writeSignal(orchDir, "CTL-1", "plan", { worktreePath: "/wt/CTL-1", status: "running" });
+    writeMaxParallel(orchDir, 4);
+    const dispatched = [];
+    const res = reconcileBootResume({
+      orchDir,
+      report: { coldStart: true },
+      agents: [],
+      reviveDispatch: (a) => { dispatched.push(a); return { code: 0 }; },
+      dispatch: () => ({ code: 0 }),
+      appendEvent: () => {},
+      reapFailedTickets: new Set(),
+    });
+    expect(dispatched.map((d) => d.ticket)).toEqual(["CTL-1"]);
+    expect(res.dispatched).toBe(1);
+  });
+
+  test("a reap-failed ticket CHARGES a slot rather than freeing one for another candidate", () => {
+    // It may still hold its worker, so the free-slot arithmetic must count it.
+    // maxParallel 1: CTL-1 is reap-failed and CTL-2 is a clean candidate, so the
+    // single slot is charged to CTL-1 and CTL-2 is deferred, not dispatched.
+    writeSignal(orchDir, "CTL-1", "plan", { worktreePath: "/wt/CTL-1", status: "running" });
+    writeSignal(orchDir, "CTL-2", "plan", { worktreePath: "/wt/CTL-2", status: "running" });
+    writeMaxParallel(orchDir, 1);
+    const dispatched = [];
+    reconcileBootResume({
+      orchDir,
+      report: { coldStart: true },
+      agents: [],
+      reviveDispatch: (a) => { dispatched.push(a); return { code: 0 }; },
+      dispatch: () => ({ code: 0 }),
+      appendEvent: () => {},
+      reapFailedTickets: new Set(["CTL-1"]),
+    });
+    expect(dispatched).toHaveLength(0);
+  });
+});
+
+describe("reconcileBootResume — the sdkLiveness arm is wired (CTL-2192)", () => {
+  test("⛔ an SDK worker the oracle reports LIVE is not re-dispatched beside itself", () => {
+    writeSignal(orchDir, "CTL-1", "plan", {
+      worktreePath: "/wt/CTL-1",
+      status: "running",
+      bg_job_id: null, // the SDK shape: every bg-keyed probe is blind to it
+    });
+    writeMaxParallel(orchDir, 4);
+    const dispatched = [];
+    const res = reconcileBootResume({
+      orchDir,
+      report: { coldStart: true },
+      agents: [],
+      reviveDispatch: (a) => { dispatched.push(a); return { code: 0 }; },
+      dispatch: () => ({ code: 0 }),
+      appendEvent: () => {},
+      sdkLiveness: () => ({ state: "live", reason: "orphan-child-alive", childPid: 4242 }),
+    });
+    expect(dispatched).toHaveLength(0);
+    expect(res.dispatched).toBe(0);
+  });
+
+  test("positive control — the same worker reported DEAD is recovered", () => {
+    writeSignal(orchDir, "CTL-1", "plan", { worktreePath: "/wt/CTL-1", status: "running", bg_job_id: null });
+    writeMaxParallel(orchDir, 4);
+    const dispatched = [];
+    reconcileBootResume({
+      orchDir,
+      report: { coldStart: true },
+      agents: [],
+      reviveDispatch: (a) => { dispatched.push(a); return { code: 0 }; },
+      dispatch: () => ({ code: 0 }),
+      appendEvent: () => {},
+      sdkLiveness: () => ({ state: "dead", reason: "orphan-child-dead", childPid: 4242 }),
+    });
+    expect(dispatched.map((d) => d.ticket)).toEqual(["CTL-1"]);
+  });
+
+  test("an oracle that THROWS degrades to unknown (dispatch), never takes down the pass", () => {
+    writeSignal(orchDir, "CTL-1", "plan", { worktreePath: "/wt/CTL-1", status: "running", bg_job_id: null });
+    writeMaxParallel(orchDir, 4);
+    const dispatched = [];
+    expect(() =>
+      reconcileBootResume({
+        orchDir,
+        report: { coldStart: true },
+        agents: [],
+        reviveDispatch: (a) => { dispatched.push(a); return { code: 0 }; },
+        dispatch: () => ({ code: 0 }),
+        appendEvent: () => {},
+        sdkLiveness: () => { throw new Error("oracle exploded"); },
+      }),
+    ).not.toThrow();
+    expect(dispatched.map((d) => d.ticket)).toEqual(["CTL-1"]);
+  });
+
+  test("⛔ reapFailedTickets OUTRANKS a live-looking oracle — the exclusion is not optional", () => {
+    // Both seams point at the same ticket. The reap-failed short-circuit runs
+    // first and must hold regardless of what the oracle would have said.
+    writeSignal(orchDir, "CTL-1", "plan", { worktreePath: "/wt/CTL-1", status: "running", bg_job_id: null });
+    writeMaxParallel(orchDir, 4);
+    const dispatched = [];
+    let oracleCalls = 0;
+    reconcileBootResume({
+      orchDir,
+      report: { coldStart: true },
+      agents: [],
+      reviveDispatch: (a) => { dispatched.push(a); return { code: 0 }; },
+      dispatch: () => ({ code: 0 }),
+      appendEvent: () => {},
+      reapFailedTickets: new Set(["CTL-1"]),
+      sdkLiveness: () => { oracleCalls++; return { state: "dead", reason: "orphan-child-dead", childPid: 1 }; },
+    });
+    expect(dispatched).toHaveLength(0);
+    expect(oracleCalls).toBe(0); // short-circuited BEFORE the oracle
+  });
+});
+
+// The `sdkState === "live"` arm is DEFENSIVE on the production boot path (see the
+// long note at its call site: reconcileSdkRegistryOnBoot runs first, after which
+// no projection can still classify `live` there). Every other test of it injects
+// a stub oracle, which proves the wiring but not that the REAL oracle can drive
+// it. This one drives the real classifySdkWorkerLiveness — through its
+// same-daemon in-memory branch, the one branch that is genuinely reachable — so
+// the arm is evidenced against the production function, not only a fake.
+describe("reconcileBootResume — the live arm fires under the REAL oracle (CTL-2192)", () => {
+  test("a worker registered in THIS process is seen live, with no stub oracle", () => {
+    writeSignal(orchDir, "CTL-1", "plan", { worktreePath: "/wt/CTL-1", status: "running", bg_job_id: null });
+    writeMaxParallel(orchDir, 4);
+    resetSdkWorkerRegistry();
+    registerSdkWorker({ ticket: "CTL-1", phase: "plan", worktreePath: "/wt/CTL-1", generation: 1 });
+    // Positive control on the instrument itself: the real oracle must say `live`
+    // here, or the assertion below would be vacuous.
+    expect(classifySdkWorkerLiveness(orchDir, "CTL-1").state).toBe("live");
+
+    const dispatched = [];
+    const res = reconcileBootResume({
+      orchDir,
+      report: { coldStart: true },
+      agents: [],
+      reviveDispatch: (a) => { dispatched.push(a); return { code: 0 }; },
+      dispatch: () => ({ code: 0 }),
+      appendEvent: () => {},
+      // NO sdkLiveness override — the module default is the real oracle.
+    });
+    expect(dispatched).toHaveLength(0);
+    expect(res.dispatched).toBe(0);
+
+    resetSdkWorkerRegistry();
+    // …and once the worker deregisters, the same call recovers it.
+    const after = [];
+    reconcileBootResume({
+      orchDir,
+      report: { coldStart: true },
+      agents: [],
+      reviveDispatch: (a) => { after.push(a); return { code: 0 }; },
+      dispatch: () => ({ code: 0 }),
+      appendEvent: () => {},
+    });
+    expect(after.map((d) => d.ticket)).toEqual(["CTL-1"]);
   });
 });

@@ -27,6 +27,9 @@ import {
   classifySdkWorkerLiveness,
   reconcileSdkRegistryOnBoot,
   resetSdkWorkerRegistry,
+  REAP_CONFIRM_GRACE_MS,
+  REAP_CONFIRM_GRACE_CODEX_MS,
+  REAP_CONFIRM_TOTAL_BUDGET_MS,
 } from "./sdk-worker-registry.mjs";
 
 const T0 = 1_700_000_000_000;
@@ -531,6 +534,7 @@ describe("codex child pid + orphan reap (CTL-1457 N2)", () => {
       now: () => T0 + 1000,
       killChild: (pid) => { killed.push(pid); dead.add(pid); return true; },
       confirmReap: (pid, { pidAlive }) => !pidAlive(pid), // defaultConfirmReap minus the sleep
+      classifyChildIdentity: () => "ours", // CTL-2192 remediation: identity before signal
     });
     expect(killed).toEqual([33333]);
     expect(res.killedChildren).toEqual([{ ticket: "CTL-1", childPid: 33333 }]);
@@ -891,6 +895,7 @@ describe("reconcileSdkRegistryOnBoot — sdk orphan reap (CTL-2192 Phase 4)", ()
       now: () => T0 + 1000,
       killChild: (pid) => { killed.push(pid); return true; },
       confirmReap: () => true, // the child died
+      classifyChildIdentity: () => "ours",
     });
     expect(killed).toEqual([33333]);
     expect(res.killedChildren).toEqual([{ ticket: "CTL-1", childPid: 33333 }]);
@@ -915,8 +920,9 @@ describe("reconcileSdkRegistryOnBoot — sdk orphan reap (CTL-2192 Phase 4)", ()
       now: () => T0 + 1000,
       killChild: () => true,
       confirmReap: () => false, // it ignored SIGTERM
+      classifyChildIdentity: () => "ours",
     });
-    expect(res.reapFailed).toEqual([{ ticket: "CTL-1", childPid: 33333 }]);
+    expect(res.reapFailed).toEqual([{ ticket: "CTL-1", childPid: 33333, reason: "survived-sigterm" }]);
     expect(res.removed).not.toContain("CTL-1");
     expect(existsSync(join(dir, ".sdk-workers", "CTL-1.json"))).toBe(true);
     rmSync(dir, { recursive: true, force: true });
@@ -934,8 +940,9 @@ describe("reconcileSdkRegistryOnBoot — sdk orphan reap (CTL-2192 Phase 4)", ()
       now: () => T0 + 1000,
       killChild: () => true,
       confirmReap: () => false,
+      classifyChildIdentity: () => "ours",
     });
-    expect(res.reapFailed).toEqual([{ ticket: "CTL-1", childPid: 33333 }]);
+    expect(res.reapFailed).toEqual([{ ticket: "CTL-1", childPid: 33333, reason: "survived-sigterm" }]);
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -1015,6 +1022,7 @@ describe("reconcileSdkRegistryOnBoot — sdk orphan reap (CTL-2192 Phase 4)", ()
       now: () => T0 + 1000,
       killChild: (pid) => { killed.push(pid); return true; },
       confirmReap: () => true,
+      classifyChildIdentity: () => "ours", // CTL-2192 remediation: identity before signal
     });
     expect(killed).toEqual([33333]);
     expect(res.harvested.map((h) => h.ticket)).toEqual(["CTL-1"]); // warm AFTER a confirmed reap
@@ -1036,6 +1044,7 @@ describe("reconcileSdkRegistryOnBoot — sdk orphan reap (CTL-2192 Phase 4)", ()
       now: () => T0 + 1000,
       killChild: () => true,
       confirmReap: () => false,
+      classifyChildIdentity: () => "ours",
     });
     expect(res.reapFailed.map((r) => r.ticket)).toEqual(["CTL-1"]);
     expect(res.harvested).toEqual([]);
@@ -1068,6 +1077,7 @@ describe("defaultConfirmReap (CTL-2192 Phase 4)", () => {
       pidAlive: (pid) => pid === 33333 && !dead.has(pid),
       now: () => T0 + 1000,
       killChild: (pid) => { dead.add(pid); return true; },
+      classifyChildIdentity: () => "ours",
     });
     expect(res.killedChildren).toEqual([{ ticket: "CTL-1", childPid: 33333 }]);
     expect(res.reapFailed).toEqual([]);
@@ -1085,10 +1095,236 @@ describe("defaultConfirmReap (CTL-2192 Phase 4)", () => {
       pidAlive: (pid) => pid === 33333,
       now: () => T0 + 1000,
       killChild: () => false, // EPERM / already reaped by someone else
+      classifyChildIdentity: () => "ours",
     });
     expect(res.killedChildren).toEqual([]);
-    expect(res.reapFailed).toEqual([{ ticket: "CTL-1", childPid: 33333 }]);
+    expect(res.reapFailed).toEqual([{ ticket: "CTL-1", childPid: 33333, reason: "signal-failed" }]);
     expect(res.removed).toEqual([]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+// ─── CTL-2192 (remediation): identity before signal ─────────────────────────
+//
+// This ticket widened the population the boot reap SIGNALS from codex-only
+// (~0 on a pure sdk/bg fleet — the file's own comment said so) to EVERY sdk
+// projection, while the only guard on the target was `kill -0` plus the 48 h
+// warm-harvest window. `kill -0` proves a pid ANSWERS, not that it is ours, and
+// the same stale pid is re-probed on every boot for as long as the projection
+// lives. The repo already holds this discipline for pid files: "matched by
+// process identity, not just kill -0 ... a recycled pid is never a kill target."
+describe("boot reap — identity before signal (CTL-2192 remediation)", () => {
+  function writeProj(dir, over = {}) {
+    mkdirSync(join(dir, ".sdk-workers"), { recursive: true });
+    writeFileSync(
+      join(dir, ".sdk-workers", "CTL-1.json"),
+      JSON.stringify({
+        ticket: "CTL-1", executor: "sdk", pid: 11111, childPid: 33333,
+        worktreePath: "/wt/CTL-1", updatedAt: T0, ...over,
+      }),
+    );
+  }
+
+  test("⛔ a REUSED pid (cwd is not our worktree) is NEVER signalled", () => {
+    const dir = freshDir();
+    writeProj(dir);
+    const killed = [];
+    const res = reconcileSdkRegistryOnBoot(dir, {
+      pidAlive: (pid) => pid === 33333,
+      now: () => T0 + 1000,
+      killChild: (pid) => { killed.push(pid); return true; },
+      classifyChildIdentity: () => "foreign",
+    });
+    expect(killed).toEqual([]);
+    // Our child is gone, so the projection takes the ordinary removal path —
+    // the stranger is left alone AND the ticket is not stranded.
+    expect(res.reapFailed).toEqual([]);
+    expect(res.removed).toEqual(["CTL-1"]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("⛔ an UNVERIFIABLE identity is neither signalled nor concluded — fail CLOSED", () => {
+    // cwd unreadable (no usable lsof at boot). We cannot prove the pid is ours,
+    // so we must not signal it; and we cannot prove our child is gone, so we
+    // must not delete the only durable pointer to it either.
+    const dir = freshDir();
+    writeProj(dir);
+    const killed = [];
+    const res = reconcileSdkRegistryOnBoot(dir, {
+      pidAlive: (pid) => pid === 33333,
+      now: () => T0 + 1000,
+      killChild: (pid) => { killed.push(pid); return true; },
+      classifyChildIdentity: () => "unverifiable",
+    });
+    expect(killed).toEqual([]);
+    expect(res.reapFailed).toEqual([{ ticket: "CTL-1", childPid: 33333, reason: "identity-unverifiable" }]);
+    expect(res.removed).toEqual([]);
+    expect(existsSync(join(dir, ".sdk-workers", "CTL-1.json"))).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // ⛔ POSITIVE CONTROL: the two above must not be passing because the reap was
+  // simply disabled.
+  test("positive control — a CONFIRMED-OURS identity is still signalled and reaped", () => {
+    const dir = freshDir();
+    writeProj(dir);
+    const killed = [];
+    const dead = new Set();
+    const res = reconcileSdkRegistryOnBoot(dir, {
+      pidAlive: (pid) => pid === 33333 && !dead.has(pid),
+      now: () => T0 + 1000,
+      killChild: (pid) => { killed.push(pid); dead.add(pid); return true; },
+      classifyChildIdentity: () => "ours",
+    });
+    expect(killed).toEqual([33333]);
+    expect(res.killedChildren).toEqual([{ ticket: "CTL-1", childPid: 33333 }]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("the identity probe is asked about THIS projection's pid and worktreePath", () => {
+    const dir = freshDir();
+    writeProj(dir, { worktreePath: "/wt/somewhere" });
+    const asked = [];
+    reconcileSdkRegistryOnBoot(dir, {
+      pidAlive: (pid) => pid === 33333,
+      now: () => T0 + 1000,
+      killChild: () => true,
+      confirmReap: () => true,
+      classifyChildIdentity: (pid, wt) => { asked.push([pid, wt]); return "ours"; },
+    });
+    expect(asked).toEqual([[33333, "/wt/somewhere"]]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("⛔ the STALE-projection hole: a >48h projection whose child is ALIVE and OURS is kept, not deleted", () => {
+    // `fresh` gates both the reap and the harvest, so the fall-through was
+    // rmSync — deleting the only pointer to a running worker, after which the
+    // oracle answers no-projection and boot-resume cold-dispatches a SECOND
+    // generation into that worktree. No signal (the plan's rule is "no freshness
+    // evidence, no kill"); the ticket is simply excluded until the child exits.
+    const dir = freshDir();
+    writeProj(dir);
+    const killed = [];
+    const res = reconcileSdkRegistryOnBoot(dir, {
+      pidAlive: (pid) => pid === 33333,
+      now: () => T0 + WARM_HARVEST_MAX_AGE_MS + 1,
+      killChild: (pid) => { killed.push(pid); return true; },
+      classifyChildIdentity: () => "ours",
+    });
+    expect(killed).toEqual([]);
+    expect(res.reapFailed).toEqual([{ ticket: "CTL-1", childPid: 33333, reason: "stale-projection-child-alive" }]);
+    expect(res.removed).toEqual([]);
+    expect(existsSync(join(dir, ".sdk-workers", "CTL-1.json"))).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("…but a stale projection whose pid is UNVERIFIABLE keeps the pre-existing deletion", () => {
+    // At >48h the pid-reuse prior dominates, so an unattributable pid must not
+    // strand the ticket. Deliberately narrower than the confirmed-ours branch.
+    const dir = freshDir();
+    writeProj(dir);
+    const res = reconcileSdkRegistryOnBoot(dir, {
+      pidAlive: (pid) => pid === 33333,
+      now: () => T0 + WARM_HARVEST_MAX_AGE_MS + 1,
+      killChild: () => true,
+      classifyChildIdentity: () => "unverifiable",
+    });
+    expect(res.reapFailed).toEqual([]);
+    expect(res.removed).toEqual(["CTL-1"]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("boot reap — the confirm has an AGGREGATE bound (CTL-2192 remediation)", () => {
+  test("⛔ N surviving orphans share ONE deadline, they do not each pay the grace", () => {
+    // defaultConfirmReap blocks the daemon's event loop synchronously, inside
+    // startDaemon's boot block and AFTER the pid file is published — so every
+    // liveness consumer reads the frozen process as healthy while it waits. A
+    // host bounced with N saturated slots whose children all survive used to pay
+    // N x grace with no aggregate cap at all.
+    const dir = freshDir();
+    mkdirSync(join(dir, ".sdk-workers"), { recursive: true });
+    for (const t of ["CTL-1", "CTL-2", "CTL-3", "CTL-4", "CTL-5", "CTL-6"]) {
+      writeFileSync(
+        join(dir, ".sdk-workers", `${t}.json`),
+        JSON.stringify({ ticket: t, executor: "sdk", pid: 11111, childPid: 33333, worktreePath: `/wt/${t}`, updatedAt: T0 }),
+      );
+    }
+    // A virtual clock: confirmReap "spends" exactly the grace it was handed.
+    let clock = T0 + 1000;
+    let totalSpent = 0;
+    const grants = [];
+    const res = reconcileSdkRegistryOnBoot(dir, {
+      pidAlive: (pid) => pid === 33333,
+      now: () => clock,
+      killChild: () => true,
+      classifyChildIdentity: () => "ours",
+      confirmTotalBudgetMs: 5_000,
+      confirmGraceMs: 2_000,
+      confirmGraceCodexMs: 2_000,
+      confirmReap: (_pid, { graceMs }) => {
+        grants.push(graceMs);
+        clock += graceMs;
+        totalSpent += graceMs;
+        return false; // every child survives — the worst case
+      },
+    });
+    expect(res.reapFailed).toHaveLength(6);
+    expect(totalSpent).toBeLessThanOrEqual(5_000);
+    // …and the tail is granted ZERO, which still probes (fail CLOSED), rather
+    // than being skipped or granted the full grace.
+    expect(grants.slice(0, 2)).toEqual([2_000, 2_000]);
+    expect(grants[grants.length - 1]).toBe(0);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("the CODEX grace is longer than the sdk one (the regressed path)", () => {
+    // Pre-ticket a codex orphan was SIGTERM'd and removed with NO confirmation,
+    // so a child that flushes and exits at t+3s newly read as reapFailed — one
+    // boot of lost work for a child that died normally a second later. The
+    // confirm POLLS, so the longer grace is only paid by a child that lingers.
+    expect(REAP_CONFIRM_GRACE_CODEX_MS).toBeGreaterThan(REAP_CONFIRM_GRACE_MS);
+    expect(REAP_CONFIRM_TOTAL_BUDGET_MS).toBeGreaterThanOrEqual(REAP_CONFIRM_GRACE_CODEX_MS);
+
+    const dir = freshDir();
+    mkdirSync(join(dir, ".sdk-workers"), { recursive: true });
+    writeFileSync(
+      join(dir, ".sdk-workers", "CTL-1.json"),
+      JSON.stringify({ ticket: "CTL-1", executor: "codex-exec", pid: 11111, childPid: 33333, worktreePath: "/wt/CTL-1", updatedAt: T0 }),
+    );
+    const grants = [];
+    reconcileSdkRegistryOnBoot(dir, {
+      pidAlive: (pid) => pid === 33333,
+      now: () => T0 + 1000,
+      killChild: () => true,
+      classifyChildIdentity: () => "ours",
+      confirmReap: (_pid, { graceMs }) => { grants.push(graceMs); return true; },
+    });
+    expect(grants).toEqual([REAP_CONFIRM_GRACE_CODEX_MS]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("the real defaultConfirmReap POLLS — a child that exits early returns well before the grace", () => {
+    // Wall-clock assertion on the REAL default (no confirmReap injected). The
+    // child is dead from the start, so a sleep-the-whole-grace implementation
+    // would take >= REAP_CONFIRM_GRACE_MS; a polling one returns at once.
+    const dir = freshDir();
+    mkdirSync(join(dir, ".sdk-workers"), { recursive: true });
+    writeFileSync(
+      join(dir, ".sdk-workers", "CTL-1.json"),
+      JSON.stringify({ ticket: "CTL-1", executor: "sdk", pid: 11111, childPid: 33333, worktreePath: "/wt/CTL-1", updatedAt: T0 }),
+    );
+    const dead = new Set();
+    const started = Date.now();
+    const res = reconcileSdkRegistryOnBoot(dir, {
+      pidAlive: (pid) => pid === 33333 && !dead.has(pid),
+      now: () => T0 + 1000,
+      killChild: (pid) => { dead.add(pid); return true; },
+      classifyChildIdentity: () => "ours",
+    });
+    const elapsed = Date.now() - started;
+    expect(res.killedChildren).toEqual([{ ticket: "CTL-1", childPid: 33333 }]);
+    expect(elapsed).toBeLessThan(REAP_CONFIRM_GRACE_MS);
     rmSync(dir, { recursive: true, force: true });
   });
 });

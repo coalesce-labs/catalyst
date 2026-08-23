@@ -138,6 +138,91 @@ describe("discoverSdkChildPid — the pure before/after diff", () => {
     });
   });
 
+  // ── CTL-2192 remediation: the zero-match branch is the ONE place in this
+  //    module that can manufacture a false CONCLUSIVE, and a conclusive
+  //    "no child" is what stamps childPidResolved — which
+  //    classifySdkWorkerLiveness branch 6 reads as DEAD.
+  test("⛔ zero matches with ONE unreadable pid is INCONCLUSIVE, even when a sibling WAS readable", () => {
+    // The pre-fix bug: the readability flag was SCAN-WIDE, so one readable
+    // sibling licensed a conclusive `no-match` even when OUR child's own probe
+    // was the one that failed. Evidence of absence requires that every fresh pid
+    // was actually interrogated.
+    expect(
+      discoverSdkChildPid({
+        before: [10],
+        after: [10, 42, 43],
+        cwdOf: (pid) => (pid === 42 ? "/somewhere/else" : null), // 43 — possibly ours — unreadable
+        worktreePath: "/wt/CTL-1",
+      }),
+    ).toEqual({ pid: null, conclusive: false, reason: "cwd-unreadable" });
+  });
+
+  test("⛔ same, when the unreadable pid THREW rather than returning null", () => {
+    expect(
+      discoverSdkChildPid({
+        before: [10],
+        after: [10, 42, 43],
+        cwdOf: (pid) => {
+          if (pid === 43) throw new Error("lsof exploded");
+          return "/somewhere/else";
+        },
+        worktreePath: "/wt/CTL-1",
+      }),
+    ).toEqual({ pid: null, conclusive: false, reason: "cwd-unreadable" });
+  });
+
+  test("⛔ an empty-string cwd counts as UNREADABLE, not as an interrogated non-match", () => {
+    expect(
+      discoverSdkChildPid({
+        before: [10],
+        after: [10, 42, 43],
+        cwdOf: (pid) => (pid === 42 ? "/somewhere/else" : ""),
+        worktreePath: "/wt/CTL-1",
+      }),
+    ).toEqual({ pid: null, conclusive: false, reason: "cwd-unreadable" });
+  });
+
+  // POSITIVE CONTROL for the two above: the same shape with every cwd readable
+  // MUST still conclude, or the fix would have simply disabled the conclusion.
+  test("positive control — every fresh pid readable and none matching is still CONCLUSIVE", () => {
+    expect(
+      discoverSdkChildPid({
+        before: [10],
+        after: [10, 42, 43],
+        cwdOf: () => "/somewhere/else",
+        worktreePath: "/wt/CTL-1",
+      }),
+    ).toEqual({ pid: null, conclusive: true, reason: "no-match" });
+  });
+
+  test("a POSITIVE match stands even when another pid's probe failed", () => {
+    // Asymmetric on purpose: we READ that pid's cwd and it is this worktree, so
+    // a sibling's unreadable probe cannot make the match wrong.
+    expect(
+      discoverSdkChildPid({
+        before: [10],
+        after: [10, 42, 43],
+        cwdOf: (pid) => (pid === 43 ? "/wt/CTL-1" : null),
+        worktreePath: "/wt/CTL-1",
+      }),
+    ).toEqual({ pid: 43, conclusive: true, reason: "matched" });
+  });
+
+  test("⛔ a null BEFORE snapshot is INCONCLUSIVE, never an empty set", () => {
+    // listChildPids returns null SPECIFICALLY to mean "I could not look". Folded
+    // into an empty Set it asserts the daemon had no children, promoting every
+    // pre-existing sibling into the `fresh` set — at best losing the stamp, at
+    // worst attributing a previous generation's orphan to this run.
+    expect(
+      discoverSdkChildPid({ before: null, after: [10, 42], cwdOf: () => "/wt/CTL-1", worktreePath: "/wt/CTL-1" }),
+    ).toEqual({ pid: null, conclusive: false, reason: "before-unavailable" });
+    // …and the pre-fix behaviour would have been a CONFIDENT (wrong) match here:
+    expect(
+      discoverSdkChildPid({ before: undefined, after: [10], cwdOf: () => "/wt/CTL-1", worktreePath: "/wt/CTL-1" })
+        .conclusive,
+    ).toBe(false);
+  });
+
   test("tolerates malformed inputs without throwing, and stays INCONCLUSIVE", () => {
     expect(discoverSdkChildPid({ before: null, after: null, cwdOf: () => "/x", worktreePath: "/x" }).conclusive).toBe(false);
     expect(discoverSdkChildPid().conclusive).toBe(false);

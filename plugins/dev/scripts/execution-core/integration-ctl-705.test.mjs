@@ -1056,3 +1056,134 @@ describe("CTL-2192 Phase 3 — the cross-lap preemption budget", () => {
     expect(readSignal("CTL-2", "research")?.status).toBe("preempted");
   });
 });
+
+// ─── CTL-2192 (remediation): the storm must STOP, not be redirected ─────────
+//
+// The per-victim budget above bounds ONE victim. The sweep scans inFlightRanked
+// worst-ranked-first and only `break`s when topQueued stops out-ranking the
+// candidate, so an exhausted victim hands the preemption to the next, BETTER
+// ranked in-flight worker: under the preempt-never-launch shape this fleet has
+// hit three times (CTC-829, CTL-1550, CTL-1681) a preemptor that wins the
+// ranking but can never dispatch burns victim A's laps, then B's, then C's,
+// evicting progressively more valuable work across the window. The bound was
+// maxLaps x |victims|.
+describe("CTL-2192 remediation — the PREEMPTOR-side lap bound", () => {
+  const T0 = 200_000;
+
+  const baseOpts = () => ({
+    readEligible: () => [{ identifier: "CTL-9", priority: 1, createdAt: "2026-05-01T00:00:00Z" }],
+    reclaimDeadWork: noopReclaim,
+    hasTriageArtifact: () => true,
+    writeStatus: {
+      applyPhaseStatus: () => {},
+      applyTerminalDone: () => {},
+      applyLabel: () => {},
+    },
+  });
+
+  function preemptorBudgetFile(ticket) {
+    return join(orchDir, ".preempt-budget", `${ticket}.json`);
+  }
+
+  function twoTicks(atMs, extra = {}) {
+    schedulerTick(orchDir, {
+      ...baseOpts(),
+      dispatch: makeRealDispatch(),
+      liveBackgroundCount: () => 2,
+      now: () => atMs,
+      killBgJob: makeKillStub(),
+      ...extra,
+    });
+    return schedulerTick(orchDir, {
+      ...baseOpts(),
+      dispatch: makeRealDispatch(),
+      liveBackgroundCount: () => 2,
+      now: () => atMs + 35_000,
+      killBgJob: makeKillStub(),
+      ...extra,
+    });
+  }
+
+  test("⛔ an exhausted PREEMPTOR does not escalate to a better-ranked victim", () => {
+    // Two in-flight victims. CTL-2 (the worst-ranked) has spent its own budget,
+    // which pre-remediation handed the preemption straight to CTL-3.
+    seedSdkWorker("CTL-2", "research", 5, T0 - 90_000, 5);
+    seedSdkWorker("CTL-3", "research", 4, T0 - 90_000, 7);
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    mkdirSync(join(orchDir, ".preempt-budget"), { recursive: true });
+    writeFileSync(preemptorBudgetFile("CTL-9"), JSON.stringify({ count: 99, windowStartedAt: T0 }));
+
+    const cancel = makeCancelStub();
+    twoTicks(T0, { cancelSdkRun: cancel });
+
+    expect(readSignal("CTL-2", "research")?.status).toBe("running");
+    expect(readSignal("CTL-3", "research")?.status).toBe("running");
+    expect(cancel.calls).toHaveLength(0);
+  });
+
+  // ⛔ NEGATIVE CONTROL. Without it, "nothing was preempted" would also be
+  // satisfied by a remediation that simply disabled preemption.
+  test("negative control — the SAME board with an unspent preemptor budget DOES preempt", () => {
+    seedSdkWorker("CTL-2", "research", 5, T0 - 90_000, 5);
+    seedSdkWorker("CTL-3", "research", 4, T0 - 90_000, 7);
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    expect(existsSync(preemptorBudgetFile("CTL-9"))).toBe(false);
+
+    const cancel = makeCancelStub();
+    twoTicks(T0, { cancelSdkRun: cancel });
+
+    expect(readSignal("CTL-2", "research")?.status).toBe("preempted");
+    expect(cancel.calls).toHaveLength(1);
+  });
+
+  test("a performed preemption spends one lap on BOTH sides of the pair", () => {
+    seedSdkWorker("CTL-2", "research", 5, T0 - 90_000, 5);
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    seedWorker("CTL-1", "verify", 4, T0 - 90_000, "bg-1");
+
+    twoTicks(T0, { cancelSdkRun: makeCancelStub() });
+
+    const victim = JSON.parse(readFileSync(preemptBudgetFile("CTL-2"), "utf8"));
+    expect(victim.count).toBe(1);
+    const preemptor = JSON.parse(readFileSync(preemptorBudgetFile("CTL-9"), "utf8"));
+    expect(preemptor.count).toBe(1);
+    expect(typeof preemptor.windowStartedAt).toBe("number");
+  });
+
+  test("the exhausted preemptor is ANNOUNCED once, and the event names which side it is about", () => {
+    seedSdkWorker("CTL-2", "research", 5, T0 - 90_000, 5);
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    mkdirSync(join(orchDir, ".preempt-budget"), { recursive: true });
+    writeFileSync(preemptorBudgetFile("CTL-9"), JSON.stringify({ count: 99, windowStartedAt: T0 }));
+
+    twoTicks(T0, { cancelSdkRun: makeCancelStub() });
+    twoTicks(T0 + 120_000, { cancelSdkRun: makeCancelStub() }); // a second window-live tick
+
+    const ym = (() => {
+      const d = new Date();
+      return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+    })();
+    const logPath = join(catalystDir, "events", `${ym}.jsonl`);
+    const events = existsSync(logPath)
+      ? readFileSync(logPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l))
+      : [];
+    const announced = events.filter(
+      (e) => e.attributes?.["event.name"] === "phase.scheduler.preempt-budget-exhausted.CTL-9",
+    );
+    // Once per window — an ungated emit would re-create the per-tick burn this
+    // whole ticket exists to stop.
+    expect(announced).toHaveLength(1);
+    // Both sides share one event name, so `scope` is what tells them apart.
+    expect(announced[0]?.body?.payload?.scope).toBe("preemptor");
+  });
+
+  test("EXPIRY: past the window the preemptor may preempt again (damping, not an exemption)", () => {
+    seedSdkWorker("CTL-2", "research", 5, T0 - 90_000, 5);
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    mkdirSync(join(orchDir, ".preempt-budget"), { recursive: true });
+    writeFileSync(preemptorBudgetFile("CTL-9"), JSON.stringify({ count: 99, windowStartedAt: T0 }));
+
+    twoTicks(T0 + 31 * 60_000, { cancelSdkRun: makeCancelStub() });
+    expect(readSignal("CTL-2", "research")?.status).toBe("preempted");
+  });
+});

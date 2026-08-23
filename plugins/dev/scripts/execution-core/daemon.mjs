@@ -1602,7 +1602,9 @@ export function startDaemon({
       // CTL-1367 item E2: thread the resolved executor dispatch — this is the 5th
       // dispatch entry point and previously defaulted to defaultDispatch, so an
       // approved-resume ticket launched via bg even under executor=sdk (split-brain).
-      processApprovedResumes({ orchDir, dispatch: dispatchFn });
+      // CTL-2192: the SAME exclusion reconcileBoot applied eight lines up. Without
+      // the Set this door dispatches the very tickets that one just refused.
+      processApprovedResumes({ orchDir, dispatch: dispatchFn, reapFailedTickets: sdkReapFailedTickets });
     }
     // CTL-1612: NOW probe the credential — after the dispatches, so a 10s `gh` timeout can
     // never delay crash recovery. Advisory only: never throws, never blocks boot, and

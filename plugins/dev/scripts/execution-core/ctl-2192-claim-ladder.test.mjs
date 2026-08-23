@@ -369,3 +369,58 @@ describe("CTC-166 — the negative control on the fixtures themselves", () => {
     expect(claimCount("CTC-166")).toBe(before);
   });
 });
+
+// ─── CTL-2192 (remediation): the WIRING is the guard ────────────────────────
+//
+// Every functional test of the Phase-4 guard injects its seams, so deleting the
+// two lines in daemon.mjs that DERIVE and THREAD `sdkReapFailedTickets` left the
+// whole guard a silent no-op with all of them still green. A unit test cannot
+// observe startDaemon's boot ordering (the same reason github-auth-preflight's
+// "daemon boot ordering" block is a source scan), so this is one too — and it
+// lives here rather than in daemon.test.mjs, which is EXCLUDED from the
+// execution-core-tests allowlist and therefore gates nothing.
+describe("daemon wiring — the reap-failed set is derived and threaded (CTL-2192)", () => {
+  const daemonSrc = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "daemon.mjs"), "utf8");
+  const lines = daemonSrc.split("\n");
+  const lineOf = (needle) => lines.findIndex((l) => l.includes(needle));
+
+  test("sdkReapFailedTickets is DERIVED from reconcileSdkRegistryOnBoot().reapFailed", () => {
+    const derive = lineOf("const sdkReapFailedTickets = new Set(");
+    expect(derive).toBeGreaterThan(-1);
+    // …from the boot reconcile's own result, not from some other source.
+    expect(lines[derive]).toContain("sdkRegistryBoot.reapFailed");
+    // …and after the reconcile that produces it.
+    const reconcile = lineOf("const sdkRegistryBoot = reconcileSdkRegistryOnBoot(");
+    expect(reconcile).toBeGreaterThan(-1);
+    expect(reconcile).toBeLessThan(derive);
+  });
+
+  test("BOTH boot dispatch entry points receive it", () => {
+    // reconcileBoot is the door the guard was written for; processApprovedResumes
+    // is the adjacent one it walked around, eight lines later.
+    const bootResume = lineOf("const bootResume = reconcileBoot(");
+    const approved = lineOf("processApprovedResumes({ orchDir, dispatch: dispatchFn");
+    expect(bootResume).toBeGreaterThan(-1);
+    expect(approved).toBeGreaterThan(-1);
+
+    // The argument must actually be present at each site. reconcileBoot's call is
+    // multi-line, so scan its object literal; processApprovedResumes' is one line.
+    const bootResumeBlock = lines.slice(bootResume, bootResume + 14).join("\n");
+    expect(bootResumeBlock).toContain("reapFailedTickets: sdkReapFailedTickets");
+    expect(lines[approved]).toContain("reapFailedTickets: sdkReapFailedTickets");
+
+    // Derived before it is used at either door.
+    const derive = lineOf("const sdkReapFailedTickets = new Set(");
+    expect(derive).toBeLessThan(bootResume);
+    expect(derive).toBeLessThan(approved);
+  });
+
+  test("⛔ the scan is anchored on strings that EXIST — the instrument can fail", () => {
+    // A source scan whose needles have all drifted returns -1 everywhere and, if
+    // the assertions were written the other way round, would read as a pass.
+    // This asserts the anchors resolve, so a rename fails loudly here rather
+    // than silently disarming the two tests above.
+    expect(lineOf("reconcileSdkRegistryOnBoot(")).toBeGreaterThan(-1);
+    expect(lineOf("a-string-that-must-never-appear-in-daemon-mjs")).toBe(-1);
+  });
+});

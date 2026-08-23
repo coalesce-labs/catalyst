@@ -18,7 +18,7 @@
 //
 // LEAF MODULE: node:fs/node:path only.
 
-import { readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 function envInt(name, fallback) {
@@ -37,7 +37,33 @@ export const PREEMPT_MAX_LAPS = envInt("SCHEDULER_PREEMPT_MAX_LAPS", 3);
 
 // The window the count is scoped to. Expiry is what makes this DAMPING rather
 // than a permanent exemption.
+//
+// ⚠️ BOUNDARY, by design: the window is anchored at the FIRST lap and never
+// slides (see recordPreemption), so laps clustered at the end of one window plus
+// laps at the start of the next can reach up to 2x maxLaps within minutes. That
+// is the price of an anchor that can actually EXPIRE under a sustained lap — a
+// sliding window would keep resetting and the bound would never be reachable.
+// Documented in the configuration reference rather than left for a reader to
+// discover from the arithmetic.
 export const PREEMPT_BUDGET_WINDOW_MS = envInt("SCHEDULER_PREEMPT_BUDGET_WINDOW_MS", 30 * 60_000);
+
+// ── the PREEMPTOR-side bound ────────────────────────────────────────────────
+//
+// The victim budget alone bounds one VICTIM, not the storm. The sweep scans
+// inFlightRanked from lowest-ranked toward highest, so an exhausted victim does
+// not stop the preemption — it hands it to the next, BETTER-ranked in-flight
+// worker. Under the preempt-never-launch shape this fleet has hit repeatedly
+// (CTC-829, CTL-1550, CTL-1681) a preemptor that wins the ranking but can never
+// dispatch would burn victim A's laps, then B's, then C's, evicting
+// progressively more valuable work. The bound would be maxLaps x |victims|, and
+// the storm redirected rather than stopped.
+//
+// A preemptor-side counter is a good proxy for "won the eviction and still never
+// took the slot": buildGlobalRanking's queued descriptors are exactly the
+// eligible tickets with NO workers/<ticket>/ dir, so a preemptor that actually
+// launched stops being `topQueued` and stops accruing. One that keeps accruing
+// is, by construction, one that keeps evicting without ever running.
+export const PREEMPTOR_MAX_LAPS = envInt("SCHEDULER_PREEMPTOR_MAX_LAPS", PREEMPT_MAX_LAPS);
 
 // The ONE spelling of the audit event's action, so recovery.mjs's emitter and
 // broker/namespace-parity.test.mjs read the same string rather than two
@@ -53,12 +79,60 @@ export function preemptBudgetExhaustedEventName(ticket) {
 const FILE = ".preempt-budget.json";
 const ALERT_FILE = ".preempt-budget-alert.json";
 
+// The preemptor's ledger canNOT live in workers/<ticket>/: a preemptor is by
+// definition a ticket with no worker dir, and CREATING one would make
+// listStartedTickets read it as in-flight — turning a damper into a phantom
+// dispatch. It gets an orchDir-level dir instead, self-pruned on write.
+const PREEMPTOR_DIR = ".preempt-budget";
+
+// Ticket ids are `TEAM-123`. Anything else never becomes a path component.
+const SAFE_TICKET = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
 export function preemptBudgetPath(orchDir, ticket) {
   return join(orchDir, "workers", ticket, FILE);
 }
 
 export function preemptBudgetAlertPath(orchDir, ticket) {
   return join(orchDir, "workers", ticket, ALERT_FILE);
+}
+
+/** @returns {string|null} null when the ticket is not a safe path component. */
+export function preemptorBudgetPath(orchDir, ticket) {
+  if (typeof ticket !== "string" || !SAFE_TICKET.test(ticket)) return null;
+  return join(orchDir, PREEMPTOR_DIR, `${ticket}.json`);
+}
+
+export function preemptorBudgetAlertPath(orchDir, ticket) {
+  if (typeof ticket !== "string" || !SAFE_TICKET.test(ticket)) return null;
+  return join(orchDir, PREEMPTOR_DIR, `${ticket}.alert.json`);
+}
+
+/**
+ * Drop preemptor ledgers whose window is long expired. The victim ledger is GC'd
+ * with its worker dir; this one has no such owner, so it prunes itself. Bounded
+ * and best-effort — a failed prune must never abort a preemption sweep.
+ */
+export function prunePreemptorBudgets(orchDir, { now = Date.now, windowMs = PREEMPT_BUDGET_WINDOW_MS } = {}) {
+  const dir = join(orchDir, PREEMPTOR_DIR);
+  const cutoff = now() - windowMs * 2;
+  let pruned = 0;
+  let names;
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return { pruned: 0 };
+  }
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+    try {
+      if (statSync(join(dir, name)).mtimeMs > cutoff) continue;
+      rmSync(join(dir, name), { force: true });
+      pruned++;
+    } catch {
+      /* best-effort */
+    }
+  }
+  return { pruned };
 }
 
 /**
@@ -69,10 +143,14 @@ export function preemptBudgetAlertPath(orchDir, ticket) {
  *
  * @returns {{count: number, windowStartedAt: number|null, readable: boolean}}
  */
-export function readPreemptBudget(orchDir, ticket) {
+export function readPreemptBudget(orchDir, ticket, { pathFor = preemptBudgetPath } = {}) {
+  const file = pathFor(orchDir, ticket);
+  // An unresolvable path (unsafe ticket id) is NOT a fresh zero — it is a read we
+  // could not perform. Same tri-state discipline as a corrupt file.
+  if (!file) return { count: 0, windowStartedAt: null, readable: false };
   let raw;
   try {
-    raw = readFileSync(preemptBudgetPath(orchDir, ticket), "utf8");
+    raw = readFileSync(file, "utf8");
   } catch (err) {
     // ENOENT is the honest zero: nothing has been recorded for this ticket.
     if (err?.code === "ENOENT") return { count: 0, windowStartedAt: null, readable: true };
@@ -100,8 +178,12 @@ export function readPreemptBudget(orchDir, ticket) {
  * Has this victim spent its budget inside the live window?
  * @returns {{exhausted: boolean, count: number, windowStartedAt: number|null, readable: boolean}}
  */
-export function isPreemptBudgetExhausted(orchDir, ticket, { now = Date.now, maxLaps = PREEMPT_MAX_LAPS, windowMs = PREEMPT_BUDGET_WINDOW_MS } = {}) {
-  const b = readPreemptBudget(orchDir, ticket);
+export function isPreemptBudgetExhausted(
+  orchDir,
+  ticket,
+  { now = Date.now, maxLaps = PREEMPT_MAX_LAPS, windowMs = PREEMPT_BUDGET_WINDOW_MS, pathFor = preemptBudgetPath } = {},
+) {
+  const b = readPreemptBudget(orchDir, ticket, { pathFor });
   // Fail toward today's behaviour — see the FAIL DIRECTION note above.
   if (!b.readable) return { ...b, exhausted: false };
   if (b.windowStartedAt == null) return { ...b, exhausted: false };
@@ -119,17 +201,23 @@ export function isPreemptBudgetExhausted(orchDir, ticket, { now = Date.now, maxL
  *
  * @returns {{count: number, windowStartedAt: number|null, written: boolean}}
  */
-export function recordPreemption(orchDir, ticket, { now = Date.now, windowMs = PREEMPT_BUDGET_WINDOW_MS } = {}) {
+export function recordPreemption(
+  orchDir,
+  ticket,
+  { now = Date.now, windowMs = PREEMPT_BUDGET_WINDOW_MS, pathFor = preemptBudgetPath, ensureDir = false } = {},
+) {
   const ts = now();
-  const prev = readPreemptBudget(orchDir, ticket);
+  const prev = readPreemptBudget(orchDir, ticket, { pathFor });
   // A corrupt ledger is REPLACED by a fresh window rather than incremented from
   // a base we could not read.
   const continuing = prev.readable && prev.windowStartedAt != null && ts - prev.windowStartedAt <= windowMs;
   const next = continuing
     ? { count: prev.count + 1, windowStartedAt: prev.windowStartedAt }
     : { count: 1, windowStartedAt: ts };
-  const file = preemptBudgetPath(orchDir, ticket);
+  const file = pathFor(orchDir, ticket);
+  if (!file) return { ...next, written: false };
   try {
+    if (ensureDir) mkdirSync(join(file, ".."), { recursive: true });
     const tmp = `${file}.tmp.${process.pid}`;
     writeFileSync(tmp, JSON.stringify(next));
     renameSync(tmp, file);
@@ -137,6 +225,23 @@ export function recordPreemption(orchDir, ticket, { now = Date.now, windowMs = P
   } catch {
     return { ...next, written: false };
   }
+}
+
+// ── the preemptor-side wrappers ─────────────────────────────────────────────
+//
+// Same ledger semantics, different owner and a different default cap. Kept as
+// named wrappers rather than making every call site pass `pathFor` by hand, so a
+// site cannot silently read the victim ledger while believing it read the
+// preemptor's.
+
+/** @returns {{exhausted: boolean, count: number, windowStartedAt: number|null, readable: boolean}} */
+export function isPreemptorBudgetExhausted(orchDir, ticket, { now = Date.now, maxLaps = PREEMPTOR_MAX_LAPS, windowMs = PREEMPT_BUDGET_WINDOW_MS } = {}) {
+  return isPreemptBudgetExhausted(orchDir, ticket, { now, maxLaps, windowMs, pathFor: preemptorBudgetPath });
+}
+
+/** @returns {{count: number, windowStartedAt: number|null, written: boolean}} */
+export function recordPreemptorLap(orchDir, ticket, { now = Date.now, windowMs = PREEMPT_BUDGET_WINDOW_MS } = {}) {
+  return recordPreemption(orchDir, ticket, { now, windowMs, pathFor: preemptorBudgetPath, ensureDir: true });
 }
 
 // ── once-per-window announcement guard ──────────────────────────────────────
@@ -150,10 +255,12 @@ export function recordPreemption(orchDir, ticket, { now = Date.now, windowMs = P
 // missing an alert is worse than repeating one.
 
 /** @returns {boolean} true iff this window's exhaustion has already been announced. */
-export function budgetExhaustionAnnounced(orchDir, ticket, windowStartedAt) {
+export function budgetExhaustionAnnounced(orchDir, ticket, windowStartedAt, { pathFor = preemptBudgetAlertPath } = {}) {
+  const file = pathFor(orchDir, ticket);
+  if (!file) return false;
   let seen;
   try {
-    seen = JSON.parse(readFileSync(preemptBudgetAlertPath(orchDir, ticket), "utf8"))?.windowStartedAt;
+    seen = JSON.parse(readFileSync(file, "utf8"))?.windowStartedAt;
   } catch {
     return false;
   }
@@ -161,9 +268,16 @@ export function budgetExhaustionAnnounced(orchDir, ticket, windowStartedAt) {
 }
 
 /** Record that this window's exhaustion has been announced. Never throws. */
-export function recordBudgetExhaustionAnnounced(orchDir, ticket, windowStartedAt) {
-  const file = preemptBudgetAlertPath(orchDir, ticket);
+export function recordBudgetExhaustionAnnounced(
+  orchDir,
+  ticket,
+  windowStartedAt,
+  { pathFor = preemptBudgetAlertPath, ensureDir = false } = {},
+) {
+  const file = pathFor(orchDir, ticket);
+  if (!file) return false;
   try {
+    if (ensureDir) mkdirSync(join(file, ".."), { recursive: true });
     const tmp = `${file}.tmp.${process.pid}`;
     writeFileSync(tmp, JSON.stringify({ ticket, windowStartedAt }));
     renameSync(tmp, file);
@@ -171,4 +285,17 @@ export function recordBudgetExhaustionAnnounced(orchDir, ticket, windowStartedAt
   } catch {
     return false;
   }
+}
+
+/** Preemptor-side twin of budgetExhaustionAnnounced. */
+export function preemptorExhaustionAnnounced(orchDir, ticket, windowStartedAt) {
+  return budgetExhaustionAnnounced(orchDir, ticket, windowStartedAt, { pathFor: preemptorBudgetAlertPath });
+}
+
+/** Preemptor-side twin of recordBudgetExhaustionAnnounced. */
+export function recordPreemptorExhaustionAnnounced(orchDir, ticket, windowStartedAt) {
+  return recordBudgetExhaustionAnnounced(orchDir, ticket, windowStartedAt, {
+    pathFor: preemptorBudgetAlertPath,
+    ensureDir: true,
+  });
 }

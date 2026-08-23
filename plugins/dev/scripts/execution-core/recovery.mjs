@@ -1310,7 +1310,13 @@ export function defaultAppendPreemptedEvent({ orchId, ticket, phase, preemptedBy
 // in PHASE_EVENT_PATTERN's terminal set (complete|failed|turn-cap-exhausted|
 // skipped), so this is pure audit with zero wake side effect. The preempted
 // phase rides body.payload.phase. Best-effort, never throws.
-export function defaultAppendPreemptBudgetExhaustedEvent({ orchId, ticket, phase, count, windowStartedAt, preemptedBy }) {
+//
+// CTL-2192 (remediation): `scope` names WHICH side of the (preemptor, victim)
+// pair the event is about — both share one event name, and without it a reader
+// cannot tell "this victim has been evicted enough" from "this preemptor has
+// evicted enough and still never launched". Defaults to "victim", the only
+// producer before the preemptor bound existed.
+export function defaultAppendPreemptBudgetExhaustedEvent({ orchId, ticket, phase, count, windowStartedAt, preemptedBy, scope = "victim" }) {
   return appendEnvelopeBestEffort(
     buildEventEnvelope({
       phase: "scheduler",
@@ -1323,6 +1329,7 @@ export function defaultAppendPreemptBudgetExhaustedEvent({ orchId, ticket, phase
         count,
         window_started_at: windowStartedAt,
         preempted_by: preemptedBy ?? null,
+        scope,
       },
       severityText: "WARN",
       severityNumber: 13,

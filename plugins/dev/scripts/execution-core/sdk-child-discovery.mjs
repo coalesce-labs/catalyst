@@ -110,8 +110,17 @@ export function cwdOfPid(pid, { lsof = defaultLsof } = {}) {
  * reads as DEAD. The inconclusive reasons are each a real host condition:
  *
  *   enumerator-unusable       — `ps` failed; `after` is null.
- *   cwd-unreadable            — new children exist but EVERY cwd probe failed
- *                               (the systematic case: no usable `lsof`).
+ *   before-unavailable        — the BEFORE snapshot is `null`, i.e. `ps` failed
+ *                               at snapshot time. listChildPids returns null
+ *                               SPECIFICALLY to mean "I could not look" (see its
+ *                               docstring); folding that into an empty Set would
+ *                               say "the daemon had no children", which promotes
+ *                               every pre-existing sibling into a `fresh` pid.
+ *   cwd-unreadable            — new children exist and AT LEAST ONE cwd probe
+ *                               failed while nothing matched (the systematic
+ *                               case: no usable `lsof`). See the zero-match
+ *                               branch below for why this is per-pid and not
+ *                               scan-wide.
  *   ambiguous-multiple-matches— two new children share the worktree, i.e. two
  *                               generations. Never a guess, and never a "no
  *                               child" claim — that would let the oracle read
@@ -127,31 +136,52 @@ export function discoverSdkChildPid({ before, after, cwdOf, worktreePath } = {})
   if (!Array.isArray(after) || typeof cwdOf !== "function") {
     return { pid: null, conclusive: false, reason: "enumerator-unusable" };
   }
-  const seen = new Set(Array.isArray(before) ? before : []);
+  // ⛔ A `null` BEFORE is "ps failed at snapshot time", not "there were no
+  // children" — listChildPids returns null for exactly that (lines 52-56). Folded
+  // into an empty Set it makes every pre-existing sibling look `fresh`, which at
+  // best loses the stamp to `ambiguous-multiple-matches` and at worst attributes
+  // a previous generation's orphan to this run. Undefined is the same fact
+  // (the caller never took a snapshot), so both are inconclusive.
+  if (!Array.isArray(before)) {
+    return { pid: null, conclusive: false, reason: "before-unavailable" };
+  }
+  const seen = new Set(before);
   const fresh = after.filter((pid) => !seen.has(pid));
   if (fresh.length === 0) return { pid: null, conclusive: true, reason: "no-new-children" };
 
   const matches = [];
-  let anyCwdRead = false;
+  // ⛔ Track the FAILURES, not "did anything succeed". `anyCwdRead` was
+  // SCAN-WIDE, so one readable sibling licensed a CONCLUSIVE `no-match` even
+  // when OUR child's own probe was the one that failed — and a conclusive
+  // no-match is what stamps childPidResolved, which classifySdkWorkerLiveness
+  // branch 6 reads as DEAD for a worker that is alive. Zero matches is evidence
+  // of absence only when every fresh pid was actually INTERROGATED; a single
+  // unreadable pid is a pid that could still have been ours.
+  let anyCwdUnreadable = false;
   for (const pid of fresh) {
     let cwd;
     try {
       cwd = cwdOf(pid);
     } catch {
-      continue; // one unreadable pid must not abort the scan
+      anyCwdUnreadable = true; // one unreadable pid must not abort the scan…
+      continue; // …but it must not be silently treated as interrogated either
     }
-    if (typeof cwd !== "string" || cwd === "") continue;
-    anyCwdRead = true;
+    if (typeof cwd !== "string" || cwd === "") {
+      anyCwdUnreadable = true;
+      continue;
+    }
     // Exact match, no trailing-slash normalisation — the same semantics
     // hasLiveBgWorker documents for its own `cwd === worktreePath` compare.
     if (cwd === worktreePath) matches.push(pid);
   }
+  // A POSITIVE match stands on its own evidence: we read that pid's cwd and it
+  // is this worktree, so another pid's unreadable probe cannot make it wrong.
   if (matches.length === 1) return { pid: matches[0], conclusive: true, reason: "matched" };
   if (matches.length > 1) return { pid: null, conclusive: false, reason: "ambiguous-multiple-matches" };
-  // Zero matches. That is only evidence if we actually READ at least one cwd.
-  return anyCwdRead
-    ? { pid: null, conclusive: true, reason: "no-match" }
-    : { pid: null, conclusive: false, reason: "cwd-unreadable" };
+  // Zero matches — conclusive ONLY if every fresh pid was readable.
+  return anyCwdUnreadable
+    ? { pid: null, conclusive: false, reason: "cwd-unreadable" }
+    : { pid: null, conclusive: true, reason: "no-match" };
 }
 
 /**

@@ -577,6 +577,23 @@ export function selectBootResumeCandidates({
     // live is enough — a bg worker and an SDK worker are different shapes of the
     // same fact. A throwing oracle degrades to `unknown` (candidate), because a
     // liveness read must never take down the boot pass.
+    //
+    // ⚠️ HONEST SCOPE of the `sdkState === "live"` arm below. On the production
+    // boot path it is DEFENSIVE, not load-bearing: startDaemon runs
+    // reconcileSdkRegistryOnBoot BEFORE this pass, and after that reconcile no
+    // projection can still classify `live` here. Walk the oracle's branches —
+    // in-memory (1) is empty at boot; a live-daemon projection (3/4) is `kept`
+    // and answers `unknown`; a dead-daemon projection whose child survived is
+    // `reapFailed` and short-circuits above, before the oracle is consulted; one
+    // whose child died answers `orphan-child-dead`; a deleted one answers
+    // `no-projection`. reapFailedTickets is therefore the mechanism that
+    // actually protects a live SDK worker at boot, and this arm is the
+    // belt-and-braces second reader of the same fact. It is kept because
+    // reconcileBootResume is an EXPORTED seam — an embedder or a future caller
+    // that runs it without the reconcile in front gets the guard anyway — and
+    // because branch 1 makes it genuinely reachable through the REAL oracle when
+    // a worker IS registered in this process (asserted end-to-end in
+    // boot-resume.test.mjs with no stub oracle).
     let sdkVerdict;
     try {
       sdkVerdict = sdkLiveness(ticket, active.worktreePath);
@@ -605,7 +622,15 @@ export function selectBootResumeCandidates({
         liveness: { source: "sdk", state: sdkState, reason: sdkVerdict?.reason ?? null },
       });
       if (sdkState === "unknown") {
-        logger.debug(
+        // CTL-2192 (remediation): INFO, not debug. A host where child-pid
+        // discovery never succeeds (no usable /usr/sbin/lsof, say) leaves every
+        // projection legacy-shaped, so the oracle answers `unknown` for every
+        // worker's whole life and the fix is silently a no-op. At `debug` that
+        // is indistinguishable from a healthy rollout in a default log config —
+        // the fail direction of the one-shot latch is toward inertness, so the
+        // rollout drain has to be VISIBLE to be watchable. It is bounded: one
+        // line per candidate per boot, not per tick.
+        logger.info(
           { ticket, phase: active.phase, reason: sdkVerdict?.reason ?? null },
           "boot-resume: sdk liveness unknown — resuming (today's behaviour); breadcrumb for the rollout drain (CTL-2192)"
         );
@@ -894,12 +919,25 @@ export function reconcileBootResume({
 // and each scheduler tick so a mid-run approval is honored without a restart.
 // Routes through reviveDispatch → same MAX_REVIVES / storm-breaker guards as
 // the cheap auto path. Clears both sentinels on a successful dispatch.
+//
+// ⚠️ CTL-2192: startDaemon calls this immediately after reconcileBoot has
+// excluded the tickets whose orphan reap could not be confirmed. Dispatching on
+// the two sentinels ALONE therefore walked straight around that exclusion
+// through the adjacent door — an operator approval dropped on a previous boot is
+// not evidence that THIS boot's orphan is gone. The guard has to be applied at
+// both doors or it is applied at neither.
 export function processApprovedResumes({
   orchDir,
   reviveDispatch = defaultReviveDispatch,
   dispatch = defaultDispatch,
   appendEvent = defaultAppendBootResumeEvent,
   orchId = undefined,
+  // CTL-2192 (Phase 4): tickets whose boot-time orphan reap could NOT be
+  // confirmed (reconcileSdkRegistryOnBoot().reapFailed). Same fact, same fail
+  // direction, as reconcileBootResume's parameter of the same name. Defaults to
+  // an empty Set so the per-tick scheduler call — which runs long after boot,
+  // when the boot reap verdict no longer describes the fleet — is unchanged.
+  reapFailedTickets = new Set(),
   // CTL-1443: the stale-gate expiry sweep rides the same every-tick call so no
   // scheduler wiring is needed. Injectable for tests; emitAlert defaults to the
   // real dispatch-alert emitter (lazy import avoided — passed by the caller or
@@ -927,15 +965,30 @@ export function processApprovedResumes({
       .filter((e) => e.isDirectory())
       .map((e) => e.name);
   } catch {
-    return { dispatched: 0, failed: 0 };
+    return { dispatched: 0, failed: 0, reapBlocked: 0 };
   }
 
   let dispatched = 0;
   let failed = 0;
+  let reapBlocked = 0; // CTL-2192: approvals held back by an unconfirmed reap
   for (const ticket of tickets) {
     const pendingPath = bootResumePendingPath(orchDir, ticket);
     const approvedPath = bootResumeApprovedPath(orchDir, ticket);
     if (!existsSync(pendingPath) || !existsSync(approvedPath)) continue;
+
+    // CTL-2192: never dispatch beside an orphan we could not prove is gone.
+    // Checked BEFORE the marker read so an unreadable marker cannot mask it, and
+    // BOTH sentinels are RETAINED — the approval is still valid, it is just not
+    // actionable on this boot. The next boot re-derives the reap verdict and
+    // dispatches then, so this defers the resume rather than dropping it.
+    if (reapFailedTickets?.has?.(ticket)) {
+      log.warn(
+        { ticket },
+        "processApprovedResumes: orphan reap unconfirmed — approval retained, not dispatching beside a possibly-live worker (CTL-2192)"
+      );
+      reapBlocked++;
+      continue;
+    }
 
     const pending = readPendingMarker(orchDir, ticket);
     if (!pending) {
@@ -965,5 +1018,5 @@ export function processApprovedResumes({
     }
   }
 
-  return { dispatched, failed };
+  return { dispatched, failed, reapBlocked };
 }
