@@ -58,7 +58,7 @@ import { freshStallStatus, TERMINAL_STALL_STATUS } from "./stall-class.mjs"; // 
 // CTL-2043 (P2-a) adds a THIRD outcome between those two, because the pair above
 // was not exhaustive and the gap was measured: a THROTTLED or CLOUD-authored
 // refusal (`unauthorized`, `budget:*`, `rate-limited`, any `cloud:*`) got NO
-// marker at all, so the needs-human escalation path re-issued the write every
+// marker at all, so the operator-escalation path re-issued the write every
 // tick and spent a host write unit each time for as long as the refusal lasted.
 //
 //   .applied         — success. Permanent.
@@ -70,7 +70,7 @@ import { freshStallStatus, TERMINAL_STALL_STATUS } from "./stall-class.mjs"; // 
 //
 // ⛔ The cool-down must NEVER be spelled `.skipped`. That marker lives under
 // workers/<T>/ and survives a restart, so it would outlive the credential
-// re-mint / budget roll that clears the refusal, and the `needs-human` label the
+// re-mint / budget roll that clears the refusal, and the escalation label the
 // operator page depends on would be abandoned for the daemon's life — strictly
 // worse than the storm it would be fixing (COORD-236).
 // labelMarkerBase — shared path prefix for the once-marker files used by

@@ -445,21 +445,21 @@ describe("⛔ COORD-236: labelOnce must NOT treat a throttled reason as permanen
     withWorkerDir("CTL-5");
     let clock = 5_000_000;
     const opts = { now: () => clock };
-    expect(labelOnce(orchDir, "CTL-5", "needs-human", w, opts)).toBe(true);
+    expect(labelOnce(orchDir, "CTL-5", "cooldown-probe", w, opts)).toBe(true);
     expect(w.calls.length).toBe(1);
     // Still no PERMANENT marker — the whole COORD-236 asymmetry.
-    expect(existsSync(join(orchDir, "workers", "CTL-5", ".linear-label-needs-human.skipped"))).toBe(
+    expect(existsSync(join(orchDir, "workers", "CTL-5", ".linear-label-cooldown-probe.skipped"))).toBe(
       false
     );
     // In-window: cooled down, zero further writes (CTL-2043 P2-a).
     for (let i = 0; i < 30; i++) {
       clock += 1_000;
-      labelOnce(orchDir, "CTL-5", "needs-human", w, opts);
+      labelOnce(orchDir, "CTL-5", "cooldown-probe", w, opts);
     }
     expect(w.calls.length).toBe(1);
     // Past the window: retried. The back-off is time-boxed, never permanent.
     clock += 61_000;
-    expect(labelOnce(orchDir, "CTL-5", "needs-human", w, opts)).toBe(true);
+    expect(labelOnce(orchDir, "CTL-5", "cooldown-probe", w, opts)).toBe(true);
     expect(w.calls.length).toBe(2);
   });
 
@@ -791,13 +791,13 @@ describe("⛔ CTL-2052: labelOnce must NOT write .skipped for the cloud label re
     withWorkerDir("CTL-23");
     let clock = 5_000_000;
     const opts = { now: () => clock };
-    expect(labelOnce(orchDir, "CTL-23", "needs-human", w, opts)).toBe(true);
+    expect(labelOnce(orchDir, "CTL-23", "cooldown-probe", w, opts)).toBe(true);
     expect(w.calls.length).toBe(1);
     expect(
-      existsSync(join(orchDir, "workers", "CTL-23", ".linear-label-needs-human.skipped"))
+      existsSync(join(orchDir, "workers", "CTL-23", ".linear-label-cooldown-probe.skipped"))
     ).toBe(false);
     clock += 61_000;
-    expect(labelOnce(orchDir, "CTL-23", "needs-human", w, opts)).toBe(true);
+    expect(labelOnce(orchDir, "CTL-23", "cooldown-probe", w, opts)).toBe(true);
     expect(w.calls.length).toBe(2);
   });
 

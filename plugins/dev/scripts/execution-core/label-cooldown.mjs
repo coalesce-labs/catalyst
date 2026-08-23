@@ -13,7 +13,7 @@
 // (`labelRetryCapBlocks`, `LABEL_RETRY_CAP`, `LABEL_RETRY_EXHAUSTED_MS`,
 // `maybeEscalateRetryExhausted`). That is converger-specific — it eventually STOPS
 // re-issuing, which is safe for a disposition label the converger re-derives every
-// tick and is NOT obviously safe for `labelOnce`'s `needs-human` escalation, whose
+// tick and is NOT obviously safe for `labelOnce`'s operator escalation, whose
 // whole job is to page an operator. Keeping the cap out of this leaf is what stops
 // it drifting into labelOnce by import-convenience; there is a test pinning it.
 //

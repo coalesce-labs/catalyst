@@ -157,7 +157,7 @@ describe("labelOnce", () => {
     let clock = 1_000_000;
     const opts = { now: () => clock };
 
-    labelOnce(orchDir, "CTL-1", "needs-human", ws, opts);
+    labelOnce(orchDir, "CTL-1", "cooldown-probe", ws, opts);
     expect(existsSync(join(orchDir, "workers", "CTL-1", ".linear-label-needs-human.applied"))).toBe(
       false
     );
@@ -167,18 +167,18 @@ describe("labelOnce", () => {
 
     // In-window: cooled down.
     clock += 1_000;
-    labelOnce(orchDir, "CTL-1", "needs-human", ws, opts);
+    labelOnce(orchDir, "CTL-1", "cooldown-probe", ws, opts);
     expect(ws.applyLabel.calls.length).toBe(1);
     // Past the window: attempted again.
     clock += 61_000;
-    labelOnce(orchDir, "CTL-1", "needs-human", ws, opts);
+    labelOnce(orchDir, "CTL-1", "cooldown-probe", ws, opts);
     expect(ws.applyLabel.calls.length).toBe(2);
   });
 
   // ── CTL-2043 (P2-a): labelOnce gets a TIME-BOXED cool-down, never .skipped ──
   //
   // The gap CTL-2052 left: labelOnce wrote `.applied` on success and `.skipped` for a
-  // terminal reason, and NOTHING for a throttled/cloud one — so the needs-human
+  // terminal reason, and NOTHING for a throttled/cloud one — so the cooldown-probe
   // escalation path re-issued the write every tick, spending a host budget unit each
   // time, for as long as the refusal lasted. The fix must not reach for `.skipped`:
   // that marker is permanent and would outlive the re-mint / budget roll, abandoning
@@ -196,17 +196,17 @@ describe("labelOnce", () => {
         let clock = 7_000_000;
         const opts = { now: () => clock };
 
-        expect(labelOnce(orchDir, "CTL-1", "needs-human", ws, opts)).toBe(true);
+        expect(labelOnce(orchDir, "CTL-1", "cooldown-probe", ws, opts)).toBe(true);
         expect(ws.applyLabel.calls.length).toBe(1);
 
         for (let i = 0; i < 30; i++) {
           clock += 1_000;
-          labelOnce(orchDir, "CTL-1", "needs-human", ws, opts);
+          labelOnce(orchDir, "CTL-1", "cooldown-probe", ws, opts);
         }
         expect(ws.applyLabel.calls.length).toBe(1);
 
         clock += 61_000;
-        labelOnce(orchDir, "CTL-1", "needs-human", ws, opts);
+        labelOnce(orchDir, "CTL-1", "cooldown-probe", ws, opts);
         expect(ws.applyLabel.calls.length).toBe(2);
       });
 
@@ -214,15 +214,15 @@ describe("labelOnce", () => {
         const ws = { applyLabel: recorder({ applied: false, reason }) };
         mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });
 
-        labelOnce(orchDir, "CTL-1", "needs-human", ws);
+        labelOnce(orchDir, "CTL-1", "cooldown-probe", ws);
 
         // Both halves are asserted: a missing .skipped alone would also pass on the
         // pre-fix code (which wrote nothing at all), so it cannot show the cool-down
         // was armed. The marker's presence is what does.
-        expect(existsSync(skippedMarker("CTL-1", "needs-human"))).toBe(false);
-        expect(existsSync(cooldownMarker("CTL-1", "needs-human"))).toBe(true);
+        expect(existsSync(skippedMarker("CTL-1", "cooldown-probe"))).toBe(false);
+        expect(existsSync(cooldownMarker("CTL-1", "cooldown-probe"))).toBe(true);
         expect(
-          JSON.parse(readFileSync(cooldownMarker("CTL-1", "needs-human"), "utf8")).failedAt
+          JSON.parse(readFileSync(cooldownMarker("CTL-1", "cooldown-probe"), "utf8")).failedAt
         ).toBeNumber();
       });
     }
@@ -231,25 +231,25 @@ describe("labelOnce", () => {
       const ws = { applyLabel: recorder({ applied: false, reason: "exclusive-conflict" }) };
       mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });
 
-      labelOnce(orchDir, "CTL-1", "needs-human", ws);
+      labelOnce(orchDir, "CTL-1", "cooldown-probe", ws);
 
-      expect(existsSync(skippedMarker("CTL-1", "needs-human"))).toBe(true);
+      expect(existsSync(skippedMarker("CTL-1", "cooldown-probe"))).toBe(true);
       // The cool-down set is exactly `shouldCoolDownLabel MINUS terminal`; a terminal
       // reason early-returns forever on .skipped, so arming a window too would be
       // dead state that muddies the ledger the converger's cap reads.
-      expect(existsSync(cooldownMarker("CTL-1", "needs-human"))).toBe(false);
+      expect(existsSync(cooldownMarker("CTL-1", "cooldown-probe"))).toBe(false);
     });
 
     test("a genuinely TRANSIENT reason arms NOTHING — it must still retry next tick", () => {
       const ws = { applyLabel: recorder({ applied: false, reason: "transient" }) };
       mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });
 
-      labelOnce(orchDir, "CTL-1", "needs-human", ws);
-      labelOnce(orchDir, "CTL-1", "needs-human", ws);
+      labelOnce(orchDir, "CTL-1", "cooldown-probe", ws);
+      labelOnce(orchDir, "CTL-1", "cooldown-probe", ws);
 
       expect(ws.applyLabel.calls.length).toBe(2);
-      expect(existsSync(cooldownMarker("CTL-1", "needs-human"))).toBe(false);
-      expect(existsSync(skippedMarker("CTL-1", "needs-human"))).toBe(false);
+      expect(existsSync(cooldownMarker("CTL-1", "cooldown-probe"))).toBe(false);
+      expect(existsSync(skippedMarker("CTL-1", "cooldown-probe"))).toBe(false);
     });
 
     test("a cooled-down call is a no-op: applyLabel is NOT called and onApplyResult does NOT fire", () => {
@@ -262,11 +262,11 @@ describe("labelOnce", () => {
       let clock = 7_000_000;
       const opts = { now: () => clock, onApplyResult: (r) => results.push(r) };
 
-      labelOnce(orchDir, "CTL-1", "needs-human", ws, opts);
+      labelOnce(orchDir, "CTL-1", "cooldown-probe", ws, opts);
       expect(results.length).toBe(1);
 
       clock += 1_000;
-      expect(labelOnce(orchDir, "CTL-1", "needs-human", ws, opts)).toBe(false);
+      expect(labelOnce(orchDir, "CTL-1", "cooldown-probe", ws, opts)).toBe(false);
       expect(ws.applyLabel.calls.length).toBe(1);
       expect(results.length).toBe(1); // no second result for a write that never happened
     });
@@ -277,9 +277,9 @@ describe("labelOnce", () => {
       mkdirSync(join(orchDir, "workers", "CTL-2"), { recursive: true });
       const opts = { now: () => 7_000_000 };
 
-      labelOnce(orchDir, "CTL-1", "needs-human", ws, opts);
+      labelOnce(orchDir, "CTL-1", "cooldown-probe", ws, opts);
       labelOnce(orchDir, "CTL-1", "stalled", ws, opts); // different label
-      labelOnce(orchDir, "CTL-2", "needs-human", ws, opts); // different ticket
+      labelOnce(orchDir, "CTL-2", "cooldown-probe", ws, opts); // different ticket
       expect(ws.applyLabel.calls.length).toBe(3);
     });
 
@@ -296,16 +296,16 @@ describe("labelOnce", () => {
       let clock = 7_000_000;
       const opts = { now: () => clock };
 
-      labelOnce(orchDir, "CTL-1", "needs-human", ws, opts);
-      expect(existsSync(cooldownMarker("CTL-1", "needs-human"))).toBe(true);
+      labelOnce(orchDir, "CTL-1", "cooldown-probe", ws, opts);
+      expect(existsSync(cooldownMarker("CTL-1", "cooldown-probe"))).toBe(true);
       clock += 61_000;
       mode = "ok";
-      labelOnce(orchDir, "CTL-1", "needs-human", ws, opts);
+      labelOnce(orchDir, "CTL-1", "cooldown-probe", ws, opts);
       // A stale marker would be harmless here (.applied early-returns forever), but a
       // left-behind attempt count is read by the converger's cap gate for the same
       // (ticket, label) — clearing it keeps that ledger honest.
-      expect(existsSync(cooldownMarker("CTL-1", "needs-human"))).toBe(false);
-      expect(existsSync(join(orchDir, "workers", "CTL-1", ".linear-label-needs-human.applied"))).toBe(
+      expect(existsSync(cooldownMarker("CTL-1", "cooldown-probe"))).toBe(false);
+      expect(existsSync(join(orchDir, "workers", "CTL-1", ".linear-label-cooldown-probe.applied"))).toBe(
         true
       );
     });
@@ -316,8 +316,8 @@ describe("labelOnce", () => {
       const ws = { applyLabel: recorder({ applied: false, reason: "cloud:exhausted" }) };
       mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });
 
-      labelOnce(orchDir, "CTL-1", "needs-human", ws);
-      labelOnce(orchDir, "CTL-1", "needs-human", ws);
+      labelOnce(orchDir, "CTL-1", "cooldown-probe", ws);
+      labelOnce(orchDir, "CTL-1", "cooldown-probe", ws);
       expect(ws.applyLabel.calls.length).toBe(1);
     });
   });
