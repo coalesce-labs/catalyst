@@ -140,12 +140,11 @@ describe("CTL-1248 Phase 3 — dnd-kit sortable wired into AppSidebar", () => {
     expect(observeIdx).toBeGreaterThan(-1);
   });
 
-  it("ui/package.json has @dnd-kit/sortable ^8.x, core stays ^6.3.1, modifiers ^9.0.0", () => {
-    expect(packageJson).toMatch(/"@dnd-kit\/sortable":\s*"\^8\./);
+  it("ui/package.json has @dnd-kit/sortable ^10.x, core stays ^6.3.1, modifiers ^9.0.0", () => {
+    expect(packageJson).toMatch(/"@dnd-kit\/sortable":\s*"\^10\./);
     expect(packageJson).toMatch(/"@dnd-kit\/core":\s*"\^6\.3\.1"/);
     expect(packageJson).toMatch(/"@dnd-kit\/modifiers":\s*"\^9\.0\.0"/);
-    // Negative: sortable must NOT be ^9 or ^10 (would require core ^7)
+    // Version 9 was skipped; version 10 remains compatible with core ^6.3.1.
     expect(packageJson).not.toMatch(/"@dnd-kit\/sortable":\s*"\^9\./);
-    expect(packageJson).not.toMatch(/"@dnd-kit\/sortable":\s*"\^10\./);
   });
 });
