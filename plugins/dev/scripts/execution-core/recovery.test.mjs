@@ -9,6 +9,9 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, readdirSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ASSERTED_BY } from "./assertion-evidence.mjs"; // CTL-1789
+// CTL-2110: the SHIPPED SDK-native liveness probe, exercised against real
+// projections captured off the live fleet (see __fixtures__/sdk-workers-ctl2110/).
+import { isSdkWorkerLiveOnDisk } from "./sdk-worker-registry.mjs";
 import {
   buildEventEnvelope,
   defaultEmitComplete, // CTL-1789: argv contract (--asserted-by)
@@ -496,6 +499,83 @@ describe("reclaimDeadWorkIfPossible — bg-less (SDK) liveness (CTL-2110)", () =
     // shows no committed work; that is the documented alive-path outcome and is
     // explicitly "never a silent reclaim". What must never happen is a kill or a
     // duplicate dispatch on top of the running worker.)
+    expect(killed).toEqual([]);
+    expect(revived).toEqual([]);
+    expect(["reclaimed", "revived", "wedged-redispatched", "no-progress-stopped"]).not.toContain(
+      String(r),
+    );
+  });
+
+  // ── The same property, against REAL projections off the live fleet ──────────
+  //
+  // The two tests above drive `sdkWorkerLive` through its seam, so they prove the
+  // branch but say nothing about whether the SHIPPED probe can read what the
+  // daemon actually writes. These read bytes captured verbatim from mini at
+  // 2026-08-22 21:50 CT (see __fixtures__/sdk-workers-ctl2110/README.md) through
+  // the real isSdkWorkerLiveOnDisk.
+  //
+  // The captures pin two details a hand-written fixture would plausibly get
+  // wrong: `pid` is the DAEMON's pid (five live tickets on the host all carried
+  // 22876), and `executor` is null on the wire even when the phase signal says
+  // "sdk". If either assumption were wrong, these fail.
+  test("the SHIPPED disk probe accepts a REAL live projection and rejects a REAL stale one", () => {
+    const fixtures = join(import.meta.dir, "__fixtures__", "sdk-workers-ctl2110");
+    const live = JSON.parse(readFileSync(join(fixtures, "live.json"), "utf8"));
+    const stale = JSON.parse(readFileSync(join(fixtures, "stale.json"), "utf8"));
+
+    mkdirSync(join(dir, ".sdk-workers"), { recursive: true });
+    writeFileSync(join(dir, ".sdk-workers", "CTL-2151.json"), readFileSync(join(fixtures, "live.json")));
+    writeFileSync(join(dir, ".sdk-workers", "CTL-2127.json"), readFileSync(join(fixtures, "stale.json")));
+
+    // Replay each capture at its own capture instant, with the pid-liveness
+    // answer that was TRUE at that instant (22876 was the running daemon; 2775
+    // had been gone ~47h). Both seams stay honest to the recorded reality —
+    // the file bytes are untouched.
+    const pidAlive = (pid) => pid === 22876;
+    const capturedAt = live.updatedAt + 30_000; // 0.5 min later, as captured
+
+    expect(isSdkWorkerLiveOnDisk(dir, "CTL-2151", { pidAlive, now: () => capturedAt })).toBe(true);
+    // Stale on BOTH counts, and either alone is disqualifying: its pid is dead,
+    // and it is ~47h past the 30-minute freshness window.
+    expect(isSdkWorkerLiveOnDisk(dir, "CTL-2127", { pidAlive, now: () => capturedAt })).toBe(false);
+    expect(
+      isSdkWorkerLiveOnDisk(dir, "CTL-2127", { pidAlive: () => true, now: () => capturedAt }),
+    ).toBe(false);
+    expect(capturedAt - stale.updatedAt).toBeGreaterThan(30 * 60 * 1000);
+
+    // A ticket with no projection at all is not live — the absent-file path.
+    expect(isSdkWorkerLiveOnDisk(dir, "CTL-9999", { pidAlive, now: () => capturedAt })).toBe(false);
+  });
+
+  // End-to-end through the DEFAULT sdkWorkerLive (no seam): a real projection on
+  // disk must stop reclaim from touching the worker. Only `pid` is rewritten, to
+  // this test process — the recorded daemon pid cannot be alive here, and the
+  // default probe takes no pidAlive seam. Everything else is the captured bytes.
+  test("a REAL on-disk projection stops reclaim, through the default probe", () => {
+    const fixtures = join(import.meta.dir, "__fixtures__", "sdk-workers-ctl2110");
+    const proj = JSON.parse(readFileSync(join(fixtures, "live.json"), "utf8"));
+    mkdirSync(join(dir, ".sdk-workers"), { recursive: true });
+    writeFileSync(
+      join(dir, ".sdk-workers", "CTL-2110.json"),
+      JSON.stringify({ ...proj, ticket: "CTL-2110", pid: process.pid, updatedAt: Date.now() }),
+    );
+
+    const killed = [];
+    const revived = [];
+    const r = reclaimDeadWorkIfPossible(dir, signal(), {
+      // No sdkWorkerLive override — this exercises the shipped default.
+      killBgJob: (id) => {
+        killed.push(id);
+        return true;
+      },
+      reviveDispatch: (...a) => {
+        revived.push(a);
+        return true;
+      },
+      statJob: () => {
+        throw new Error("statJob must not be consulted for a bg-less signal");
+      },
+    });
     expect(killed).toEqual([]);
     expect(revived).toEqual([]);
     expect(["reclaimed", "revived", "wedged-redispatched", "no-progress-stopped"]).not.toContain(
