@@ -46,6 +46,13 @@ export function fillEstimateFallback(
  * `catalyst.linear.read {source:"linearis", op:"team_method"}`. Returns null on
  * any failure; it is deliberately never defaulted to a scale, because null makes
  * the scheduler SKIP its estimate write while a guess would write a wrong one.
+ *
+ * CTL-2187: that degraded fetch now resolves its credential through
+ * linear-degraded-auth.mjs, which adds the scoped CATALYST_MONITOR_APP_ACTOR_TOKEN
+ * tier the launchd monitor process actually has — before it, the call was never
+ * dispatched at all. A FAILED resolution is now also remembered for 10 minutes,
+ * so a host with genuinely no credential re-attempts once per team per window
+ * instead of once per board render.
  */
 export function getEstimationMethodAsync(
   teamId: string,

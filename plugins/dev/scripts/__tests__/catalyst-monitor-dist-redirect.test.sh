@@ -881,23 +881,26 @@ else
   fi
 fi
 
-# ─── Test 16: CATALYST_LIVENESS_READ_SOURCE=loki skips the app-actor mint ────
-# CTL-1612 round 3 (Codex P2 follow-up): the scoped token's ONLY consumer
-# (server.ts pollAnchorHeartbeats → readAnchor → readPeerHeartbeatsSync) is
-# structurally unreachable when CATALYST_LIVENESS_READ_SOURCE=loki
-# (orch-monitor/lib/peer-liveness.mjs readPeerRecords early-returns before
-# ever calling readAnchor — see orch-monitor/__tests__/peer-liveness.test.ts
-# "explicit loki: trusts an empty result — never reads the retired anchor").
-# cmd_start should skip the real mint entirely in that mode (no curl, no
-# network), and must NOT skip it for any other value — unset/AUTO or the
-# explicit anchor-only "linear" mode — where the anchor can still be read.
+# ─── Test 16: the app-actor mint runs in EVERY liveness mode, loki included ──
+# CTL-1612 round 3 made this mint conditional on the anchor read being
+# reachable, because that read was the scoped token's only consumer. CTL-2187
+# added a second consumer — the DEGRADED Linear reads
+# (orch-monitor/lib/linear-degraded-auth.mjs), which run on every board render
+# regardless of liveness source — so the mint is now UNCONDITIONAL. These cases
+# pin that: no mode logs a skip, and curl (the mint) is invoked in all of them.
+# Skipping in loki-only mode would leave exactly those hosts with no resolvable
+# Linear credential, which is the CTL-2187 defect itself.
+#
+# The diagnostic line survives with different wording — loki-only mode still
+# says the ANCHOR read will not use the token — so the sub-cases below assert on
+# "skipping app-actor mint" being ABSENT everywhere.
 #
 # Each sub-case installs FAKE (obviously non-real) orchestrator creds plus a
 # stub curl that marks a file instead of ever reaching the network, so "was
 # the mint code path reached" is asserted via the marker file's presence —
 # never via a real request, fake creds or not.
 echo ""
-echo "Test 16: cmd_start skips the app-actor mint under CATALYST_LIVENESS_READ_SOURCE=loki (CTL-1612 round 3)"
+echo "Test 16: cmd_start mints the app-actor token in every liveness mode, loki included (CTL-2187)"
 
 ROOT="$(make_sandbox)"
 install_fake_orchestrator_creds_and_curl_stub "$ROOT"
@@ -906,14 +909,14 @@ run_cmd_start_capture_stderr "$ROOT" \
   CATALYST_LIVENESS_READ_SOURCE=loki
 STDERR_LOKI="$(cat "$ROOT/stderr-captured" 2>/dev/null || echo '(missing)')"
 if echo "$STDERR_LOKI" | grep -q "skipping app-actor mint"; then
-  pass "16a: loki-only mode logs the skip"
+  fail "16a: loki-only mode still skips the mint — CTL-2187's degraded reads would have no credential; stderr: $STDERR_LOKI"
 else
-  fail "16a: loki-only mode did not log the skip; stderr: $STDERR_LOKI"
+  pass "16a: loki-only mode does not skip the mint"
 fi
 if [[ -f "$ROOT/curl-invoked" ]]; then
-  fail "16b: loki-only mode still invoked curl (mint attempted despite the skip)"
+  pass "16b: loki-only mode invoked curl — mint code path ran (CTL-2187)"
 else
-  pass "16b: loki-only mode never invoked curl — mint code path never ran"
+  fail "16b: loki-only mode never invoked curl; stderr: $STDERR_LOKI"
 fi
 rm -rf "$ROOT"
 
@@ -959,30 +962,33 @@ run_cmd_start_capture_stderr "$ROOT" \
   CATALYST_LAYER2_CONFIG_FILE="$ROOT/fake-layer2-config.json" \
   CATALYST_LIVENESS_READ_SOURCE=" LOKI "
 STDERR_UPPER="$(cat "$ROOT/stderr-captured" 2>/dev/null || echo '(missing)')"
-if echo "$STDERR_UPPER" | grep -q "skipping app-actor mint"; then
+# The loki-only branch still matches case-insensitively after trimming — it now
+# selects the DIAGNOSTIC wording rather than a skip, so assert on that line.
+if echo "$STDERR_UPPER" | grep -q "anchor read is unused in loki-only mode"; then
   pass "16g: whitespace + uppercase LOKI is matched case-insensitively (trimmed)"
 else
   fail "16g: whitespace/uppercase LOKI was not recognized as loki-only; stderr: $STDERR_UPPER"
 fi
 if [[ -f "$ROOT/curl-invoked" ]]; then
-  fail "16h: whitespace/uppercase LOKI still invoked curl"
+  pass "16h: whitespace/uppercase LOKI invoked curl — mint runs regardless of mode (CTL-2187)"
 else
-  pass "16h: whitespace/uppercase LOKI never invoked curl"
+  fail "16h: whitespace/uppercase LOKI never invoked curl; stderr: $STDERR_UPPER"
 fi
 rm -rf "$ROOT"
 
-# ─── Test 17: no liveness anchor configured skips the app-actor mint ────────
-# CTL-1612 round 5 (Codex P2 follow-up): readAnchor's other precondition —
-# alongside "not loki-only" (Test 16) — is a resolvable liveness anchor issue
+# ─── Test 17: the mint runs even when no liveness anchor is configured ──────
+# CTL-1612 round 5 skipped the mint when NO anchor resolves
 # (execution-core/config.mjs getLivenessAnchorIssue: CATALYST_LIVENESS_ANCHOR_ISSUE
 # env, else catalyst.cluster.livenessAnchorIssue in Layer-2, else null; when
 # null, orch-monitor/lib/peer-liveness.mjs readPeerRecords's `!anchorIssue`
-# branch means readAnchor is NEVER called, regardless of source). cmd_start
-# should skip the mint when NO anchor resolves at all (AUTO or explicit
-# "linear"), and must NOT skip when an anchor resolves via EITHER the env
-# override or the Layer-2 config key.
+# branch means readAnchor is NEVER called, regardless of source) — same premise
+# Test 16 covers, same CTL-2187 retirement. A single-host fleet, or one that has
+# not set up cross-host liveness, still runs board renders and therefore still
+# needs the degraded-read credential, so the mint is unconditional here too. The
+# anchor-resolution legs (env / Layer-2) are still exercised below because they
+# select the diagnostic wording.
 echo ""
-echo "Test 17: cmd_start skips the app-actor mint when no liveness anchor is configured (CTL-1612 round 5)"
+echo "Test 17: cmd_start mints the app-actor token even with no liveness anchor configured (CTL-2187)"
 
 # 17a: orchestrator creds present, but NO anchor anywhere (env unset, Layer-2
 # has no cluster.livenessAnchorIssue field at all — the empty-string 2nd arg).
@@ -992,14 +998,16 @@ run_cmd_start_capture_stderr "$ROOT" \
   CATALYST_LAYER2_CONFIG_FILE="$ROOT/fake-layer2-config.json"
 STDERR_NOANCHOR="$(cat "$ROOT/stderr-captured" 2>/dev/null || echo '(missing)')"
 if echo "$STDERR_NOANCHOR" | grep -q "no liveness anchor configured"; then
-  pass "17a: no-anchor-configured mode logs the skip"
+  pass "17a: no-anchor-configured mode logs the anchor diagnostic"
 else
-  fail "17a: no-anchor-configured mode did not log the skip; stderr: $STDERR_NOANCHOR"
+  fail "17a: no-anchor-configured mode did not log the anchor diagnostic; stderr: $STDERR_NOANCHOR"
 fi
-if [[ -f "$ROOT/curl-invoked" ]]; then
-  fail "17b: no-anchor-configured mode still invoked curl (mint attempted despite the skip)"
+if echo "$STDERR_NOANCHOR" | grep -q "skipping app-actor mint"; then
+  fail "17b: no-anchor-configured mode still skips the mint — CTL-2187's degraded reads would have no credential; stderr: $STDERR_NOANCHOR"
+elif [[ -f "$ROOT/curl-invoked" ]]; then
+  pass "17b: no-anchor-configured mode invoked curl — mint code path ran (CTL-2187)"
 else
-  pass "17b: no-anchor-configured mode never invoked curl — mint code path never ran"
+  fail "17b: no-anchor-configured mode never invoked curl; stderr: $STDERR_NOANCHOR"
 fi
 rm -rf "$ROOT"
 
