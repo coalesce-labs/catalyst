@@ -7,8 +7,9 @@
 //
 // Pairs with broker/ingestion-recency.mjs (the CTL-1122 detector). system_down
 // rides that detector's already-edge-triggered/holddown'd stale/recovered edges,
-// so it needs NO new debounce. needs_human_pileup is a LEVEL signal (a count),
-// so it has its own pure threshold + persistence + cooldown machine here.
+// so it needs NO new debounce. The CTL-2156 SYSTEM-trouble kinds are LEVEL
+// signals (a distinct-key count from broker/system-trouble.mjs), so they share
+// the pure threshold + persistence + cooldown machine at the bottom of this file.
 //
 // Envelope mirrors buildIngestionRecencyEnvelope (hand-built — the broker's
 // buildCanonicalEnvelope can't carry event.entity/action/label).
@@ -30,16 +31,44 @@ export const ALERT_CLEARED = "catalyst.alert.cleared";
 
 // Alert KINDS (event.label). Extend here as new policies are added.
 export const ALERT_KIND_SYSTEM_DOWN = "system_down";
-export const ALERT_KIND_NEEDS_HUMAN_PILEUP = "needs_human_pileup";
 
-// The needs-human label taxonomy. Canonical source is board-data.mjs
-// (ATTENTION_LABEL_NEEDS_HUMAN/NEEDS_INPUT) — but that is a monitor-tree module
-// that pulls linear-cache-reader/estimate-fallback, so importing it into the
-// surviving broker at runtime would couple the broker to monitor code (and erode
-// dashboard-independence). We define the strings locally and pin them to the
-// canonical source with a parity test (alert-emit.test.mjs) so a taxonomy rename
-// (CTL-995) cannot silently drift the broker's pile-up count.
-export const NEEDS_HUMAN_LABELS = ["needs-human", "needs-input"];
+// CTL-2156 — the SYSTEM-trouble kinds. Each is fleet-scoped (ONE alert for the
+// whole condition, however many tickets it touches) and AUTO-CLEARING (the
+// condition ending emits `cleared` with no human action). Detector inputs live in
+// broker/system-trouble.mjs; the wiring is router.mjs.
+//
+// These REPLACE the retired `needs_human_pileup` kind. That kind counted Linear
+// `needs-human`/`needs-input` LABELS — i.e. it measured the per-ticket escalation
+// artifact rather than the condition, so a single provider outage showed up as a
+// pile-up of N human asks. Measured: of 86 items flagged as waiting on a human,
+// 41 were the provider being overloaded and 3 genuinely needed a person. The
+// label taxonomy (and its parity pin) moved out of the broker with it; the
+// surviving copy is orch-monitor/lib/linear-cache-reader.mjs, pinned by its own
+// parity test.
+/** 429/529 exhaustion from the model provider. */
+export const ALERT_KIND_PROVIDER_DEGRADED = "provider_degraded";
+/** An account / Linear / GitHub budget is spent. */
+export const ALERT_KIND_RATE_LIMIT_EXHAUSTED = "rate_limit_exhausted";
+/** No free execution slots on a node (see system-trouble.mjs on executor death). */
+export const ALERT_KIND_CAPACITY_UNAVAILABLE = "capacity_unavailable";
+/**
+ * Tickets stalled on a SYSTEM condition — CTL-2159.
+ *
+ * ⛔ WHY A FOURTH KIND WAS REQUIRED. The other three are keyed on PROVIDER /
+ * ACCOUNT / NODE telemetry, and they cover roughly three of the ~35 reason tokens
+ * the CTL-2158 classifier calls SYSTEM. The rest — a spent retry budget, an
+ * exhausted remediate cycle, a watchdog kill, a wedged never-started worker, an
+ * unresolvable conflict — have no telemetry producer at all. Once CTL-2159 stopped
+ * writing the per-ticket label for them, they produced NEITHER a per-ticket
+ * artifact NOR a fleet alert: silent, which is the plan's named worst outcome and
+ * strictly worse than the bin this epic deletes.
+ *
+ * This kind closes that hole with the SAME fan-in shape: N system-class stalls are
+ * N distinct keys under ONE fleet alert, auto-clearing when they stop arriving.
+ * Its input is `ticket.escalated` carrying `escalation.stall_class="system"` — the
+ * classifier's own verdict, not a re-derivation.
+ */
+export const ALERT_KIND_SYSTEM_STALL = "system_stall";
 
 /**
  * buildAlertEnvelope — assemble the canonical OTel envelope for a
@@ -48,11 +77,11 @@ export const NEEDS_HUMAN_LABELS = ["needs-human", "needs-input"];
  *
  * @param {object} i
  * @param {"raised"|"cleared"} i.action
- * @param {string} i.kind        the alert KIND → event.label (system_down | needs_human_pileup)
+ * @param {string} i.kind        the alert KIND → event.label (system_down | provider_degraded | …)
  * @param {string} [i.reason]    short human-readable reason
  * @param {string|null} [i.source]   the silent/recovered source (system_down)
- * @param {number|null} [i.count]    the pile-up count (needs_human_pileup)
- * @param {number|null} [i.threshold] the pile-up threshold that was crossed
+ * @param {number|null} [i.count]    the level count (the CTL-2156 LEVEL kinds)
+ * @param {number|null} [i.threshold] the level threshold that was crossed
  * @param {number|null} [i.sinceMs]  ms the condition has held (raised) / lasted (cleared)
  * @param {string|null} [i.causedBy] forensic link (event id) → caused_by
  * @param {object} [opts]
@@ -117,16 +146,18 @@ export function emitAlertEvent(input, { logPath = getEventLogPath(), now } = {})
 }
 
 /**
- * initialPileupState — per-kind level-alarm state for the needs_human_pileup
- * count. `raised` latches a fired-and-not-yet-cleared pile-up; `aboveSince` is
- * the persistence clock; `clearedAt` arms the post-clear cooldown.
+ * initialAlarmState — per-kind level-alarm state. `raised` latches a
+ * fired-and-not-yet-cleared condition; `aboveSince` is the persistence clock;
+ * `clearedAt` arms the post-clear cooldown. One instance PER KIND — the router
+ * keeps a kind→state map so provider_degraded and capacity_unavailable debounce
+ * independently.
  */
-export function initialPileupState() {
+export function initialAlarmState() {
   return { raised: false, raisedAt: null, aboveSince: null, clearedAt: null };
 }
 
 /**
- * nextPileupAlarmState — PURE threshold + persistence + cooldown machine for a
+ * nextLevelAlarmState — PURE threshold + persistence + cooldown machine for a
  * LEVEL signal (a count). Returns { state, emit } where emit ∈ "raised" |
  * "cleared" | null.
  *
@@ -138,7 +169,7 @@ export function initialPileupState() {
  * stops a flapping count from storming. Mirrors nextRecencyAlarmState's
  * pure-then-emit shape.
  *
- * @param {object} prev  prior state (initialPileupState shape)
+ * @param {object} prev  prior state (initialAlarmState shape)
  * @param {object} i
  * @param {number} i.count
  * @param {number} i.threshold
@@ -147,7 +178,7 @@ export function initialPileupState() {
  * @param {number} [i.cooldownMs]     min ms between a clear and the next raise (flap guard)
  * @returns {{state: object, emit: "raised"|"cleared"|null}}
  */
-export function nextPileupAlarmState(
+export function nextLevelAlarmState(
   prev,
   { count, threshold, nowMs, persistenceMs = 300_000, cooldownMs = 3_600_000 } = {},
 ) {
@@ -165,10 +196,11 @@ export function nextPileupAlarmState(
         s.raisedAt = nowMs;
       }
       // else: DEFER — leave raised false so the next tick re-checks and raises
-      // the moment the cooldown expires (a sustained pile-up is never masked).
+      // the moment the cooldown expires (a sustained condition is never masked).
     }
   } else {
-    // below threshold → reset the persistence clock; clear any open pile-up.
+    // below threshold → reset the persistence clock; clear any open alarm. This
+    // is the AUTO-CLEAR: no human action, no per-ticket artifact to unwind.
     s.aboveSince = null;
     if (s.raised) {
       emit = "cleared";

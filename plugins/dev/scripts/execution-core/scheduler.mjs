@@ -347,6 +347,7 @@ import {
   WORKER_STATUS_LABELS,
   labelMarkerBase, // CTL-1571: convergeHeldLabel writes the same once-marker labelOnce does
 } from "./label-guard.mjs";
+import { escalationIsHumanFacing } from "./escalation-publish.mjs"; // CTL-2159: class gate for the worker.transition emits
 import { DISPOSITIONS } from "./worker-disposition.mjs"; // CTL-1605: precedence order for the onTerminalCleared aggregate-arg → pre-clear `from` resolution
 import { processApprovedResumes } from "./boot-resume.mjs"; // CTL-644: per-tick approval poll
 import { countReapOutcomes } from "./reaper-metrics.mjs";
@@ -395,10 +396,10 @@ import {
 import {
   buildExplanation,
   buildRemediateCapExplanation,
-  coerceExplanation,
   describeSignalReason,
   resolveSignalReason,
 } from "./escalation-explanation.mjs"; // CTL-1130, CTL-1754
+import { explanationForStall } from "./escalation-publish.mjs"; // CTL-2159
 
 // The last pipeline phase — its `done` signal means the whole pipeline
 // finished. `done` is otherwise phase-dependent: a `triage: done` signal still
@@ -3326,10 +3327,20 @@ export function maybeEscalateDispatchFailures(
   // CTL-2141: reverted from routeStuckTicketToDelegate (CTL-1609 delegate-first
   // seam, deleted) to the direct Phase-1 chokepoint — byte-identical to the
   // off-mode behavior the seam always resolved to in production.
+  // ⛔ CTL-2159: forward the reason. With none the classifier correctly returns
+  // HELD ("I could not look" is not "nothing is wrong"), so a site that knows its
+  // reason and drops it turns every SYSTEM stall here into a held one and the
+  // retry/alert path never fires — the phase would ship inert while passing its
+  // own tests. `onOutcome` carries out the CLASS, which the boolean erases.
+  let stallClass = null;
   const labelled = labelNeedsHumanUnlessBeliefOwner(orchDir, marker.ticket, writeStatus, {
     env,
     site: "dispatch-failures",
     log,
+    reason: `dispatch-circuit-breaker:${marker.consecutiveFailures}`,
+    onOutcome: (o) => {
+      stallClass = o?.stallClass ?? null;
+    },
     explanation: {
       escalation_type: "authorization",
       problem: `dispatch failed ${marker.consecutiveFailures}× on ${marker.phase} (${marker.code})`,
@@ -3348,7 +3359,13 @@ export function maybeEscalateDispatchFailures(
     code: marker.code,
     consecutiveFailures: marker.consecutiveFailures,
   });
-  return labelled === true;
+  // ⛔ CTL-2159: this boolean gates a durable per-ticket `worker.transition
+  // { toDisposition:"needs-human" }` at both call sites, and `labelled` alone is
+  // TRUE for a provider outage — publishEscalation returns true for every class
+  // because its boolean is a RETRY contract. Gate on the CLASS so a SYSTEM stall
+  // records no human-facing disposition (the CTL-2156 fleet alert names it and
+  // the ticket retries); ASK and HELD still do.
+  return labelled === true && escalationIsHumanFacing(stallClass);
 }
 
 // CTL-712: the refused-dispatch path writes NO signal file (the artifact gate
@@ -3374,9 +3391,13 @@ export function escalateDispatchExhausted(
     // absent / malformed → create fresh
   }
   if (existing.status === "stalled") return true; // idempotent
-  // CTL-1130: DECISION — dispatch retries exhausted; re-dispatch vs abandon is a
-  // priority call the scheduler cannot compute (D7). GATE 1 passes (re-dispatch
-  // is possible), no single dominant option → tie-break is human preference.
+  // ⛔ CTL-2159 — CTL-1130 CALLED THIS A DECISION AND IT IS NOT ONE.
+  // "dispatch retries exhausted → re-dispatch or abandon?" is the template, and
+  // `prior-artifact-retry-exhausted` is a SYSTEM stall: the provider, the box, or
+  // a late artifact. Asking a person to choose between retrying and abandoning is
+  // asking them to be the retry policy. The fields below are kept verbatim so
+  // that IF a future reason at this site ever classifies ASK the card is ready —
+  // but the class, not the site, decides whether one is written at all.
   let explanation;
   const explanationFields = {
     escalation_type: "decision",
@@ -3394,12 +3415,23 @@ export function escalateDispatchExhausted(
     ],
     why_you: `after ${cause ?? code ?? "exhausted retries"}, re-dispatch vs abandon is a priority call the scheduler cannot compute`,
   };
-  try {
-    explanation = buildExplanation(explanationFields);
-  } catch {
-    // CTL-1130: degrade with the full assembled fields (not just { problem })
-    // so the operator keeps the options/why_you decision context on the page.
-    explanation = coerceExplanation(explanationFields, { ticket, phase });
+  // The class gate. `explanationForStall` returns null for anything that is not an
+  // ASK — including the `coerceExplanation` fallback path, which is audit finding
+  // (b)'s named site: it passed no `canExecute`, so it degraded to a fabricated
+  // DECISION. Deleting only that degrade branch would have swapped a manufactured
+  // decision for a manufactured AUTHORIZATION; gating on the class removes both.
+  const permitted = explanationForStall({
+    fields: explanationFields,
+    ticket,
+    phase,
+    reason: "prior-artifact-retry-exhausted",
+  });
+  if (permitted) {
+    try {
+      explanation = buildExplanation(explanationFields);
+    } catch {
+      explanation = permitted;
+    }
   }
   try {
     mkdirSync(dir, { recursive: true });
@@ -3413,7 +3445,7 @@ export function escalateDispatchExhausted(
         stalledReason: "prior-artifact-retry-exhausted",
         dispatchFailureCode: code, // CTL-1045 Bug 2: exit code that exhausted retries (2 = prior_artifact_missing)
         dispatchFailureCause: cause, // CTL-1045 Bug 2: human-readable reason (observability)
-        explanation,
+        ...(explanation ? { explanation } : {}),
         needsHumanSince: existing.needsHumanSince ?? new Date().toISOString(), // CTL-1131: preserve prior stamp
         updatedAt: new Date().toISOString(),
       })
@@ -3456,9 +3488,22 @@ function writeTerminalStalled(
   // CTL-1130: every terminal stall carries a typed-union explanation so the inbox
   // shows a meaningful call_to_action. Callers may pass a richer typed explanation
   // via extra.explanation; fall back to a coerced decision generic.
+  // ⛔ CTL-2159 (audit finding (b)). A caller-supplied explanation is REAL
+  // evidence and passes through untouched. What is gone is the fallback that
+  // manufactured one from nothing but the reason string: `coerceExplanation({
+  // problem })` with no `canExecute` degraded every unexplained stall — a dead
+  // executor, a rate limit, a dirty tree — into the same "decide whether to
+  // retry, hand off, or cancel" human decision. Only an ASK-classified stall
+  // gets a manufactured card now.
   const explanation =
     extra.explanation ??
-    coerceExplanation({ problem: `${phase} phase stalled: ${reason}` }, { ticket, phase });
+    explanationForStall({
+      fields: { problem: `${phase} phase stalled: ${reason}` },
+      ticket,
+      phase,
+      reason,
+      signal: cur,
+    });
   try {
     writeFile(
       p,
@@ -3467,7 +3512,7 @@ function writeTerminalStalled(
         ...extra,
         status: "stalled",
         stalledReason: reason,
-        explanation,
+        ...(explanation ? { explanation } : {}),
         needsHumanSince: cur.needsHumanSince ?? new Date().toISOString(), // CTL-1131: preserve prior stamp
         updatedAt: new Date().toISOString(),
       })
@@ -7081,10 +7126,17 @@ export function schedulerTick(
             ) {
               clearFenceStandoff(orchDir, member);
               // CTL-2141: reverted from routeStuckTicketToDelegate (deleted).
+              // ⛔ CTL-2159: forward the reason (else the classifier returns HELD)
+              // and carry the CLASS out through onOutcome — the boolean erases it.
+              let dcStallClass = null;
               const dcLabelled = labelNeedsHumanUnlessBeliefOwner(orchDir, member, writeStatus, {
                 env,
                 site: "dependency-cycle",
                 log,
+                reason: "dependency-cycle",
+                onOutcome: (o) => {
+                  dcStallClass = o?.stallClass ?? null;
+                },
                 explanation: {
                   escalation_type: "decision",
                   problem: `${member} is in a dependency cycle: ${anomaly.members.join(" → ")}`,
@@ -7102,7 +7154,7 @@ export function schedulerTick(
               });
               // CTL-764 finding 8: emit only on an actual label write (a persisted
               // marker after restart / belief-owner deferral is not a fresh escalation).
-              if (dcLabelled === true) {
+              if (dcLabelled === true && escalationIsHumanFacing(dcStallClass)) {
                 recordTransition({
                   ticket: member,
                   toDisposition: "needs-human",
@@ -8144,10 +8196,16 @@ export function schedulerTick(
           ) {
             clearFenceStandoff(orchDir, member);
             // CTL-2141: reverted from routeStuckTicketToDelegate (deleted).
+            // ⛔ CTL-2159: forward the reason; carry the CLASS out (see above).
+            let c925StallClass = null;
             const c925Labelled = labelNeedsHumanUnlessBeliefOwner(orchDir, member, writeStatus, {
               env,
               site: "ctl-925-cycle",
               log,
+              reason: "dependency-cycle",
+              onOutcome: (o) => {
+                c925StallClass = o?.stallClass ?? null;
+              },
               explanation: {
                 escalation_type: "decision",
                 problem: `${member} is in a dependency cycle among eligible tickets: ${anomaly.members.join(" → ")}`,
@@ -8162,7 +8220,7 @@ export function schedulerTick(
             });
             // CTL-764 finding 8: emit only on an actual label write (a persisted
             // marker after restart / belief-owner deferral is not a fresh escalation).
-            if (c925Labelled === true) {
+            if (c925Labelled === true && escalationIsHumanFacing(c925StallClass)) {
               recordTransition({
                 ticket: member,
                 toDisposition: "needs-human",
@@ -8880,10 +8938,19 @@ export function schedulerTick(
             // every card said "(no reason)" while the reason sat in the same file.
             const stalledReason = resolveSignalReason(stalledSig);
             // CTL-2141: reverted from routeStuckTicketToDelegate (deleted).
+            // ⛔ CTL-2159: forward the resolved reason — this is the VOLUME
+            // producer, so a HELD-by-default here would silence the SYSTEM path
+            // for most of the fleet. Carry the CLASS out through onOutcome.
+            let tsStallClass = null;
             const tsLabelled = labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, writeStatus, {
               env,
               site: "terminal-sweep",
               log,
+              reason: stalledReason.reason ?? "stalled",
+              signal: stalledSig ?? null,
+              onOutcome: (o) => {
+                tsStallClass = o?.stallClass ?? null;
+              },
               explanation: {
                 problem: `${ticket} has a ${stalledSig?.status ?? "stalled"} phase signal (${describeSignalReason(stalledSig)}) and is not terminal`,
                 call_to_action: `decide whether to retry ${ticket} or close it`,
@@ -8893,7 +8960,7 @@ export function schedulerTick(
             // actually occurred. A persisted .linear-label-needs-human marker after a
             // daemon restart (labelOnce no-ops) or a belief-owner deferral changes no
             // label — recording a fresh needs-human transition there is a false escalation.
-            if (tsLabelled === true) {
+            if (tsLabelled === true && escalationIsHumanFacing(tsStallClass)) {
               recordTransition({ ticket, toDisposition: "needs-human", source: "terminal-sweep" });
             }
           } else {

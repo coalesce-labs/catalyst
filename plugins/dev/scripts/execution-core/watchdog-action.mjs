@@ -157,6 +157,11 @@ export async function killHungWorker(
     env,
     site: "watchdog-kill",
     log,
+    // ⛔ CTL-2159: forward the reason. `site` is advisory on the verdict and is
+    // never classified from (stall-class.mjs), so without this every hung-worker
+    // kill classified HELD via the no-reason rule — a wedged executor is the
+    // textbook SYSTEM stall and it was losing its retry/alert path silently.
+    reason: failureReason,
   });
   recordEscalation(orchDir, ticket, phase, failureReason, now());
 

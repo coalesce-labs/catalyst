@@ -308,8 +308,8 @@ const FULL_EXPL = {
 };
 
 describe("CTL-1110: escalationExplanationFor", () => {
-  it("returns the camelCase view for a needs-human row with a full explanation", () => {
-    const row = rowFor(mkTicket("CTL-1092", { attention: "needs-human", explanation: FULL_EXPL }));
+  it("returns the camelCase view for a ask row with a full explanation", () => {
+    const row = rowFor(mkTicket("CTL-1092", { attention: "ask", explanation: FULL_EXPL }));
     expect(escalationExplanationFor(row)).toEqual({
       callToAction: FULL_EXPL.call_to_action,
       outcome: FULL_EXPL.outcome,
@@ -322,7 +322,7 @@ describe("CTL-1110: escalationExplanationFor", () => {
 
   it("projects absent sub-fields to null (graceful partial)", () => {
     const row = rowFor(mkTicket("CTL-1", {
-      attention: "needs-human",
+      attention: "ask",
       explanation: { call_to_action: "Decide.", outcome: null, problem: "X.",
                      why_you: null, why_not_auto: null, what_to_do: null },
     }));
@@ -333,14 +333,14 @@ describe("CTL-1110: escalationExplanationFor", () => {
     expect(v.whatToDo).toBeNull();
   });
 
-  it("returns null for a needs-human row with no explanation (graceful absent → bare hero)", () => {
-    const row = rowFor(mkTicket("CTL-2", { attention: "needs-human" }));
+  it("returns null for a ask row with no explanation (graceful absent → bare hero)", () => {
+    const row = rowFor(mkTicket("CTL-2", { attention: "ask" }));
     expect(escalationExplanationFor(row)).toBeNull();
   });
 
   it("returns null when every explanation field is null/empty", () => {
     const row = rowFor(mkTicket("CTL-3", {
-      attention: "needs-human",
+      attention: "ask",
       explanation: { call_to_action: "", outcome: null, problem: null,
                      why_you: null, why_not_auto: null, what_to_do: null },
     }));

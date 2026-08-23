@@ -526,7 +526,7 @@ let state accumulate; one mega-reaper.
 **Accepted (direction) 2026-06-16.** Surfacing shipped (CTL-1180/1182/1181); the reasoning sweep
 (CTL-1176) is proposed, not built. When a ticket stalls/fails/needs a decision, it must **surface**
 to the operator and ideally something should try to **unstick** it first. Both were broken:
-ADV-1392's `pr` phase failed (`push_rejected_no_workflow_scope`) and surfaced nowhere (`needs-human`
+ADV-1392's `pr` phase failed (`push_rejected_no_workflow_scope`) and surfaced nowhere (the escalation
 was applied only for `stalled`, never `failed`); CTL-1167 stalled with no comment; a scan found **31
 silently-stuck tickets/month vs 6 `escalate.human` events**. Nothing reasons over the queue
 (diagnostician CTL-937/828 evidence-only/dark; janitor J3 narrow; `phase-remediate` CTL-653
@@ -535,7 +535,7 @@ in-pipeline only; unstuck-sweep seams unwired).
 **Decision** — a flexible LLM-reasoning recovery layer in front of the human inbox (distinct from
 ADR-024 hygiene and ADR-022 belief):
 
-1. **Reasoning recovery sweep (CTL-1176)** — periodic LLM pass over the stuck/failed/needs-human
+1. **Reasoning recovery sweep (CTL-1176)** — periodic LLM pass over the stuck/failed/escalated
    queue; per item, reconstruct from log + belief store + worktree/PR/CI and ask "human-decision or
    can I unblock?". Resolves mechanical cases via existing deterministic seams; escalates only true
    human-decisions **with a written reason**. Unifies diagnostician + janitor + sweeper +
@@ -544,7 +544,7 @@ ADR-024 hygiene and ADR-022 belief):
    deterministic re-check + hard cycle cap; HUMAN otherwise. No open-ended re-dispatch authority
    (reopens CTL-736 revive-storm). Every decision → log + Linear comment.
 2. **Surfacing model (CTL-1180, shipped)** — a terminally-`failed` phase surfaces like `stalled`:
-   `needs-human` for `status ∈ {failed, stalled}` when not pipeline-done (scheduler terminal sweep),
+   an escalation for `status ∈ {failed, stalled}` when not pipeline-done (scheduler terminal sweep),
    plus a `phaseFailed`/`escalationType` trigger in the monitor's `deriveAttention` → Needs-You
    inbox + nav dot + `/queue`. Closes the `failed ≠ stalled` gap.
 3. **Always-record comment policy (CTL-1182, shipped)** — every phase, including failed, records its
@@ -556,7 +556,7 @@ ADR-024 hygiene and ADR-022 belief):
 Rationale: the fleet only alerts + escalates then stops; the "try to clean it up first" step was
 scaffolding only (31:6 quantifies the cost). Deterministic-vs-flexible boundary (ADR-023): hygiene
 stays gated; LLM judgment is bounded to "human-or-not + which seam." Surfacing is the floor — inbox
-membership keys on worker-dir/event status (`failed`/`stalled`/`needs-human`), not just
+membership keys on worker-dir/event status (`failed`/`stalled`), not just
 `gh pr list`, so failed-but-no-PR cases surface. Consequences: CTL-1176 needs its own scoping doc
 (becomes this ADR's implementation vehicle); belief executors (ADR-022) and this sweep are
 complementary; this is the "supervisor" record previously split across CTL-780/828/937. Rejected: a
@@ -590,9 +590,9 @@ structurally distinct sites, both bypassing `recordTransition` but for different
   explains the bypass: "scheduler.mjs owns the park/apply emission; the clear is emitted here (the
   daemon removes the durable label out-of-band and redispatches — the scheduler never observes this
   edge)."
-- The **`needs-human` clear** runs once per comment-wake call, gated on positive human provenance
+- The **escalation clear** runs once per comment-wake call, gated on positive human provenance
   and a managed ticket, with **no redispatch** in that block. It bypasses `recordTransition` because
-  the scheduler's own needs-human handling is STICKY-by-design (never clears it itself on a
+  the scheduler's own escalation handling is STICKY-by-design (never clears it itself on a
   steady-state admission pass, per the `recordTransition` suppression logic above) — the
   "redispatches" half of the quoted rationale does not apply to this site.
 
@@ -602,7 +602,7 @@ Both are deliberate, self-documented second-producer sites.
 hung-worker escalation (`killHungWorker` in `watchdog-action.mjs`, invoked from `scheduler.mjs`'s
 progress-watchdog pass) does emit `phase.terminal.reap-requested` (via `emitReapIntent`, when
 `bgJobId` exists) for the kill/reap side of the sequence — that part of the path is observable. But
-it applies the `needs-human` label via `labelNeedsHumanUnlessBeliefOwner` (`label-guard.mjs`) and
+it publishes the escalation via the shared guard (`label-guard.mjs`) and
 never calls `recordTransition`, `appendWorkerTransitionEvent`, or any other `worker.transition`
 emitter anywhere in that path — a real Axis-2 transition with no `worker.transition` record. Unlike
 the daemon's comment-wake sites above, this is a genuine coverage gap in the transition stream
@@ -613,30 +613,40 @@ chokepoint (CTL-764)" in `docs/architecture.md` for the live mechanism.
 
 - **Axis 1 — Pipeline stage** (where the ticket is in the pipeline): Linear workflow Status, written
   through the single `applyPhaseStatus` chokepoint.
-- **Axis 2 — Worker disposition** (how the worker is doing): four mutually exclusive values in the
-  `worker-status` label group (`queued`, `blocked`, `needs-input`, `needs-human`).
+- **Axis 2 — Worker disposition** (how the worker is doing): **three** mutually exclusive values in
+  the `worker-status` label group (`queued`, `blocked`, `needs-input`).
+
+  ⛔ **CTL-2161 — the group went from FOUR members to THREE.** `needs-human` was the fourth. It is
+  deleted (CTL-2155 epic): measured across 86 items it flagged, 3 genuinely needed a person and 41
+  were the model provider being overloaded, escalated one ticket at a time. It is replaced by two
+  distinct paths, neither of which is a worker-disposition label — SYSTEM trouble raises ONE
+  fleet-scoped, auto-clearing alert (CTL-2156) with zero per-ticket artifacts, and a genuine human
+  question becomes ONE ask ticket carrying a `blocks` relation to the work it holds (CTL-2157). The
+  surviving three keep their meanings unchanged: they are all *worker* states, which is what the
+  axis is for; `needs-human` never was.
 
 **Single-valued workspace group** — workspace scope (shared by CTL and ADV teams) ensures the label
 is always readable regardless of which team's ticket is in flight. Exclusive group enforces
 single-value; the daemon removes stale members before applying a new one.
 
-**Precedence** — `needs-human > needs-input > blocked > queued > none`. `needs-human` is sticky
-(applied by `labelOnce`, NOT tick-converged) and cleared only at explicit resolution.
-`queued`/`blocked`/`needs-input` are tick-converged (re-derived on diff each tick).
+**Precedence** — `needs-input > blocked > queued > none`. All three are tick-converged (re-derived
+on diff each tick). The sticky, apply-once member (`needs-human`) is gone with CTL-2161; the
+`labelOnce` once-marker machinery survives it because five retry loops read its return value as
+their STOP condition and boot-resume reads the marker to suppress auto-resume of a chronically
+failing ticket (see CTL-2159).
 
-**Resolution-gated clearing — TWO removal paths (Codex #2970 round 5).** `needs-human` is removed
-only by an explicit, confirmed-removal signal, and there are two: (1) `clearStalledLabel`'s
-`onRemoved` callback, fired only on confirmed Linear label removal at scheduler-side resolution
-points (Done / terminal-sweep / no-stall-clear), preventing false-positive "cleared" events on API
-failures; and (2) the daemon's `handleCommentWake` needs-human clear on a managed ticket's confirmed
-human reply — a write-gated, emission-carrying removal via `removeLabel` directly (not
-`clearStalledLabel`), documented in the producer-split paragraph above.
+**Resolution-gated clearing.** The two confirmed-removal paths built for `needs-human` — (1)
+`clearStalledLabel`'s `onRemoved` callback at scheduler-side resolution points, and (2) the daemon's
+`handleCommentWake` clear on a managed ticket's confirmed human reply — remain in place for the
+surviving members and for clearing the label off tickets that still wear it during the CTL-2160
+migration. They are deliberately NOT deleted with the producers: deleting a clearer before the
+backlog is swept strands every ticket already carrying the label.
 
 **`waiting` → `queued` rename** — the prior `waiting` label was renamed to `queued` to align with
 the disposition vocabulary. Back-compat: legacy `waiting` labels map to `queued` in the HUD and
 `heldFor`. CTL-755 team-level `blocked`/`waiting` labels are superseded by the workspace group.
 
-**Rationale** — scattered label writes produced observable drift (needs-human in the event log but
+**Rationale** — scattered label writes produced observable drift (an escalation in the event log but
 healthy in Linear, or vice versa). One chokepoint, one group, one canonical `worker.transition`
 event per genuine change eliminates the coordination problem without per-site reasoning.
 
@@ -651,9 +661,9 @@ stage-only or disposition-only (`toDisposition === undefined` means "no disposit
 emit" for a pure stage move; omitting `toStage`/`fromStage` means no Linear-Status write for a pure
 disposition move), so a transition reaches at most three: a stage move touches Linear Status + event
 log + OTLP (skips the label sink); a disposition move touches the label + event log + OTLP (skips
-Linear Status) — e.g. the dependency-cycle escalation (`scheduler.mjs` ~5666-5678) calls
-`labelNeedsHumanUnlessBeliefOwner` (label) and `recordTransition({ toDisposition: "needs-human" })`
-(event log + OTLP) with no stage touched at all. Only a call that sets both `toStage` and
+Linear Status) — e.g. the dependency-cycle escalation (`scheduler.mjs`) routes through the shared
+escalation guard (event log + OTLP) with no stage touched at all. Since CTL-2161 that path publishes
+an ASK ticket rather than a `needs-human` disposition. Only a call that sets both `toStage` and
 `toDisposition` together would reach all four. A fifth sink (an optional broker
 `ticket_state_transitions` table, CTL-764 Phase 10) was designed but never implemented — no schema,
 writer, or broker consumer exist for it. The HUD capacity header gains per-disposition buckets and

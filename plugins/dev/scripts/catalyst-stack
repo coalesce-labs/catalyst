@@ -31,6 +31,9 @@
 #   catalyst-stack claude-account status
 #   catalyst-stack claude-account switch <handle> [--yes]
 #   catalyst-stack claude-account sync [--yes]
+#   catalyst-stack codex-account status
+#   catalyst-stack codex-account switch <handle> [--yes]
+#   catalyst-stack codex-account sync [--yes]
 #
 # claude-account (CTL-1650):
 #   Fleet-wide Claude OAuth-account control, one command.
@@ -51,6 +54,34 @@
 #                    and verify.
 #   Token values are never echoed, logged, or written anywhere but the 0600
 #   ~/.config/catalyst/claude-accounts.env target file.
+#
+# codex-account (CTL-2072):
+#   Fleet-wide Codex account control — the Codex twin of claude-account, but a
+#   materially different mechanism (see the codex-account block below).
+#   status         — run codex-accounts-usage.mjs and print, per provisioned
+#                    account, the email/plan, every rate-limit window's used-% and
+#                    reset, and which account is ACTIVE. Costs ZERO TOKENS (the
+#                    `codex app-server` account plane), unlike the Claude side which
+#                    must spend one inference call per account. Exits nonzero if no
+#                    account reported limits.
+#   switch <handle> — flip the fleet's active Codex account (handle form: acctN).
+#                    Guards on the local age key + a clean catalyst-cluster clone,
+#                    REFUSES when this host pins CODEX_HOME (env or Layer-1
+#                    catalyst.orchestration.codex.codexHome — a pin outranks the
+#                    selector, so the switch would silently not apply), probes the
+#                    target BEFORE switching, flips the
+#                    `_catalyst_active_codex_home` selector in
+#                    secrets/node-secret-files.sops.json via a non-interactive
+#                    `sops edit`, commits + pushes, re-materializes
+#                    ~/.config/catalyst/codex-account.env, repoints the local
+#                    ~/catalyst/codex-home symlink, and verifies.
+#   sync            — for another node after a switch was pushed elsewhere: git pull,
+#                    re-materialize the selector file, repoint the symlink, verify.
+#   ⚠️ NO RESTART on either path: codexConfig() re-resolves the codex-home symlink
+#   on every dispatch, so the next `codex exec` child already uses the new account.
+#   NO CREDENTIALS travel: the SOPS entry carries a HANDLE NAME only. Codex
+#   subscription auth.json files are rotation-bound and are never copied between
+#   hosts — each node runs `codex login` per account into its own CODEX_HOME.
 #
 # sync-cloud-env (CTL-1307):
 #   Project the cluster-shared CATALYST_CLOUD_TOKEN (decrypted by cluster-sync into
@@ -4485,6 +4516,546 @@ cmd_claude_account() {
   esac
 }
 
+# ─── codex-account (CTL-2072) ───────────────────────────────────────────────
+# Fleet-wide Codex account control: report per-account quota, and flip WHICH
+# account the `codex-exec` executor runs under.
+#
+# ── WHY THIS IS STRUCTURALLY SIMPLER THAN claude-account ────────────────────
+# The Claude side flips a TOKEN VALUE inside the SOPS bundle and must restart the
+# stack, because the executor captures CLAUDE_CODE_OAUTH_TOKEN at boot. Codex
+# cannot work that way and does not need to:
+#
+#   * NO TOKENS IN SOPS. These are SUBSCRIPTION accounts whose `auth.json` is
+#     rotation-bound — a copy goes stale the moment the original refreshes, and
+#     OpenAI's single-use refresh-token rotation would exhaust the fork. So live
+#     credentials stay NODE-LOCAL in per-account CODEX_HOME dirs, and the bundle
+#     carries only the selector's HANDLE NAME. `codex-account.env` is not a
+#     credential file.
+#
+#   * NO RESTART. Measured 2026-08-22: codexConfig() resolves codexHome as
+#     CATALYST_CODEX_HOME -> Layer-1 catalyst.orchestration.codex.codexHome ->
+#     ${catalystDir()}/codex-home, and with neither pin set it returns a CONSTANT
+#     PATH THAT IS A SYMLINK, re-resolved on every dispatch. Repointing the
+#     symlink changes the account the next `codex exec` child uses with no daemon
+#     restart and no rearm hook. `switch` therefore deliberately does NOT call
+#     cmd_restart — bouncing the fleet would be pure cost.
+#
+#   * ⛔ ...WHICH IS EXACTLY WHY THE PIN GUARD EXISTS. Because the symlink is only
+#     the THIRD rung of that ladder, a node with CATALYST_CODEX_HOME exported or
+#     Layer-1 codexHome set would keep resolving the pinned path while the switch
+#     cheerfully repointed a symlink nobody reads — reporting success for a change
+#     that did not happen. _cx_assert_selector_unpinned refuses instead. A check
+#     that cannot fail is not a check.
+#
+# SECRETS HYGIENE: nothing here reads, prints, or copies any token material.
+# auth.json is stat'd for PRESENCE only and never opened. The temp EDITOR script
+# contains a sed program built from account HANDLES (acctN) alone.
+
+CX_AGE_KEY_FILE_DEFAULT="${HOME}/.config/catalyst/age.key"
+CX_SELECTOR_ENV_DEFAULT="${HOME}/.config/catalyst/codex-account.env"
+# Same posture as CA_SOPS_CANDIDATES / cluster-sync.mjs's SOPS_CANDIDATES: a
+# restricted daemon/shell PATH frequently omits /opt/homebrew/bin.
+CX_SOPS_CANDIDATES=("/opt/homebrew/bin/sops" "/usr/local/bin/sops" "/usr/bin/sops" "${HOME}/.local/bin/sops")
+# The bundle key and the materialized filename are the same string in both places.
+CX_BUNDLE_ENTRY="codex-account.env"
+
+_cx_age_key_file()      { echo "${CATALYST_AGE_KEY_FILE:-$CX_AGE_KEY_FILE_DEFAULT}"; }
+# Mirrors execution-core/config.mjs's getClusterRepoDir() exactly (see _ca_cluster_repo_dir).
+_cx_cluster_repo_dir()  { echo "${CATALYST_CLUSTER_DIR:-${CATALYST_DIR:-$HOME/catalyst}/catalyst-cluster}"; }
+_cx_selector_env_file() { echo "${CATALYST_CODEX_SELECTOR_ENV:-$CX_SELECTOR_ENV_DEFAULT}"; }
+_cx_secrets_file()      { echo "$(_cx_cluster_repo_dir)/secrets/node-secret-files.sops.json"; }
+# CX_USAGE_SCRIPT_OVERRIDE is a TEST SEAM so the suite can exercise probe/verify
+# against a fixture payload without spawning a real codex app-server.
+_cx_usage_script()      { echo "${CX_USAGE_SCRIPT_OVERRIDE:-${SCRIPT_DIR}/codex-accounts-usage.mjs}"; }
+# The per-account homes live beside the selector, under the catalyst dir.
+_cx_homes_root()        { echo "${CATALYST_CODEX_ROOT:-${CATALYST_DIR:-$HOME/catalyst}}"; }
+
+# _cx_valid_handle HANDLE — true iff HANDLE matches the provisioned-account form
+# `acctN` (digits only after "acct"). Rejects "acct-2", "ACCT2", "", globs, and
+# anything with shell/regex metacharacters, since it is later interpolated into a
+# sed program and a `git commit` message.
+_cx_valid_handle() {
+  [[ "$1" =~ ^acct[0-9]+$ ]]
+}
+
+# _cx_resolve_sops — absolute sops path: known install dirs first, then PATH.
+_cx_resolve_sops() {
+  local c
+  for c in "${CX_SOPS_CANDIDATES[@]}"; do
+    [[ -x "$c" ]] && { echo "$c"; return 0; }
+  done
+  command -v sops 2>/dev/null && return 0
+  return 1
+}
+
+_cx_node_runtime() {
+  if command -v bun >/dev/null 2>&1; then echo bun
+  elif command -v node >/dev/null 2>&1; then echo node
+  else return 1
+  fi
+}
+
+# _cx_parse_active_handle_stream — reads a codex-account.env body from STDIN and
+# prints just the "acctN" handle from its `_catalyst_active_codex_home="acctN"`
+# selector line. Reads the STREAM and never captures it into a variable, so a
+# caller may pipe a live sops decrypt through it (the bundle carries other
+# entries' contents on other lines). Prints nothing (rc 1) when the selector line
+# is absent — NEVER guesses a default.
+_cx_parse_active_handle_stream() {
+  local line
+  line="$(grep -m1 -oE '_catalyst_active_codex_home=\\?"[A-Za-z0-9_]+\\?"' 2>/dev/null)" || return 1
+  [[ -n "$line" ]] || return 1
+  sed -E 's/.*_catalyst_active_codex_home=\\?"([A-Za-z0-9_]+).*/\1/' <<<"$line"
+}
+
+# _cx_current_active_handle [ENV_FILE] — the selector handle from the locally
+# materialized codex-account.env. Prints nothing (rc 1) when absent.
+# NOTE: the local file goes stale the moment ANOTHER node switches, which is why
+# `switch` derives its old_handle from a fresh sops decrypt instead.
+_cx_current_active_handle() {
+  local env_file="${1:-$(_cx_selector_env_file)}"
+  [[ -f "$env_file" ]] || return 1
+  _cx_parse_active_handle_stream < "$env_file"
+}
+
+# _cx_sed_program OLD NEW — the sed -E program that flips ONLY the
+# `_catalyst_active_codex_home=` selector from OLD to NEW.
+#
+# The quotes are matched as an OPTIONAL literal backslash + `"`, because the real
+# target is sops's decrypted-for-edit JSON temp file, where the env body is itself
+# a JSON string — so a `"` inside it is rendered as the 2-char escape `\"`, not a
+# bare `"`. A plain env-file fixture matches too, since the backslash is optional.
+# Bounding on the trailing quote also stops a handle matching as a bare PREFIX of
+# a longer one (acct1 vs acct10).
+#
+# The trailing `g` flag is load-bearing: sops's temp file is the WHOLE bundle
+# rendered as single JSON string lines, so a `g`-less program flips only the FIRST
+# occurrence — a stray commented-out selector earlier in the entry would eat the
+# substitution and leave the real, active selector untouched while sops still
+# reported "changed", silently committing a no-op.
+_cx_sed_program() {
+  local old="$1" new="$2"
+  local pre='s/(_catalyst_active_codex_home=\\?")'
+  local mid='(\\?")/\1'
+  local suf='\2/g'
+  printf '%s' "${pre}${old}${mid}${new}${suf}"
+}
+
+# _cx_flip_selector_file FILE OLD NEW — apply _cx_sed_program in place (BSD/GNU-sed
+# portable via the `.bak` suffix form). Standalone so tests can exercise the real
+# transform against a fixture without going near sops or the network.
+_cx_flip_selector_file() {
+  local file="$1" old="$2" new="$3"
+  sed -E -i.bak -e "$(_cx_sed_program "$old" "$new")" "$file" || return 1
+  rm -f "${file}.bak"
+}
+
+# _cx_write_editor_script OUT_FILE OLD NEW — the temporary EDITOR script `sops edit`
+# invokes (sops calls it with the decrypted-for-edit temp file as $1).
+_cx_write_editor_script() {
+  local out_file="$1" old="$2" new="$3"
+  {
+    echo "#!/usr/bin/env bash"
+    echo "set -euo pipefail"
+    # No `--` end-of-options marker: BSD/Apple sed rejects it in this position.
+    # Safe to omit — "$1" is sops's own mktemp path and never starts with a dash.
+    printf 'sed -E -i.bak -e %q "$1"\n' "$(_cx_sed_program "$old" "$new")"
+    echo 'rm -f "$1.bak"'
+  } > "$out_file"
+  chmod +x "$out_file"
+}
+
+_cx_confirm() {
+  local prompt="$1" assume_yes="$2" ans
+  [[ "$assume_yes" == "yes" ]] && return 0
+  read -r -p "${prompt} [y/N] " ans
+  [[ "$ans" =~ ^[Yy]$ ]]
+}
+
+_cx_daemon_env_file() { echo "${CATALYST_EXECUTION_CORE_ENV:-${HOME}/.config/catalyst/execution-core.env}"; }
+
+# _cx_source_daemon_env_for_read — mirrors _vn_source_daemon_env_for_read (CTL-1678)
+# and catalyst-execution-core's helper of the same name. Fail-open: an absent file
+# is a no-op success, never a non-zero return. Callers invoke it inside a SUBSHELL
+# so the sourced vars never leak into catalyst-stack itself.
+_cx_source_daemon_env_for_read() {
+  local _daemon_env; _daemon_env="$(_cx_daemon_env_file)"
+  # shellcheck disable=SC1090
+  [[ -f "$_daemon_env" ]] && source "$_daemon_env"
+  return 0
+}
+
+# _cx_effective_pins — echo "<codexHome>\t<configFile>" AS THE DAEMON WOULD SEE THEM.
+#
+# ⛔ Reading only this shell's env is the wrong instrument. catalyst-execution-core
+# sources ~/.config/catalyst/execution-core.env before starting the daemon, and per
+# its own precedence note that file OUTRANKS the ambient inherited value. So a pin
+# set only in that file is invisible to a plain `${CATALYST_CODEX_HOME:-}` read here
+# while the running daemon honours it — the guard would pass, the switch would push
+# and "verify" a symlink the daemon never reads, and the command would report exactly
+# the false success it exists to prevent. Sourcing AFTER the ambient env reproduces
+# the daemon's precedence (file wins). CATALYST_CONFIG_FILE gets the same treatment:
+# it selects WHICH config.json the Layer-1 rung below reads.
+_cx_effective_pins() {
+  (
+    _cx_source_daemon_env_for_read
+    printf '%s\t%s\n' "${CATALYST_CODEX_HOME:-}" "${CATALYST_CONFIG_FILE:-}"
+  )
+}
+
+# ⛔ _cx_assert_selector_unpinned — refuse when a pin OUTRANKS the symlink.
+# codexConfig() reads CATALYST_CODEX_HOME, then Layer-1
+# catalyst.orchestration.codex.codexHome, and only THEN the symlink. With either
+# set, repointing the symlink is a silent no-op and a switch that reported success
+# would be lying. Names which pin wins, WHERE it is set, and what to unset.
+_cx_assert_selector_unpinned() {
+  local eff env_home cfg pinned where
+  eff="$(_cx_effective_pins)"
+  env_home="${eff%%$'\t'*}"
+  cfg="${eff#*$'\t'}"
+
+  if [[ -n "$env_home" ]]; then
+    # Distinguish the two sources: the remedy differs (unset a var vs edit a file).
+    if [[ -n "${CATALYST_CODEX_HOME:-}" ]]; then
+      where="in this environment — unset it"
+    else
+      where="in $(_cx_daemon_env_file), which the daemon sources and which OUTRANKS the ambient env — remove that line"
+    fi
+    warn "CATALYST_CODEX_HOME is set (${env_home}) ${where}. It OVERRIDES the codex-home selector symlink, so a switch would not take effect. Then retry."
+    return 1
+  fi
+
+  if [[ -z "$cfg" ]]; then
+    cfg="${CATALYST_DIR:-$HOME/catalyst}/.catalyst/config.json"
+    [[ -f "$cfg" ]] || cfg="$(pwd)/.catalyst/config.json"
+  fi
+  if [[ -f "$cfg" ]] && command -v jq >/dev/null 2>&1; then
+    pinned="$(jq -r '.catalyst.orchestration.codex.codexHome // empty' "$cfg" 2>/dev/null)"
+    if [[ -n "$pinned" ]]; then
+      warn "Layer-1 catalyst.orchestration.codex.codexHome is set (${pinned}) in ${cfg} — it OVERRIDES the codex-home selector symlink, so a switch would not take effect. Remove that key, then retry."
+      return 1
+    fi
+  fi
+  return 0
+}
+
+# _cx_mv_symlink_nodolow SRC DST — rename SRC over DST WITHOUT dereferencing DST.
+#
+# ⛔ A plain `mv -f` is WRONG here and fails SILENTLY. Measured on macOS
+# 2026-08-22: with `sel` a symlink to directory `a/`, `mv -f sel.tmp sel`
+# FOLLOWED the link and moved the new symlink INSIDE the directory — leaving
+# `a/sel.tmp` behind and `sel` still pointing at the OLD account, while mv
+# returned 0. The switch would have reported success having changed nothing and
+# littered the previous account's home.
+#
+# There is no single portable flag: BSD/macOS mv has `-h` (do not follow a
+# symlink destination) and no `-T`; GNU coreutils mv has `-T`
+# (--no-target-directory) and no `-h`. The fleet runs macOS and CI runs
+# ubuntu-latest, so BOTH are needed. Each is still a single atomic rename(2), so
+# no window exists in which the selector is absent — which matters because every
+# dispatch in such a window would resolve to nothing.
+_cx_mv_symlink_nodolow() {
+  mv -h "$1" "$2" 2>/dev/null && return 0   # BSD / macOS
+  mv -T "$1" "$2" 2>/dev/null && return 0   # GNU coreutils
+  return 1
+}
+
+# _cx_apply_selector HOME_ROOT HANDLE — point HOME_ROOT/codex-home at
+# HOME_ROOT/codex-home-HANDLE.
+#
+# Refuses a missing home, a home with no auth.json (switching the fleet onto an
+# unauthenticated account is the outage this command exists to prevent), and a
+# selector path that is a REAL DIRECTORY — that is somebody's data, not ours to
+# delete; converting it is a documented one-time operator step.
+#
+# The flip is a RENAME over the old link, never rm-then-ln: `mv -f` is atomic, so
+# there is no window in which no selector exists at all. A partially applied
+# selector is worse than none, because every dispatch in that window resolves to
+# nothing.
+_cx_apply_selector() {
+  local root="$1" handle="$2"
+  _cx_valid_handle "$handle" || { warn "invalid handle '${handle}'"; return 1; }
+  local target="${root}/codex-home-${handle}"
+  if [[ ! -d "$target" ]]; then
+    warn "no Codex home at ${target} — '${handle}' is not provisioned on this host (run: CODEX_HOME=${target} codex login)"
+    return 1
+  fi
+  if [[ ! -f "${target}/auth.json" ]]; then
+    warn "${target} has no auth.json — '${handle}' is not logged in on this host; refusing to select an unauthenticated account"
+    return 1
+  fi
+  local selector="${root}/codex-home"
+  if [[ -e "$selector" && ! -L "$selector" ]]; then
+    warn "${selector} is a real directory/file, not a symlink — this host is PINNED and cannot be switched. Move it aside and re-create it as a symlink (one-time operator step)."
+    return 1
+  fi
+  local tmplink="${selector}.switching.$$"
+  ln -sfn "$target" "$tmplink" || { warn "could not create ${tmplink}"; return 1; }
+  if ! _cx_mv_symlink_nodolow "$tmplink" "$selector"; then
+    rm -f "$tmplink"
+    warn "could not move the new selector into place (neither \`mv -h\` nor \`mv -T\` was accepted)"
+    return 1
+  fi
+  log "codex-account: selector -> ${target}"
+}
+
+# _cx_entry_rejected_reason ENTRY_JSON — prints a short reason when OpenAI itself
+# has rejected the account. This is the Codex twin of _ca_entry_rejected_reason and
+# exists for the SAME trap: `account/rateLimits/read` SUCCEEDS on a throttled
+# account (it just carries a non-null rateLimitReachedType), exactly as a Claude
+# 429 still returns headers. A caller judging "did the call work?" calls a dead
+# account healthy. Prints nothing when not rejected.
+_cx_entry_rejected_reason() {
+  printf '%s' "$1" | jq -r '
+    if (.status // "") == "rejected"
+    then "rejected by OpenAI: " + (.reason // "no reason given")
+    else empty end
+  ' 2>/dev/null
+}
+
+# _cx_probe_handle_ok HANDLE — reads every provisioned home and requires HANDLE's
+# entry to be `ok`. Costs ZERO TOKENS (see codex-accounts-usage.mjs). Any other
+# verdict — unauthenticated, rejected, error, or absent — fails, which is the
+# fail-CLOSED direction: we refuse to switch onto an account we could not prove
+# healthy.
+_cx_probe_handle_ok() {
+  local handle="$1" rt script json entry status
+  rt="$(_cx_node_runtime)" || { warn "neither bun nor node found on PATH — cannot probe"; return 1; }
+  script="$(_cx_usage_script)"
+  [[ -f "$script" ]] || { warn "codex-accounts-usage.mjs missing at ${script}"; return 1; }
+  json="$("$rt" "$script" --json 2>/dev/null)" || true
+  entry="$(printf '%s' "$json" | jq -c --arg h "$handle" '.accounts[]? | select(.label == $h)' 2>/dev/null)"
+  [[ -n "$entry" ]] || { warn "probe: no account labelled '${handle}' was discovered on this host"; return 1; }
+  status="$(printf '%s' "$entry" | jq -r '.status // empty' 2>/dev/null)"
+  if [[ "$status" != "ok" ]]; then
+    warn "probe: ${handle} reports status '${status:-<none>}' $(_cx_entry_rejected_reason "$entry")"
+    return 1
+  fi
+  return 0
+}
+
+# _cx_verify_active HANDLE — re-read the plane and require that HANDLE, and only
+# HANDLE, is the active account AND that it is healthy.
+#
+# ⛔ This must not accept "looks fine". It re-reads from scratch and demands THIS
+# handle, because the whole point of the switch is that a specific account is now
+# serving work. The read itself carries a free positive control the Claude side
+# never had: the app-server echoes back the codexHome it actually resolved, so an
+# `ok` here means the numbers came from the home we asked about (see
+# lib/codex-account-plane.mjs's home-mismatch rung).
+_cx_verify_active() {
+  local handle="$1" rt script json active entry status
+  rt="$(_cx_node_runtime)" || { warn "neither bun nor node found on PATH — cannot verify"; return 1; }
+  script="$(_cx_usage_script)"
+  [[ -f "$script" ]] || { warn "codex-accounts-usage.mjs missing at ${script}"; return 1; }
+  json="$("$rt" "$script" --json 2>/dev/null)" || true
+  active="$(printf '%s' "$json" | jq -r '.selector.activeHandle // empty' 2>/dev/null)"
+  if [[ "$active" != "$handle" ]]; then
+    warn "verify: the selector resolves to '${active:-<none>}', expected '${handle}'"
+    return 1
+  fi
+  entry="$(printf '%s' "$json" | jq -c --arg h "$handle" '[.accounts[]? | select(.label == $h)] | first // empty' 2>/dev/null)"
+  if [[ -z "$entry" ]]; then
+    warn "verify: no account entry for '${handle}' in the usage payload"
+    return 1
+  fi
+  status="$(printf '%s' "$entry" | jq -r '.status // empty' 2>/dev/null)"
+  if [[ "$status" != "ok" ]]; then
+    warn "verify: ${handle} is selected but reports status '${status:-<none>}' $(_cx_entry_rejected_reason "$entry")"
+    return 1
+  fi
+  log "codex-account: verified — ${handle} is ACTIVE"
+  "$rt" "$script"
+}
+
+cmd_codex_account_status() {
+  local rt script
+  [[ $# -eq 0 ]] || fail "unknown codex-account status arg: $1"
+  rt="$(_cx_node_runtime)" || fail "neither bun nor node found on PATH — cannot run codex-accounts-usage.mjs"
+  script="$(_cx_usage_script)"
+  [[ -f "$script" ]] || fail "codex-accounts-usage.mjs missing at ${script}"
+  # No env sourcing (unlike claude-account status): the Codex selector is a
+  # filesystem symlink the tool reads directly, not an exported token value.
+  "$rt" "$script"
+}
+
+cmd_codex_account_switch() {
+  local handle="${1:-}"
+  [[ -n "$handle" ]] || fail "usage: catalyst-stack codex-account switch <handle> [--yes] (e.g. acct2)"
+  shift
+  local assume_yes="${ASSUME_YES:-no}" a
+  for a in "$@"; do
+    case "$a" in
+      --yes) assume_yes="yes" ;;
+      *) fail "unknown codex-account switch arg: $a" ;;
+    esac
+  done
+
+  _cx_valid_handle "$handle" || fail "invalid handle '${handle}' — must match ^acct[0-9]+\$ (e.g. acct2)"
+
+  # ⛔ Before anything else: a pin outranks the symlink, so a switch under a pin
+  # would report a success that did not happen.
+  _cx_assert_selector_unpinned || fail "codex-account switch: this host pins CODEX_HOME, so the selector is not what codexConfig() reads — refusing to report a switch that would not take effect"
+
+  local age_key; age_key="$(_cx_age_key_file)"
+  [[ -f "$age_key" ]] || fail "no age key at ${age_key} — this node cannot decrypt cluster secrets"
+
+  local cluster_dir; cluster_dir="$(_cx_cluster_repo_dir)"
+  [[ -d "${cluster_dir}/.git" ]] || fail "no cluster repo clone at ${cluster_dir}"
+
+  # Refuse on a dirty/staged clone: a bystander staged change would otherwise be
+  # swept into the secrets commit and pushed fleet-wide. The commit below is also
+  # pathspec'd as defense in depth, but this guard is what stops the switch.
+  local dirty; dirty="$(cd "$cluster_dir" && git status --porcelain)"
+  [[ -z "$dirty" ]] || fail "cluster repo ${cluster_dir} has uncommitted or staged changes — refusing to switch (they would be swept into the secrets commit); commit, stash, or discard them first"
+
+  log "codex-account switch: syncing ${cluster_dir} with origin..."
+  ( cd "$cluster_dir" && git pull --ff-only ) \
+    || fail "git pull --ff-only failed in ${cluster_dir} — resolve the divergence manually, then retry switch"
+
+  local sops_bin; sops_bin="$(_cx_resolve_sops)" || fail "sops binary not found (checked known install dirs + PATH)"
+
+  local secrets_file; secrets_file="$(_cx_secrets_file)"
+  [[ -f "$secrets_file" ]] || fail "missing ${secrets_file}"
+
+  # The target must be usable ON THIS HOST before we change fleet state. Codex
+  # credentials are node-local, so a handle can be perfectly valid in the bundle
+  # and absent here.
+  local homes_root; homes_root="$(_cx_homes_root)"
+  [[ -d "${homes_root}/codex-home-${handle}" ]] \
+    || fail "no Codex home at ${homes_root}/codex-home-${handle} — provision it first: CODEX_HOME=${homes_root}/codex-home-${handle} codex login"
+
+  # Derive old_handle from the just-pulled SOPS content, NOT the local file: the
+  # local copy goes stale the moment any OTHER node switches, so reading it here
+  # could corrupt the sed program's OLD side and no-op the edit. The decrypted
+  # stream is piped straight into the parser and never captured in a variable.
+  local old_handle; old_handle="$(
+    SOPS_AGE_KEY_FILE="$age_key" "$sops_bin" -d --extract "[\"${CX_BUNDLE_ENTRY}\"]" "$secrets_file" 2>/dev/null \
+      | _cx_parse_active_handle_stream
+  )" || fail "could not determine the currently active Codex account from the cluster repo's ${CX_BUNDLE_ENTRY} selector (freshly pulled from ${secrets_file}) — refusing to guess which selector line to flip"
+
+  local local_hint; local_hint="$(_cx_current_active_handle 2>/dev/null || echo '?')"
+  [[ "$local_hint" != "$old_handle" ]] && log "codex-account switch: note — local ${CX_BUNDLE_ENTRY} selector (${local_hint}) differs from the cluster repo's (${old_handle}); using the cluster repo's as authoritative"
+
+  if [[ "$old_handle" == "$handle" ]]; then
+    log "codex-account switch: ${handle} is already the fleet's active account"
+    # Still converge THIS host: the fleet selector can already name `handle`
+    # while this node's symlink lags (it never synced, or a local apply failed).
+    _cx_apply_selector "$homes_root" "$handle" || fail "codex-account switch: local selector apply failed"
+    _cx_verify_active "$handle" || fail "codex-account switch: verification failed"
+    return 0
+  fi
+
+  log "codex-account switch: probing ${handle} before switching (zero token spend)..."
+  _cx_probe_handle_ok "$handle" \
+    || fail "${handle} is not usable right now (unauthenticated, rate-limited/rejected, or unreadable) — refusing to switch the fleet onto a broken account"
+
+  _cx_confirm "Switch fleet active Codex account ${old_handle} -> ${handle}?" "$assume_yes" || fail "aborted"
+
+  log "codex-account switch: flipping selector ${old_handle} -> ${handle} in ${secrets_file}..."
+  local editor_script; editor_script="$(mktemp)"
+  trap 'rm -f "$editor_script"' EXIT
+  _cx_write_editor_script "$editor_script" "$old_handle" "$handle"
+
+  local edit_out edit_rc
+  edit_out="$(SOPS_AGE_KEY_FILE="$age_key" EDITOR="$editor_script" "$sops_bin" edit "$secrets_file" 2>&1)"
+  edit_rc=$?
+  rm -f "$editor_script"
+  trap - EXIT
+  if printf '%s' "$edit_out" | grep -qi "has not changed"; then
+    fail "sops reported no change — the selector pattern for ${old_handle} did not match in ${secrets_file} (schema drift?): ${edit_out}"
+  fi
+  if [[ $edit_rc -ne 0 ]]; then
+    fail "sops edit failed: ${edit_out}"
+  fi
+  log "  → ${edit_out:-selector flipped}"
+
+  log "codex-account switch: committing + pushing ${cluster_dir}..."
+  (
+    cd "$cluster_dir" || exit 1
+    git add secrets/node-secret-files.sops.json || exit 1
+    git commit -qm "chore(secrets): switch active Codex account ${old_handle} -> ${handle}" \
+      -- secrets/node-secret-files.sops.json || exit 1
+    if ! git push; then
+      # Push rejected (another node pushed first). Roll the local flip back so the
+      # clone matches origin and a retried switch starts clean — otherwise the
+      # retry re-flips an already-flipped file, sops reports "no change", and the
+      # command hard-fails with a misleading "schema drift?" and no way out.
+      git reset --hard HEAD~1 >/dev/null 2>&1
+      exit 1
+    fi
+  ) || fail "cluster repo commit/push failed in ${cluster_dir} — local commit rolled back (clone matches origin again); retry switch"
+
+  log "codex-account switch: re-materializing local ${CX_BUNDLE_ENTRY}..."
+  local dest; dest="$(_cx_selector_env_file)"
+  mkdir -p "$(dirname "$dest")"
+  ( umask 077; SOPS_AGE_KEY_FILE="$age_key" "$sops_bin" -d --extract "[\"${CX_BUNDLE_ENTRY}\"]" "$secrets_file" > "$dest" ) \
+    || fail "sops decrypt of ${CX_BUNDLE_ENTRY} failed"
+  chmod 600 "$dest"
+
+  # Apply locally. NO RESTART (D3) — codexConfig() re-resolves the symlink on
+  # every dispatch, so the next `codex exec` child already uses the new account.
+  _cx_apply_selector "$homes_root" "$handle" || fail "codex-account switch: local selector apply failed (the fleet selector IS switched; re-run \`codex-account sync\` on this host once fixed)"
+
+  _cx_verify_active "$handle" || fail "codex-account switch: post-switch verification failed"
+  log "codex-account switch: done — no restart required (every other host applies this on its next \`codex-account sync\`)"
+}
+
+cmd_codex_account_sync() {
+  local assume_yes="${ASSUME_YES:-no}" a
+  for a in "$@"; do
+    case "$a" in
+      --yes) assume_yes="yes" ;;
+      *) fail "unknown codex-account sync arg: $a" ;;
+    esac
+  done
+
+  _cx_assert_selector_unpinned || fail "codex-account sync: this host pins CODEX_HOME, so applying the fleet selector would not take effect"
+
+  local age_key; age_key="$(_cx_age_key_file)"
+  [[ -f "$age_key" ]] || fail "no age key at ${age_key} — this node cannot decrypt cluster secrets"
+
+  local cluster_dir; cluster_dir="$(_cx_cluster_repo_dir)"
+  [[ -d "${cluster_dir}/.git" ]] || fail "no cluster repo clone at ${cluster_dir}"
+
+  local sops_bin; sops_bin="$(_cx_resolve_sops)" || fail "sops binary not found (checked known install dirs + PATH)"
+  local secrets_file; secrets_file="$(_cx_secrets_file)"
+
+  _cx_confirm "Pull cluster secrets and apply the fleet Codex account selector on this node?" "$assume_yes" || fail "aborted"
+
+  log "codex-account sync: pulling ${cluster_dir}..."
+  ( cd "$cluster_dir" && git pull --ff-only ) || fail "git pull --ff-only failed in ${cluster_dir}"
+  [[ -f "$secrets_file" ]] || fail "missing ${secrets_file} after pull"
+
+  log "codex-account sync: re-materializing local ${CX_BUNDLE_ENTRY}..."
+  local dest; dest="$(_cx_selector_env_file)"
+  mkdir -p "$(dirname "$dest")"
+  ( umask 077; SOPS_AGE_KEY_FILE="$age_key" "$sops_bin" -d --extract "[\"${CX_BUNDLE_ENTRY}\"]" "$secrets_file" > "$dest" ) \
+    || fail "sops decrypt of ${CX_BUNDLE_ENTRY} failed"
+  chmod 600 "$dest"
+
+  local handle; handle="$(_cx_current_active_handle "$dest")" \
+    || fail "could not determine the active Codex account after sync — refusing to guess"
+
+  # No selector change of our own, no restart: just converge this host onto what
+  # the fleet already decided.
+  _cx_apply_selector "$(_cx_homes_root)" "$handle" || fail "codex-account sync: local selector apply failed"
+
+  _cx_verify_active "$handle" || fail "codex-account sync: post-sync verification failed"
+  log "codex-account sync: done — no restart required"
+}
+
+cmd_codex_account() {
+  local sub="${1:-}"
+  [[ $# -gt 0 ]] && shift
+  case "$sub" in
+    status) cmd_codex_account_status "$@" ;;
+    switch) cmd_codex_account_switch "$@" ;;
+    sync)   cmd_codex_account_sync "$@" ;;
+    *) fail "usage: catalyst-stack codex-account status | switch <handle> [--yes] | sync [--yes]" ;;
+  esac
+}
+
 # ─── Dispatch ───────────────────────────────────────────────────────────────
 # Guard so the file can be sourced (e.g. by __tests__/verify-updater.test.sh) to
 # reach the pure helpers WITHOUT running a command. When executed directly,
@@ -4508,10 +5079,11 @@ case "${1:-}" in
   services-status)      shift; cmd_services_status ;;
   sync-cloud-env)       shift; cmd_sync_cloud_env "$@" ;;
   claude-account)       shift; cmd_claude_account "$@" ;;
+  codex-account)        shift; cmd_codex_account "$@" ;;
   status|"") cmd_status ;;
   -h|--help)
     sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
     ;;
-  *) fail "unknown command: $1 (try: start | stop | restart | status | hotpatch | parity | install-services | uninstall-services | adopt-updater | adopt-thoughts-sync | adopt-cloud-sync | verify-cloud-sync | activate-replica | verify-updater | verify-node | services-status | claude-account)" ;;
+  *) fail "unknown command: $1 (try: start | stop | restart | status | hotpatch | parity | install-services | uninstall-services | adopt-updater | adopt-thoughts-sync | adopt-cloud-sync | verify-cloud-sync | activate-replica | verify-updater | verify-node | services-status | claude-account | codex-account)" ;;
 esac
 fi

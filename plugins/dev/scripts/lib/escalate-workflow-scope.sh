@@ -41,18 +41,18 @@ _escalate_workflow_scope_push() {
       --as "$TICKET" --type attention --orch "${ORCH_ID}" >/dev/null 2>&1 || true
   fi
 
-  # Apply needs-human THROUGH the shared guard (CTL-1552): the belief-owner check
-  # + read-verify applyLabel + the once-marker in ONE place, replacing the prior
-  # raw label add and the hand-written once-marker (which skipped the guard and
-  # could desync marker vs. Linear). The CLI writes the once-marker itself via
-  # labelOnce, so orch-monitor's Needs-You inbox still lights. Best-effort,
-  # fail-open. Runs under bun (the execution-core runtime; applyLabel reaches
-  # bun:sqlite).
+  # PUBLISH the escalation THROUGH the shared guard (CTL-1552/CTL-2159): the
+  # belief-owner check + the CTL-2158 classifier + the once-marker in ONE place.
+  # It applies NO Linear label any more — SYSTEM trouble retries under the ONE
+  # CTL-2156 fleet alert, a genuine ASK becomes one ask ticket carrying `blocks`.
+  # The CLI still writes the once-marker via labelOnce (five retry loops read it
+  # as their STOP). Best-effort, fail-open. Runs under bun (the execution-core
+  # runtime; the guard reaches bun:sqlite).
   local _orch="${ORCH_DIR:-${CATALYST_ORCHESTRATOR_DIR:-}}"
   if [[ -n "${_orch:-}" ]]; then
-    # bun ONLY — never node. label-needs-human.mjs transitively imports
+    # bun ONLY — never node. publish-escalation-cli.mjs transitively imports
     # bun:sqlite, so node exits ERR_UNSUPPORTED_ESM_URL_SCHEME and the fail-open
-    # redirect below would silently leave the label AND its marker unapplied.
+    # redirect below would silently leave the escalation unpublished.
     local _rt
     _rt="$(command -v bun 2>/dev/null || true)"
     if [[ -n "${_rt:-}" ]]; then
@@ -60,7 +60,7 @@ _escalate_workflow_scope_push() {
       # writes a generic "unexplained failure" phase-recovery-pass.json, which the
       # monitor prefers over the failed-phase signal — hiding the actionable
       # OAuth-scope instructions from the Needs-You inbox.
-      "$_rt" "${PLUGIN_ROOT}/scripts/execution-core/label-needs-human.mjs" \
+      "$_rt" "${PLUGIN_ROOT}/scripts/execution-core/publish-escalation-cli.mjs" \
         --ticket "${TICKET}" --orch-dir "${_orch}" \
         --explanation "${expl_json}" \
         --reason push_rejected_no_workflow_scope >/dev/null 2>&1 || true

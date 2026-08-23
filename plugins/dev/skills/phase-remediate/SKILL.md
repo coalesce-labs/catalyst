@@ -2,7 +2,7 @@
 name: phase-remediate
 description: |
   Phase-agent that fixes a failing verify verdict so the pipeline self-heals
-  instead of stalling to needs-human (CTL-653). Reads
+  instead of stalling to an escalation (CTL-653). Reads
   `${ORCH_DIR}/workers/<ticket>/verify.json`, fixes the `findings[]` (every
   severity:"high" plus the regression_risk drivers) directly via Edit/Write,
   commits the remediation, and emits `phase.remediate.complete.<ticket>`. The
@@ -25,7 +25,7 @@ allowed-tools:
 
 Phase-agent that owns the **fix** half of the verify⇄remediate cycle (CTL-653).
 Today a failing `verify` is a dead-end: the router marches into `review` against
-a known-bad branch, or a verify crash revives once then stalls to needs-human.
+a known-bad branch, or a verify crash revives once then stalls and escalates.
 `phase-remediate` is the conditional detour the router takes when `verify`
 produces a verdict-fail (`regression_risk ≥ 5` OR any `severity:"high"`
 finding): it reads `verify.json.findings[]` as its brief, fixes the code,
@@ -364,7 +364,7 @@ fi
 ## Failure handling
 
 One failure mode — hard error (caller-supplied reason). When escalating to
-`stalled`/`needs-human`, populate an `explanation` block per CTL-1065 using
+`stalled`, populate an `explanation` block per CTL-1065 using
 the CLI shim (always exits 0; degrades gracefully on bad input):
 
 ```bash
@@ -399,7 +399,7 @@ scheduler's router (`deriveAdvancement` + `maybeResetForRemediateCycle`,
 CTL-653) deletes the verify+remediate cycle signals and re-dispatches a fresh
 `verify`. `countRemediateCycles` counts this `complete` event toward the cap of
 3; the 3rd remediation is still re-verified, and only a verify verdict-fail
-*after* the budget is spent escalates to `stalled` → `needs-human` (the sole
+*after* the budget is spent escalates to `stalled` → the escalation guard (the sole
 human entry).
 
 ## Comms discipline

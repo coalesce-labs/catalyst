@@ -46,32 +46,28 @@ in one screen is a stall nobody has to ask about.
 3. **Needs a decision** → an ask ticket, and proceed on the default.
 
 ⛔ **Never escalate straight to the human.** The ladder is instrument → steward → concierge → human, and
-the human is only ever reached as an ask. A bare `needs-human` label with no ask behind it puts a row in
+the human is only ever reached as an ask. A bare escalation with no ask behind it puts a row in
 their queue that nothing can clear.
 
-## Clearing a needs-human label (do it, don't just say it)
+## Retracting a false fire (do it, don't just say it)
 
-A comment saying "clearing needs-human" does **not** remove the label. Steward comments are posted by the
-app actor — the daemon's human-provenance gate rejects them — so the label stays attached and the re-flap
-cycle continues. You must issue the label-removal mutation directly.
+⚠️ **CTL-2156…CTL-2162 deleted the per-ticket human-block label.** There is no label to strip: a system-level
+failure is ONE fleet alert that retracts itself when the condition clears, and anything genuinely
+needing a person is an **ask ticket**. This section used to carry a label-removal recipe (CTL-2098);
+the recipe is gone, but the lesson that motivated it is not, and it now applies to the ask:
 
-```bash
-# 1. Read current labels through the freshness-gated replica helper — NEVER a bare
-#    `linearis issues read`, which burns the shared 2500/hr fleet-wide API quota
-#    (see plugins/dev/skills/linearis/SKILL.md, "Reading Linear").
-source plugins/dev/scripts/lib/linear-read-replica.sh
-json=$(linear_read_ticket CTL-XXXX) || exit 1   # falls back to a live read only if the replica is stale/absent
-labels=$(echo "$json" | jq -r '[.labels.nodes[].name] | map(select(. != "needs-human")) | join(",")')
+**A steward comment is not a mutation.** Steward comments are posted by the app actor — the daemon's
+human-provenance gate rejects them — so a comment saying "this is resolved" leaves the ask OPEN and the
+work it `blocks` still held. You must issue the state change directly.
 
-# 2a. Remove needs-human while keeping any other labels present
-linearis issues update CTL-XXXX --labels "$labels" --label-mode overwrite
-
-# 2b. If needs-human is the ONLY label (or you want to clear all)
-linearis issues update CTL-XXXX --clear-labels
-```
+- **A false-fire ASK** → close it the way the `ask` SOP closes any ask: answer in-thread, then move the
+  ticket to Done with `linearis`. Reads go through the freshness-gated replica helper, never a bare
+  `linearis issues read` (see `plugins/dev/skills/linearis/SKILL.md`, "Reading Linear").
+- **A false-fire SYSTEM alert** → you do not retract it by hand. The broker raises and clears it on the
+  edge; if it is stuck raised, that is a broker bug worth a ticket, not a per-ticket label to clear.
 
 Still post an in-thread comment explaining **why** it was a false fire — the comment is the audit trail;
-the mutation is the action. Both are complementary.
+the state change is the action. Both are complementary.
 
 ## When the instrument pages you
 

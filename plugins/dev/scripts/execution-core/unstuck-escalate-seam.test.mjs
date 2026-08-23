@@ -2,7 +2,7 @@
 // escalate seam factory. All IO is stubbed via deps injection; no real git/fs/Linear.
 
 import { describe, test, expect } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync, chmodSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, chmodSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -134,21 +134,33 @@ describe("buildUnstuckEscalateSeam — CTL-1641", () => {
 // re-commented on every sweep. Both exercise the DEFAULT bindings against a real temp
 // orchDir so the marker files and the labelOnce/onOutcome path actually run.
 describe("buildUnstuckEscalateSeam — CTL-1641 Codex #3005 P2 remediation", () => {
-  test("a genuine non-confirming label write (applyLabel ran, applied:false) surfaces a 'label' error", () => {
+  // ⛔ CTL-2159: "a genuine non-confirming LABEL write" is no longer reachable —
+  // this seam publishes through the classifier and never calls applyLabel for
+  // needs-human, so a Linear failure cannot manufacture a `label` error. The
+  // surviving property is the one the seam exists for: the escalation is recorded
+  // and the comment posts, regardless of what the Linear transport would return.
+  test("CTL-2159 — a would-be-failing Linear transport neither blocks nor is consulted", () => {
     const dir = mkdtempSync(join(tmpdir(), "ctl1641-labelfail-"));
     mkdirSync(join(dir, "workers", "CTL-1"), { recursive: true });
+    const applyCalls = [];
     const seam = buildUnstuckEscalateSeam({
       orchDir: dir,
-      env: {},                                                     // not belief-owner → real labelOnce path
-      writeStatus: { applyLabel: () => ({ applied: false, reason: "rate-limited" }) },
+      env: {},                                                     // not belief-owner → the real publish path
+      writeStatus: {
+        applyLabel: (a) => {
+          applyCalls.push(a);
+          return { applied: false, reason: "rate-limited" };
+        },
+      },
       // applyNeedsHuman intentionally NOT injected — exercise the default structured binding.
       postComment: () => true,
       captureEvidence: () => ({ reason: "unknown", porcelainLines: [], prState: null, remediateHistory: [] }),
       commitsAhead: () => 2,
     });
     const r = seam(candidate("unknown", "CTL-1", "verify"), decision("unknown"));
-    expect(r.labelApplied).toBe(false);
-    expect(r.errors.some((e) => e.sideEffect === "label")).toBe(true);
+    expect(applyCalls).toEqual([]);
+    expect(r.labelApplied).toBe(true);
+    expect(r.errors.some((e) => e.sideEffect === "label")).toBe(false);
     expect(r.commentPosted).toBe(true);                            // independence: the comment still posts
   });
 
@@ -264,5 +276,115 @@ describe("buildUnstuckEscalateSeam default _post binding — CTL-1641 verify LOW
       if (prev === undefined) delete process.env.CATALYST_COMMENT_POST_HELPER;
       else process.env.CATALYST_COMMENT_POST_HELPER = prev;
     }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CTL-2159 — the class gate on the authored Linear comment.
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// ⛔ WHY. With the needs-human label deleted, THIS comment became the surviving
+// contradiction of the epic's central promise ("SYSTEM → zero per-ticket
+// artifacts"): it posted on EVERY escalation, gated only by a per-(ticket,
+// category, phase) idempotency marker and never by the stall class. A provider
+// outage across N tickets wrote N authored comments into a 300-writes/day budget
+// for a condition the ONE fleet alert already names and that clears itself.
+describe("CTL-2159 — the comment is gated on the stall CLASS", () => {
+  const seamWith = (labelResult, posted) =>
+    buildUnstuckEscalateSeam({
+      orchDir: "/tmp/orch-ctl2159",
+      applyNeedsHuman: () => labelResult,
+      postComment: (t, b) => { posted.push([t, b]); return true; },
+      captureEvidence: () => ({ reason: "unknown", porcelainLines: [], prState: null, remediateHistory: [] }),
+      commitsAhead: () => 0,
+    });
+
+  test("a SYSTEM verdict posts NO per-ticket comment", () => {
+    const posted = [];
+    const r = seamWith({ applied: true, stallClass: "system" }, posted)(
+      candidate("attempts-exhausted", "CTL-800", "implement"),
+      decision("remediate-cap"),
+    );
+    expect(posted).toEqual([]);
+    expect(r.commentPosted).toBe(false);
+    expect(r.stallClass).toBe("system");
+    expect(r.errors).toEqual([]); // a withheld comment is NOT a side-effect failure
+  });
+
+  test("a MOOT verdict posts NO per-ticket comment", () => {
+    const posted = [];
+    seamWith({ applied: true, stallClass: "moot" }, posted)(
+      candidate("empty-branch", "CTL-801", "implement"),
+      decision("empty-branch"),
+    );
+    expect(posted).toEqual([]);
+  });
+
+  test("POSITIVE CONTROL: HELD and ASK still comment — silence is not the default", () => {
+    // HELD means "a person must look"; silencing it would ship the plan's named
+    // worst outcome (no label, no ask, no alert, no comment).
+    for (const klass of ["held", "ask"]) {
+      const posted = [];
+      seamWith({ applied: true, stallClass: klass }, posted)(
+        candidate("unknown", `CTL-80${klass.length}`, "implement"),
+        decision("unknown"),
+      );
+      expect(posted).toHaveLength(1);
+    }
+  });
+
+  test("FAIL-OPEN: an unknown/absent class still comments", () => {
+    // An injected label stub returns a bare boolean and a belief-owner deferral
+    // publishes nothing. Absence of evidence is not a SYSTEM verdict.
+    const posted = [];
+    seamWith(true, posted)(candidate("unknown", "CTL-804", "implement"), decision("unknown"));
+    expect(posted).toHaveLength(1);
+  });
+
+  test("the sweep's reason REACHES the label seam (it was structurally unreachable)", () => {
+    // The default _applyLabel closure was built at seam-construction time as
+    // `(ticket) => …` while `reason` was computed inside escalate(), so every
+    // unstuck-sweep escalation classified HELD via the no-reason rule.
+    const seen = [];
+    buildUnstuckEscalateSeam({
+      orchDir: "/tmp/orch-ctl2159",
+      applyNeedsHuman: (ticket, reason) => { seen.push({ ticket, reason }); return true; },
+      postComment: () => true,
+      captureEvidence: () => ({ reason: "unknown", porcelainLines: [], prState: null, remediateHistory: [] }),
+      commitsAhead: () => 0,
+    })(candidate("remediate-cycle-cap-exhausted", "CTL-805", "verify"), decision("remediate-cap"));
+    expect(seen).toEqual([{ ticket: "CTL-805", reason: "remediate-cycle-cap-exhausted" }]);
+  });
+});
+
+// ⛔ THE SECOND SWEEP. A still-stuck SYSTEM ticket is re-censused on the next
+// interval, and by then publishEscalation early-returns on its own once-marker.
+// If that no-op reported no class, the gate would fail open and post the comment
+// it withheld the first time — "zero per-ticket artifacts, except on sweep two".
+describe("CTL-2159 — the class survives a marker-guarded re-publish", () => {
+  test("a SYSTEM ticket already published stays comment-free on the next sweep", () => {
+    const orchDir = mkdtempSync(join(tmpdir(), "ctl2159-resweep-"));
+    mkdirSync(join(orchDir, "workers", "CTL-810"), { recursive: true });
+    const posted = [];
+    const seam = buildUnstuckEscalateSeam({
+      orchDir,
+      writeStatus: { applyLabel: () => ({ applied: true }) },
+      env: { CATALYST_ESCALATION_ASK: "off" },
+      log: { info: () => {}, warn: () => {} },
+      postComment: (t, b) => { posted.push([t, b]); return true; },
+      captureEvidence: () => ({ reason: "attempts-exhausted", porcelainLines: [], prState: null, remediateHistory: [] }),
+      commitsAhead: () => 0,
+    });
+    const cand = candidate("attempts-exhausted", "CTL-810", "implement");
+    const dec = decision("remediate-cap");
+    const first = seam(cand, dec);
+    const second = seam(cand, dec);
+    expect(first.stallClass).toBe("system");
+    // POSITIVE CONTROL: the second call really did take the marker-guarded no-op
+    // path — it applied nothing — and STILL knew the class.
+    expect(second.labelApplied).toBe(false);
+    expect(second.stallClass).toBe("system");
+    expect(posted).toEqual([]);
+    rmSync(orchDir, { recursive: true, force: true });
   });
 });

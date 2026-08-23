@@ -12,8 +12,12 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 const mod = await import("./durable-escalation.mjs");
-const { recordDurableEscalation, readDurableEscalations, forgetDurableEscalation } =
-  mod;
+const {
+  recordDurableEscalation,
+  readDurableEscalations,
+  forgetDurableEscalation,
+  isHumanFacingEscalationRecord,
+} = mod;
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -184,5 +188,64 @@ describe("forgetDurableEscalation — removal", () => {
   it("is idempotent — calling on an already-absent record never throws", () => {
     expect(() => forgetDurableEscalation(orchDir, "CTL-9999")).not.toThrow();
     expect(() => forgetDurableEscalation("/tmp/nonexistent-ctl1643-orch", "CTL-9999")).not.toThrow();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CTL-2159 — the durable store is a per-ticket escalation ARTIFACT in its own
+// right. board-data.mjs renders every record as `attention:"needs-human"` with a
+// humanQuestion, on both the merge and the synthesis path. Deleting the Linear
+// label while leaving this untouched would have moved the artifact one layer
+// down, not removed it: a provider outage across N tickets still lighting N
+// human cards.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("CTL-2159 — records carry the stall class, and SYSTEM/MOOT are not human-facing", () => {
+  let orchDir;
+  beforeEach(() => { orchDir = tmpOrchDir(); });
+  afterEach(() => { rmSync(orchDir, { recursive: true, force: true }); });
+
+  it("DERIVES the class from the reason so no writer can forget it", () => {
+    // Three writers feed this store (recovery.mjs, fence-standoff.mjs,
+    // stale-pr-rescue-timer.mjs) and none of them passed a class.
+    const rec = recordDurableEscalation({
+      orchDir, ticket: "CTL-2159A", phase: "implement",
+      reason: "unresolvable-conflict", labelConfirmed: true, source: "stale-pr-rescue",
+      now: "2026-08-21T10:00:00Z",
+    });
+    expect(rec.stallClass).toBe("system");
+    expect(isHumanFacingEscalationRecord(rec)).toBe(false);
+    expect(readDurableEscalations(orchDir)[0].stallClass).toBe("system");
+  });
+
+  it("POSITIVE CONTROL: an unclassifiable reason is HELD and IS human-facing", () => {
+    // The zero above must be a verdict, not the predicate answering false for
+    // everything. HELD means "a person must look" — it still lights a card.
+    const rec = recordDurableEscalation({
+      orchDir, ticket: "CTL-2159B", phase: "implement",
+      reason: "something-nobody-classified", labelConfirmed: true, source: "scheduler",
+      now: "2026-08-21T10:00:00Z",
+    });
+    expect(rec.stallClass).toBe("held");
+    expect(isHumanFacingEscalationRecord(rec)).toBe(true);
+  });
+
+  it("an explicit class from the caller wins, and survives an upsert", () => {
+    recordDurableEscalation({
+      orchDir, ticket: "CTL-2159C", phase: "implement", reason: "no-progress",
+      labelConfirmed: false, source: "scheduler", now: "2026-08-21T10:00:00Z",
+      stallClass: "ask",
+    });
+    const again = recordDurableEscalation({
+      orchDir, ticket: "CTL-2159C", phase: "implement", reason: "no-progress",
+      labelConfirmed: true, source: "scheduler", now: "2026-08-21T10:05:00Z",
+    });
+    expect(again.stallClass).toBe("ask");
+  });
+
+  it("FAIL-OPEN: a legacy record with no class at all is still human-facing", () => {
+    // Records written before this field existed must not silently vanish from the
+    // board — an absence of evidence is not a SYSTEM verdict.
+    expect(isHumanFacingEscalationRecord({ ticket: "CTL-1", reason: "x" })).toBe(true);
+    expect(isHumanFacingEscalationRecord(null)).toBe(true);
   });
 });

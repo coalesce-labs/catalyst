@@ -19,6 +19,27 @@
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+// stall-class.mjs is PURE and import-free — safe to pull into this leaf, and into
+// board-data.mjs's dependency graph through it.
+import { classifyStall, STALL_CLASS } from "./stall-class.mjs";
+
+// isHumanFacingEscalationRecord — CTL-2159. Should this durable record put an
+// `attention:"needs-human"` card, with a human question, in front of a person?
+//
+// ⛔ WHY THIS EXISTS. The durable store is a SECOND per-ticket escalation artifact
+// — independent of the Linear label, GC-surviving, and rendered by
+// board-data.mjs's mergeDurableEscalationsIntoCards / synthesizeDurableEscalations
+// as exactly the card this epic deletes. Deleting the label while leaving this
+// untouched would move the artifact one layer down rather than remove it: a
+// provider outage across N tickets would still light N human cards.
+//
+// FAIL-OPEN. Only an EXPLICIT system/moot class suppresses. A record with no
+// class (written before this field existed, or by a path that could not classify)
+// still surfaces — an absence of evidence is not a SYSTEM verdict.
+export function isHumanFacingEscalationRecord(rec) {
+  const k = rec?.stallClass;
+  return k !== STALL_CLASS.SYSTEM && k !== STALL_CLASS.MOOT;
+}
 
 function escalationsDir(orchDir) {
   return join(orchDir, ".escalations");
@@ -47,6 +68,11 @@ export function recordDurableEscalation({
   commentPosted: commentPostedArg,
   source,
   now,
+  // CTL-2159: the CTL-2158 verdict for this stall. Callers that already hold one
+  // pass it; otherwise it is DERIVED from `reason` here, so all three writers
+  // (recovery.mjs, fence-standoff.mjs, stale-pr-rescue-timer.mjs) get the class
+  // without a call-site change and none of them can forget it.
+  stallClass: stallClassArg = null,
 }) {
   try {
     const dir = escalationsDir(orchDir);
@@ -67,10 +93,12 @@ export function recordDurableEscalation({
         : (prior?.labelAttempts ?? 0) + 1;
     // commentPosted is sticky: once set true it is never cleared by a retry tick.
     const commentPosted = commentPostedArg === true || prior?.commentPosted === true;
+    const stallClass = stallClassArg ?? prior?.stallClass ?? classifyStall({ reason }).klass;
     const rec = {
       ticket,
       phase,
       reason,
+      stallClass,
       escalatedAt,
       labelConfirmed: labelConfirmed === true,
       commentPosted,
@@ -88,6 +116,7 @@ export function recordDurableEscalation({
       ticket,
       phase,
       reason,
+      stallClass: stallClassArg ?? classifyStall({ reason }).klass,
       escalatedAt: now,
       labelConfirmed: labelConfirmed === true,
       commentPosted: commentPostedArg === true,

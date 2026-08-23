@@ -1,4 +1,4 @@
-// CTL-1180: groupHoldingBuckets routes a not-in-flight needs-human ticket into
+// CTL-1180: groupHoldingBuckets routes a not-in-flight ask ticket into
 // the needs-you bucket. Previously only live waitingOnUser workers landed there.
 // A reaped failed ticket (no live worker) now also surfaces under needs-you.
 
@@ -62,9 +62,9 @@ function t(p: Partial<BoardTicket> & { id: string }): BoardTicket {
   };
 }
 
-describe("groupHoldingBuckets — needs-human not-in-flight tickets (CTL-1180)", () => {
-  it("a not-in-flight needs-human ticket lands in needsYou", () => {
-    const tickets = [t({ id: "CTL-1180", attention: "needs-human" })];
+describe("groupHoldingBuckets — ask not-in-flight tickets (CTL-1180)", () => {
+  it("a not-in-flight ask ticket lands in needsYou", () => {
+    const tickets = [t({ id: "CTL-1180", attention: "ask" })];
     const b = groupHoldingBuckets(tickets, [], 4);
     const ids = b.needsYou.items.map((i) =>
       i.kind === "ticket" ? i.ticket.id : "",
@@ -80,8 +80,8 @@ describe("groupHoldingBuckets — needs-human not-in-flight tickets (CTL-1180)",
     expect(b.needsYou.items.filter((i) => i.kind === "ticket")).toHaveLength(0);
   });
 
-  it("an in-flight needs-human ticket is NOT double-listed in needsYou", () => {
-    const tickets = [t({ id: "CTL-1", attention: "needs-human" })];
+  it("an in-flight ask ticket is NOT double-listed in needsYou", () => {
+    const tickets = [t({ id: "CTL-1", attention: "ask" })];
     const workers = [w({ name: "w1", ticket: "CTL-1", startedAt: 1 })];
     const b = groupHoldingBuckets(tickets, workers, 4);
     // CTL-1 is in-flight → excluded from ticket buckets
@@ -89,9 +89,9 @@ describe("groupHoldingBuckets — needs-human not-in-flight tickets (CTL-1180)",
     expect(ticketItems).toHaveLength(0);
   });
 
-  it("∉ queue invariant: needs-human in needsYou, stalled in stalled, blocked in blocked", () => {
+  it("∉ queue invariant: ask in needsYou, stalled in stalled, blocked in blocked", () => {
     const tickets = [
-      t({ id: "CTL-A", attention: "needs-human" }),
+      t({ id: "CTL-A", attention: "ask" }),
       t({ id: "CTL-B", status: "stalled" }),
       t({ id: "CTL-C", held: "blocked" }),
     ];

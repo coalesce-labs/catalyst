@@ -37,9 +37,9 @@ const SUB_B: PushSubscriptionRecord = {
   keys: { p256dh: "Q", auth: "B" },
 };
 
-const NEEDS_HUMAN_BOARD: ProjectorBoard = {
+const ASK_BOARD: ProjectorBoard = {
   tickets: [
-    { id: "CTL-1", attention: "needs-human", attentionSince: "s1", humanQuestion: "Approve?" },
+    { id: "CTL-1", attention: "ask", attentionSince: "s1", humanQuestion: "Approve?" },
   ],
   daemon: "healthy",
   anomaly: false,
@@ -57,14 +57,14 @@ describe("createPushBridge", () => {
     };
   });
 
-  it("calls send once per stored subscription for a new needs-human ticket", async () => {
+  it("calls send once per stored subscription for a new ask ticket", async () => {
     const store = makeStore([SUB_A, SUB_B]);
     const bridge = createPushBridge({
       store,
       projector: createNotificationProjector(),
       send,
     });
-    await bridge.onBoard(NEEDS_HUMAN_BOARD);
+    await bridge.onBoard(ASK_BOARD);
     expect(sendCalls).toHaveLength(2);
     expect(sendCalls[0].sub.endpoint).toBe(SUB_A.endpoint);
     expect(sendCalls[1].sub.endpoint).toBe(SUB_B.endpoint);
@@ -75,9 +75,9 @@ describe("createPushBridge", () => {
     const store = makeStore([SUB_A]);
     const projector = createNotificationProjector();
     const bridge = createPushBridge({ store, projector, send });
-    await bridge.onBoard(NEEDS_HUMAN_BOARD);
+    await bridge.onBoard(ASK_BOARD);
     sendCalls = [];
-    await bridge.onBoard(NEEDS_HUMAN_BOARD); // same episode, same attentionSince
+    await bridge.onBoard(ASK_BOARD); // same episode, same attentionSince
     expect(sendCalls).toHaveLength(0);
   });
 
@@ -86,7 +86,7 @@ describe("createPushBridge", () => {
     const err410 = Object.assign(new Error("Gone"), { statusCode: 410 });
     const failSend = (): Promise<void> => Promise.reject(err410);
     const bridge = createPushBridge({ store, projector: createNotificationProjector(), send: failSend });
-    await bridge.onBoard(NEEDS_HUMAN_BOARD);
+    await bridge.onBoard(ASK_BOARD);
     expect(store.deleted).toContain(SUB_A.endpoint);
     expect(store.subs).toHaveLength(0);
   });
@@ -100,7 +100,7 @@ describe("createPushBridge", () => {
       projector: createNotificationProjector(),
       send: failSend,
     });
-    await bridge.onBoard(NEEDS_HUMAN_BOARD);
+    await bridge.onBoard(ASK_BOARD);
     expect(store.deleted).toHaveLength(0);
     expect(store.subs).toHaveLength(1);
   });
@@ -108,7 +108,7 @@ describe("createPushBridge", () => {
   it("emits no sends when zero subscriptions are stored", async () => {
     const store = makeStore([]);
     const bridge = createPushBridge({ store, projector: createNotificationProjector(), send });
-    await bridge.onBoard(NEEDS_HUMAN_BOARD);
+    await bridge.onBoard(ASK_BOARD);
     expect(sendCalls).toHaveLength(0);
   });
 
