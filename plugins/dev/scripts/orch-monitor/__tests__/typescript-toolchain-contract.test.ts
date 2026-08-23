@@ -87,4 +87,18 @@ describe("TypeScript toolchain contract (CTL-2179)", () => {
     expect(cfg).not.toContain('"cli/**"');
     expect(cfg).not.toContain('"lib/**"');
   });
+
+  // AC3 pin: the UI's compiler declaration must be explicit and must not have
+  // silently regressed below the pre-migration 5.8.3 floor (Phase 3, Branch A).
+  test("the UI workspace declares an intentional, non-downgraded TypeScript", () => {
+    const ui = JSON.parse(
+      readFileSync(join(ROOT, "ui", "package.json"), "utf8"),
+    ) as { devDependencies?: Record<string, string> };
+    const dev = ui.devDependencies ?? {};
+    const declared = dev["typescript"];
+    expect(typeof declared).toBe("string");
+    // Anchored at the start: an unanchored /\^?[0-4]\./ would false-positive on
+    // e.g. "^6.0.2" itself (it matches the "0." inside ".0.2").
+    expect(declared).not.toMatch(/^\^?[0-4]\./);
+  });
 });
