@@ -626,7 +626,10 @@ describe("escalation default seam", () => {
     clock.advance(1_000);
     await new Promise(r => setTimeout(r, 20));
 
-    expect(labels).toEqual([{ ticket: "CTL-31", label: "needs-human" }]);
+    // ⛔ CTL-2159: was `[{ ticket: "CTL-31", label: "needs-human" }]`. The default
+    // escalate no longer writes a Linear label — the once-marker below is the
+    // record `rescue.json.escalatedAt` latches on, and it is unchanged.
+    expect(labels).toEqual([]);
     expect(existsSync(join(orchDir, "workers", "CTL-31", ".linear-label-needs-human.applied"))).toBe(true);
   });
 

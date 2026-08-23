@@ -35,7 +35,6 @@ import {
   getAllTicketDescriptors,
   upsertTicketDescriptor,
 } from "./broker-state.mjs";
-import { startTerminalNeedsHumanReconcile } from "./terminal-needs-human-reconcile.mjs";
 // CTL-532: re-export the worker-state store helpers through the barrel.
 export {
   upsertWorkerState,
@@ -609,37 +608,14 @@ function main() {
   startTailing();
   const watchdogId = startWatchdog();
   const driftCheckId = startDriftCheckWatcher();
-  // CTL-1242 (corrected scope): broker-side terminal needs-human cache reconcile.
-  // The board reads ticket_state.labels (not live Linear); a missed label-removed
-  // webhook leaves a stale `needs-human` cache label on a terminal ticket and the
-  // board keeps flagging a finished ticket. The broker is the sole ticket_state
-  // writer, so it strips the stale label here. Deterministic + idempotent +
-  // terminal-only — ships ENFORCE by default with the CATALYST_TERMINAL_NEEDS_HUMAN_RECONCILE
-  // kill-switch (=off | =shadow). Runs at boot + every interval; clears on shutdown.
-  const terminalNeedsHumanReconcileId = startTerminalNeedsHumanReconcile({
-    getAll: () => getAllTicketDescriptors(),
-    upsert: (input) => upsertTicketDescriptor(input),
-    log,
-    emit: (summary) => {
-      try {
-        appendEvent({
-          event: "broker.terminal-needs-human.reconciled",
-          orchestrator: null,
-          worker: null,
-          severity: "INFO",
-          detail: {
-            broker: true,
-            mode: summary.mode,
-            scanned: summary.scanned,
-            stripped: summary.stripped,
-            tickets: summary.items.map((i) => i.ticket),
-          },
-        });
-      } catch {
-        // Best-effort audit telemetry — never crash the broker on an emit.
-      }
-    },
-  });
+  // ⛔ CTL-2161: the terminal needs-human cache reconcile (CTL-1242) is GONE.
+  // It existed to strip a stale `needs-human` cache label off a terminal ticket so
+  // the board stopped flagging a finished ticket. The board no longer reads that
+  // label at all (orch-monitor/lib/linear-cache-reader.mjs ATTENTION_LABELS), so
+  // the stale cache row is inert and the reconcile had nothing left to protect.
+  // The analogous risk for the SURVIVING attention labels is already covered by
+  // the reader itself, which excludes Done/Canceled descriptors before it looks at
+  // labels — the reconcile was belt-and-braces on top of that gate, not the gate.
   // CTL-1171: periodic liveness heartbeat so an idle broker doesn't false-report
   // "down" in the monitor (which keys off catalyst.broker event recency). Beat
   // immediately so the broker is fresh the moment it boots, then every interval.
@@ -682,7 +658,6 @@ function main() {
     clearInterval(heartbeatId); // CTL-1171: stop the liveness heartbeat
     clearInterval(driftCheckId); // CTL-1161: drift-check backstop timer
     if (cacheReconcileId) clearInterval(cacheReconcileId); // CTL-1277: cache reconcile
-    clearInterval(terminalNeedsHumanReconcileId); // CTL-1242: stop the needs-human reconcile
     // CTL-529: the debounce timer handles are router module-internal.
     clearDebounceTimers();
     // CTL-351: emit a parallel shutdown event so subscribers can pair

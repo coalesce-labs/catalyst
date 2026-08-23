@@ -8,7 +8,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  ESCALATION_EVENT_NEEDS_HUMAN,
+  ESCALATION_EVENT_TICKET_ESCALATED,
   buildEscalationEnvelope,
   emitEscalationEvent,
 } from "./escalation-event.mjs";
@@ -23,14 +23,14 @@ describe("buildEscalationEnvelope", () => {
     expect(e.attributes["event.label"]).toBe("CTL-2056");
   });
 
-  test("event.name equals ESCALATION_EVENT_NEEDS_HUMAN constant", () => {
+  test("event.name equals ESCALATION_EVENT_TICKET_ESCALATED constant", () => {
     const e = buildEscalationEnvelope("CTL-1");
-    expect(e.attributes["event.name"]).toBe(ESCALATION_EVENT_NEEDS_HUMAN);
+    expect(e.attributes["event.name"]).toBe(ESCALATION_EVENT_TICKET_ESCALATED);
     expect(e.attributes["event.name"]).toBe("ticket.escalated");
   });
 
   test("event name is namespace-safe (not phase.*/filter.*/broker.daemon/session.heartbeat)", () => {
-    const name = ESCALATION_EVENT_NEEDS_HUMAN;
+    const name = ESCALATION_EVENT_TICKET_ESCALATED;
     expect(name.startsWith("filter.")).toBe(false);
     expect(name.startsWith("broker.daemon")).toBe(false);
     expect(name).not.toBe("session.heartbeat");
@@ -91,6 +91,31 @@ describe("emitEscalationEvent", () => {
   test("returns false (never throws) when logPath is null", () => {
     const result = emitEscalationEvent("CTL-1", {}, { logPath: null });
     expect(result).toBe(false);
+  });
+
+  // ⛔ CTL-2159. The chokepoint has always PASSED `stallClass` in `meta`; this
+  // builder dropped it, so the ONE signal that lets the broker fan N system-class
+  // stalls into ONE fleet alert never reached the broker. Without this attribute
+  // a SYSTEM stall produces no per-ticket artifact AND no alert — silent.
+  test("the stall CLASS rides on the envelope — broker/system-trouble.mjs keys on it", () => {
+    const e = buildEscalationEnvelope(
+      "CTL-77",
+      { site: "terminal-sweep", reason: "attempts-exhausted", stallClass: "system", stallRule: "exact:attempts-exhausted" },
+      { now: () => "2026-08-19T23:44:00Z" }
+    );
+    expect(e.attributes["escalation.stall_class"]).toBe("system");
+    expect(e.attributes["escalation.stall_rule"]).toBe("exact:attempts-exhausted");
+    expect(e.body.payload.stallClass).toBe("system");
+  });
+
+  test("POSITIVE CONTROL: no class supplied → the attribute is ABSENT, not empty", () => {
+    // A class-less event must read as NO OPINION at the detector, never as a
+    // system stall — so the key must not exist rather than carry a falsy value.
+    const e = buildEscalationEnvelope("CTL-77", { site: "x" });
+    expect("escalation.stall_class" in e.attributes).toBe(false);
+    // and the control that the same builder DOES set it when given one:
+    const withClass = buildEscalationEnvelope("CTL-77", { stallClass: "ask" });
+    expect(withClass.attributes["escalation.stall_class"]).toBe("ask");
   });
 
   test("multiple appends accumulate as separate JSONL lines", () => {

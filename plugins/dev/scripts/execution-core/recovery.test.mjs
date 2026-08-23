@@ -2727,10 +2727,15 @@ describe("reclaimDeadWorkIfPossible — CTL-638 escalation storm prevention", ()
     // relative path that depends on cwd and silently fails on most systems.
     const s = setupAt(orchDir, { phase: "pr" });
     reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
-    expect(s.opts.applyStalledLabel.calls[0][0]).toEqual({
+    expect(s.opts.applyStalledLabel.calls[0][0]).toMatchObject({
       orchDir: s.orch,
       ticket: "CTL-9",
     });
+    // ⛔ CTL-2159: the seam now also carries the stall REASON. Without it the
+    // CTL-2158 classifier answers HELD for every recovery escalation — the
+    // highest-volume escalation in the system — so the SYSTEM retry path and the
+    // ASK path would both be permanently dark while every test still passed.
+    expect(typeof s.opts.applyStalledLabel.calls[0][0].reason).toBe("string");
   });
 });
 

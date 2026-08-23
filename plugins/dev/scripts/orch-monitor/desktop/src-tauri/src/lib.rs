@@ -7,7 +7,7 @@
 // Two Rust-side bridges run against whatever server is configured:
 //   attention_bridge (polls /api/board):
 //     * Dock badge   = # of tickets needing a HUMAN (attention != null:
-//                      needs-human ∪ waiting-on-you). NOT queue depth — the
+//                      ask ∪ waiting-on-you). NOT queue depth — the
 //                      pipeline handles the queue; the badge is reserved for
 //                      "something is waiting for YOU".
 //     * Notification = a ticket that NEWLY needs you (deduped; baselined on the
@@ -114,7 +114,7 @@ async fn attention_bridge(app: tauri::AppHandle) {
                 if !first_poll {
                     for (id, att, body, member) in &current {
                         if !known.contains(id) && !*member {
-                            let label = if att == "needs-human" {
+                            let label = if att == "ask" {
                                 "needs your decision"
                             } else {
                                 "is waiting on you"

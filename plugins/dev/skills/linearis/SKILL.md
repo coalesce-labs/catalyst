@@ -259,7 +259,7 @@ linearis issues update ENG-123 --project-milestone "Milestone Name"
 > ⛔ **`linearis issues discuss` posts AS THE HUMAN.** It authenticates with the personal
 > `lin_api_…` token, so the comment carries Ryan's identity — and the ask-resolution gate
 > (CTL-1567) reads a human-identity comment as *the human deciding* and clears
-> `needs-human`. An agent commenting this way can silently look like his decision.
+> the escalation hold. An agent commenting this way can silently look like his decision.
 >
 > **Every machine reply goes through the app actor instead** — `Catalyst Cloud`, tagged
 > with the agent via `createAsUser`:

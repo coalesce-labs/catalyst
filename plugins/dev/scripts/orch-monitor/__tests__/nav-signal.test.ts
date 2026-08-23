@@ -150,7 +150,7 @@ describe("nav-signal projection (CTL-896 / SHELL6)", () => {
 
   // Scenario: Board anomaly dot
   describe("board anomaly dot", () => {
-    it("flags an anomaly when a ticket is held blocked (needs-human / dependency)", () => {
+    it("flags an anomaly when a ticket is held blocked (ask / dependency)", () => {
       const sig = deriveNavSignal(
         board({ tickets: [ticket("CTL-1"), ticket("CTL-2", { held: "blocked" })] }),
       );

@@ -8,12 +8,12 @@ import {
 } from "../lib/notification-filter";
 
 describe("shouldNotify (template parity with lib.rs)", () => {
-  it("needs-human ticket → '{id} needs your decision' + humanQuestion body + deep link", () => {
+  it("ask ticket → '{id} needs your decision' + humanQuestion body + deep link", () => {
     expect(
       shouldNotify({
         kind: "ticket",
         id: "CTL-9",
-        attention: "needs-human",
+        attention: "ask",
         humanQuestion: "Approve plan?",
         title: "T",
       }),
@@ -45,7 +45,7 @@ describe("shouldNotify (template parity with lib.rs)", () => {
       shouldNotify({
         kind: "ticket",
         id: "CTL-9",
-        attention: "needs-human",
+        attention: "ask",
         humanQuestion: "",
         title: "",
       })?.body,
@@ -65,7 +65,7 @@ describe("shouldNotify (template parity with lib.rs)", () => {
       shouldNotify({
         kind: "ticket",
         id: "CTL-11",
-        attention: "needs-human",
+        attention: "ask",
         humanQuestion: "Approve plan?",
         correlationRole: "member",
       }),
@@ -77,7 +77,7 @@ describe("shouldNotify (template parity with lib.rs)", () => {
       shouldNotify({
         kind: "ticket",
         id: "CTL-10",
-        attention: "needs-human",
+        attention: "ask",
         humanQuestion: "Approve plan?",
         correlationRole: "anchor",
       }),
@@ -93,7 +93,7 @@ describe("shouldNotify (template parity with lib.rs)", () => {
       shouldNotify({
         kind: "ticket",
         id: "CTL-12",
-        attention: "needs-human",
+        attention: "ask",
         humanQuestion: "Approve plan?",
         correlationRole: null,
       }),
@@ -133,7 +133,7 @@ describe("createNotificationProjector (edge detection + dedup)", () => {
   const board = (over: Record<string, unknown> = {}) => ({
     tickets: [] as Array<{
       id: string;
-      attention: "needs-human" | "waiting-on-you" | null;
+      attention: "ask" | "waiting-on-you" | null;
       attentionSince?: string | null;
       humanQuestion?: string;
       title?: string;
@@ -150,7 +150,7 @@ describe("createNotificationProjector (edge detection + dedup)", () => {
     const out = p.project(
       board({
         tickets: [
-          { id: "CTL-1", attention: "needs-human", attentionSince: "s1" },
+          { id: "CTL-1", attention: "ask", attentionSince: "s1" },
         ],
       }),
     );
@@ -165,9 +165,9 @@ describe("createNotificationProjector (edge detection + dedup)", () => {
     const out = p.project(
       board({
         tickets: [
-          { id: "CTL-1", attention: "needs-human", attentionSince: "s1", correlationRole: "anchor" },
-          { id: "CTL-2", attention: "needs-human", attentionSince: "s1", correlationRole: "member" },
-          { id: "CTL-3", attention: "needs-human", attentionSince: "s1", correlationRole: "member" },
+          { id: "CTL-1", attention: "ask", attentionSince: "s1", correlationRole: "anchor" },
+          { id: "CTL-2", attention: "ask", attentionSince: "s1", correlationRole: "member" },
+          { id: "CTL-3", attention: "ask", attentionSince: "s1", correlationRole: "member" },
         ],
       }),
     );
@@ -194,7 +194,7 @@ describe("createNotificationProjector (edge detection + dedup)", () => {
     p.project(
       board({
         tickets: [
-          { id: "CTL-2", attention: "needs-human", attentionSince: "s1", correlationRole: "member" },
+          { id: "CTL-2", attention: "ask", attentionSince: "s1", correlationRole: "member" },
         ],
       }),
     );
@@ -203,7 +203,7 @@ describe("createNotificationProjector (edge detection + dedup)", () => {
     const out = p.project(
       board({
         tickets: [
-          { id: "CTL-2", attention: "needs-human", attentionSince: "s1", correlationRole: "anchor" },
+          { id: "CTL-2", attention: "ask", attentionSince: "s1", correlationRole: "anchor" },
         ],
       }),
     );
@@ -213,7 +213,7 @@ describe("createNotificationProjector (edge detection + dedup)", () => {
   it("does not re-fire the same ticket attention episode", () => {
     const p = createNotificationProjector();
     const t = [
-      { id: "CTL-1", attention: "needs-human" as const, attentionSince: "s1" },
+      { id: "CTL-1", attention: "ask" as const, attentionSince: "s1" },
     ];
     p.project(board({ tickets: t }));
     expect(p.project(board({ tickets: t }))).toEqual([]);
@@ -223,12 +223,12 @@ describe("createNotificationProjector (edge detection + dedup)", () => {
     const p = createNotificationProjector();
     p.project(
       board({
-        tickets: [{ id: "CTL-1", attention: "needs-human", attentionSince: "s1" }],
+        tickets: [{ id: "CTL-1", attention: "ask", attentionSince: "s1" }],
       }),
     );
     const out = p.project(
       board({
-        tickets: [{ id: "CTL-1", attention: "needs-human", attentionSince: "s2" }],
+        tickets: [{ id: "CTL-1", attention: "ask", attentionSince: "s2" }],
       }),
     );
     expect(out).toHaveLength(1);

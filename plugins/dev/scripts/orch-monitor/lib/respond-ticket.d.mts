@@ -55,7 +55,7 @@ export function emitResumeEvent(
   },
 ): { path: string; event: ResumeEvent };
 
-export function clearNeedsHumanMarker(
+export function clearEscalationMarker(
   args: { ticket: string; label?: string },
   opts?: {
     workersDir?: string;

@@ -21,14 +21,20 @@ import { buildUnstuckActSeams } from "./unstuck-act-seams.mjs";
 // classifyStalledTicket — pure top-level router (CTL-1064)
 // ---------------------------------------------------------------------------
 describe("classifyStalledTicket — pure top-level router (CTL-1064)", () => {
+  // CTL-2158: these three verdicts are unchanged in MEANING but now carry a
+  // `reason:"already-escalated"` field, because they are derived by
+  // stall-class.mjs's quiet-gate instead of by three hand-typed STALL_CATEGORY_MAP
+  // rows. toMatchObject keeps each case asserting the property it was written for
+  // (a fully-escalated stall never re-enters the unstuck escalate path); the
+  // derivation itself is mutation-proven in stall-class-wiring.test.mjs.
   test("escalation-ask-cap stalls are SKIPPED — already terminally escalated by CTL-1442 (no re-ask loop)", () => {
     const r = classifyStalledTicket({ reason: "escalation-ask-cap" });
-    expect(r).toEqual({ category: "skip", action: "skip" });
+    expect(r).toMatchObject({ category: "skip", action: "skip" });
   });
 
   test("no-probe-for-phase stalls are SKIPPED — already terminally escalated by PROJ-1657 (no re-ask loop, Codex #3027 round 4 P2)", () => {
     const r = classifyStalledTicket({ reason: "no-probe-for-phase" });
-    expect(r).toEqual({ category: "skip", action: "skip" });
+    expect(r).toMatchObject({ category: "skip", action: "skip" });
   });
 
   test("needs_human stalls are SKIPPED — the normalized human handoff is already fully escalated (CTL-1552)", () => {
@@ -36,7 +42,7 @@ describe("classifyStalledTicket — pure top-level router (CTL-1064)", () => {
     // "needs_human". Routing it to unknown/escalate would bypass the intent gate
     // and post a fresh Linear comment every sweep interval on a parked ticket.
     const r = classifyStalledTicket({ reason: "needs_human" });
-    expect(r).toEqual({ category: "skip", action: "skip" });
+    expect(r).toMatchObject({ category: "skip", action: "skip" });
   });
 
   test("rebase_refused_dirty_tree → dirty-tree/clear-noise-and-retry", () => {

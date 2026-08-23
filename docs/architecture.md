@@ -350,7 +350,7 @@ The record is GC-surviving and reaches the board two ways. When the ticket has *
 drops the record, so `mergeDurableEscalationsIntoCards` runs first and stamps the escalation's
 reason onto the existing card — but only when that card carries no `attention` yet, so a live
 reason always wins. Both halves are needed: a terminal-sweep standoff has a live `failed`/`stalled`
-signal (hence a card, hence `deriveAttention`'s `phaseFailed` → `needs-human`) and only wanted the
+signal (hence a card, hence `deriveAttention`'s `phaseFailed` → `ask`) and only wanted the
 standoff-specific reason, whereas a stale-PR standoff on a `BEHIND` PR has a card with **no**
 attention at all — `BEHIND` is excluded from `PR_BLOCKER_STATES` as auto-rebasable and the fence
 suppressed the label — so before the merge pass its break-glass reached no operator surface,
@@ -359,7 +359,7 @@ including the push bridge, which projects only board tickets.
 This changes no `fenceGuard` decision: every write suppressed before CAT-173 remains suppressed.
 It does change the **retry cadence** of those suppressed writes. Crossing the bound stamps a
 `.fence-standoff-cooldown` (default 6 h) that gates the same terminal-sweep probe+write block
-`.fence-suppressed` (15 min) already gated, so after a break-glass a healed standoff's `needs-human`
+`.fence-suppressed` (15 min) already gated, so after a break-glass a healed standoff's escalation
 label write — and the terminal-clear branch that retracts it on a late Done — is retried every 6 h
 rather than every 15 min. A break-glass whose delivery FAILS drops the 15-minute marker to retry on
 the next tick, bounded by `CATALYST_FENCE_STANDOFF_DELIVERY_RETRY_MAX` (default 5) so a persistently
@@ -631,7 +631,7 @@ destroy-and-recreate from selecting a bystander worktree.
   stall rc=3; real source → CTL-708 stub (always unavailable) → stall rc=2.
 - **L3 — Phase-aware fallback** (`phase-agent-dispatch`): terminal source conflict (rc=2) on
   `research`/`plan` → destroy+recreate worktree fresh; same on `implement`/`verify`/`review` → park
-  `needs-human`; thoughts conflict (rc=3) → park on all phases.
+  an escalation; thoughts conflict (rc=3) → park on all phases.
 - **L4 — Telemetry** (`lib/rebase-telemetry.sh`):
 
 | Event                                                | Severity | Emitter                  |
@@ -713,13 +713,13 @@ Synthetic completion is restricted by `ORPHAN_MERGE_PHASE_ALLOWLIST` to `monitor
 
 ### Explanation-required escalation chokepoint (CTL-1609, delegate-first routing removed CTL-2141)
 
-CTL-1609 originally closed two gaps where the scheduler labels a ticket `needs-human`: a
+CTL-1609 originally closed two gaps at the point where the scheduler escalates a ticket: a
 delegate-first routing seam (`routeStuckTicketToDelegate` / `execution-core/delegate-first.mjs`,
 gated by `CATALYST_DELEGATE_FIRST`) that could route a stuck ticket to the delegate runner instead
 of labelling it, and an explanation-required chokepoint on the direct label path. CTL-2141 deleted
 the delegate-first seam along with the rest of the recovery-pass/board-health judgment layer it fed
 — off-mode was always byte-identical to the direct label call in production, so removing it changed
-no live behavior. All six `needs-human` producer sites (`scheduler.mjs` / `monitor.mjs` /
+no live behavior. All six escalation producer sites (`scheduler.mjs` / `monitor.mjs` /
 `stale-pr-rescue-timer.mjs`) now call `labelNeedsHumanUnlessBeliefOwner` directly, as they did before
 CTL-1609 and as they always resolved to in production regardless.
 
@@ -759,7 +759,7 @@ reclaim storms). Three additive defenses:
   `orchDir/.runaway-alerts/`). Surfaces in HUD; does not quarantine.
 
 Enforcement reuses the sweep + breaker: a `stalled` signal makes `isTicketInFlight` drop the ticket;
-the terminal sweep applies `needs-human` via `labelOnce`.
+the terminal sweep publishes the escalation via `labelOnce`.
 
 A worker directory must not persist with zero phase signals (CAT-24). The shared stall-clear seam
 removes the directory when it deletes the last real signal — but only once `clearStalledLabel`
@@ -1106,27 +1106,36 @@ Every worker ticket has **two orthogonal axes** — never blurred:
 - **Axis 1 — Pipeline stage** (WHERE the ticket is in the pipeline): written through the single
   `applyPhaseStatus` chokepoint → Linear workflow Status, audited by `linear.state.write.<TICKET>`.
 - **Axis 2 — Worker disposition** (HOW the worker is doing): a single-valued workspace-scoped
-  `worker-status` Linear label group with four mutually exclusive values:
+  `worker-status` Linear label group with **three** mutually exclusive values:
 
   | Value         | Detection seam                                      | Cleared by                  |
   | ------------- | --------------------------------------------------- | --------------------------- |
   | `queued`      | converger (admission gate, tick-converged)          | pickup / Done               |
   | `blocked`     | converger (dependency not terminal, tick-converged) | dep becomes terminal / Done |
   | `needs-input` | daemon `handleCommentWake` (worker paused, CTL-768) | human reply                 |
-  | `needs-human` | `labelOnce` (sticky — NOT tick-converged)           | two paths — see below       |
 
-**Precedence** (only one label at a time): `needs-human > needs-input > blocked > queued > none`.
-`needs-human` is **sticky** — it is never included in `TICK_CONVERGED_DISPOSITIONS` and only cleared
-at explicit resolution, not on steady-state ticks.
+⛔ **CTL-2161 — the group lost its fourth member, `needs-human`.** It is deleted (CTL-2155 epic):
+across 86 items it flagged, 3 genuinely needed a person and 41 were the model provider being
+overloaded, escalated one ticket at a time. Its replacements are not worker-disposition labels at
+all — SYSTEM trouble raises ONE fleet-scoped, auto-clearing alert (CTL-2156) with zero per-ticket
+artifacts, and a genuine human question becomes ONE ask ticket carrying a `blocks` relation to the
+work it holds (CTL-2157). The three survivors are genuinely *worker* states, which is what this axis
+is for; `needs-human` never was.
 
-**Resolution-gated clearing — TWO removal paths for `needs-human` (Codex #2970 round 5).**
-Tick-converged labels (`queued`/`blocked`/`needs-input`) are re-derived on every tick and
-applied/removed on diff. `needs-human` is different: it is removed only by an explicit,
-confirmed-removal signal, and there are two of those, not one:
+**Precedence** (only one label at a time): `needs-input > blocked > queued > none`. All three are
+tick-converged (re-derived on every tick, applied/removed on diff). The sticky, `labelOnce`-applied
+member is gone with `needs-human` — but the `labelOnce` machinery and its on-disk once-marker are
+NOT: five retry loops read the publish result as their STOP, and `boot-resume` reads the marker to
+suppress auto-resume of a chronically failing ticket (CTL-2159).
+
+**Resolution-gated clearing — the TWO removal paths (Codex #2970 round 5).** Built for
+`needs-human`, they are deliberately retained after it: they are what clears the label off the ~69
+tickets that still wear it during the CTL-2160 migration, and deleting a clearer before the backlog
+is swept strands every one of them. The two confirmed-removal signals:
 
 1. **`clearStalledLabel`'s `onRemoved` callback**, fired only on a confirmed Linear label removal at
    scheduler-side resolution points (terminal-done-clear, terminal-sweep-clear, no-stall-clear).
-2. **The daemon's `handleCommentWake` needs-human clear** (CTL-1612/#2970) — a _write-gated_,
+2. **The daemon's `handleCommentWake` escalation clear** (CTL-1612/#2970) — a _write-gated_,
    _emission-carrying_ removal on a managed ticket's confirmed human reply. It calls `removeLabel`
    directly (not `clearStalledLabel`), only treats the removal as genuine when the call performed a
    real write (not a no-op re-check), emits the `worker.transition` clear itself
@@ -1161,10 +1170,10 @@ reasons, not one shared rationale:
   comment explains the bypass: "scheduler.mjs owns the park/apply emission; the clear is emitted
   here (the daemon removes the durable label out-of-band and redispatches — the scheduler never
   observes this edge)."
-- The **`needs-human` clear** runs once per comment-wake call, gated on positive human provenance
+- The **escalation clear** runs once per comment-wake call, gated on positive human provenance
   and a managed ticket — before any per-signal / worker-dir lookup, and with **no redispatch** in
   that block at all. It bypasses `recordTransition` for the same underlying reason (the scheduler's
-  own STICKY needs-human handling explicitly defers clearing to an external confirmed-removal
+  own STICKY escalation handling explicitly defers clearing to an external confirmed-removal
   signal, never clearing it itself on a steady-state admission pass), but the "redispatches" half of
   the quoted rationale above does not apply to this site.
 
@@ -1174,7 +1183,7 @@ Both are deliberate, self-documented second-producer sites, not a gap in the cho
 hung-worker escalation (`killHungWorker` in `watchdog-action.mjs`, invoked from `scheduler.mjs`'s
 progress-watchdog pass) does emit `phase.terminal.reap-requested` (via `emitReapIntent`, when
 `bgJobId` exists) for the kill/reap side of the sequence — that part of the path is observable. But
-it applies the `needs-human` label via `labelNeedsHumanUnlessBeliefOwner` (`label-guard.mjs`) and
+it publishes the escalation via the shared guard (`label-guard.mjs`) and
 never calls `recordTransition`, `appendWorkerTransitionEvent`, or any other `worker.transition`
 emitter anywhere in that path — a real Axis-2 transition with no `worker.transition` record. Unlike
 the daemon's comment-wake sites above, this is a genuine coverage gap in the transition stream
@@ -1394,7 +1403,7 @@ a revive, a resume, and a new-work pull).
   pass after deploy reads `absent` / `no-marker`. Do not alarm on `absent` until a full ticket has
   cycled.
 - **Scope**: only the terminal-**success** writers are stamped (plus the SDK backstop). The ~20
-  `stalled`/`failed`/`aborted`/`needs-human` writers are deliberately unstamped — those statuses are
+  `stalled`/`failed`/`aborted` writers are deliberately unstamped — those statuses are
   never advance-eligible (`deriveAdvancement` gates on `done`, or `skipped` for `monitor-deploy`
   only), so they can never be the `from` signal of an applied advance.
 
@@ -1438,7 +1447,7 @@ its own job needs nobody, and conflating them imports CTL-1850's false-page defe
   declared). `failed` is in `signal-reader.mjs`'s `TERMINAL` set, so reclaim short-circuits to
   `noop` and the terminal sweep routes through the CTL-1609 delegate-first path — identical to a
   plain abandonment, so no yield-expire-redispatch loop is constructible. Deliberately not
-  `stalled`, which routes to `needs-human` and would page an operator for every expired yield.
+  `stalled`, which routes to the escalation guard and would page an operator for every expired yield.
 - **Vocabulary collision**: CTL-615/CTL-702's `phase-*-yield-*.json` tombstones are an unrelated
   mechanism (a duplicate worker bowing out to the canonical one). A `grep` for "yield" returns both.
 

@@ -325,7 +325,7 @@ describe("describeOrNull", () => {
       event({
         id: "e",
         created_at: 1,
-        added_labels: [{ id: "l1", name: "needs-human", color: "#e36b6b" }],
+        added_labels: [{ id: "l1", name: "catalyst-ask", color: "#e36b6b" }],
       }),
     );
 

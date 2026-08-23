@@ -10,7 +10,7 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test fence-guard-integration.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -173,12 +173,18 @@ describe("defaultEscalate fence guard (site 10, CTL-863)", () => {
   beforeEach(() => { dir = makeTmpDir(); });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-  test("single-host (multiHost:false) skips fence check and applies label", () => {
+  // ⛔ CTL-2159: the observable is the ESCALATION, not the label — nothing writes
+  // the Linear `needs-human` label any more. `confirmed` + the once-marker are what
+  // the fence guard's callers actually consume (rescue.json.escalatedAt latches on
+  // `confirmed`), so they are what is asserted.
+  test("single-host (multiHost:false) skips fence check and PUBLISHES (no label written)", () => {
     let labelApplied = false;
     mkdirSync(join(dir, "workers", "CTL-10"), { recursive: true });
     const linearWrite = { applyLabel: () => { labelApplied = true; return { applied: true }; } };
-    defaultEscalate("CTL-10", {}, { orchDir: dir, linearWrite, multiHost: false });
-    expect(labelApplied).toBe(true);
+    const r = defaultEscalate("CTL-10", {}, { orchDir: dir, linearWrite, multiHost: false });
+    expect(r.confirmed).toBe(true);
+    expect(existsSync(join(dir, "workers", "CTL-10", ".linear-label-needs-human.applied"))).toBe(true);
+    expect(labelApplied).toBe(false);
   });
 
   // WATCH-ITEM (Codex follow-up): the escalation site is the ONE guarded write
@@ -186,12 +192,13 @@ describe("defaultEscalate fence guard (site 10, CTL-863)", () => {
   // needs-human escalation must NEVER be silently dropped just because a
   // generation can't be read. So a multi-host escalate with no signal file
   // (generation null) now LOUDLY applies the label rather than suppressing it.
-  test("multi-host + no signal file (missing generation) → label IS applied (fail-open, escalation never silently dropped)", () => {
+  test("multi-host + no signal file (missing generation) → escalation IS published (fail-open, never silently dropped)", () => {
     let labelApplied = false;
     mkdirSync(join(dir, "workers", "CTL-10"), { recursive: true });
     const linearWrite = { applyLabel: () => { labelApplied = true; return { applied: true }; } };
-    defaultEscalate("CTL-10", {}, { orchDir: dir, linearWrite, multiHost: true });
-    expect(labelApplied).toBe(true);
+    const r = defaultEscalate("CTL-10", {}, { orchDir: dir, linearWrite, multiHost: true });
+    expect(r.confirmed).toBe(true); // CTL-2159: the fail-open intent, label-free
+    expect(labelApplied).toBe(false);
   });
 
 });
@@ -337,8 +344,10 @@ describe("schedulerTick terminal probe fence guard (CTL-1329)", () => {
     const wdir = join(orchDir, "workers", "CTL-Y");
     const t1 = runTick(["host-A", "host-B"]);
     // The escalation went through (that is this PR's fail-open intent).
-    expect(t1.labels.filter((l) => l.ticket === "CTL-Y" && l.label === "needs-human").length)
-      .toBeGreaterThan(0);
+    // ⛔ CTL-2159: the observable moved from the Linear label to the host-local
+    // once-marker the publish writes — same event, no shared-quota API call.
+    expect(existsSync(join(wdir, ".linear-label-needs-human.applied"))).toBe(true);
+    expect(t1.labels.filter((l) => l.label === "needs-human")).toEqual([]);
     expect(existsSync(join(wdir, ".escalation-probe-cooldown"))).toBe(true);
     expect(existsSync(join(wdir, ".fence-suppressed"))).toBe(false);
     // ...and the burn bound the cooldown exists for still holds next tick.
@@ -410,7 +419,33 @@ describe("schedulerTick ctl-925 cycle escalation — HRW ownership gate", () => 
       claimDispatch: () => ({ won: true, generation: 1 }),
       now: () => 1_000,
     });
-    return labels.filter((l) => l.label === "needs-human").map((l) => l.ticket);
+    // ⛔ CTL-2159: "this host escalated this ticket" is now recorded by the
+    // host-local once-marker rather than by a Linear label write. The HRW
+    // ownership property under test is unchanged — the marker is per-orchDir,
+    // exactly as the caller's own comment about labelOnce markers assumes.
+    // ⛔ CTL-2159: "this host escalated this ticket" is no longer observable as a
+    // Linear label write. The durable record is the escalation signal the publish
+    // writes — `phase-recovery-pass.json` carrying the CTL-2158 `stallClass`.
+    //
+    // ⚠️ NOT the once-marker: a later clearer in the SAME tick deletes it (that
+    // clearer is what re-arms the retry budget and must not be removed), so a
+    // marker probe reads empty and looks like "this host did not escalate".
+    void labels;
+    let escalated = [];
+    try {
+      escalated = readdirSync(join(orchDir, "workers")).filter((t) => {
+        const sig = join(orchDir, "workers", t, "phase-recovery-pass.json");
+        if (!existsSync(sig)) return false;
+        try {
+          return typeof JSON.parse(readFileSync(sig, "utf8")).stallClass === "string";
+        } catch {
+          return false;
+        }
+      });
+    } catch {
+      escalated = [];
+    }
+    return escalated;
   }
 
   test("each cycle member is escalated by exactly ONE host — its HRW owner", () => {

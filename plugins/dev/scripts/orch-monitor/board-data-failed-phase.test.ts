@@ -1,8 +1,8 @@
 // CTL-1180: unit tests for the phaseFailed + escalationType inputs to
 // deriveAttention, the TERMINAL_FAILURE set, and the deriveEscalationType helper.
 // A self-emitted failed phase on a NOT-done ticket surfaces as
-// attention:"needs-human" — the same path stalled phases already take. A ticket
-// that failed but later genuinely shipped (Done) must never appear as needs-human
+// attention:"ask" — the same path stalled phases already take. A ticket
+// that failed but later genuinely shipped (Done) must never appear as ask
 // (false-positive guard). assembleBoard is not unit-testable (WORKERS_DIR is a
 // homedir const) — the call-site logic is covered here via the exported pure
 // functions it composes from.
@@ -26,7 +26,7 @@ describe("TERMINAL_FAILURE set (CTL-1180)", () => {
   it("contains 'stalled'", () => {
     expect(TERMINAL_FAILURE.has("stalled")).toBe(true);
   });
-  it("does not contain 'done' or 'skipped' (those are not needs-human)", () => {
+  it("does not contain 'done' or 'skipped' (those are not ask)", () => {
     expect(TERMINAL_FAILURE.has("done")).toBe(false);
     expect(TERMINAL_FAILURE.has("skipped")).toBe(false);
   });
@@ -39,14 +39,14 @@ describe("TERMINAL_FAILURE set (CTL-1180)", () => {
 // ── deriveAttention — phaseFailed + escalationType inputs ─────────────────────
 
 describe("deriveAttention — phaseFailed (CTL-1180)", () => {
-  it("phaseFailed:true → attention:'needs-human'", () => {
+  it("phaseFailed:true → attention:'ask'", () => {
     const r = deriveAttention({ phaseFailed: true });
-    expect(r.attention).toBe("needs-human");
+    expect(r.attention).toBe("ask");
   });
 
   it("phaseFailed:true + escalationType → both on the result", () => {
     const r = deriveAttention({ phaseFailed: true, escalationType: "authorization" });
-    expect(r.attention).toBe("needs-human");
+    expect(r.attention).toBe("ask");
     expect(r.escalationType).toBe("authorization");
   });
 
@@ -55,12 +55,12 @@ describe("deriveAttention — phaseFailed (CTL-1180)", () => {
     expect(r.attention).toBeNull();
   });
 
-  it("phaseFailed does not override needsHumanSince anchor (anchor precedence unchanged)", () => {
+  it("phaseFailed does not override escalationSince anchor (anchor precedence unchanged)", () => {
     const r = deriveAttention({
       phaseFailed: true,
-      needsHumanSince: "2026-06-15T10:00:00Z",
+      escalationSince: "2026-06-15T10:00:00Z",
     });
-    expect(r.attention).toBe("needs-human");
+    expect(r.attention).toBe("ask");
     expect(r.attentionSince).toBe("2026-06-15T10:00:00Z");
   });
 
@@ -72,16 +72,16 @@ describe("deriveAttention — phaseFailed (CTL-1180)", () => {
 
   it("phaseFailed:true wins over waiting-on-you (escalation precedence)", () => {
     const r = deriveAttention({ waitingOnUser: true, phaseFailed: true });
-    expect(r.attention).toBe("needs-human");
+    expect(r.attention).toBe("ask");
   });
 
   it("escalationType is null when not provided (not a failed-phase source)", () => {
-    const r = deriveAttention({ labels: ["needs-human"] });
+    const r = deriveAttention({ labels: ["catalyst-ask"] });
     expect(r.escalationType).toBeNull();
   });
 
   it("all three return branches include the escalationType key", () => {
-    const needs = deriveAttention({ labels: ["needs-human"] });
+    const needs = deriveAttention({ labels: ["catalyst-ask"] });
     const waiting = deriveAttention({ waitingOnUser: true });
     const none = deriveAttention({});
     expect("escalationType" in needs).toBe(true);
@@ -89,9 +89,9 @@ describe("deriveAttention — phaseFailed (CTL-1180)", () => {
     expect("escalationType" in none).toBe(true);
   });
 
-  it("existing needs-human label + phaseFailed both → still needs-human", () => {
-    const r = deriveAttention({ labels: ["needs-human"], phaseFailed: true });
-    expect(r.attention).toBe("needs-human");
+  it("existing ask label + phaseFailed both → still ask", () => {
+    const r = deriveAttention({ labels: ["catalyst-ask"], phaseFailed: true });
+    expect(r.attention).toBe("ask");
   });
 });
 

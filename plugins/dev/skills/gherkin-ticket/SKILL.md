@@ -161,14 +161,14 @@ Do not invent a scenario whose `Then` is "the code is cleaner".
 
 ```gherkin
 Scenario: A blocked worker surfaces in the assistance list
-  Given a phase worker has been waiting on a needs-human decision for 5 minutes
+  Given a phase worker has been waiting on an ask for 5 minutes
   When an operator opens the dashboard
   Then that worker appears in the "needs assistance" list
   And the list shows the ticket, the phase, and how long it has been waiting
 
 Scenario: A worker drops off the list once unblocked
   Given a worker is shown in the "needs assistance" list
-  When the operator resolves its needs-human decision
+  When the operator answers its ask
   Then the worker disappears from the list without a page reload
 ```
 

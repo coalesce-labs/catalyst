@@ -271,7 +271,7 @@ When referencing thoughts documents, always provide GitHub links:
 > ⛔ **`linearis issues discuss` posts AS THE HUMAN — do not use it for machine replies.** It
 > authenticates with the personal `lin_api_…` token, so the comment carries the human's identity —
 > and the ask-resolution gate (CTL-1567) reads a human-identity comment as *the human deciding* and
-> clears `needs-human`. An agent commenting that way can silently look like his decision.
+> clears the escalation hold. An agent commenting that way can silently look like his decision.
 >
 > Post machine replies through the app actor (`Catalyst Cloud`) instead, via
 > `linear-reply.mjs <TICKET-ID> --as <AGENT>` — the canonical copyable invocation is owned by

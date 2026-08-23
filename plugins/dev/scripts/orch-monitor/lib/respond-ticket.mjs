@@ -7,11 +7,14 @@
 //      input is durable — written as a `.respond-<phase>.json` artifact in the
 //      ticket's worker dir AND carried in the resume event's payload (the unified
 //      event log is the system-wide record).
-//   2. CLEAR the `needs-human` label + the `.linear-label-needs-human.applied`
-//      once-marker. This is the exact inverse of the daemon's labelOnce guard
-//      (execution-core/label-guard.mjs clearStalledLabel, CTL-646): the label is
-//      removed from Linear AND the marker deleted, together, so the daemon's apply
-//      guard re-arms and a stale-label / stale-marker split-brain can't form.
+//   2. CLEAR the host-local escalation once-marker, re-arming the daemon's
+//      labelOnce guard (execution-core/label-guard.mjs clearStalledLabel, CTL-646).
+//      ⛔ CTL-2161: this used to clear a `needs-human` LINEAR LABEL as well. That
+//      label is deleted (CTL-2155 epic) — of 86 items it flagged, 3 genuinely
+//      needed a person and 41 were the provider being overloaded. The MARKER half
+//      survives untouched, filename included: five retry loops read it as their
+//      STOP and boot-resume reads it to SUPPRESS auto-resume of a chronically
+//      failing ticket, so re-arming it is what lets an answered ticket move again.
 //   3. TRIGGER re-dispatch — CTL-876's resume loop. The daemon already resumes a
 //      parked (`status:"needs-input"`) worker on a `linear.comment.created` event
 //      for the ticket (execution-core/daemon.mjs handleCommentWake, CTL-549): it
@@ -57,14 +60,20 @@ import { nodeClass } from "./canonical-event-shared.ts";
 // The execution-core worker tree root — ~/catalyst/execution-core/workers/<T>/.
 // Byte-identical to ticket-runs.mjs::DEFAULT_WORKERS_DIR and board-data.mjs's
 // WORKERS_DIR (the on-disk home of both the phase-*.json signals AND the
-// .linear-label-needs-human.applied marker the daemon's labelOnce writes there).
+// escalation once-marker the daemon's labelOnce writes there).
 const HOME = homedir();
 const DEFAULT_WORKERS_DIR = join(HOME, "catalyst", "execution-core", "workers");
 
-// The held marker the daemon's labelOnce (label-guard.mjs) writes when it applies
-// the flat `needs-human` label. clearStalledLabel deletes BOTH this and the
-// `.skipped` sibling on a confirmed removal; we mirror that exactly.
-const NEEDS_HUMAN_LABEL = "needs-human";
+// ⛔ CTL-2161 — THE FILENAME IS DELIBERATELY UNCHANGED. This is the once-marker
+// the daemon's labelOnce (label-guard.mjs) writes when it publishes an escalation.
+// It is LIVE on-disk state on every host, with three readers outside this file
+// (boot-resume's auto-resume suppression, stall-janitor's GC, label-guard's own
+// guard). Renaming it here without migrating the files already on disk would make
+// every existing marker invisible — boot-resume would silently start auto-retrying
+// chronically-failing tickets, untested, which is exactly the CTL-1006 Scenario-4
+// invariant. The NAME below is honest about what it now means; the STRING is not
+// touched. Renaming the file itself belongs with a migration, not with this phase.
+const ESCALATION_MARKER_LABEL = "needs-human";
 
 // re-export the shared fence primitives so the endpoint + tests resolve one
 // fence implementation (DRY with BFF8 — never a second copy that can drift).
@@ -152,19 +161,17 @@ export function emitResumeEvent(
   return { path, event };
 }
 
-// ── clear the needs-human once-marker (re-arm labelOnce) ─────────────────────
-// clearNeedsHumanMarker — delete the `.linear-label-needs-human.{applied,skipped}`
-// once-marker(s) under the ticket's worker dir, re-arming the daemon's labelOnce
-// guard. Mirrors label-guard.mjs::clearStalledLabel's marker half exactly.
-// CTL-1552: the daemon's handleCommentWake now clears the Linear LABEL **and**
-// its once-marker TOGETHER (via clearStalledLabel) — it is no longer a deliberate
-// split where this endpoint owned the marker and the daemon owned the label. This
-// call is now a safe idempotent RE-ARM: if the daemon already cleared both halves
-// the marker is already gone (no-op); if this races ahead, re-arming the apply is
-// the safe direction (the daemon re-applies if the label is still genuinely held).
+// ── clear the escalation once-marker (re-arm labelOnce) ──────────────────────
+// clearEscalationMarker — delete the `.{applied,skipped}` once-marker(s) under the
+// ticket's worker dir, re-arming the daemon's labelOnce guard. Mirrors
+// label-guard.mjs::clearStalledLabel's marker half exactly.
+// CTL-1552/CTL-2161: the daemon's handleCommentWake clears the marker on the same
+// authorization this endpoint runs under. This call is a safe idempotent RE-ARM:
+// if the daemon already cleared it the marker is gone (no-op); if this races
+// ahead, re-arming the apply is the safe direction.
 // Best-effort, never throws. Returns the list of markers actually removed.
-export function clearNeedsHumanMarker(
-  { ticket, label = NEEDS_HUMAN_LABEL },
+export function clearEscalationMarker(
+  { ticket, label = ESCALATION_MARKER_LABEL },
   { workersDir = DEFAULT_WORKERS_DIR, rm = unlinkSync } = {},
 ) {
   const base = join(workersDir, ticket, `.linear-label-${label}`);
@@ -211,7 +218,7 @@ export function recordResponse(
 // ── find the held run for a ticket ───────────────────────────────────────────
 // findHeldRun — scan the ticket's worker dir for the phase signal that is held
 // awaiting an operator: parked for input (status "needs-input") OR a stalled
-// escalation (status "stalled") the daemon flagged needs-human (CTL-1067).
+// escalation (status "stalled") the daemon published (CTL-1067).
 // Returns { phase, signal } for the first held run in PHASE_ORDER, or null.
 export function findHeldRun(
   ticket,
@@ -275,7 +282,7 @@ export function respondTicket(
     findHeld = findHeldRun,
     fenceCheck = runFenceCheck,
     record = recordResponse,
-    clearMarker = clearNeedsHumanMarker,
+    clearMarker = clearEscalationMarker,
     emit = emitResumeEvent,
   } = {},
 ) {
@@ -307,7 +314,7 @@ export function respondTicket(
   }
 
   // Fence current (or single-host no-op): mutate. Record the human's response,
-  // clear the needs-human marker (re-arm the daemon's apply guard), then emit the
+  // clear the escalation marker (re-arm the daemon's apply guard), then emit the
   // resume event that drives CTL-876's loop (handleCommentWake re-dispatches).
   record({ ticket, phase, response });
   clearMarker({ ticket });

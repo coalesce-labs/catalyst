@@ -26,6 +26,13 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
+// CTL-2158: classify the stall and stamp "an escalation was published" so the
+// unstuck sweep's quiet-gate no longer needs the reason token.
+import {
+  classifyStall,
+  stallClassSignalFields,
+  ESCALATION_PUBLISHED_FIELD,
+} from "./stall-class.mjs";
 import {
   YIELDED_STATUS,
   YIELD_EXPIRED_REASON,
@@ -1775,7 +1782,7 @@ export function defaultReviveDispatch(
 //     even if labelOnce keeps retrying the write, the cool-down suppresses
 //     the audit-event + label-call pair entirely so the scheduler's own
 //     event-log fast path stops self-feeding.
-function defaultApplyStalledLabel({ orchDir, ticket }) {
+function defaultApplyStalledLabel({ orchDir, ticket, reason = null, explanation = null }) {
   return labelNeedsHumanUnlessBeliefOwner(
     orchDir,
     ticket,
@@ -1784,6 +1791,13 @@ function defaultApplyStalledLabel({ orchDir, ticket }) {
       env: process.env,
       site: "recovery-stalled",
       log: { info: () => {} },
+      // ⛔ CTL-2159: forward the reason and the explanation. This is the recovery
+      // sweep's escalation — the highest-volume ASK-or-SYSTEM decision in the
+      // system — and with no reason the CTL-2158 classifier correctly answers
+      // HELD for every one of them, which would leave the SYSTEM retry path and
+      // the ASK path both permanently dark while every test still passed.
+      reason,
+      explanation: explanation ?? undefined,
     }
   );
 }
@@ -2216,6 +2230,14 @@ function markEscalationCapTerminal({ orchDir, ticket, phase, explanation, stalle
     sig.status = "stalled";
     sig.stalledReason = stalledReason;
     sig.explanation = explanation;
+    // CTL-2158 — OUTPUT RE-TARGET. Additive: status/stalledReason unchanged.
+    Object.assign(
+      sig,
+      stallClassSignalFields(
+        classifyStall({ reason: stalledReason, signal: sig, explanation, site: "escalation-cap-terminal" }),
+      ),
+    );
+    sig[ESCALATION_PUBLISHED_FIELD] = true;
     if (!sig.needsHumanSince) sig.needsHumanSince = new Date().toISOString();
     sig.updatedAt = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
     const tmp = `${signalPath}.tmp.${process.pid}`;
@@ -3134,7 +3156,7 @@ export function reclaimDeadWorkIfPossible(
     // 10-min cooldown on confirmed-or-unrecoverable so a transient 429 leaves the
     // retry window open. The .applied/.skipped markers written by labelOnce let us
     // classify the outcome without repeating the API call.
-    const labelConfirmed = applyStalledLabel({ orchDir, ticket });
+    const labelConfirmed = applyStalledLabel({ orchDir, ticket, reason, explanation });
     const markerBase = labelMarkerBase(orchDir, ticket, "needs-human");
     const labelApplied = labelConfirmed || existsSync(`${markerBase}.applied`);
     const labelUnrecoverable = existsSync(`${markerBase}.skipped`);
