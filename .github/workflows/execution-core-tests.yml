@@ -687,6 +687,33 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash lib/__tests__/cluster-fence-guard.test.sh
 
+      - name: handoff-durability write-then-cite unit tests (CTL-2104)
+        # ⛔ PINNED BECAUSE IT WAS NOT. lib/handoff-durability.sh is the entire
+        # runtime half of CTL-2104 — the mechanical stamp, the absolute-realpath
+        # resolution through the per-project thoughts/shared symlink, the
+        # read-back after install, and the five-valued sync verdict. Its own
+        # suite is the ONLY coverage for any of that. The ticket pinned its
+        # sibling shape suite in skills-gate.yml but not this one, and this job
+        # runs an ENUMERATED list of shell suites — there is no glob runner and
+        # no run-tests.sh here (see the note at the catalyst-account-usage-page
+        # step) — so the suite would have run only in the local full gate.
+        #
+        # Verified before adding this step: `grep -rn handoff-durability
+        # .github/workflows/` returned NOTHING. The same grep for
+        # `handoff-contract` returns skills-gate.yml's line — that is the
+        # SHAPE suite over the prose skills, not this one — and the same grep
+        # for `cluster-fence-guard.test.sh` (right above, same lib/__tests__
+        # directory) returns its own run line. Both are positive controls that
+        # the instrument reports a pin when a pin exists.
+        #
+        # What it guards: a false `synced` verdict, which is exactly the claim
+        # that made six real handoff files look like phantoms. Case 5 is a
+        # positive control that `synced` is reachable at all, so a suite that
+        # could only ever return local-only cannot pass vacuously.
+        # Measured 22 pass / 0 fail.
+        working-directory: plugins/dev/scripts
+        run: bash lib/__tests__/handoff-durability.test.sh
+
       - name: worktree-salvage destroy-site wiring tests (CTL-1639)
         # Deterministic source-order invariant: each destructive bash site
         # (phase-agent-dispatch L3, orphan-sweep, phase-teardown SKILL.md) must
