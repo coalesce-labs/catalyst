@@ -20,7 +20,7 @@ import type {
   TicketDiscussion,
 } from "../../../lib/ticket-discussion-reader.mjs";
 
-export type { TicketActivityEvent, TicketComment, TicketDiscussion };
+export type { TicketActivityEvent, TicketComment };
 
 export interface TicketDiscussionState {
   /** false when the replica could not be read OR the ticket is not mirrored. */

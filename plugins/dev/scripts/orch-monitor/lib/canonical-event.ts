@@ -29,15 +29,11 @@ import { classifyEventStream } from "../../lib/event-stream-class.mjs";
 
 export {
   type Severity,
-  SEVERITY_NUMBERS,
-  sha256Hex,
   severityNumber,
   deriveTraceId,
   deriveSpanId,
   generateEventId,
   synthesizeEventId,
-  hostName,
-  hostId,
 } from "./canonical-event-shared";
 
 export interface Resource {

@@ -419,6 +419,3 @@ export function SlotDeck({
     </section>
   );
 }
-
-// Re-export so a caller that only needs the live-worker predicate doesn't re-derive it.
-export { isLiveWorker };
