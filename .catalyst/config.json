@@ -84,6 +84,22 @@
           "label": null,
           "priority": null
         }
+      },
+      "phaseAgents": {
+        "models": {
+          "triage": "sonnet",
+          "research": "sonnet",
+          "plan": "sonnet",
+          "implement": "opus",
+          "verify": "sonnet",
+          "review": "sonnet",
+          "pr": "sonnet",
+          "remediate": "sonnet",
+          "monitor-merge": "sonnet",
+          "monitor-deploy": "sonnet",
+          "teardown": "sonnet"
+        },
+        "modelOverrides": {}
       }
     },
     "feedback": {
