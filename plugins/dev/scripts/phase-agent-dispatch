@@ -130,7 +130,7 @@ die() {
 # ─── Defaults ───────────────────────────────────────────────────────────────
 
 # Hardcoded fallbacks used only when neither CLI flag nor config sets them.
-DEFAULT_MODEL="opus"
+DEFAULT_MODEL="sonnet"
 DEFAULT_TURN_CAP=50
 
 # Per-phase default turn caps (mirrors plan §Initiative 1 Phase 6 config block).
