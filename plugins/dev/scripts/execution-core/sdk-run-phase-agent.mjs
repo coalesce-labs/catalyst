@@ -1293,12 +1293,44 @@ export async function sdkRunPhaseAgent(
   } catch {
     /* best-effort — an unusable process table just means no discovery */
   }
-  // ONE-SHOT per run (not per streamed message, and not per 429 retry attempt):
-  // `lsof` is not a per-message cost, and the projection field is durable.
+  // ONE-SHOT per ATTEMPT (not per streamed message): `lsof` is not a per-message
+  // cost, and the projection field is durable. Re-armed on every 429/529 retry —
+  // see the re-arm block at the top of the loop.
   let childPidResolved = false;
   try {
     let lastOverload = null;
     for (let i = 0; i <= maxRetries; i++) {
+      // CTL-2192 (Codex #3955 P1): a 429/529 retry spawns a REPLACEMENT SDK
+      // subprocess, so everything the previous attempt discovered is now stale.
+      // Without this re-arm the run-wide latch kept discovery from running again
+      // and the projection retained attempt N-1's EXITED pid; a daemon bounce
+      // during attempt N then read `orphan-child-dead` (branch 5) for a ticket
+      // whose child is alive, and boot reconciliation dispatched a new generation
+      // beside a surviving orphan — the concurrent-worker failure this ticket
+      // exists to close, reintroduced by the retry path.
+      //
+      // Order matters: CLEAR first, snapshot second. The clear returns the record
+      // to `unknown` (never `dead` — see clearChildPid), so the window between the
+      // stale pid and the replacement's discovery is honestly inconclusive rather
+      // than confidently wrong.
+      if (i > 0) {
+        childPidResolved = false;
+        try {
+          reg.clearChildPid?.(); // optional-chained: Phase B test fakes lack it
+        } catch {
+          /* best-effort — a projection write failure must not abort the retry */
+        }
+        // Re-snapshot BEFORE the replacement launches, so the diff attributes this
+        // attempt's child and not the previous one. The prior child is either still
+        // present (→ lands in `before`, excluded from `fresh`) or already gone (→
+        // never in `after`); either way it cannot be mistaken for the replacement.
+        // ⛔ `null` on failure, never `[]` — same contract as the initial snapshot.
+        try {
+          childPidsBefore = listChildPids(process.pid);
+        } catch {
+          childPidsBefore = null;
+        }
+      }
       const ac = new AbortController();
       // Phase B: expose the per-attempt controller so cancel/abort (preemption,
       // watchdog) can reach the live query; a pending abort fires immediately.

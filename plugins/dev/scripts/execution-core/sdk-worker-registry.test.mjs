@@ -503,6 +503,53 @@ describe("codex child pid + orphan reap (CTL-1457 N2)", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  // CTL-2192 (Codex #3955 P1): the runner's 429/529 re-arm needs a way to say
+  // "this pid is stale and I do not yet know the replacement's" WITHOUT landing
+  // in the `dead` bucket.
+  test("clearChildPid returns the record to UNRESOLVED — unknown, never dead", () => {
+    const dir = freshDir();
+    const h = registerSdkWorker(entry(dir, {}));
+    h.setChildPid(44444);
+    expect(readProjection(dir, "CTL-1").childPid).toBe(44444);
+    expect(readProjection(dir, "CTL-1").childPidResolved).toBe(true);
+
+    h.clearChildPid();
+    const proj = readProjection(dir, "CTL-1");
+    expect(proj.childPid).toBe(null);
+    // ⛔ The whole point: `false`, not `true`. setChildPid(null) would leave this
+    // true, which classifySdkWorkerLiveness branch 6 reads as DEAD.
+    expect(proj.childPidResolved).toBe(false);
+    expect(sdkWorkerForTicket("CTL-1").childPid).toBe(null);
+
+    // Prove the VERDICT, not just the field: with the daemon gone, the cleared
+    // record must classify UNKNOWN. Were it `dead`, boot reconciliation would
+    // dispatch a new generation beside the live retry child.
+    //
+    // Classify the REAL writer's bytes, not a hand-authored fixture: capture the
+    // projection clearChildPid just wrote, drop same-daemon authority (deregister
+    // both forgets _live AND unlinks the file, so the disk read would otherwise
+    // answer `no-projection`), then restore those exact bytes.
+    const clearedBytes = readFileSync(join(dir, ".sdk-workers", "CTL-1.json"), "utf8");
+    h.deregister();
+    writeFileSync(join(dir, ".sdk-workers", "CTL-1.json"), clearedBytes);
+    const v = classifySdkWorkerLiveness(dir, "CTL-1", { pidAlive: () => false, selfPid: 4242 });
+    expect(v.state).toBe("unknown");
+    expect(v.reason).toBe("legacy-projection-no-child-record");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a superseded handle's clearChildPid does not clobber the successor (token fence)", () => {
+    const dir = freshDir();
+    const hOld = registerSdkWorker(entry(dir, { generation: 1 }));
+    const hNew = registerSdkWorker(entry(dir, { generation: 2 }));
+    hNew.setChildPid(55555);
+    hOld.clearChildPid(); // superseded — must be a no-op
+    expect(readProjection(dir, "CTL-1").childPid).toBe(55555);
+    expect(readProjection(dir, "CTL-1").childPidResolved).toBe(true);
+    hNew.deregister();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   test("a superseded handle's setChildPid does not clobber the successor (token fence)", () => {
     const dir = freshDir();
     const hOld = registerSdkWorker(entry(dir, { generation: 1, executor: "codex-exec" }));

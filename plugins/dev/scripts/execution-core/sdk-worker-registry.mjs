@@ -243,6 +243,24 @@ export function registerSdkWorker(
       entry.updatedAt = entry.now();
       writeProjection(entry);
     },
+    // CTL-2192 (Codex #3955 P1): return the child record to UNRESOLVED — the state
+    // registerWorker starts in, which classifySdkWorkerLiveness reads as `unknown`
+    // (branch 7), never `dead`. This is NOT setChildPid(null): that one asserts "we
+    // looked and there is no child" and lands in branch 6 (DEAD).
+    //
+    // The caller is the runner's 429/529 retry, where the previous attempt's child
+    // has exited and a replacement is about to spawn. Leaving the dead pid stamped
+    // makes branch 5 answer `orphan-child-dead` for a ticket whose replacement child
+    // is alive, so a daemon bounce mid-retry lets boot reconciliation dispatch a new
+    // generation beside a surviving orphan — the exact concurrent-worker failure this
+    // ticket exists to close. Unknown is the honest verdict for the retry window.
+    clearChildPid() {
+      if (_live.get(ticket)?.token !== entry.token) return;
+      entry.childPid = null;
+      entry.childPidResolved = false;
+      entry.updatedAt = entry.now();
+      writeProjection(entry);
+    },
     deregister() {
       const current = _live.get(ticket);
       if (current?.token !== entry.token) return; // superseded by a resume re-register

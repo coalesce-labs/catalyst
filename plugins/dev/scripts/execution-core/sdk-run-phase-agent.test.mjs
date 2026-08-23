@@ -779,14 +779,19 @@ describe("sdkRunPhaseAgent — 429/529 backoff", () => {
         n === "execution-core.sdk.phase-turns" ||
         // CTL-2192: this test injects no process-table probes, so the real ones
         // run against the bun test process and the child-pid scan may legitimately
-        // conclude nothing. At most ONE such breadcrumb per run (the discovery is
-        // one-shot), asserted below.
+        // conclude nothing. At most ONE such breadcrumb per ATTEMPT (the discovery
+        // is one-shot per attempt, re-armed on each 429/529 retry), asserted below.
         n === "execution-core.sdk.child-pid-inconclusive",
       ),
     ).toBe(true);
+    // CTL-2192 (Codex #3955 P1): the bound is per-ATTEMPT, not per-run. Discovery
+    // is deliberately re-armed on every retry — a replacement subprocess needs its
+    // own scan — so 3 attempts may produce up to 3 breadcrumbs. What must still
+    // hold is that it never fires per streamed message: `attempt` is the number of
+    // query() launches, so this bound fails the moment discovery re-runs inside one.
     expect(
       events.filter(([n]) => n === "execution-core.sdk.child-pid-inconclusive").length,
-    ).toBeLessThanOrEqual(1);
+    ).toBeLessThanOrEqual(attempt);
     expect(backstops.length).toBe(0); // success → no backstop
   });
 
@@ -2502,7 +2507,7 @@ describe("sdkRunPhaseAgent — CTL-2192 preemption abort", () => {
 
 describe("sdkRunPhaseAgent — CTL-2192 child-pid discovery", () => {
   const childPidRegistry = () => {
-    const state = { registered: [], childPids: [], resolvedCalls: 0 };
+    const state = { registered: [], childPids: [], resolvedCalls: 0, clears: 0 };
     const registerWorker = (entry) => {
       state.registered.push(entry);
       return {
@@ -2512,6 +2517,11 @@ describe("sdkRunPhaseAgent — CTL-2192 child-pid discovery", () => {
         setChildPid(pid) {
           state.childPids.push(pid);
           state.resolvedCalls += 1;
+        },
+        // CTL-2192 (Codex #3955 P1): the retry re-arm calls this before the
+        // replacement child spawns.
+        clearChildPid() {
+          state.clears += 1;
         },
         deregister() {},
       };
@@ -2617,7 +2627,13 @@ describe("sdkRunPhaseAgent — CTL-2192 child-pid discovery", () => {
     expect(r.code).toBe(0);
   });
 
-  test("discovery does not re-run across a 429 retry (still exactly one stamp)", async () => {
+  // CTL-2192 (Codex #3955 P1). This pair replaces an earlier test that asserted
+  // discovery does NOT re-run across a retry — that was the defect, not the
+  // contract. A 429/529 retry spawns a REPLACEMENT subprocess, so the previous
+  // attempt's pid is dead; leaving it stamped makes classifySdkWorkerLiveness
+  // answer `orphan-child-dead` (branch 5) for a ticket whose child is alive, and
+  // boot reconciliation then dispatches a new generation beside a live orphan.
+  test("discovery RE-RUNS across a 429 retry and stamps the replacement child's pid", async () => {
     const { spawn } = spawnReturningSpec();
     const { registerWorker, state } = childPidRegistry();
     let attempt = 0;
@@ -2629,6 +2645,11 @@ describe("sdkRunPhaseAgent — CTL-2192 child-pid discovery", () => {
         yield i === 0 ? resultMsg({ subtype: "error", is_error: true, api_error_status: 529 }) : resultMsg();
       })();
     };
+    // Four snapshots, in call order: attempt-0 before, attempt-0 after,
+    // attempt-1 before (4242 has exited), attempt-1 after (5353 is the
+    // replacement). 4242 must NOT be re-attributed to attempt 1.
+    const snapshots = [[11], [11, 4242], [11], [11, 5353]];
+    let n = 0;
     const r = await sdkRunPhaseAgent(ARGS, {
       ...GOOD_AUTH,
       spawn,
@@ -2636,14 +2657,83 @@ describe("sdkRunPhaseAgent — CTL-2192 child-pid discovery", () => {
       registerWorker,
       sleep: async () => {},
       backoff: { baseMs: 1, capMs: 2 },
-      listChildPids: (() => {
-        let n = 0;
-        return () => (n++ === 0 ? [11] : [11, 4242]);
-      })(),
+      listChildPids: () => snapshots[n++] ?? [11],
+      cwdOfPid: (pid) => (pid === 4242 || pid === 5353 ? "/wt/CTL-100" : "/elsewhere"),
+    });
+    expect(r.code).toBe(0);
+    // ONE stamp per ATTEMPT (still not per streamed message), and the second
+    // names the replacement — never the exited first attempt's pid.
+    expect(state.resolvedCalls).toBe(2);
+    expect(state.childPids).toEqual([4242, 5353]);
+    // The stale pid was invalidated BEFORE the replacement was discovered, so the
+    // retry window reads `unknown` rather than a confidently-wrong dead pid.
+    expect(state.clears).toBe(1);
+  });
+
+  test("a retry whose discovery is INCONCLUSIVE still clears the previous attempt's stale pid", async () => {
+    // The fail direction that matters: we could not identify the replacement, so
+    // nothing is stamped — but the dead pid from attempt 0 must not survive as a
+    // `dead` verdict. Clear-then-discover leaves the record UNRESOLVED (unknown).
+    const { spawn } = spawnReturningSpec();
+    const { registerWorker, state } = childPidRegistry();
+    let attempt = 0;
+    const runQuery = () => {
+      const i = attempt++;
+      return (async function* () {
+        yield { type: "assistant", message: {} };
+        yield i === 0 ? resultMsg({ subtype: "error", is_error: true, api_error_status: 529 }) : resultMsg();
+      })();
+    };
+    // attempt-1's BEFORE snapshot returns null — `ps` failed, which
+    // discoverSdkChildPid reports as the inconclusive `before-unavailable`.
+    const snapshots = [[11], [11, 4242], null, [11, 5353]];
+    let n = 0;
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH,
+      spawn,
+      runQuery,
+      registerWorker,
+      sleep: async () => {},
+      backoff: { baseMs: 1, capMs: 2 },
+      listChildPids: () => (n < snapshots.length ? snapshots[n++] : [11]),
+      cwdOfPid: (pid) => (pid === 4242 || pid === 5353 ? "/wt/CTL-100" : "/elsewhere"),
+    });
+    expect(r.code).toBe(0);
+    expect(state.clears).toBe(1);
+    // Only attempt 0 stamped; the inconclusive retry deliberately did not.
+    expect(state.childPids).toEqual([4242]);
+  });
+
+  test("a registry handle with NO clearChildPid (older fake) survives a retry", async () => {
+    // Same optional-chaining contract setChildPid already carries: an older test
+    // double must not turn a retry into a crash.
+    const { spawn } = spawnReturningSpec();
+    const registerWorker = () => ({
+      setAbortController() {},
+      touch() {},
+      setSessionId() {},
+      setChildPid() {},
+      deregister() {},
+    });
+    let attempt = 0;
+    const runQuery = () => {
+      const i = attempt++;
+      return (async function* () {
+        yield { type: "assistant", message: {} };
+        yield i === 0 ? resultMsg({ subtype: "error", is_error: true, api_error_status: 529 }) : resultMsg();
+      })();
+    };
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH,
+      spawn,
+      runQuery,
+      registerWorker,
+      sleep: async () => {},
+      backoff: { baseMs: 1, capMs: 2 },
+      listChildPids: () => [11],
       cwdOfPid: () => "/wt/CTL-100",
     });
     expect(r.code).toBe(0);
-    expect(state.resolvedCalls).toBe(1);
   });
 });
 
