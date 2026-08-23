@@ -177,6 +177,8 @@ import { listProjects } from "./registry.mjs";
 // is no bun: protocol anywhere in its graph (asserted in config-dump.test.mjs).
 // Read-only and advisory: nothing in this module can change a grade to FAIL.
 import { collectConfigDump } from "./config-dump.mjs";
+import { probePublishCapability, resolvePushRemote } from "./publish-preflight.mjs"; // CAT-60: worker write-capability gate
+import { resolvePublishPreflightMode } from "./config.mjs";
 
 // readLinearBotUserIds — inlined from daemon.mjs to avoid pulling in the full
 // daemon dependency chain (which includes bun: protocol imports incompatible
@@ -250,6 +252,46 @@ export { checkLinearWriteBudget };
 export { checkAgentToolsWritePath };
 export { checkExecutionCoreEnvDrift };
 export { checkIndexServingRoot };
+
+// checkRepoPushPermission — CAT-60. Grade the worker's ability to publish to
+// its resolved write remote independently of scheduler dispatch. Only a
+// definitive denial can fail; operational uncertainty is always informational.
+export function checkRepoPushPermission(deps = {}) {
+  const {
+    repoRoot = process.cwd(),
+    pushRemote,
+    configPath = process.env.CATALYST_CONFIG_FILE || layer1Path(),
+    layer2ConfigPath = layer2Path(),
+    env = process.env,
+    cacheDir = resolve(getExecutionCoreDir(), ".publish-preflight"),
+    probe = probePublishCapability,
+    resolveMode = resolvePublishPreflightMode,
+    now,
+    spawn,
+  } = deps;
+  const resolvedPushRemote = pushRemote ?? resolvePushRemote({ repoRoot, env, layer1Path: configPath, layer2Path: layer2ConfigPath, spawn });
+  let mode;
+  try { mode = resolveMode({ env, configPath }); } catch { mode = "shadow"; }
+  if (mode === "off") {
+    return [mkCheck("repo-push-permission", STATUS.INFO, "publish preflight is off — push permission not checked")];
+  }
+  let verdict;
+  try { verdict = probe({ repoRoot, pushRemote: resolvedPushRemote, env, cacheDir, now, spawn }); }
+  catch (err) {
+    verdict = { state: "unknown", detail: err?.message ?? "publish probe threw" };
+  }
+  const target = `${verdict?.slug ?? "the configured repository"} via ${resolvedPushRemote}`;
+  const identity = verdict?.login ? ` for ${verdict.login}` : "";
+  const cached = verdict?.cached ? " (cached)" : "";
+  if (verdict?.state === "allowed") {
+    return [mkCheck("repo-push-permission", STATUS.PASS, `publish push permission allowed on ${target}${identity}${cached}`)];
+  }
+  if (verdict?.state === "denied") {
+    const status = mode === "enforce" ? STATUS.FAIL : STATUS.WARN;
+    return [mkCheck("repo-push-permission", status, `publish push permission denied on ${target}${identity} (${mode})${cached}`)];
+  }
+  return [mkCheck("repo-push-permission", STATUS.INFO, `publish push permission could not be determined for ${target}: ${verdict?.detail ?? "unknown"}${cached}`)];
+}
 
 // ─── CTL-1616 PR2/PR3: secret-contract observability (zero grade change) ─────
 //
@@ -6534,6 +6576,86 @@ export function checkSkillsDirPlugins(deps = {}) {
   ];
 }
 
+// checkGithubFeedReaderConsistency — CTL-2011 (AC1, AC2). Detects when
+// execution-core.env carries a CATALYST_GITHUB_FEED pin that the broker/orch-monitor
+// don't see, splitting the four readers into two authority regimes. Worker-class only
+// (matches checkWebhookIngestion). Injectable for unit tests.
+//
+// Execution-core view: overlay the env file's exported CATALYST_GITHUB_FEED pin onto
+// the ambient env — identical to what the daemon resolver sees after the launcher
+// sources the file. Broker/monitor view: strip the pin entirely (only Layer-2 applies).
+// Compare the two resolved modes; FAIL on disagreement. PASS on agreement. WARN when
+// the env file is unreadable for a non-ENOENT reason (cannot compute exec-core view).
+export function checkGithubFeedReaderConsistency(deps = {}) {
+  const {
+    resolveGithubFeedModeFn = resolveGithubFeedMode,
+    execCoreEnvPath = defaultExecCoreEnvPath(),
+    readEnvFileFn = (p) => {
+      try {
+        return readFileSync(p, "utf8");
+      } catch (err) {
+        if (err?.code === "ENOENT") return ""; // absent → no pin → valid agree case
+        throw err; // non-ENOENT → INCONCLUSIVE
+      }
+    },
+    env = process.env,
+  } = deps;
+
+  let envFileText;
+  try {
+    envFileText = readEnvFileFn(execCoreEnvPath);
+  } catch (err) {
+    if (err?.code === "ENOENT") {
+      // Absent file → no pin; both views fall through to Layer-2/default. Valid agree case.
+      envFileText = "";
+    } else {
+      return [
+        mkCheck(
+          "github-feed-reader-consistency",
+          STATUS.WARN,
+          `could not read execution-core.env (${err?.message ?? String(err)}) — cannot compare reader resolutions`,
+        ),
+      ];
+    }
+  }
+
+  // Build exec-core effective env: lift the CATALYST_GITHUB_FEED pin from the file
+  // (if any exported assignment is present) and overlay it on the ambient env.
+  const pin = parseEnvFileFlag(
+    envFileText,
+    /^\s*(?:export\s+)?CATALYST_GITHUB_FEED=["']?([^"'\s]+)/m,
+  );
+  const execCoreEnv = pin !== null ? { ...env, CATALYST_GITHUB_FEED: pin } : { ...env };
+  const execCoreResult = resolveGithubFeedModeFn({ env: execCoreEnv });
+
+  // Broker/monitor view: strip the env pin so only Layer-2 (or default) applies.
+  // The broker inherits the ambient env but never sources execution-core.env.
+  const { CATALYST_GITHUB_FEED: _gf, CATALYST_GITHUB_FEED_INTERVAL_SEC: _gfi, ...strippedEnv } =
+    { ...env };
+  const brokerResult = resolveGithubFeedModeFn({ env: strippedEnv });
+
+  if (execCoreResult.mode !== brokerResult.mode) {
+    return [
+      mkCheck(
+        "github-feed-reader-consistency",
+        STATUS.FAIL,
+        `readers disagree: execution-core resolves "${execCoreResult.mode}" ` +
+          `(source=${execCoreResult.source}, from ${execCoreEnvPath}) while ` +
+          `broker/orch-monitor resolve "${brokerResult.mode}" (source=${brokerResult.source}) — ` +
+          `smee is suppressed while the producer emits markers; total loss for suppressible github.* names`,
+      ),
+    ];
+  }
+  return [
+    mkCheck(
+      "github-feed-reader-consistency",
+      STATUS.PASS,
+      `readers agree: both resolve "${execCoreResult.mode}" ` +
+        `(exec-core source=${execCoreResult.source}, broker source=${brokerResult.source})`,
+    ),
+  ];
+}
+
 // ─── Suite selection ─────────────────────────────────────────────────────────
 
 // checksForClass — build the check-thunk suite for a resolved node class. This is
@@ -6563,6 +6685,13 @@ export function checksForClass(nc, opts = {}) {
     hasStackAgent,
     hasUpdaterAgent,
     pluginPullOwner,
+    repoRoot,
+    pushRemote,
+    publishProbe,
+    publishPreflightMode,
+    publishCacheDir,
+    publishNow,
+    publishSpawn,
     // CTL-1473: pre-install flag downgrades install-remediable checks (shipper, agents-for-class)
     // from FAIL to WARN when the join gate runs BEFORE install-services (which creates the services).
     preinstall = !!process.env.CATALYST_DOCTOR_PREINSTALL,
@@ -6768,6 +6897,7 @@ export function checksForClass(nc, opts = {}) {
     staleLockThunk, // CTL-1415: a stale plugin-source index.lock silently freezes the broker's pulls
     skillsDirPluginsThunk, // skills-dir migration: catalyst loads in-place via ~/.claude/skills; no marketplace/wrapper residue (FAIL on a worker)
     () => checkWebhookIngestion(), // CTL-1284: multiHost member ingests webhooks; single-host does not
+    () => checkGithubFeedReaderConsistency(), // CTL-2011: execution-core.env pin vs broker/monitor view — FAILs on disagreement
     () => checkThoughts(), // CTL-1293: member thoughts repo provisioned + non-foreign primary
     () => checkClaudeSettings(), // CTL-1231: member settings.json pins host identity + OTLP endpoint
     () => checkReaper(), // CTL-1306: orphan-sweep reaper installed + baked path still exists (not dead-127)
@@ -6784,6 +6914,15 @@ export function checksForClass(nc, opts = {}) {
     () => checkSdkDaemonEnv(), // CTL-1396 item A: under executor=sdk, the RUNNING daemon's process env must carry CLAUDE_CODE_OAUTH_TOKEN (not just the operator shell) + surface recent silent sdk→bg degrades
     () => checkConfigScopeLeak(), // CTL-1214: committed Layer-1 .catalyst/config.json must not carry node/cluster scope (roster/orchestration/feedback/sweep/repoColors/hosts.json)
     () => checkRepoIconTokenScope(), // CTL-1375: monitor daemon's gh token can read configured private repos' contents (else favicons fall back to the org avatar) — advisory (never FAIL)
+    () => checkRepoPushPermission({
+      repoRoot,
+      pushRemote,
+      probe: publishProbe,
+      resolveMode: publishPreflightMode ? () => publishPreflightMode : undefined,
+      cacheDir: publishCacheDir,
+      now: publishNow,
+      spawn: publishSpawn,
+    }), // CAT-60: workers must be able to publish to the resolved write remote
     () => checkMonitorProductionBuild(), // CTL-1372: warn if the local monitor serves a dev-build React bundle (leaks via performance.measure) — advisory (never FAIL)
     () => checkWorkerLabels(), // CTL-1481: worker:<host> label is a best-effort visibility projection, never the claim arbiter — advisory only
     () => checkDrainDisabled(), // CTL-1678: surface the per-node drain override + the draining-but-ignored third state — advisory only (never FAIL)

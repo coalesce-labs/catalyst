@@ -70,7 +70,12 @@ ALLOWLIST_RE='^(plugins/dev/CHANGELOG\.md|docs/adrs\.md|plugins/dev/scripts/__te
 # `needs-human-epic`, so without it the scan reports a hit whose presence depends
 # on the checkout's directory name. That is a host-dependent manifest entry.
 SCAN_EXCLUDES=(
-  -g '!node_modules/**'
+  # ⚠️ `**/` is load-bearing: a bare `node_modules/**` is ROOT-ANCHORED, so NESTED
+  # dependency trees (e.g. plugins/dev/scripts/orch-monitor/node_modules/) were scanned
+  # and their build caches enrolled in the manifest. One jiti cache file
+  # (.cache/jiti/lib-board-data.*.mjs) was frozen at 86 and read 5 after a rebuild —
+  # a manifest entry that moves when nobody edited source is a ratchet that cries wolf.
+  -g '!**/node_modules/**'
   -g '!.git'
   -g '!.git/**'
   -g '!thoughts/**'

@@ -74,6 +74,21 @@ try {
 }
 export { log };
 
+export const PUBLISH_PREFLIGHT_MODES = ["off", "shadow", "enforce"];
+
+export function resolvePublishPreflightMode({ env = process.env, configPath = null, logger = log } = {}) {
+  let raw = env?.CATALYST_PUBLISH_PREFLIGHT;
+  if (raw == null && configPath) {
+    try {
+      raw = JSON.parse(readFileSync(configPath, "utf8"))?.catalyst?.orchestration?.publishPreflight?.mode;
+    } catch { /* missing/malformed config uses shipped default */ }
+  }
+  const mode = typeof raw === "string" ? raw.trim().toLowerCase() : "shadow";
+  if (PUBLISH_PREFLIGHT_MODES.includes(mode)) return mode;
+  logger?.warn?.({ value: raw }, "publish-preflight: invalid mode; using shadow");
+  return "shadow";
+}
+
 // CTL-1617: the canonical deployment-mode resolver is a zero-import leaf
 // (../lib/deployment-mode.mjs) shared verbatim by execution-core (this
 // re-export) and orch-monitor (direct cross-directory import) — never
@@ -193,6 +208,14 @@ export function writeDaemonRuntimeEnv(
     pid = process.pid,
     pidFile = null,
     now = () => new Date().toISOString(),
+    // CTL-2073: { CATALYST_LINEAR_WRITE_DAILY_BUDGET, CATALYST_LINEAR_WRITE_TICKET_CAP }
+    // — the SAME validated values createLinearWriteProxy resolved for THIS process
+    // (linear-write-proxy.mjs's resolveWriteBudgetCaps), or null when no write-proxy
+    // is live on this daemon (mode "off" — there is no live budget to disagree
+    // about; write-budget-health.mjs's own ledger-absent branch already covers that
+    // host state). Same mutable-file problem this whole mechanism exists to solve
+    // for drainDisabled/bootDrained, applied to the write-budget doctor check.
+    writeBudget = null,
   } = {}
 ) {
   const payload = {
@@ -208,6 +231,7 @@ export function writeDaemonRuntimeEnv(
     startedAt: now(),
     drainDisabled: isDrainDisabled(env),
     bootDrained: env?.CATALYST_BOOT_DRAINED === "1",
+    writeBudget,
   };
   try {
     const p = getDaemonRuntimeEnvPath(orchDir);
@@ -2402,8 +2426,29 @@ export function readCloudFeedConfig(envObj = process.env) {
 // the wrong direction for a containment knob — an operator reaching for the env var
 // to REDUCE actuation would have silently left a Layer-2 `enforce` live.
 export function readGithubFeedConfig(envObj = process.env) {
-  const { mode, intervalSec } = resolveGithubFeedMode({ env: envObj });
-  return { mode, intervalSec };
+  const { mode, intervalSec, source } = resolveGithubFeedMode({ env: envObj });
+  return { mode, intervalSec, source };
+}
+
+// CTL-2011 Phase 3: the broker/orch-monitor VIEW of the github-feed mode — the
+// second reader whose disagreement with this daemon is the reader-split alarm.
+//
+// The daemon (this process) sources execution-core.env, so its own mode carries
+// any CATALYST_GITHUB_FEED pin. The broker and orch-monitor NEVER source that
+// file, so their mode is the ambient env with the pin stripped — only Layer-2
+// (or the default) applies. This is the exact same pin-strip idiom doctor.mjs's
+// checkGithubFeedReaderConsistency uses to compute its broker view; here it is
+// the resolver the daemon hands to startGithubFeedTimer as `resolveLayer2ModeFn`
+// so the timer can edge-detect a split against the pinned exec-core mode. Named
+// (not inlined at the call site) so the production wiring is unit-testable and a
+// regression is caught by a test rather than only in the field.
+export function resolveGithubFeedLayer2Mode(envObj = process.env) {
+  const {
+    CATALYST_GITHUB_FEED: _pin,
+    CATALYST_GITHUB_FEED_INTERVAL_SEC: _pinInterval,
+    ...stripped
+  } = envObj;
+  return readGithubFeedConfig(stripped);
 }
 
 // CTL-1889: Linear write-proxy mode reader. Same ladder as readCloudFeedConfig —

@@ -9,14 +9,20 @@
 // bare-fn form in the plan sketch never lands a label. Every case here uses a
 // real temp orchDir + injected event/comms sinks so nothing touches the fleet.
 import { test, expect } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultEscalate } from "../stale-pr-rescue-timer.mjs";
+import { recordItemPage } from "../steward-item-pages.mjs";
 
 function tmpOrch() {
   return mkdtempSync(join(tmpdir(), "ctl2000-esc-"));
 }
+// CTL-2129: keep the enforce cases hermetic — the default readProjectId/
+// stewardTookTurn read the real replica + real ~/catalyst/roles, so inject inert
+// stubs unless a case is exercising them.
+const noProject = () => null;
+const noTurn = () => false;
 const okTransport = (calls) => ({ applyLabel: () => { calls.push(1); return { applied: true }; } });
 
 test("shadow (default): byte-identical to today — still labels, logs would-route-steward", () => {
@@ -78,6 +84,8 @@ test("enforce with no steward: pages the concierge, does NOT apply needs-human",
       env: { CATALYST_STEWARD_ESCALATION: "enforce" },
       appendDelegateEvent: () => {},
       resolveSteward: () => null,
+      readProjectId: noProject,
+      stewardTookTurn: noTurn,
       postConciergePage: (p) => { posted.push(p); return true; },
     });
     expect(calls).toHaveLength(0); // needs-human label NEVER applied
@@ -99,6 +107,8 @@ test("enforce emits an observable routed-to-concierge event on the log", () => {
       env: { CATALYST_STEWARD_ESCALATION: "enforce" },
       appendDelegateEvent: (e) => events.push(e),
       resolveSteward: () => null,
+      readProjectId: noProject,
+      stewardTookTurn: noTurn,
       postConciergePage: () => true,
     });
     expect(events.some((e) => e.type === "phase.rescue.routed-to-concierge")).toBe(true);
@@ -118,6 +128,8 @@ test("enforce with a matched steward pages the steward, not the concierge, and a
       env: { CATALYST_STEWARD_ESCALATION: "enforce" },
       appendDelegateEvent: () => {},
       resolveSteward: () => ({ role: "steward-x", scope: "CTL-1" }), // CTL-1974 forward-compat
+      readProjectId: noProject,
+      stewardTookTurn: noTurn,
       postConciergePage: (p) => { posted.push(p); return true; },
     });
     expect(calls).toHaveLength(0);
@@ -129,6 +141,95 @@ test("enforce with a matched steward pages the steward, not the concierge, and a
     expect(posted).toHaveLength(1);
     expect(posted[0].target?.target).toBe("steward");
     expect(posted[0].target?.steward?.role).toBe("steward-x");
+  } finally {
+    rmSync(orchDir, { recursive: true, force: true });
+  }
+});
+
+// ── CTL-2129: the ticket→scope-key + per-item counter wiring ──────────────────
+
+test("enforce routes to the STEWARD when the ticket's PROJECT has a matching steward", () => {
+  const orchDir = tmpOrch();
+  const posted = [];
+  try {
+    // The ticket maps to a project id; the steward's scopeKeys own THAT project id,
+    // not the ticket id — the whole point of Phase 2 (scopeForTicket).
+    const out = defaultEscalate("CTL-1", { reason: "conflict", prNumber: 9 }, {
+      orchDir,
+      linearWrite: okTransport([]),
+      env: { CATALYST_STEWARD_ESCALATION: "enforce" },
+      appendDelegateEvent: () => {},
+      readProjectId: () => "proj-uuid-1", // ticket → project id
+      stewardTookTurn: noTurn,
+      resolveSteward: (scope) => (scope === "proj-uuid-1" ? { role: "steward-x", scope } : null),
+      postConciergePage: (p) => { posted.push(p); return true; },
+    });
+    expect(out.escalatedTo).toBe("steward");
+    expect(posted[0].target?.steward?.role).toBe("steward-x");
+    expect(posted[0].target?.steward?.scope).toBe("proj-uuid-1");
+  } finally {
+    rmSync(orchDir, { recursive: true, force: true });
+  }
+});
+
+test("enforce escalates INWARD to the CONCIERGE after two same-item silences (priorPages >= 2)", () => {
+  const orchDir = tmpOrch();
+  try {
+    // Pre-seed two prior pages on the scope key, with no steward turn since.
+    recordItemPage(orchDir, "proj-uuid-1", { now: 100 });
+    recordItemPage(orchDir, "proj-uuid-1", { now: 200 });
+    const out = defaultEscalate("CTL-1", { reason: "conflict", prNumber: 9 }, {
+      orchDir,
+      linearWrite: okTransport([]),
+      env: { CATALYST_STEWARD_ESCALATION: "enforce" },
+      appendDelegateEvent: () => {},
+      readProjectId: () => "proj-uuid-1",
+      stewardTookTurn: noTurn, // the steward has NOT taken a turn → the count stands
+      resolveSteward: (scope) => (scope === "proj-uuid-1" ? { role: "steward-x", scope } : null),
+      postConciergePage: () => true,
+    });
+    // A steward EXISTS, but it was already paged twice on this item without a turn,
+    // so the ladder escalates inward to the concierge rather than paging it a third time.
+    expect(out.escalatedTo).toBe("concierge");
+  } finally {
+    rmSync(orchDir, { recursive: true, force: true });
+  }
+});
+
+test("enforce records a page only on a STEWARD route (a first steward page → count 1)", () => {
+  const orchDir = tmpOrch();
+  try {
+    defaultEscalate("CTL-1", { reason: "conflict", prNumber: 9 }, {
+      orchDir,
+      linearWrite: okTransport([]),
+      env: { CATALYST_STEWARD_ESCALATION: "enforce" },
+      appendDelegateEvent: () => {},
+      readProjectId: () => "proj-uuid-1",
+      stewardTookTurn: noTurn,
+      resolveSteward: (scope) => (scope === "proj-uuid-1" ? { role: "steward-x", scope } : null),
+      postConciergePage: () => true,
+    });
+    const raw = JSON.parse(readFileSync(join(orchDir, ".steward-pages", "proj-uuid-1.json"), "utf8"));
+    expect(raw.count).toBe(1);
+  } finally {
+    rmSync(orchDir, { recursive: true, force: true });
+  }
+});
+
+test("enforce does NOT record a page on a concierge route (no steward → count stays absent)", () => {
+  const orchDir = tmpOrch();
+  try {
+    defaultEscalate("CTL-1", { reason: "conflict", prNumber: 9 }, {
+      orchDir,
+      linearWrite: okTransport([]),
+      env: { CATALYST_STEWARD_ESCALATION: "enforce" },
+      appendDelegateEvent: () => {},
+      readProjectId: () => "proj-uuid-1",
+      stewardTookTurn: noTurn,
+      resolveSteward: () => null, // no steward → concierge route
+      postConciergePage: () => true,
+    });
+    expect(existsSync(join(orchDir, ".steward-pages", "proj-uuid-1.json"))).toBe(false);
   } finally {
     rmSync(orchDir, { recursive: true, force: true });
   }

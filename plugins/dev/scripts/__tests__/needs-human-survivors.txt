@@ -9,7 +9,7 @@
 #   bash plugins/dev/scripts/__tests__/needs-human-deleted.test.sh --write-baseline
 # and review the diff — entries must only DISAPPEAR or SHRINK.
 #
-# Generated: 2026-08-22
+# Generated: 2026-08-23
 12	.github/workflows/execution-core-tests.yml
 4	docs/architecture.md
 3	docs/orchestrator-overview.md
@@ -67,7 +67,7 @@
 51	plugins/dev/scripts/execution-core/daemon.test.mjs
 2	plugins/dev/scripts/execution-core/delegate-emit-wiring.test.mjs
 3	plugins/dev/scripts/execution-core/delegate-first.mjs
-11	plugins/dev/scripts/execution-core/delegate-first.test.mjs
+12	plugins/dev/scripts/execution-core/delegate-first.test.mjs
 5	plugins/dev/scripts/execution-core/diagnostician.mjs
 3	plugins/dev/scripts/execution-core/diagnostician.test.mjs
 1	plugins/dev/scripts/execution-core/durable-escalation.mjs
@@ -83,19 +83,21 @@
 2	plugins/dev/scripts/execution-core/heartbeat-event.mjs
 2	plugins/dev/scripts/execution-core/heartbeat-event.test.mjs
 1	plugins/dev/scripts/execution-core/in-flight-supersede.test.mjs
+3	plugins/dev/scripts/execution-core/infra-class-backoff.mjs
+1	plugins/dev/scripts/execution-core/infra-class-backoff.test.mjs
 12	plugins/dev/scripts/execution-core/integration-ctl-1005.test.mjs
 4	plugins/dev/scripts/execution-core/integration-ctl-1180.test.mjs
 3	plugins/dev/scripts/execution-core/integration-ctl-587.test.mjs
 2	plugins/dev/scripts/execution-core/integration-ctl-729.test.mjs
-16	plugins/dev/scripts/execution-core/label-budget-backoff.test.mjs
+20	plugins/dev/scripts/execution-core/label-budget-backoff.test.mjs
 2	plugins/dev/scripts/execution-core/label-failure-class.mjs
-18	plugins/dev/scripts/execution-core/label-guard.mjs
-138	plugins/dev/scripts/execution-core/label-guard.test.mjs
+20	plugins/dev/scripts/execution-core/label-guard.mjs
+168	plugins/dev/scripts/execution-core/label-guard.test.mjs
 1	plugins/dev/scripts/execution-core/linear-query.mjs
 5	plugins/dev/scripts/execution-core/linear-query.test.mjs
 2	plugins/dev/scripts/execution-core/linear-write-proxy-resolve.mjs
 4	plugins/dev/scripts/execution-core/linear-write-proxy-resolve.test.mjs
-21	plugins/dev/scripts/execution-core/linear-write-proxy-wiring.test.mjs
+23	plugins/dev/scripts/execution-core/linear-write-proxy-wiring.test.mjs
 1	plugins/dev/scripts/execution-core/linear-write-proxy.test.mjs
 4	plugins/dev/scripts/execution-core/linear-write.mjs
 34	plugins/dev/scripts/execution-core/linear-write.test.mjs
@@ -119,7 +121,7 @@
 1	plugins/dev/scripts/execution-core/replica-read.mjs
 3	plugins/dev/scripts/execution-core/replica-supplemental-reads.test.mjs
 122	plugins/dev/scripts/execution-core/scheduler.mjs
-168	plugins/dev/scripts/execution-core/scheduler.test.mjs
+172	plugins/dev/scripts/execution-core/scheduler.test.mjs
 2	plugins/dev/scripts/execution-core/sdk-run-phase-agent.mjs
 8	plugins/dev/scripts/execution-core/self-echo-negative-control.test.mjs
 3	plugins/dev/scripts/execution-core/signal-reader.test.mjs
@@ -163,7 +165,6 @@
 4	plugins/dev/scripts/orch-monitor/lib/linear-cache-reader.mjs
 3	plugins/dev/scripts/orch-monitor/lib/linear-cache-reader.test.mjs
 2	plugins/dev/scripts/orch-monitor/lib/respond-ticket.mjs
-86	plugins/dev/scripts/orch-monitor/node_modules/.cache/jiti/lib-board-data.3d3fd2a0.mjs
 1	plugins/dev/scripts/orch-monitor/ui/src/board/Board.tsx
 1	plugins/dev/scripts/orch-monitor/ui/src/board/types.ts
 1	plugins/dev/scripts/orch-monitor/ui/src/components/fleet-alert-strip.tsx
@@ -176,4 +177,4 @@
 2	website/src/content/docs/autonomous-workflow/linear-control-room.md
 1	website/src/content/docs/autonomous-workflow/see-your-work.md
 6	website/src/content/docs/autonomous-workflow/worker-status-labels.md
-14	website/src/content/docs/reference/configuration.md
+16	website/src/content/docs/reference/configuration.md

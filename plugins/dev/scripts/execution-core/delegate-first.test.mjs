@@ -346,6 +346,61 @@ describe("routeStuckTicketToDelegate (CTL-1609)", () => {
   });
 });
 
+// ─── CTL-2061: an infra-class reason never labels, never enqueues ─────────────
+//
+// AC5 (mutation control): both axes are exercised — an infra-class reason
+// ("sdk-overloaded-exhausted") and a genuine product-class one ("stalled", the
+// default in makeOpts() and the value every pre-existing test above already
+// uses) — so this suite can tell "infra-class routes differently" from "the
+// function stopped labelling altogether".
+describe("routeStuckTicketToDelegate — infra-class short-circuit (CTL-2061)", () => {
+  for (const mode of ["off", "shadow", "enforce"]) {
+    test(`${mode}: an infra-class reason never labels needs-human, never enqueues`, () => {
+      const labelCalls = [];
+      let enqueueCalls = 0;
+      const opts = makeOpts({
+        labelCalls,
+        enqueueFn: () => {
+          enqueueCalls++;
+          return { enqueued: true, reason: "enqueued" };
+        },
+        env: { CATALYST_DELEGATE_FIRST: mode },
+      });
+      opts.reason = "sdk-overloaded-exhausted";
+      opts.deps.postComment = () => ({ posted: true });
+
+      const result = routeStuckTicketToDelegate(orchDir, "CTL-INFRA-1", opts);
+
+      expect(labelCalls).toHaveLength(0);
+      expect(enqueueCalls).toBe(0);
+      expect(result.labelled).toBe(false);
+    });
+  }
+
+  test("a genuine product-class reason ('stalled') is UNCHANGED — still labels under off", () => {
+    const labelCalls = [];
+    const opts = makeOpts({ labelCalls, env: { CATALYST_DELEGATE_FIRST: "off" } });
+    // makeOpts()'s default reason is "stalled" — deliberately not infra-class.
+
+    const result = routeStuckTicketToDelegate(orchDir, "CTL-PRODUCT-1", opts);
+
+    expect(labelCalls).toHaveLength(1);
+    expect(result.labelled).toBe(true);
+  });
+
+  test("the infra-class check runs first attempt returns the same shape enqueue-fallback does", () => {
+    const opts = makeOpts({ env: { CATALYST_DELEGATE_FIRST: "enforce" } });
+    opts.reason = "cluster_fence_stale"; // a different registered infra reason
+    opts.deps.postComment = () => ({ posted: true });
+
+    const result = routeStuckTicketToDelegate(orchDir, "CTL-INFRA-2", opts);
+
+    expect(result).toHaveProperty("action");
+    expect(result).toHaveProperty("count");
+    expect(result.labelled).toBe(false);
+  });
+});
+
 // ─── CTL-1609 (Codex P1): runner-disabled fail-safe gate ──────────────────────
 //
 // enforce may suppress the needs-human label ONLY when a runner is confirmed

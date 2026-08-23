@@ -49,6 +49,26 @@ in one screen is a stall nobody has to ask about.
 the human is only ever reached as an ask. A bare escalation with no ask behind it puts a row in
 their queue that nothing can clear.
 
+## Retracting a false fire (do it, don't just say it)
+
+⚠️ **CTL-2156…CTL-2162 deleted the per-ticket human-block label.** There is no label to strip: a system-level
+failure is ONE fleet alert that retracts itself when the condition clears, and anything genuinely
+needing a person is an **ask ticket**. This section used to carry a label-removal recipe (CTL-2098);
+the recipe is gone, but the lesson that motivated it is not, and it now applies to the ask:
+
+**A steward comment is not a mutation.** Steward comments are posted by the app actor — the daemon's
+human-provenance gate rejects them — so a comment saying "this is resolved" leaves the ask OPEN and the
+work it `blocks` still held. You must issue the state change directly.
+
+- **A false-fire ASK** → close it the way the `ask` SOP closes any ask: answer in-thread, then move the
+  ticket to Done with `linearis`. Reads go through the freshness-gated replica helper, never a bare
+  `linearis issues read` (see `plugins/dev/skills/linearis/SKILL.md`, "Reading Linear").
+- **A false-fire SYSTEM alert** → you do not retract it by hand. The broker raises and clears it on the
+  edge; if it is stuck raised, that is a broker bug worth a ticket, not a per-ticket label to clear.
+
+Still post an in-thread comment explaining **why** it was a false fire — the comment is the audit trail;
+the state change is the action. Both are complementary.
+
 ## When the instrument pages you
 
 Board-health and the stalled-PR sweep page **you** first, in-thread, tagged `instrument/<name>`. Treat the

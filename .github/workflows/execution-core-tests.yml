@@ -1147,6 +1147,18 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/merge-delete-branch-worktree-guard.test.sh
 
+      - name: CAT-60 config documentation coverage
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/config-docs-coverage.test.sh
+
+      - name: CAT-60 phase-pr return-code mapping
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/phase-pr-rc-map.test.sh
+
+      - name: CAT-60 draft PR push-remote and permission contract
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/draft-pr-lib.test.sh
+
       - name: needs-human deletion guard (CTL-2162)
         # CTL-2162: the label `needs-human` is deleted (CTL-2156…CTL-2161). This is the
         # guard that stops it coming back — a ratchet over a frozen survivor manifest
@@ -1381,6 +1393,7 @@ jobs:
             config-node-class.test.mjs \
             config-cloud-token-env.test.mjs \
             config.test.mjs \
+            delegate-first.test.mjs \
             delegate-config-event.test.mjs \
             delegate-queue.test.mjs \
             delegate-runner.test.mjs \
@@ -1399,6 +1412,7 @@ jobs:
             __tests__/replica-health.test.mjs \
             __tests__/replica-health-event.test.mjs \
             __tests__/linear-query-triage-source.test.mjs \
+            doctor-publish-preflight.test.mjs \
             eligible-set.test.mjs \
             event-cursor.test.mjs \
             event-scan.test.mjs \
@@ -1493,6 +1507,8 @@ jobs:
             pid-file-identity.test.mjs \
             registry.test.mjs \
             replica-read.test.mjs \
+            __tests__/scope-for-ticket.test.mjs \
+            __tests__/steward-item-pages.test.mjs \
             replica-comment-read.test.mjs \
             replica-supplemental-reads.test.mjs \
             scan.test.mjs \
@@ -1530,6 +1546,8 @@ jobs:
             worktree.test.mjs \
             recovery-reasoning.test.mjs \
             recovery-fix-backoff.test.mjs \
+            infra-class-reasons.test.mjs \
+            infra-class-backoff.test.mjs \
             recovery-orphan-stale-e2e.test.mjs \
             recovery-seam-deps.test.mjs \
             pr-block-probe.test.mjs \
@@ -1558,6 +1576,8 @@ jobs:
             service-manifest.test.mjs \
             github-auth-preflight.test.mjs \
             claude-accounts-rearm.test.mjs \
+            publish-preflight.test.mjs \
+            publish-preflight-config.test.mjs \
             github-token-candidates-legacy-parity.test.mjs \
             github-quota.test.mjs \
             github-quota-timer.test.mjs \

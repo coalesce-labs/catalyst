@@ -8,6 +8,7 @@
 import { test, expect } from "bun:test";
 import { quietFleetScan } from "./quiet-fleet.mjs";
 import { LIVENESS } from "../lib/agent-liveness.mjs";
+import { resolveSteward as resolveStewardCore } from "../execution-core/escalation-router.mjs";
 
 const now = 1_000_000_000_000;
 const hb = (ageMs, extra = {}) => ({ ts: now - ageMs, scope: "s", pid: 1, ...extra });
@@ -68,4 +69,28 @@ test("checked_at echoes the injected clock (no clock is read internally)", () =>
   const scan = quietFleetScan([], { now, readHeartbeat: () => null, scopeActive: () => true, priorPages: () => 0 });
   expect(scan.checked_at).toBe(now);
   expect(scan.pages).toHaveLength(0);
+});
+
+// ── CTL-2129: the real registry-backed resolver (replacing the () => null stub) ──
+// A resolver built from the router's real resolveSteward + injected roles/manifest
+// fixtures, exactly as runQuietFleetOnce now wires it against the live registry.
+const realResolver = (roles, manifests) => (scope) =>
+  resolveStewardCore(scope, { listRoles: () => roles, readManifest: (r) => manifests[r] ?? null });
+
+test("real reader: a silent role whose NAME is not a scopeKey still pages the concierge (no regression)", () => {
+  // steward-x owns a PROJECT id, not the silent role's name → the router returns
+  // null for scope "r" → the concierge backstop, today's exact behavior.
+  const resolveSteward = realResolver(["steward-x"], { "steward-x": { role: "steward-x", scopeKeys: ["proj-uuid-1"] } });
+  const scan = quietFleetScan(["r"], { now, readHeartbeat: () => hb(12 * 60_000), scopeActive: () => true, priorPages: () => 0, resolveSteward });
+  expect(scan.pages).toHaveLength(1);
+  expect(scan.pages[0].target).toBe("concierge");
+});
+
+test("real reader: a role listed in some manifest's scopeKeys resolves to the steward (forward-compat)", () => {
+  // The silent role's NAME is present in steward-x's scopeKeys → the router routes
+  // the page to the steward instead of the concierge.
+  const resolveSteward = realResolver(["steward-x"], { "steward-x": { role: "steward-x", scopeKeys: ["silent-role"] } });
+  const scan = quietFleetScan(["silent-role"], { now, readHeartbeat: () => hb(12 * 60_000), scopeActive: () => true, priorPages: () => 0, resolveSteward });
+  expect(scan.pages).toHaveLength(1);
+  expect(scan.pages[0].target).toBe("steward");
 });

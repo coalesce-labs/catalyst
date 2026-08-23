@@ -84,7 +84,7 @@ import {
   beliefCfg,
 } from "./lib/belief-store-queries.mjs";
 // CTL-1100: journey assembler (bun:sqlite-free — plain static import safe).
-import { assembleJourney } from "./lib/journey.mjs";
+import { assembleJourney, eventLogPathFor } from "./lib/journey.mjs";
 // CTL-887 (BFF5): the live transcript tail for execution-core workers. The
 // legacy /api/worker-stream reads the Plane-B runs/ tree (empty for EC); this
 // is the EC equivalent — tails ~/.claude/projects/*/<sessionId>.jsonl and
@@ -4270,6 +4270,8 @@ export function createServer(opts: CreateServerOptions): BunServer {
             orchDir: wtDir,
             workersDir: `${wtDir}/workers`,
             dbPath: dbPath ?? undefined,
+            // CAT-216: keep request cost scoped to this server's catalyst root.
+            eventLogPath: eventLogPathFor(CATALYST_DIR),
           }));
         }
 
