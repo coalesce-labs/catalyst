@@ -159,9 +159,17 @@ will cite — never restate a path or a durability claim from memory:
 HANDOFF_ABS="$(handoff_write_verified "$HANDOFF_ABS" "$HANDOFF_TMP")" || exit 1
 rm -f "$HANDOFF_TMP"
 
+# ⚠️ REGISTER THE INSTALL. The `Track Handoff Documents` hook in hooks.toml matches
+# `tool_name = "Write"` only, and this install path is Bash — so nothing records the
+# handoff for you. `workflow-context.sh recent handoffs` returns the FIRST recorded
+# entry and only falls back to the filesystem when there is none, so skipping this
+# leaves the next `resume-handoff` auto-discovering an OLDER handoff.
+"${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" add handoffs "$HANDOFF_REL" "<scope>" \
+  || echo "warning: could not register the handoff in workflow context (auto-discovery may return an older one)" >&2
+
 # Echoes exactly one verdict token: `synced`, or `local-only:<reason>`.
 HANDOFF_VERDICT="$(handoff_sync_and_classify "$HANDOFF_ABS")"
-printf 'path: %s\nverdict: %s\n' "$HANDOFF_ABS" "$HANDOFF_VERDICT"
+printf 'absolute: %s\nrelative: %s\nverdict: %s\n' "$HANDOFF_ABS" "$HANDOFF_REL" "$HANDOFF_VERDICT"
 ```
 
 ⚠️ **Cite the echoed `$HANDOFF_ABS` verbatim, and do NOT re-type the path or the timestamp
@@ -182,9 +190,22 @@ the one you actually got — this section is the guarantee attached to each:
 | `local-only:git-unavailable`    | No `git`, or the thoughts tree is not a checkout — durability is unprovable here.                         |
 
 **Every `local-only:*` verdict still means the file is written and verified on disk at
-`$HANDOFF_ABS`.** No work is lost, and the path is safe to cite on **this host now**;
-cross-host resume becomes available after the next sync tick (≤300 s). Do **not** retry the
-sync yourself — two retry ladders on one failure is a storm.
+`$HANDOFF_ABS`.** No work is lost, and the path is safe to cite on **this host now**. Do
+**not** retry the sync yourself — two retry ladders on one failure is a storm.
+
+⚠️ **The next-tick guarantee applies to `not-in-pushed-tree` only.** That verdict is the
+async case: the sync ran, and the following tick (≤300 s) usually carries the bytes up.
+`sync-failed`, `sync-unavailable` and `git-unavailable` are **not** waiting on a tick —
+an unresolved rebase conflict or missing tooling persists until somebody fixes it, and no
+amount of waiting makes the handoff cross-host. Treat those three as **host-local until
+something positively verifies the pushed bytes**; say so rather than promising a sync that
+may never come.
+
+⚠️ **`$HANDOFF_ABS` is this host's path.** It contains this machine's home and thoughts
+checkout location, so it is the unambiguous citation *here* but may not resolve on another
+host. Cite **both** forms: the absolute path for same-host use, and `$HANDOFF_REL` — the
+`thoughts/shared/...` form — as the portable identity a reader on another host resolves in
+their own tree.
 
 Never announce "synced" on a `local-only:*` verdict. An unconditional durability claim is
 exactly what made six real files look like phantoms.
@@ -194,8 +215,23 @@ Then respond to the user with the template matching your verdict, between
 
 **When `HANDOFF_VERDICT` is `synced`:**
 
-<template_response> Handoff written, verified, and synced — durable and safe to cite from any
-host. Resume from it in a new session with:
+<template_response> Handoff written, verified, and synced — the pushed bytes are this
+handoff. Resume from it in a new session with:
+
+```bash
+/catalyst-dev:resume-handoff <the echoed absolute path>
+```
+
+On another host, resolve `<the echoed relative path>` in that host's thoughts tree.
+
+</template_response>
+
+**When `HANDOFF_VERDICT` is `local-only:not-in-pushed-tree`** (the async case — a tick may
+still carry it up):
+
+<template_response> Handoff written and verified on disk, but **not yet in the pushed tree**
+— safe to cite on this host now; cross-host resume follows the next sync tick (≤300 s).
+Resume from it with:
 
 ```bash
 /catalyst-dev:resume-handoff <the echoed absolute path>
@@ -203,11 +239,13 @@ host. Resume from it in a new session with:
 
 </template_response>
 
-**When `HANDOFF_VERDICT` starts with `local-only`:**
+**When `HANDOFF_VERDICT` is any other `local-only:*`** (`sync-failed`, `sync-unavailable`,
+`git-unavailable` — these are **not** waiting on a tick):
 
-<template_response> Handoff written and verified on disk, but **not yet synced**
-(`<the verdict>`) — it is safe to cite on this host now; cross-host resume follows the next
-sync tick. Resume from it with:
+<template_response> Handoff written and verified on disk, but **host-local**
+(`<the verdict>`) — it is safe to cite on this host now, and it will **not** become
+cross-host on its own: this verdict means the sync could not run or could not complete, so
+it stays here until that is resolved. Resume from it on this host with:
 
 ```bash
 /catalyst-dev:resume-handoff <the echoed absolute path>

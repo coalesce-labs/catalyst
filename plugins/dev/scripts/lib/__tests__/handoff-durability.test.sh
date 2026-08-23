@@ -177,12 +177,15 @@ else fail "Case 3f: the relative citation also resolves from this cwd" "missing:
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "Case 4: write_verified FAILS LOUD when the on-disk bytes do not match"
-BAD_DEST="${SCRATCH}/readonly-dir/nested/x.md"
-mkdir -p "${SCRATCH}/readonly-dir"
-chmod 500 "${SCRATCH}/readonly-dir"
+# The unwritable case must not depend on PRIVILEGES: `chmod 500` does not stop
+# UID 0 or a process holding CAP_DAC_OVERRIDE, so a root-based container would see
+# this write SUCCEED and report a spurious failure of a helper that is working.
+# A regular file where a parent DIRECTORY is required fails with ENOTDIR for every
+# user, root included — deterministic regardless of who runs the suite.
+BAD_DEST="${SCRATCH}/not-a-dir/nested/x.md"
+printf 'i am a file, not a directory\n' > "${SCRATCH}/not-a-dir"
 ERR4="$(handoff_write_verified "$BAD_DEST" "$SRC" 2>&1 >/dev/null)"
 RC4=$?
-chmod 700 "${SCRATCH}/readonly-dir"
 if [ "$RC4" -ne 0 ]; then ok "Case 4a: unwritable destination exits non-zero (rc=$RC4)"
 else fail "Case 4a: unwritable destination exits non-zero" "rc=0 — a silent false success"; fi
 if [ -n "$ERR4" ]; then ok "Case 4b: it is LOUD on stderr"
@@ -252,6 +255,62 @@ case "$V8" in
   local-only:*) ok "Case 8: degrades to a named local-only verdict ('$V8'), never a crash or a false 'synced'" ;;
   *)            fail "Case 8: degrades to a named local-only verdict" "got: '$V8'" ;;
 esac
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "Case 10: write_verified REFUSES to overwrite an existing destination"
+# The stamp has one-second resolution, so two agents with the same scope and
+# description collide on one path. `mv` would silently replace the first handoff
+# while reporting success — work destroyed by a helper that promises not to.
+OUT10="$(handoff_resolve_path CTL-2104 collide 2>/dev/null)"
+ABS10="$(printf '%s\n' "$OUT10" | sed -n '2p')"
+printf 'first agent content\n' > "${SCRATCH}/first.md"
+handoff_write_verified "$ABS10" "${SCRATCH}/first.md" >/dev/null 2>&1
+RC10A=$?
+if [ "$RC10A" -eq 0 ]; then ok "Case 10a (precondition): the first write lands"
+else fail "Case 10a (precondition): the first write lands" "rc=$RC10A"; fi
+printf 'second agent content\n' > "${SCRATCH}/second.md"
+ERR10="$(handoff_write_verified "$ABS10" "${SCRATCH}/second.md" 2>&1 >/dev/null)"
+RC10B=$?
+if [ "$RC10B" -ne 0 ]; then ok "Case 10b: the colliding second write is REFUSED (rc=$RC10B)"
+else fail "Case 10b: the colliding second write is REFUSED" "rc=0 — it overwrote the first handoff"; fi
+if [ -n "$ERR10" ]; then ok "Case 10c: the refusal is loud on stderr"
+else fail "Case 10c: the refusal is loud on stderr" "stderr was empty"; fi
+# The decisive assertion: the FIRST agent's work still exists, unmodified.
+if cmp -s "${SCRATCH}/first.md" "$ABS10"; then
+  ok "Case 10d: the first agent's handoff is intact — no work was destroyed"
+else
+  fail "Case 10d: the first agent's handoff is intact" "the second write clobbered it"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "Case 11: 'synced' requires the pushed bytes to BE this handoff, not merely"
+echo "         a file at the same path (blob-hash compare, not cat-file -e)"
+HL_STUB_MODE=ok
+export HL_STUB_MODE
+OUT11="$(handoff_resolve_path CTL-2104 same-path-diff-bytes 2>/dev/null)"
+ABS11="$(printf '%s\n' "$OUT11" | sed -n '2p')"
+printf 'the ORIGINAL bytes\n' > "${SCRATCH}/orig.md"
+handoff_write_verified "$ABS11" "${SCRATCH}/orig.md" >/dev/null 2>&1
+V11A="$(handoff_sync_and_classify "$ABS11" 2>/dev/null)"
+if [ "$V11A" = "synced" ]; then
+  ok "Case 11a (positive control): the pushed original reads 'synced'"
+else
+  fail "Case 11a (positive control): the pushed original reads 'synced'" "got: '$V11A'"
+fi
+# Now replace the bytes on disk WITHOUT pushing them (the exit-0 no-op sync). The
+# path still exists upstream, so a `cat-file -e` check would still say 'synced'
+# while another host would read the ORIGINAL — a durability claim about content
+# that was never pushed.
+printf 'DIFFERENT bytes that were never pushed\n' > "$ABS11"
+HL_STUB_MODE=noop
+V11B="$(handoff_sync_and_classify "$ABS11" 2>/dev/null)"
+if [ "$V11B" = "local-only:not-in-pushed-tree" ]; then
+  ok "Case 11b: same path, different bytes upstream => 'local-only:not-in-pushed-tree', never 'synced'"
+else
+  fail "Case 11b: same path, different bytes upstream => not-in-pushed-tree" "got: '$V11B'"
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""

@@ -147,6 +147,19 @@ handoff_write_verified() {
 		return 1
 	fi
 
+	# ⛔ NEVER OVERWRITE. The stamp has one-second resolution, so two agents using
+	# the same scope and description within the same second resolve to the SAME
+	# destination — and `mv` would silently replace whichever landed first,
+	# destroying a handoff while reporting success. That directly contradicts this
+	# file's no-work-loss contract. Refuse instead: the loser gets a loud failure
+	# and can retry with a distinct description, which loses nothing.
+	if [ -e "$dest" ]; then
+		echo "handoff_write_verified: destination already exists: ${dest}" >&2
+		echo "  refusing to overwrite — another handoff already claimed this path (same scope, description and second)" >&2
+		echo "  retry with a more specific description; nothing has been changed" >&2
+		return 1
+	fi
+
 	local dir
 	dir="$(dirname "$dest")"
 	if ! mkdir -p "$dir" 2>/dev/null; then
@@ -260,8 +273,28 @@ handoff_sync_and_classify() {
 		printf '%s\n' "local-only:not-in-pushed-tree"
 		return 0
 	fi
-	if ! git -C "$repo" cat-file -e "${upstream}:${relpath}" 2>/dev/null; then
+	# ⛔ THE PATH EXISTING UPSTREAM IS NOT THE BYTES BEING UPSTREAM. `cat-file -e`
+	# answers "is there a blob at this path", which is satisfied by an OLDER blob
+	# at the same path. Two agents that collide on scope+description within the
+	# same second produce the same path, so a sync that exits 0 without pushing
+	# the replacement would return `synced` while another host reads the previous
+	# handoff — a false durability claim about the wrong content, which is the
+	# exact class of over-claim this file exists to remove. Compare BLOB HASHES.
+	local upstream_blob local_blob
+	upstream_blob="$(git -C "$repo" rev-parse --verify --quiet "${upstream}:${relpath}" 2>/dev/null || true)"
+	if [ -z "$upstream_blob" ]; then
 		echo "handoff_sync_and_classify: ${relpath} is absent from ${upstream}" >&2
+		printf '%s\n' "local-only:not-in-pushed-tree"
+		return 0
+	fi
+	local_blob="$(git -C "$repo" hash-object -- "$target" 2>/dev/null || true)"
+	if [ -z "$local_blob" ]; then
+		echo "handoff_sync_and_classify: could not hash ${target} — cannot prove the pushed bytes match" >&2
+		printf '%s\n' "local-only:not-in-pushed-tree"
+		return 0
+	fi
+	if [ "$local_blob" != "$upstream_blob" ]; then
+		echo "handoff_sync_and_classify: ${relpath} exists in ${upstream} but holds DIFFERENT bytes — the pushed copy is not this handoff" >&2
 		printf '%s\n' "local-only:not-in-pushed-tree"
 		return 0
 	fi

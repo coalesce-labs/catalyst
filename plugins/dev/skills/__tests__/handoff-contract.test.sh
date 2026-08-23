@@ -82,10 +82,33 @@ assert_grep "$CREATE" 'local-only' \
 # "synced" on a local-only run, which is the bug.
 assert_grep "$CREATE" 'When .HANDOFF_VERDICT. is .synced' \
   "create-handoff has a distinct response branch for the synced verdict"
-assert_grep "$CREATE" 'When .HANDOFF_VERDICT. starts with .local-only' \
-  "create-handoff has a distinct response branch for a local-only verdict"
+assert_grep "$CREATE" 'When .HANDOFF_VERDICT. is .local-only:not-in-pushed-tree' \
+  "create-handoff has a distinct response branch for the async not-in-pushed-tree verdict"
+assert_grep "$CREATE" 'When .HANDOFF_VERDICT. is any other .local-only' \
+  "create-handoff has a distinct response branch for the NON-async local-only verdicts"
 assert_grep "$CREATE" '## Durability contract' \
   "create-handoff has a 'Durability contract' section (AC-b)"
+
+# ── Codex review round 1 on #3931/#3933: three claims that must stay true ─────
+# 1. The Bash install path is invisible to the `Track Handoff Documents` hook,
+#    which matches tool_name = "Write". Without an explicit registration the next
+#    resume-handoff auto-discovers an OLDER handoff, because
+#    `workflow-context.sh recent handoffs` only falls back to the filesystem when
+#    the context has NO entry for the type.
+assert_grep "$CREATE" 'workflow-context\.sh. add handoffs' \
+  "create-handoff registers the installed handoff in workflow context (the Write hook cannot see a Bash install)"
+
+# 2. The next-tick promise is true only for the async verdict. A rebase conflict
+#    or missing tooling persists until someone fixes it, so promising ≤300 s for
+#    every local-only verdict is the same shape of over-claim as the old
+#    unconditional "synced".
+assert_grep "$CREATE" 'next-tick guarantee applies to .not-in-pushed-tree. only' \
+  "create-handoff scopes the next-tick guarantee to not-in-pushed-tree alone"
+
+# 3. The absolute path carries THIS host's root, so a reader elsewhere needs the
+#    repo-relative identity too.
+assert_grep "$CREATE" 'HANDOFF_REL' \
+  "create-handoff also cites the portable repo-relative path for other hosts"
 
 # The old unconditional claim must be GONE — leaving it is the bug.
 if grep -Eq 'Handoff created and synced!' "$CREATE"; then
