@@ -865,6 +865,24 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/codex-accounts-usage.test.sh
 
+      - name: catalyst-codex-usage-page alarm contract (CTL-2072)
+        # The paging half. What is pinned here is NOT "does it fire at 80%" — it
+        # is that every way of being unable to SEE Codex quota renders as
+        # UNOBSERVABLE and pages through the SAME sinks, never as "under
+        # threshold". Includes the `[].every(p) is true` false-clean directly: a
+        # payload with zero accounts must page DARK, and must never print the
+        # under-threshold all-clear.
+        #
+        # Also pinned: a REJECTED account pages regardless of percentage (the
+        # rate-limits RPC succeeds on a throttled account, so a purely numeric
+        # pager calls a dead account healthy), a weekly-only account pages as
+        # `weekly` and never as a fabricated 5-hour window, and a page NO SINK
+        # ACCEPTED is not recorded so the next run retries.
+        #
+        # Measured 24 pass / 0 fail on this branch.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-codex-usage-page.test.sh
+
       - name: catalyst-stack codex-account contract (CTL-2072)
         # The operator surface: handle validation, selector parsing, the sops
         # sed flip, the local symlink apply, the pin guard, and probe/verify.
