@@ -361,15 +361,20 @@ config_value() {
 		return
 	fi
 	local v
-	if [[ -n $CONFIG_PATH && -f $CONFIG_PATH ]]; then
-		v=$(jq -r "$key // empty" "$CONFIG_PATH" 2>/dev/null)
+	# ⭐ #3973 review P1 — MACHINE CONFIG FIRST. docs/configuration.md's contract is "Layer 2 wins over
+	# Layer 1 on a per-field basis" (Layer 2 = ~/.config/catalyst machine config, Layer 1 = the repo's
+	# .catalyst/config.json). This function had the order inverted; it was latent while the repo file
+	# lacked the keys, and became live the moment the repo committed a phaseAgents block — a host's
+	# explicit `implement: opus` override would have been silently shadowed by the repo default.
+	if [[ -f $MACHINE_CONFIG_PATH ]]; then
+		v=$(jq -r "$key // empty" "$MACHINE_CONFIG_PATH" 2>/dev/null)
 		if [[ -n $v ]]; then
 			echo "$v"
 			return
 		fi
 	fi
-	if [[ -f $MACHINE_CONFIG_PATH ]]; then
-		v=$(jq -r "$key // empty" "$MACHINE_CONFIG_PATH" 2>/dev/null)
+	if [[ -n $CONFIG_PATH && -f $CONFIG_PATH ]]; then
+		v=$(jq -r "$key // empty" "$CONFIG_PATH" 2>/dev/null)
 		if [[ -n $v ]]; then
 			echo "$v"
 			return

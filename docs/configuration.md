@@ -159,9 +159,9 @@ catalyst-execution-core restart
         "models": {
           "triage":         "sonnet",
           "research":       "sonnet",
-          "plan":           "sonnet",
-          "implement":      "opus",
-          "verify":         "sonnet",
+          "plan":           "opus",
+          "implement":      "sonnet",
+          "verify":         "opus",
           "review":         "sonnet",
           "pr":             "sonnet",
           "monitor-merge":  "sonnet",
