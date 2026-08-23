@@ -135,7 +135,18 @@ import {
 import {
   isSdkWorkerLive as registrySdkWorkerLive,
   isSdkWorkerLiveOnDisk,
+  // CTL-2192: the generation-fenced preemption cancel. It has existed since
+  // CTL-705 Phase D, already carries PREEMPTION_ABORT_REASON, and had ZERO
+  // production callers — which is why preempting an SDK worker freed nothing.
+  cancelSdkRun as defaultCancelSdkRun,
 } from "./sdk-worker-registry.mjs";
+// CTL-2192: the durable cross-lap preemption bound (see preempt-budget.mjs).
+import {
+  isPreemptBudgetExhausted,
+  recordPreemption,
+  budgetExhaustionAnnounced,
+  recordBudgetExhaustionAnnounced,
+} from "./preempt-budget.mjs";
 // CTL-933: shadow belief-store fact collector (opt-in CATALYST_BELIEFS_SHADOW=1).
 // CTL-937: getBeliefsDb exposes the module-level db handle for the diagnostician.
 // CTL-1241: getEscalateHumanBelief reads the latest escalate_human belief for the
@@ -236,6 +247,7 @@ import {
   defaultAppendYieldFileSkipEvent,
   defaultKillBgJob,
   defaultAppendPreemptedEvent,
+  defaultAppendPreemptBudgetExhaustedEvent,
   defaultAppendResumedAfterPreemptionEvent,
   defaultAppendHeldStoppedEvent,
   defaultAppendCooldownGcEvent,
@@ -5108,6 +5120,12 @@ export function schedulerTick(
     killBgJob = defaultKillBgJob,
     appendPreemptedEvent = defaultAppendPreemptedEvent,
     appendResumedAfterPreemptionEvent = defaultAppendResumedAfterPreemptionEvent,
+    // CTL-2192: the SDK-native half of the preemption stop. killBgJob returns
+    // immediately on a falsy id, so for an SDK victim (bg_job_id: null) it frees
+    // NOTHING — the parked worker keeps running and the resume sweep
+    // re-dispatches beside it. Injectable for tests.
+    cancelSdkRun = defaultCancelSdkRun,
+    appendPreemptBudgetExhaustedEvent = defaultAppendPreemptBudgetExhaustedEvent,
     // CTL-768 held-worker stop seams.
     // livenessForHeld — idle/busy/absent on a needs-input bg process; the
     //   mid-turn guard. Default injects the warm getAgentsCached snapshot so the
@@ -7622,9 +7640,66 @@ export function schedulerTick(
         }
         if (nowMs - rankedAboveSince.get(hysteresisKey) < PREEMPT_HYSTERESIS_MS) continue;
 
+        // ── CTL-2192: the cross-lap budget ─────────────────────────────
+        // Guard: this victim's durable lap budget. The hysteresis key above is
+        // deleted after every successful preemption (and lives in module state,
+        // so a bounce erases it anyway), which is why a correct preempt→resume
+        // pair can otherwise repeat forever at the ~2-minute cadence this ticket
+        // names. The budget is a FILE for exactly that reason.
+        const budget = isPreemptBudgetExhausted(orchDir, candidate.identifier, { now: () => nowMs });
+        if (budget.exhausted) {
+          // Once per window — the verdict is re-derived on every tick while the
+          // window is live, so an ungated emit would re-create the per-tick
+          // event burn this ticket exists to stop.
+          if (!budgetExhaustionAnnounced(orchDir, candidate.identifier, budget.windowStartedAt)) {
+            recordBudgetExhaustionAnnounced(orchDir, candidate.identifier, budget.windowStartedAt);
+            safeEmit(
+              appendPreemptBudgetExhaustedEvent,
+              {
+                orchId: candidate.identifier,
+                ticket: candidate.identifier,
+                phase: activePhase,
+                count: budget.count,
+                windowStartedAt: budget.windowStartedAt,
+                preemptedBy: topQueued.identifier,
+              },
+              { ticket: candidate.identifier, phase: activePhase }
+            );
+          }
+          continue; // skip THIS victim; a different candidate may still be preemptable
+        }
+
         // All guards passed — preempt this candidate.
         const bgJobId = signalRaw.bg_job_id;
         killBgJob({ bgJobId });
+
+        // CTL-2192: an SDK victim carries bg_job_id: null, so the killBgJob above
+        // freed nothing. cancelSdkRun is the SDK-native stop — generation-fenced,
+        // so a stale scheduler decision can never abort a NEWER dispatch.
+        if (!bgJobId) {
+          let cancelRes = null;
+          try {
+            cancelRes = cancelSdkRun({ ticket: candidate.identifier, generation: signalRaw.generation });
+          } catch (err) {
+            // Fail-open: a broken registry must not wedge the preemption sweep.
+            log.warn(
+              { ticket: candidate.identifier, phase: activePhase, err: err.message },
+              "scheduler: cancelSdkRun threw — continuing with the park (CTL-2192)"
+            );
+          }
+          // `stale` means the registry holds a NEWER generation than the signal
+          // we read: we are behind. Parking here would clobber the signal of a
+          // worker we just proved we do not own. `found: false` is NOT a gate —
+          // the cancel is best-effort and a worker already gone still deserves
+          // its signal parked.
+          if (cancelRes?.stale) {
+            log.warn(
+              { ticket: candidate.identifier, phase: activePhase, generation: signalRaw.generation },
+              "scheduler: preemption aborted — registry holds a newer generation (CTL-2192)"
+            );
+            continue;
+          }
+        }
 
         // Atomically park the signal: status → "preempted", add parkedFrom + attentionReason.
         const signalPath = join(
@@ -7663,6 +7738,11 @@ export function schedulerTick(
           },
           { ticket: candidate.identifier, phase: activePhase }
         );
+
+        // CTL-2192: spend one lap of the durable budget. Deliberately AFTER the
+        // successful park, so an aborted (stale) or failed-write preemption
+        // costs the victim nothing.
+        recordPreemption(orchDir, candidate.identifier, { now: () => nowMs });
 
         rankedAboveSince.delete(hysteresisKey); // clear after successful preemption
         break; // one preemption per tick

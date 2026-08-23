@@ -207,6 +207,8 @@ export { resolvePhaseSessionId };
 import { buildExplanation, coerceExplanation, tierProducer } from "./escalation-explanation.mjs";
 
 import { postLinearCommentAsSpawnResult } from "./linear-comment-write.mjs"; // CTL-1889 inc 2
+// CTL-2192: one spelling of the preempt-budget audit action (leaf module).
+import { PREEMPT_BUDGET_EXHAUSTED_ACTION } from "./preempt-budget.mjs";
 // detectSessionRateLimitHit — best-effort: did the dead worker's OWN session
 // immediately hit a Claude account usage/session limit, rather than genuinely
 // failing to make progress on the ticket's actual work?
@@ -1297,6 +1299,35 @@ export function defaultAppendPreemptedEvent({ orchId, ticket, phase, preemptedBy
       payloadExtras: { preempted_by: preemptedBy, bg_job_id: bgJobId },
     }),
     "preempted"
+  );
+}
+
+// CTL-2192: defaultAppendPreemptBudgetExhaustedEvent —
+// phase.scheduler.preempt-budget-exhausted.<TICKET>.
+// Emitted once per budget window when a victim has been preempted
+// PREEMPT_MAX_LAPS times inside it and is therefore skipped. The `scheduler`
+// slot is an allowed namespace exception and "preempt-budget-exhausted" is not
+// in PHASE_EVENT_PATTERN's terminal set (complete|failed|turn-cap-exhausted|
+// skipped), so this is pure audit with zero wake side effect. The preempted
+// phase rides body.payload.phase. Best-effort, never throws.
+export function defaultAppendPreemptBudgetExhaustedEvent({ orchId, ticket, phase, count, windowStartedAt, preemptedBy }) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase: "scheduler",
+      ticket,
+      orchId,
+      action: PREEMPT_BUDGET_EXHAUSTED_ACTION,
+      reason: "preempt_lap_budget_spent",
+      payloadExtras: {
+        phase,
+        count,
+        window_started_at: windowStartedAt,
+        preempted_by: preemptedBy ?? null,
+      },
+      severityText: "WARN",
+      severityNumber: 13,
+    }),
+    "preempt-budget-exhausted"
   );
 }
 

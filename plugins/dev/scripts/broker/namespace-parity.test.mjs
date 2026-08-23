@@ -84,6 +84,9 @@ import {
   PUBLISH_PREFLIGHT_BLOCKED,
   PUBLISH_PREFLIGHT_WOULD_BLOCK,
 } from "../execution-core/publish-preflight-event.mjs";
+// CTL-2192: the preempt-budget audit name is built from the SAME exported action
+// the emitter uses, so this registration cannot drift from the producer.
+import { preemptBudgetExhaustedEventName } from "../execution-core/preempt-budget.mjs";
 
 // Inline names that don't have a dedicated exported constant; verified against
 // the source file they appear in.
@@ -137,6 +140,7 @@ const EXEC_CORE_EVENT_NAMES = [
   EVENT_READERS_CONVERGED, // CTL-2011 github-feed-timer.mjs — readers converged after a prior split
   PUBLISH_PREFLIGHT_BLOCKED, // CAT-60 publish-preflight-event.mjs — denied push capability
   PUBLISH_PREFLIGHT_WOULD_BLOCK, // CAT-60 publish-preflight-event.mjs — shadow mode would-block
+  preemptBudgetExhaustedEventName("CTL-1"), // CTL-2192 recovery.mjs defaultAppendPreemptBudgetExhaustedEvent
   ...INLINE_EVENT_NAMES,
 ];
 

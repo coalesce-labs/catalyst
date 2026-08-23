@@ -778,3 +778,281 @@ describe("CTL-705 guard scenario — monitor-deploy not preemptable", () => {
     expect(readSignal("CTL-MD", "monitor-deploy")?.status).toBe("running"); // unchanged
   });
 });
+
+// ---------------------------------------------------------------------------
+// CTL-2192 Phase 3 — Producer A: make the preemption real, and damp the lap.
+//
+// Two independent defects produce the ~2-minute lap, and fixing only one leaves
+// the symptom:
+//   (a) killBgJob returns immediately on a falsy id (recovery.mjs:1844), so for
+//       an SDK victim (bg_job_id: null) the kill frees NOTHING — the "preempted"
+//       worker keeps running and the resume sweep re-dispatches beside it.
+//   (b) There is no cross-lap damping: scheduler.mjs deletes the hysteresis key
+//       after each successful preemption, so even a CORRECT preempt→resume pair
+//       repeats forever.
+// ---------------------------------------------------------------------------
+
+function seedSdkWorker(ticket, phase, priority, startedAtMs, generation = 1) {
+  // An SDK worker: bg_job_id is null, so every bg-keyed liveness/kill probe is
+  // structurally blind to it.
+  const dir = join(orchDir, "workers", ticket);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, `phase-${phase}.json`),
+    JSON.stringify({
+      ticket,
+      phase,
+      status: "running",
+      bg_job_id: null,
+      executor: "sdk",
+      generation,
+      startedAt: new Date(startedAtMs).toISOString(),
+    }),
+  );
+  writeWorkerPriority(orchDir, ticket, { priority, createdAt: "2026-05-01T00:00:00Z" });
+}
+
+function makeCancelStub(result = { found: true, stale: false, aborted: true }) {
+  const calls = [];
+  const fn = (args) => {
+    calls.push(args);
+    return typeof result === "function" ? result(args) : result;
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+function preemptBudgetFile(ticket) {
+  return join(orchDir, "workers", ticket, ".preempt-budget.json");
+}
+
+describe("CTL-2192 Phase 3 — preemption cancels the SDK run", () => {
+  const T0 = 200_000;
+
+  const baseOpts = () => ({
+    readEligible: () => [{ identifier: "CTL-9", priority: 1, createdAt: "2026-05-01T00:00:00Z" }],
+    reclaimDeadWork: noopReclaim,
+    hasTriageArtifact: () => true,
+    writeStatus: {
+      applyPhaseStatus: () => {},
+      applyTerminalDone: () => {},
+      applyLabel: () => {},
+    },
+  });
+
+  // Tick once at T0 to open the hysteresis window, then again past it.
+  function runTwoTicks(extra) {
+    schedulerTick(orchDir, {
+      ...baseOpts(),
+      dispatch: makeRealDispatch(),
+      liveBackgroundCount: () => 2,
+      now: () => T0,
+      killBgJob: makeKillStub(),
+      ...extra,
+      now_: undefined,
+    });
+    return schedulerTick(orchDir, {
+      ...baseOpts(),
+      dispatch: makeRealDispatch(),
+      liveBackgroundCount: () => 2,
+      now: () => T0 + 35_000,
+      killBgJob: makeKillStub(),
+      ...extra,
+    });
+  }
+
+  test("an SDK victim's run is CANCELLED (not just bg-killed) when it is preempted", () => {
+    seedWorker("CTL-1", "verify", 4, T0 - 90_000, "bg-1");
+    seedSdkWorker("CTL-2", "research", 4, T0 - 90_000, 7);
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+
+    const cancel = makeCancelStub();
+    const kill = makeKillStub();
+    runTwoTicks({ cancelSdkRun: cancel, killBgJob: kill });
+
+    expect(readSignal("CTL-2", "research")?.status).toBe("preempted");
+    expect(cancel.calls).toHaveLength(1);
+    // Generation-fenced, exactly as cancelSdkRun already requires.
+    expect(cancel.calls[0]).toMatchObject({ ticket: "CTL-2", generation: 7 });
+    // The bg kill is UNCHANGED — no behaviour change on the bg path.
+    expect(kill.calls.map((c) => c.bgJobId)).toContain(null);
+  });
+
+  test("a BG victim still uses killBgJob and does NOT call cancelSdkRun", () => {
+    seedWorker("CTL-1", "verify", 4, T0 - 90_000, "bg-1");
+    seedWorker("CTL-2", "research", 4, T0 - 90_000, "bg-2");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+
+    const cancel = makeCancelStub();
+    const kill = makeKillStub();
+    runTwoTicks({ cancelSdkRun: cancel, killBgJob: kill });
+
+    expect(readSignal("CTL-2", "research")?.status).toBe("preempted");
+    expect(kill.calls.map((c) => c.bgJobId)).toContain("bg-2");
+    expect(cancel.calls).toHaveLength(0);
+  });
+
+  test("cancelSdkRun reporting {found:false} still parks the signal — the cancel is best-effort", () => {
+    seedWorker("CTL-1", "verify", 4, T0 - 90_000, "bg-1");
+    seedSdkWorker("CTL-2", "research", 4, T0 - 90_000);
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+
+    const cancel = makeCancelStub({ found: false, stale: false, aborted: false });
+    runTwoTicks({ cancelSdkRun: cancel });
+
+    expect(cancel.calls).toHaveLength(1);
+    expect(readSignal("CTL-2", "research")?.status).toBe("preempted");
+  });
+
+  test("⛔ cancelSdkRun reporting {stale:true} ABORTS the preemption — do not park a newer generation", () => {
+    // The registry holds a NEWER generation than the signal we read: we are
+    // behind. Parking would clobber a worker we just proved we do not own.
+    seedWorker("CTL-1", "verify", 4, T0 - 90_000, "bg-1");
+    seedSdkWorker("CTL-2", "research", 4, T0 - 90_000, 3);
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+
+    const cancel = makeCancelStub({ found: true, stale: true, aborted: false });
+    runTwoTicks({ cancelSdkRun: cancel });
+
+    expect(cancel.calls).toHaveLength(1);
+    const sig = readSignal("CTL-2", "research");
+    expect(sig?.status).toBe("running"); // NOT parked
+    expect(sig?.parkedFrom).toBeUndefined();
+    expect(sig?.generation).toBe(3); // generation untouched
+    expect(existsSync(preemptBudgetFile("CTL-2"))).toBe(false); // no budget spent
+  });
+
+  test("a throwing cancelSdkRun does not take down the tick (fail-open, still parks)", () => {
+    seedWorker("CTL-1", "verify", 4, T0 - 90_000, "bg-1");
+    seedSdkWorker("CTL-2", "research", 4, T0 - 90_000);
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+
+    expect(() =>
+      runTwoTicks({
+        cancelSdkRun: () => {
+          throw new Error("registry exploded");
+        },
+      }),
+    ).not.toThrow();
+    expect(readSignal("CTL-2", "research")?.status).toBe("preempted");
+  });
+});
+
+describe("CTL-2192 Phase 3 — the cross-lap preemption budget", () => {
+  const T0 = 200_000;
+
+  const baseOpts = () => ({
+    readEligible: () => [{ identifier: "CTL-9", priority: 1, createdAt: "2026-05-01T00:00:00Z" }],
+    reclaimDeadWork: noopReclaim,
+    hasTriageArtifact: () => true,
+    writeStatus: {
+      applyPhaseStatus: () => {},
+      applyTerminalDone: () => {},
+      applyLabel: () => {},
+    },
+  });
+
+  function preemptOnce(atMs, extra = {}) {
+    // Re-seed the victim as running so the next lap has something to preempt —
+    // this is exactly what the resume sweep does in production.
+    schedulerTick(orchDir, {
+      ...baseOpts(),
+      dispatch: makeRealDispatch(),
+      liveBackgroundCount: () => 2,
+      now: () => atMs,
+      killBgJob: makeKillStub(),
+      ...extra,
+    });
+    return schedulerTick(orchDir, {
+      ...baseOpts(),
+      dispatch: makeRealDispatch(),
+      liveBackgroundCount: () => 2,
+      now: () => atMs + 35_000,
+      killBgJob: makeKillStub(),
+      ...extra,
+    });
+  }
+
+  test("a victim at the lap cap is SKIPPED: no rewrite, no event, generation unchanged", () => {
+    seedWorker("CTL-1", "verify", 4, T0 - 90_000, "bg-1");
+    seedSdkWorker("CTL-2", "research", 4, T0 - 90_000, 5);
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    // Pre-spend the budget inside a live window.
+    writeFileSync(preemptBudgetFile("CTL-2"), JSON.stringify({ count: 99, windowStartedAt: T0 }));
+
+    const cancel = makeCancelStub();
+    preemptOnce(T0, { cancelSdkRun: cancel });
+
+    const sig = readSignal("CTL-2", "research");
+    expect(sig?.status).toBe("running"); // no signal rewrite
+    expect(sig?.generation).toBe(5); // generation unchanged
+    expect(cancel.calls).toHaveLength(0);
+
+    const ym = (() => {
+      const d = new Date();
+      return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+    })();
+    const logPath = join(catalystDir, "events", `${ym}.jsonl`);
+    const events = existsSync(logPath)
+      ? readFileSync(logPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l))
+      : [];
+    expect(events.find((e) => e.attributes?.["event.name"] === "phase.research.preempted.CTL-2")).toBeUndefined();
+    // The skip IS observable.
+    expect(
+      events.find((e) => e.attributes?.["event.name"] === "phase.scheduler.preempt-budget-exhausted.CTL-2"),
+    ).toBeDefined();
+  });
+
+  test("a performed preemption spends one lap of the budget", () => {
+    seedWorker("CTL-1", "verify", 4, T0 - 90_000, "bg-1");
+    seedSdkWorker("CTL-2", "research", 4, T0 - 90_000);
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+
+    preemptOnce(T0, { cancelSdkRun: makeCancelStub() });
+
+    expect(readSignal("CTL-2", "research")?.status).toBe("preempted");
+    const budget = JSON.parse(readFileSync(preemptBudgetFile("CTL-2"), "utf8"));
+    expect(budget.count).toBe(1);
+    expect(typeof budget.windowStartedAt).toBe("number");
+  });
+
+  test("DURABLE: the budget survives a simulated daemon bounce (__resetForTests drops module state)", () => {
+    // rankedAboveSince is module state and a bounce erases it. If the bound were
+    // in-memory too, this test would pass a preemption straight through.
+    seedWorker("CTL-1", "verify", 4, T0 - 90_000, "bg-1");
+    seedSdkWorker("CTL-2", "research", 4, T0 - 90_000, 5);
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeFileSync(preemptBudgetFile("CTL-2"), JSON.stringify({ count: 99, windowStartedAt: T0 }));
+
+    __resetForTests(); // the bounce
+
+    const cancel = makeCancelStub();
+    preemptOnce(T0, { cancelSdkRun: cancel });
+    expect(readSignal("CTL-2", "research")?.status).toBe("running");
+    expect(cancel.calls).toHaveLength(0);
+  });
+
+  test("EXPIRY: past the window the victim is preemptable again (damping, not an exemption)", () => {
+    seedWorker("CTL-1", "verify", 4, T0 - 90_000, "bg-1");
+    seedSdkWorker("CTL-2", "research", 4, T0 - 90_000);
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeFileSync(preemptBudgetFile("CTL-2"), JSON.stringify({ count: 99, windowStartedAt: T0 }));
+
+    // Well past the 30-minute default window.
+    const later = T0 + 31 * 60_000;
+    preemptOnce(later, { cancelSdkRun: makeCancelStub() });
+    expect(readSignal("CTL-2", "research")?.status).toBe("preempted");
+  });
+
+  test("⛔ NEGATIVE CONTROL: a never-preempted victim is still preemptable", () => {
+    // Without this, "the lap stopped" would also be satisfied by a fix that
+    // simply disabled preemption.
+    seedWorker("CTL-1", "verify", 4, T0 - 90_000, "bg-1");
+    seedSdkWorker("CTL-2", "research", 4, T0 - 90_000);
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    expect(existsSync(preemptBudgetFile("CTL-2"))).toBe(false);
+
+    preemptOnce(T0, { cancelSdkRun: makeCancelStub() });
+    expect(readSignal("CTL-2", "research")?.status).toBe("preempted");
+  });
+});

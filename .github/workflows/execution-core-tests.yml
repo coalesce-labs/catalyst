@@ -1622,6 +1622,7 @@ jobs:
             reconcile-health-event.test.mjs \
             recovery.test.mjs \
             pid-file-identity.test.mjs \
+            preempt-budget.test.mjs \
             registry.test.mjs \
             replica-read.test.mjs \
             replica-comment-read.test.mjs \
