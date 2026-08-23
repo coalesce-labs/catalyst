@@ -291,18 +291,29 @@ rm -f "$DB_WITH" "$DB_NOISSUE"
 rm -rf "$BODY_TMP"
 
 # --- CTL-2204: the documented recipe must teach --body-file ---
+# Every doc file Phase 4 rewrote gets its OWN positive-controlled check — not just
+# threading.md. A future edit that reverts ask/SKILL.md's top-level usage sample back to
+# `--body "<markdown>"` (the exact mistake this ticket exists to stop) is the file an agent
+# actually reads first; without its own check that regression would pass CI silently.
 DOCS_ROOT="${SCRIPT_DIR}/../../skills"
-# Positive control: the instrument can see a string we know is in the file.
-if grep -q "linear-reply.mjs" "${DOCS_ROOT}/ask/references/threading.md"; then
-  ok "positive control: docs grep instrument reads threading.md"
-  if grep -q -- "--body-file" "${DOCS_ROOT}/ask/references/threading.md"; then
-    ok "threading.md documents --body-file"
+check_doc_teaches_body_file() { # $1=path relative to DOCS_ROOT  $2=known-present control string
+  local rel="$1" ctrl="$2"
+  local f="${DOCS_ROOT}/${rel}"
+  if grep -q -- "$ctrl" "$f" 2>/dev/null; then
+    ok "positive control: docs grep instrument reads ${rel}"
+    if grep -q -- "--body-file" "$f"; then
+      ok "${rel} documents --body-file"
+    else
+      bad "${rel} does not document --body-file"
+    fi
   else
-    bad "threading.md does not document --body-file"
+    bad "positive control FAILED — docs path/content wrong (${f}), grep result untrustworthy"
   fi
-else
-  bad "positive control FAILED — docs path wrong (${DOCS_ROOT}), grep result untrustworthy"
-fi
+}
+check_doc_teaches_body_file "ask/references/threading.md" "linear-reply.mjs"
+check_doc_teaches_body_file "ask/SKILL.md" "linear-reply.mjs"
+check_doc_teaches_body_file "ask/references/closing.md" "ask.mjs"
+check_doc_teaches_body_file "linearis/SKILL.md" "linear-reply.mjs"
 
 echo ""
 echo "Results: ${PASS} passed, ${FAIL} failed"
