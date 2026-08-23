@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://catalyst.coalescelabs.ai/schemas/catalyst-config.schema.json",
   "title": "Catalyst Project Config",
-  "description": "Schema for .catalyst/config.json — the Layer-1 project config committed to the repository. Contains team-wide settings safe to share. Secrets and host-specific overrides belong in the Layer-2 machine config (~/.config/catalyst/config.json).",
+  "description": "Schema for .catalyst/config.json \u2014 the Layer-1 project config committed to the repository. Contains team-wide settings safe to share. Secrets and host-specific overrides belong in the Layer-2 machine config (~/.config/catalyst/config.json).",
   "type": "object",
   "required": [],
   "additionalProperties": false,
@@ -16,13 +16,18 @@
         "schemaVersion": {
           "type": "integer",
           "minimum": 1,
-          "description": "Config schema version (CTL-1214). RECOMMENDED, not required, during the back-compat migration window: a not-yet-slimmed config that omits it still validates (Phase 6 — which slims the committed configs and promotes schemaVersion to required — is deferred). When present it must be an integer >= 1. Version 1 is the slimmed project-identity schema: only projectKey, project.ticketPrefix, linear.{teamKey,teamId,stateMap,stateIds}, monitor.linear.botUserId/monitor.suppressVersionWarning, and thoughts.* are canonical Layer-1 fields. The monitor.linear.teams project roster relocates to the cluster scope (catalyst-cluster/cluster.json.projects[]); monitor.github.repoColors and the orchestration.* / feedback.* / sweep.* stanzas relocate to the node scope (~/.config/catalyst/config.json). Those relocated keys are marked deprecated but remain permitted during the back-compat migration window and are flagged by `catalyst doctor`.",
-          "examples": [1]
+          "description": "Config schema version (CTL-1214). RECOMMENDED, not required, during the back-compat migration window: a not-yet-slimmed config that omits it still validates (Phase 6 \u2014 which slims the committed configs and promotes schemaVersion to required \u2014 is deferred). When present it must be an integer >= 1. Version 1 is the slimmed project-identity schema: only projectKey, project.ticketPrefix, linear.{teamKey,teamId,stateMap,stateIds}, monitor.linear.botUserId/monitor.suppressVersionWarning, and thoughts.* are canonical Layer-1 fields. The monitor.linear.teams project roster relocates to the cluster scope (catalyst-cluster/cluster.json.projects[]); monitor.github.repoColors and the orchestration.* / feedback.* / sweep.* stanzas relocate to the node scope (~/.config/catalyst/config.json). Those relocated keys are marked deprecated but remain permitted during the back-compat migration window and are flagged by `catalyst doctor`.",
+          "examples": [
+            1
+          ]
         },
         "projectKey": {
           "type": "string",
           "description": "Short identifier for this project, used as a namespace for machine-config lookup (~/.config/catalyst/config-{projectKey}.json) and as a display label.",
-          "examples": ["CTL", "MY-PROJECT"]
+          "examples": [
+            "CTL",
+            "MY-PROJECT"
+          ]
         },
         "project": {
           "type": "object",
@@ -32,7 +37,10 @@
             "ticketPrefix": {
               "type": "string",
               "description": "Linear ticket prefix used when constructing ticket IDs (e.g. 'CTL' produces 'CTL-123').",
-              "examples": ["CTL", "ADV"]
+              "examples": [
+                "CTL",
+                "ADV"
+              ]
             }
           }
         },
@@ -44,7 +52,10 @@
             "teamKey": {
               "type": "string",
               "description": "Linear team key string (e.g. 'CTL'). Required for Linear integration to function.",
-              "examples": ["CTL", "ADV"]
+              "examples": [
+                "CTL",
+                "ADV"
+              ]
             },
             "stateMap": {
               "type": "object",
@@ -103,7 +114,7 @@
             },
             "stateIds": {
               "type": "object",
-              "description": "Optional cache of Linear state name → UUID mappings. Populated automatically by setup scripts. Allows the daemon to avoid repeated API lookups.",
+              "description": "Optional cache of Linear state name \u2192 UUID mappings. Populated automatically by setup scripts. Allows the daemon to avoid repeated API lookups.",
               "additionalProperties": {
                 "type": "string",
                 "format": "uuid"
@@ -122,22 +133,34 @@
           "additionalProperties": false,
           "properties": {
             "org": {
-              "type": ["string", "null"],
-              "description": "GitHub organization/owner that hosts this project's `thoughts` repo — provisioning clones `https://github.com/<org>/thoughts.git` into `~/catalyst/hlt/<org>/thoughts`. This is a GitHub owner, NOT the `profile` alias below and NOT the org of the project's own code repo: a project whose code lives under `github.com/groundworkapp/Adva` can keep its thoughts under `github.com/rightsite-cloud/thoughts`. null (or absent) makes provisioning fall back — loudly — to `profile`, which is correct only when the two names coincide.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "GitHub organization/owner that hosts this project's `thoughts` repo \u2014 provisioning clones `https://github.com/<org>/thoughts.git` into `~/catalyst/hlt/<org>/thoughts`. This is a GitHub owner, NOT the `profile` alias below and NOT the org of the project's own code repo: a project whose code lives under `github.com/groundworkapp/Adva` can keep its thoughts under `github.com/rightsite-cloud/thoughts`. null (or absent) makes provisioning fall back \u2014 loudly \u2014 to `profile`, which is correct only when the two names coincide.",
               "default": null
             },
             "profile": {
-              "type": ["string", "null"],
-              "description": "HumanLayer profile name for the thoughts CLI — the key under `.thoughts.profiles` in humanlayer.json, NOT a GitHub owner (see `org` above). null disables thoughts persistence.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "HumanLayer profile name for the thoughts CLI \u2014 the key under `.thoughts.profiles` in humanlayer.json, NOT a GitHub owner (see `org` above). null disables thoughts persistence.",
               "default": null
             },
             "directory": {
-              "type": ["string", "null"],
+              "type": [
+                "string",
+                "null"
+              ],
               "description": "Absolute or repo-relative path to the thoughts directory where agent notes are written.",
               "default": null
             },
             "user": {
-              "type": ["string", "null"],
+              "type": [
+                "string",
+                "null"
+              ],
               "description": "Username passed to the thoughts CLI. null uses the CLI default.",
               "default": null
             }
@@ -161,7 +184,7 @@
                 "repoColors": {
                   "type": "object",
                   "deprecated": true,
-                  "description": "DEPRECATED (CTL-1214) — relocated to the node scope ~/.config/catalyst/config.json → catalyst.monitor.github.repoColors. A node-scoped operator display preference, not a repo invariant. Still permitted here during the back-compat window. Maps repository full names (owner/repo) to CSS color strings for color-coding in the monitor dashboard.",
+                  "description": "DEPRECATED (CTL-1214) \u2014 relocated to the node scope ~/.config/catalyst/config.json \u2192 catalyst.monitor.github.repoColors. A node-scoped operator display preference, not a repo invariant. Still permitted here during the back-compat window. Maps repository full names (owner/repo) to CSS color strings for color-coding in the monitor dashboard.",
                   "additionalProperties": {
                     "type": "string",
                     "description": "A CSS color string (e.g. '#4A90E2', 'blue')."
@@ -183,10 +206,13 @@
                 "teams": {
                   "type": "array",
                   "deprecated": true,
-                  "description": "DEPRECATED (CTL-1214) — relocated to the cluster scope catalyst-cluster/cluster.json → projects[] ({teamKey,vcsRepo,projectKey}). The project roster is a fleet/cluster invariant, not per-repo. Still permitted here during the back-compat window (monitor readers prefer the cluster roster and fall back to this). List of Linear teams to display in the monitor, each linked to a VCS repository.",
+                  "description": "DEPRECATED (CTL-1214) \u2014 relocated to the cluster scope catalyst-cluster/cluster.json \u2192 projects[] ({teamKey,vcsRepo,projectKey}). The project roster is a fleet/cluster invariant, not per-repo. Still permitted here during the back-compat window (monitor readers prefer the cluster roster and fall back to this). List of Linear teams to display in the monitor, each linked to a VCS repository.",
                   "items": {
                     "type": "object",
-                    "required": ["key", "vcsRepo"],
+                    "required": [
+                      "key",
+                      "vcsRepo"
+                    ],
                     "additionalProperties": false,
                     "properties": {
                       "key": {
@@ -201,10 +227,16 @@
                   }
                 },
                 "botUserId": {
-                  "type": ["string", "null"],
+                  "type": [
+                    "string",
+                    "null"
+                  ],
                   "format": "uuid",
-                  "description": "Linear user UUID of the Catalyst app-actor (the 'Linear for Agents' app user, installed via CTL-550). Used by orch-monitor and the execution-core daemon to suppress bot self-echo comments/updates and bot-authored issue events, preventing write loops (CTL-749). Required for the Linear app-actor comms channel — i.e. when the execution-core daemon mirrors phase-agent output to Linear and wakes on human replies (CTL-550 / CTL-549 / CTL-749); omitting it makes the system treat the agent's own comments as human input. Obtain it from the app-actor access token's viewer.id (NOT a personal/admin token): query{viewer{id}}. This value is workspace-specific — set it only in the local .catalyst/config.json, not in committed templates (use null + a placeholder there). Default null disables suppression.",
-                  "examples": ["00000000-0000-0000-0000-000000000000", null]
+                  "description": "Linear user UUID of the Catalyst app-actor (the 'Linear for Agents' app user, installed via CTL-550). Used by orch-monitor and the execution-core daemon to suppress bot self-echo comments/updates and bot-authored issue events, preventing write loops (CTL-749). Required for the Linear app-actor comms channel \u2014 i.e. when the execution-core daemon mirrors phase-agent output to Linear and wakes on human replies (CTL-550 / CTL-549 / CTL-749); omitting it makes the system treat the agent's own comments as human input. Obtain it from the app-actor access token's viewer.id (NOT a personal/admin token): query{viewer{id}}. This value is workspace-specific \u2014 set it only in the local .catalyst/config.json, not in committed templates (use null + a placeholder there). Default null disables suppression.",
+                  "examples": [
+                    "00000000-0000-0000-0000-000000000000",
+                    null
+                  ]
                 }
               }
             }
@@ -213,14 +245,17 @@
         "orchestration": {
           "type": "object",
           "deprecated": true,
-          "description": "DEPRECATED (CTL-1214) — relocated to the node scope ~/.config/catalyst/config.json → catalyst.orchestration.*. Node/machine tuning, not a repo invariant. Still permitted here during the back-compat window (readers prefer Layer-2 and fall back to this). Orchestration engine settings controlling how Catalyst dispatches and manages agent work.",
+          "description": "DEPRECATED (CTL-1214) \u2014 relocated to the node scope ~/.config/catalyst/config.json \u2192 catalyst.orchestration.*. Node/machine tuning, not a repo invariant. Still permitted here during the back-compat window (readers prefer Layer-2 and fall back to this). Orchestration engine settings controlling how Catalyst dispatches and manages agent work.",
           "additionalProperties": false,
           "properties": {
             "dispatchMode": {
               "type": "string",
-              "enum": ["phase-agents", "oneshot-legacy"],
+              "enum": [
+                "phase-agents",
+                "oneshot-legacy"
+              ],
               "default": "phase-agents",
-              "description": "Selects the orchestration strategy. 'phase-agents' runs one short-lived claude --bg job per pipeline phase (triage→research→plan→implement→verify→review→pr→monitor-merge→monitor-deploy→teardown). 'oneshot-legacy' runs a single long-lived claude -p /catalyst-legacy:oneshot job per ticket. Default is 'phase-agents'."
+              "description": "Selects the orchestration strategy. 'phase-agents' runs one short-lived claude --bg job per pipeline phase (triage\u2192research\u2192plan\u2192implement\u2192verify\u2192review\u2192pr\u2192monitor-merge\u2192monitor-deploy\u2192teardown). 'oneshot-legacy' runs a single long-lived claude -p /catalyst-legacy:oneshot job per ticket. Default is 'phase-agents'."
             },
             "worktreeRefresh": {
               "type": "object",
@@ -278,19 +313,31 @@
                       "description": "Linear workflow state name to filter eligible tickets (e.g. 'Todo')."
                     },
                     "team": {
-                      "type": ["string", "null"],
+                      "type": [
+                        "string",
+                        "null"
+                      ],
                       "description": "Linear team key to filter eligible tickets. null means all enrolled teams."
                     },
                     "project": {
-                      "type": ["string", "null"],
+                      "type": [
+                        "string",
+                        "null"
+                      ],
                       "description": "Linear project name to filter eligible tickets. null means no project filter."
                     },
                     "label": {
-                      "type": ["string", "null"],
+                      "type": [
+                        "string",
+                        "null"
+                      ],
                       "description": "Linear label to filter eligible tickets. null means no label filter."
                     },
                     "priority": {
-                      "type": ["integer", "null"],
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
                       "minimum": 1,
                       "maximum": 4,
                       "description": "Linear priority (1=urgent, 2=high, 3=medium, 4=low) to filter eligible tickets. null means no priority filter."
@@ -347,6 +394,17 @@
                       "teardown": 15
                     }
                   ]
+                },
+                "modelOverrides": {
+                  "type": "object",
+                  "description": "Per-ticket model exceptions: modelOverrides[phase][ticket] = model. Read by phase-agent-dispatch before models[phase].",
+                  "additionalProperties": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string",
+                      "description": "Model identifier string (e.g. 'sonnet', 'opus', 'claude-opus-4-5')."
+                    }
+                  }
                 }
               }
             },
@@ -383,7 +441,7 @@
                     "retentionSeconds": {
                       "type": "number",
                       "default": 86400,
-                      "description": "Minimum age (in seconds) of a job directory before it is eligible for deletion. Default 24h — far longer than any phase duration. Env CATALYST_JOB_GC_RETENTION_SECONDS overrides."
+                      "description": "Minimum age (in seconds) of a job directory before it is eligible for deletion. Default 24h \u2014 far longer than any phase duration. Env CATALYST_JOB_GC_RETENTION_SECONDS overrides."
                     },
                     "batchCap": {
                       "type": "number",
@@ -394,26 +452,34 @@
                 },
                 "procReaper": {
                   "type": "object",
-                  "description": "CTL-1165 D2: the orphan child-process reaper, run on the same cadence as the orphan-reaper sweep. `claude stop` deregisters a worker's claude agent but leaves its reparented node/bun grandchildren (MCP servers, sub-agent tooling, bun-test runners) running — the bulk of the resident-memory leak. It refuses to act unless every signal corroborates: a successful `claude agents` read this cycle (a failed read aborts the whole sweep, killing nothing), the process is reparented and outside the entire live-agent process tree, command and working directory match, and it has persisted across two consecutive sweeps. A hard never-kill allowlist always protects the daemon, broker, monitor, the live-agent tree, Tailscale, pid 1, and any foreign-uid process.",
+                  "description": "CTL-1165 D2: the orphan child-process reaper, run on the same cadence as the orphan-reaper sweep. `claude stop` deregisters a worker's claude agent but leaves its reparented node/bun grandchildren (MCP servers, sub-agent tooling, bun-test runners) running \u2014 the bulk of the resident-memory leak. It refuses to act unless every signal corroborates: a successful `claude agents` read this cycle (a failed read aborts the whole sweep, killing nothing), the process is reparented and outside the entire live-agent process tree, command and working directory match, and it has persisted across two consecutive sweeps. A hard never-kill allowlist always protects the daemon, broker, monitor, the live-agent tree, Tailscale, pid 1, and any foreign-uid process.",
                   "additionalProperties": false,
                   "properties": {
                     "mode": {
                       "type": "string",
-                      "enum": ["off", "shadow", "enforce"],
+                      "enum": [
+                        "off",
+                        "shadow",
+                        "enforce"
+                      ],
                       "default": "shadow",
-                      "description": "off disables the reaper; shadow (the default) logs procOrphans.would-reap for each eligible orphan but kills nothing; enforce SIGTERMs then (after grace, if still alive) SIGKILLs. Ships in shadow so the allowlist + live-tree correlation can be audited on real hosts before any enforce flip. Does NOT arm the CTL-1531 widened any-command class — that has its own widenMode knob."
+                      "description": "off disables the reaper; shadow (the default) logs procOrphans.would-reap for each eligible orphan but kills nothing; enforce SIGTERMs then (after grace, if still alive) SIGKILLs. Ships in shadow so the allowlist + live-tree correlation can be audited on real hosts before any enforce flip. Does NOT arm the CTL-1531 widened any-command class \u2014 that has its own widenMode knob."
                     },
                     "widenMode": {
                       "type": "string",
-                      "enum": ["off", "shadow", "enforce"],
+                      "enum": [
+                        "off",
+                        "shadow",
+                        "enforce"
+                      ],
                       "default": "shadow",
-                      "description": "CTL-1531: INDEPENDENT rollout mode for the WIDENED (any-command) orphan class, deliberately NOT derived from `mode`. off removes the widened admission entirely (a byte-identical revert of the feature); shadow (the default) classifies and reports widened candidates via procOrphans.would-reap but never signals them, even when mode is already enforce; enforce lets a widened candidate follow `mode`, so BOTH knobs must be open before an arbitrary PPID-1 command is signalled. An unrecognized value degrades to shadow, never to enforce. Exists because a host already carrying mode:'enforce' — granted for the narrow node/bun class after ITS shadow bake — must not inherit authority over the widened class on deploy (ADR-023: dark by default, one knob per actuator). Mirrors orphan-sweep.sh's SWEEP_PROC_WIDEN."
+                      "description": "CTL-1531: INDEPENDENT rollout mode for the WIDENED (any-command) orphan class, deliberately NOT derived from `mode`. off removes the widened admission entirely (a byte-identical revert of the feature); shadow (the default) classifies and reports widened candidates via procOrphans.would-reap but never signals them, even when mode is already enforce; enforce lets a widened candidate follow `mode`, so BOTH knobs must be open before an arbitrary PPID-1 command is signalled. An unrecognized value degrades to shadow, never to enforce. Exists because a host already carrying mode:'enforce' \u2014 granted for the narrow node/bun class after ITS shadow bake \u2014 must not inherit authority over the widened class on deploy (ADR-023: dark by default, one knob per actuator). Mirrors orphan-sweep.sh's SWEEP_PROC_WIDEN."
                     },
                     "widenMaxKills": {
                       "type": "integer",
                       "minimum": 0,
                       "default": 5,
-                      "description": "CTL-1531: per-run cap on CONFIRMED terminations from the WIDENED class (0 = uncapped). Delivered signals carry a second ceiling of widenMaxKills x 2, since a candidate is worth at most SIGTERM + SIGKILL. The widened class's authorizing evidence ('this cwd no longer exists') is correlated across a whole host — one renamed or unmounted worktreeRoot makes every process beneath it qualify at once — so a run that wants to kill more than a handful is a root-level event that wants a human. A non-numeric value degrades to the default 5, never to uncapped. Mirrors orphan-sweep.sh's SWEEP_PROC_WIDEN_MAX_KILLS."
+                      "description": "CTL-1531: per-run cap on CONFIRMED terminations from the WIDENED class (0 = uncapped). Delivered signals carry a second ceiling of widenMaxKills x 2, since a candidate is worth at most SIGTERM + SIGKILL. The widened class's authorizing evidence ('this cwd no longer exists') is correlated across a whole host \u2014 one renamed or unmounted worktreeRoot makes every process beneath it qualify at once \u2014 so a run that wants to kill more than a handful is a root-level event that wants a human. A non-numeric value degrades to the default 5, never to uncapped. Mirrors orphan-sweep.sh's SWEEP_PROC_WIDEN_MAX_KILLS."
                     },
                     "graceMs": {
                       "type": "number",
@@ -423,7 +489,7 @@
                     "minEtimeSec": {
                       "type": "number",
                       "default": 900,
-                      "description": "A process must have run at least this long (elapsed seconds) to be eligible — corroboration only, never the sole gate."
+                      "description": "A process must have run at least this long (elapsed seconds) to be eligible \u2014 corroboration only, never the sole gate."
                     },
                     "worktreeRoot": {
                       "type": "string",
@@ -443,7 +509,7 @@
             },
             "fleetHealth": {
               "type": "object",
-              "description": "CTL-1165 D5: the pre-exhaustion fleet-health guardrail. Every intervalMs it samples four steady-state degradation signals (the ~/.claude/jobs dir count, the live background-agent count, the resident node/bun worker-process count, and macOS swap-used MB) and, when any crosses its threshold, emits a single fleet.health.degraded event. selfHealEnabled is OFF by default (emit-only); when enabled it eagerly fires the same gated reap intents the 600s orphan-reaper timer emits — it gains no new kill authority.",
+              "description": "CTL-1165 D5: the pre-exhaustion fleet-health guardrail. Every intervalMs it samples four steady-state degradation signals (the ~/.claude/jobs dir count, the live background-agent count, the resident node/bun worker-process count, and macOS swap-used MB) and, when any crosses its threshold, emits a single fleet.health.degraded event. selfHealEnabled is OFF by default (emit-only); when enabled it eagerly fires the same gated reap intents the 600s orphan-reaper timer emits \u2014 it gains no new kill authority.",
               "additionalProperties": false,
               "properties": {
                 "enabled": {
@@ -484,7 +550,7 @@
                 "selfHealEnabled": {
                   "type": "boolean",
                   "default": false,
-                  "description": "When true, a sustained breach eagerly fires the orphan-reaper + phase-reconcile + proc-orphan reap intents (each gated by its own reaper; the proc-orphan sweep is shadow by default). DEFAULT OFF — the first ship is a pure alert. Env EXECUTION_CORE_FLEET_SELF_HEAL=1 also enables it."
+                  "description": "When true, a sustained breach eagerly fires the orphan-reaper + phase-reconcile + proc-orphan reap intents (each gated by its own reaper; the proc-orphan sweep is shadow by default). DEFAULT OFF \u2014 the first ship is a pure alert. Env EXECUTION_CORE_FLEET_SELF_HEAL=1 also enables it."
                 },
                 "sustainedTicks": {
                   "type": "number",
@@ -500,7 +566,11 @@
               "properties": {
                 "mode": {
                   "type": "string",
-                  "enum": ["off", "notify", "write"],
+                  "enum": [
+                    "off",
+                    "notify",
+                    "write"
+                  ],
                   "default": "off",
                   "description": "off = inert; notify = emit drift events but never write Linear; write = reconcile declared completions to Linear via the canonical primitive."
                 },
@@ -517,7 +587,15 @@
             },
             "executor": {
               "type": "string",
-              "enum": ["bg", "sdk", "oneshot-legacy", "codex-exec", "claude-bg", "claude-sdk", "claude-oneshot"],
+              "enum": [
+                "bg",
+                "sdk",
+                "oneshot-legacy",
+                "codex-exec",
+                "claude-bg",
+                "claude-sdk",
+                "claude-oneshot"
+              ],
               "description": "CTL-1365a/CTL-1457: the phase-worker substrate this node dispatches on. Canonical values: 'bg' (detached claude --bg job), 'sdk' (in-process claude-agent-sdk query worker), 'oneshot-legacy' (catalyst-legacy single long-lived job), 'codex-exec' (child-process codex exec --json worker on OpenAI Codex). The 'claude-*' compound values are read-time aliases for bg/sdk/oneshot-legacy. Precedence: env CATALYST_EXECUTOR > this Layer-1 value > node-class default (Phase 1: always 'bg'). Node-scoped; the daemon reads it once at boot."
             },
             "executorByPhase": {
@@ -548,8 +626,11 @@
                   "description": "Path to (or name of) the codex binary. Default 'codex' (resolved via PATH). Env CATALYST_CODEX_BIN overrides."
                 },
                 "model": {
-                  "type": ["string", "null"],
-                  "description": "Model id passed to `codex exec -m`. null (default) lets the codex config.toml decide — no -m flag is added. Env CATALYST_CODEX_MODEL overrides."
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Model id passed to `codex exec -m`. null (default) lets the codex config.toml decide \u2014 no -m flag is added. Env CATALYST_CODEX_MODEL overrides."
                 },
                 "writableRoots": {
                   "type": "array",
@@ -569,21 +650,25 @@
         },
         "deployment": {
           "type": "object",
-          "description": "Fleet-topology declaration (CTL-1617). Unlike orchestration.dispatchMode (node-scoped, relocated to Layer-2 by CTL-1214), deployment mode is genuinely fleet-scoped, so it is a first-class Layer-1 field. A per-host Layer-2 catalyst.deployment.mode value wins over this when present (the exception hatch — e.g. a laptop dev-clone of a cluster-declared repo overriding to single-host).",
+          "description": "Fleet-topology declaration (CTL-1617). Unlike orchestration.dispatchMode (node-scoped, relocated to Layer-2 by CTL-1214), deployment mode is genuinely fleet-scoped, so it is a first-class Layer-1 field. A per-host Layer-2 catalyst.deployment.mode value wins over this when present (the exception hatch \u2014 e.g. a laptop dev-clone of a cluster-declared repo overriding to single-host).",
           "additionalProperties": false,
           "properties": {
             "mode": {
               "type": "string",
-              "enum": ["single-host", "cluster", "cloud"],
+              "enum": [
+                "single-host",
+                "cluster",
+                "cloud"
+              ],
               "default": "single-host",
-              "description": "Declares this fleet's deployment topology. 'single-host' (default) — a lone node, no cluster substrate expected. 'cluster' — a coordinated multi-host fleet; roster/HRW/liveness are graded by catalyst doctor. 'cloud' — a managed-container node; the smee webhook tunnel must NOT be live and secrets are platform-delivered. Resolution precedence: env CATALYST_DEPLOYMENT_MODE > Layer-2 catalyst.deployment.mode > this Layer-1 value > constant default 'single-host'. An unset key or an unrecognized value both degrade to 'single-host' (the safest direction) — see lib/deployment-mode.mjs for the full validity ladder."
+              "description": "Declares this fleet's deployment topology. 'single-host' (default) \u2014 a lone node, no cluster substrate expected. 'cluster' \u2014 a coordinated multi-host fleet; roster/HRW/liveness are graded by catalyst doctor. 'cloud' \u2014 a managed-container node; the smee webhook tunnel must NOT be live and secrets are platform-delivered. Resolution precedence: env CATALYST_DEPLOYMENT_MODE > Layer-2 catalyst.deployment.mode > this Layer-1 value > constant default 'single-host'. An unset key or an unrecognized value both degrade to 'single-host' (the safest direction) \u2014 see lib/deployment-mode.mjs for the full validity ladder."
             }
           }
         },
         "feedback": {
           "type": "object",
           "deprecated": true,
-          "description": "DEPRECATED (CTL-1214) — relocated to the node scope ~/.config/catalyst/config.json → catalyst.feedback.*. A node-scoped operator preference, not a repo invariant. Still permitted here during the back-compat window (readers prefer Layer-2 and fall back to this). Automatic feedback filing settings. When enabled, agents can file issues to a GitHub repository when they encounter unexpected behavior.",
+          "description": "DEPRECATED (CTL-1214) \u2014 relocated to the node scope ~/.config/catalyst/config.json \u2192 catalyst.feedback.*. A node-scoped operator preference, not a repo invariant. Still permitted here during the back-compat window (readers prefer Layer-2 and fall back to this). Automatic feedback filing settings. When enabled, agents can file issues to a GitHub repository when they encounter unexpected behavior.",
           "additionalProperties": false,
           "properties": {
             "autoFile": {
@@ -593,7 +678,9 @@
             "githubRepo": {
               "type": "string",
               "description": "GitHub repository full name (owner/repo) where feedback issues are filed.",
-              "examples": ["coalesce-labs/catalyst"]
+              "examples": [
+                "coalesce-labs/catalyst"
+              ]
             },
             "labels": {
               "type": "array",
@@ -601,14 +688,19 @@
               "items": {
                 "type": "string"
               },
-              "examples": [["auto-filed", "agent-feedback"]]
+              "examples": [
+                [
+                  "auto-filed",
+                  "agent-feedback"
+                ]
+              ]
             }
           }
         },
         "responder": {
           "type": "object",
           "additionalProperties": false,
-          "description": "Daemon-health responder tuning (CTL-1509) — consumed at INSTALL time by install-health-responder.sh (repo .catalyst/config.json walk-up), which bakes the value into the LaunchAgent's StartInterval. Node-scoped machine tuning in spirit (like sweep.*), permitted here so a repo can pin the sweep cadence; re-run 'catalyst-stack adopt-cloud-sync' (or install-services) after changing it.",
+          "description": "Daemon-health responder tuning (CTL-1509) \u2014 consumed at INSTALL time by install-health-responder.sh (repo .catalyst/config.json walk-up), which bakes the value into the LaunchAgent's StartInterval. Node-scoped machine tuning in spirit (like sweep.*), permitted here so a repo can pin the sweep cadence; re-run 'catalyst-stack adopt-cloud-sync' (or install-services) after changing it.",
           "properties": {
             "intervalSeconds": {
               "type": "integer",
@@ -621,7 +713,7 @@
         "sweep": {
           "type": "object",
           "deprecated": true,
-          "description": "DEPRECATED (CTL-1214) — relocated to the node scope ~/.config/catalyst/config.json → catalyst.sweep.*. Node-scoped machine tuning consumed by orphan-sweep.sh, not a repo invariant. Still permitted here during the back-compat window (readers prefer Layer-2, fall back to this, then code defaults 48/2/false/20). Orphan-worktree sweep thresholds.",
+          "description": "DEPRECATED (CTL-1214) \u2014 relocated to the node scope ~/.config/catalyst/config.json \u2192 catalyst.sweep.*. Node-scoped machine tuning consumed by orphan-sweep.sh, not a repo invariant. Still permitted here during the back-compat window (readers prefer Layer-2, fall back to this, then code defaults 48/2/false/20). Orphan-worktree sweep thresholds.",
           "additionalProperties": false,
           "properties": {
             "idleHours": {
@@ -647,9 +739,13 @@
             },
             "procWiden": {
               "type": "string",
-              "enum": ["off", "shadow", "enforce"],
+              "enum": [
+                "off",
+                "shadow",
+                "enforce"
+              ],
               "default": "shadow",
-              "description": "CTL-1531: rollout mode for orphan-sweep.sh vector 1's WIDENED (any-command) branch — the daemon-side sibling of orchestration.orphanReaper.procReaper.widenMode. Read by install-orphan-sweep.sh and BAKED INTO the LaunchAgent's EnvironmentVariables as SWEEP_PROC_WIDEN, so the setting survives the plist regeneration that every routine `catalyst-stack install-services` performs. Resolution order: an explicit SWEEP_PROC_WIDEN env var at install time > this key > the value already present in the installed plist > shadow."
+              "description": "CTL-1531: rollout mode for orphan-sweep.sh vector 1's WIDENED (any-command) branch \u2014 the daemon-side sibling of orchestration.orphanReaper.procReaper.widenMode. Read by install-orphan-sweep.sh and BAKED INTO the LaunchAgent's EnvironmentVariables as SWEEP_PROC_WIDEN, so the setting survives the plist regeneration that every routine `catalyst-stack install-services` performs. Resolution order: an explicit SWEEP_PROC_WIDEN env var at install time > this key > the value already present in the installed plist > shadow."
             }
           }
         },

@@ -86,12 +86,11 @@
         }
       },
       "phaseAgents": {
-        "_comment": "Ryan 2026-08-19 + 2026-08-23: phase workers run on sonnet for cost control; phase-agent-dispatch falls back to a hardcoded opus when this block is absent, which is how the fleet drifted back to opus. Per-ticket exceptions go in modelOverrides[phase][ticket].",
         "models": {
           "triage": "sonnet",
           "research": "sonnet",
           "plan": "sonnet",
-          "implement": "sonnet",
+          "implement": "opus",
           "verify": "sonnet",
           "review": "sonnet",
           "pr": "sonnet",
