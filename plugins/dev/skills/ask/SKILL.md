@@ -29,8 +29,7 @@ node "$CLAUDE_PLUGIN_ROOT/scripts/ask.mjs" create \
   --title "ASK: <one line>" \
   --why "<what it unblocks>" \
   --option "<option A>" --option "<option B>" \
-  --default "<what happens if silent>" \
-  --blocks CTL-NNNN
+  --default "<what happens if silent>" --blocks CTL-NNNN
 #   --dry-run   print the body and the parsed options without writing
 ```
 

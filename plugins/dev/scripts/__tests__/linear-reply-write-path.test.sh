@@ -417,6 +417,13 @@ check_first_invocation_is_not_bare_body() { # $1=rel path  $2=tool basename
 check_first_invocation_is_not_bare_body "ask/references/threading.md" "linear-reply.mjs"
 check_first_invocation_is_not_bare_body "ask/SKILL.md" "linear-reply.mjs"
 
+# linearis/SKILL.md is the skill most agents read for a Linear invocation, so its primary
+# reply recipe is among the most-copied in the repo — yet it had only the weaker presence
+# check above, which a `#   --body-file …` comment line satisfies while the invocation line
+# itself still taught a bare --body. That is exactly the regression this strict check exists
+# to catch (CTL-2204 verify finding), so linearis is covered here too, not just ask/.
+check_first_invocation_is_not_bare_body "linearis/SKILL.md" "linear-reply.mjs"
+
 # ask/SKILL.md §5 is the `accept` recipe an agent copies when CLOSING an ask, and it is a
 # SECOND invocation in the same file — so the ask.mjs recipe needs its own anchor. Before the
 # CTL-2204 remediation this file's only --body-file mention was on the linear-reply line, so

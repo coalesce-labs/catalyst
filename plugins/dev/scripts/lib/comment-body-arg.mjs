@@ -15,8 +15,9 @@
 // phase-triage/SKILL.md documents it to agents as `linear-comment-post.sh <TICKET> "<body>"`.
 // Its in-repo callers are programmatic phase-mirror blocks that build the body in a shell
 // variable, so the residual exposure is hand-invocation. Porting this rule into that bash
-// helper is a follow-up, NOT part of this leaf — so read "one function, two importers" as a
-// statement about the two --body PARSERS, never as "every path into a Linear comment".
+// helper is a follow-up — filed as CTL-2207 — NOT part of this leaf, so read "one function,
+// two importers" as a statement about the two --body PARSERS, never as "every path into a
+// Linear comment".
 //
 // ⛔ SCOPE OF THE PATH GUARD — deliberately narrow, and the narrowness is the point.
 // It fires only on an ABSOLUTE (or ~/) path to a file that PROVABLY EXISTS. It does not
