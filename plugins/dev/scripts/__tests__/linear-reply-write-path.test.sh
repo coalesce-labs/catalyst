@@ -290,6 +290,20 @@ fi
 rm -f "$DB_WITH" "$DB_NOISSUE"
 rm -rf "$BODY_TMP"
 
+# --- CTL-2204: the documented recipe must teach --body-file ---
+DOCS_ROOT="${SCRIPT_DIR}/../../skills"
+# Positive control: the instrument can see a string we know is in the file.
+if grep -q "linear-reply.mjs" "${DOCS_ROOT}/ask/references/threading.md"; then
+  ok "positive control: docs grep instrument reads threading.md"
+  if grep -q -- "--body-file" "${DOCS_ROOT}/ask/references/threading.md"; then
+    ok "threading.md documents --body-file"
+  else
+    bad "threading.md does not document --body-file"
+  fi
+else
+  bad "positive control FAILED — docs path wrong (${DOCS_ROOT}), grep result untrustworthy"
+fi
+
 echo ""
 echo "Results: ${PASS} passed, ${FAIL} failed"
 [[ "$FAIL" -eq 0 ]]

@@ -56,7 +56,7 @@ in one place: **[`references/threading.md`](references/threading.md)** — one-l
 what a reply must contain. Read it before your first reply.
 
 ```bash
-direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" CTL-NNNN --as <ROLE> --body "<markdown>"
+direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" CTL-NNNN --as <ROLE> --body-file <path>
 ```
 
 ## 5. Closing (the raising agent)

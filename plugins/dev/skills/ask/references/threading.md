@@ -39,14 +39,22 @@ as an ADR before it ships, because history cannot be re-tagged.
 ## The helper (do not hand-roll the write)
 
 ```bash
-direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" CTL-NNNN --as <ROLE> --body "<markdown>"
-#   --body -          read the body from stdin
-#   --parent <id>     thread under a specific comment (its ROOT is used)
-#   --top             start a new top-level comment
+direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" CTL-NNNN --as <ROLE> --body-file <path>
+#   --body-file <path>  post the FILE'S CONTENTS (preferred for anything multi-line)
+#   --body "<markdown>" post a literal string
+#   --body -            read the body from stdin
+#   --parent <id>       thread under a specific comment (its ROOT is used)
+#   --top               start a new top-level comment
 ```
 
-Needs `LINEAR_SYNC_CLIENT_ID` / `LINEAR_SYNC_CLIENT_SECRET` (the app's client credentials — the
-catalyst-cloud direnv profile carries them); the helper mints the app-actor token itself.
+⛔ **Write the body to a file, then pass it with `--body-file` — never with `--body`.**
+`--body <path>` is REFUSED (exit 2): a path is never a comment body. This guard exists because
+the file-first habit produced 23 published comments whose entire body was a tmp path, across 16
+tickets, before CTL-2204.
+
+The helper posts through the cloud write proxy as the app actor and needs no client
+credentials of its own (CTL-1958); it requires `CATALYST_LINEAR_WRITE_PROXY=enforce` plus a
+cloud token, and refuses under any other resolution.
 
 ## Acknowledging with 👀
 
