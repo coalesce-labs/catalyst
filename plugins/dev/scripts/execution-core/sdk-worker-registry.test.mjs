@@ -795,3 +795,67 @@ describe("classifySdkWorkerLiveness (CTL-2192 Phase 1)", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 });
+
+// ---------------------------------------------------------------------------
+// CTL-2192 Phase 2 — childPidResolved on the projection.
+//
+// The marker records THAT WE LOOKED for a child, which is what lets Phase 1's
+// ladder tell "no child" (dead) from "never asked" (unknown). Without it a
+// legacy projection and a semaphore-parked worker are byte-identical.
+// ---------------------------------------------------------------------------
+
+describe("childPidResolved (CTL-2192 Phase 2)", () => {
+  test("a fresh registration projects childPidResolved: false — we have not looked yet", () => {
+    const dir = freshDir();
+    registerSdkWorker(entry(dir));
+    const proj = readProjection(dir, "CTL-1");
+    expect(proj.childPidResolved).toBe(false);
+    expect(proj.childPid).toBe(null);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("setChildPid(pid) records the pid AND stamps childPidResolved: true", () => {
+    const dir = freshDir();
+    const h = registerSdkWorker(entry(dir));
+    h.setChildPid(33333);
+    const proj = readProjection(dir, "CTL-1");
+    expect(proj.childPid).toBe(33333);
+    expect(proj.childPidResolved).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("setChildPid(null) stamps childPidResolved: true with a null pid — 'we looked, there was none'", () => {
+    // The semaphore-parked / two-generations-in-one-worktree cases. Recording
+    // the LOOK is what makes the later verdict `dead` instead of `unknown`.
+    const dir = freshDir();
+    const h = registerSdkWorker(entry(dir));
+    h.setChildPid(null);
+    const proj = readProjection(dir, "CTL-1");
+    expect(proj.childPid).toBe(null);
+    expect(proj.childPidResolved).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a SUPERSEDED handle's setChildPid does not stamp the successor's projection", () => {
+    const dir = freshDir();
+    const hOld = registerSdkWorker(entry(dir, { generation: 1 }));
+    registerSdkWorker(entry(dir, { generation: 2 })); // resume re-register
+    hOld.setChildPid(33333);
+    const proj = readProjection(dir, "CTL-1");
+    expect(proj.generation).toBe(2);
+    expect(proj.childPid).toBe(null);
+    expect(proj.childPidResolved).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("end-to-end: a stamped projection with a dead daemon and no child classifies DEAD, not unknown", () => {
+    const dir = freshDir();
+    const h = registerSdkWorker(entry(dir));
+    h.setChildPid(null);
+    resetSdkWorkerRegistry(); // simulate the daemon bounce — in-memory is gone
+    const v = classifySdkWorkerLiveness(dir, "CTL-1", { pidAlive: () => false, selfPid: process.pid + 1 });
+    expect(v.state).toBe("dead");
+    expect(v.reason).toBe("no-child-resolved");
+    rmSync(dir, { recursive: true, force: true });
+  });
+});

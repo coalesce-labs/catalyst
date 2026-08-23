@@ -2382,3 +2382,160 @@ describe("CTL-1814 — the fallback terminal event carries its orchestrator", ()
     expect(importBlock[1]).toContain("flipSignalAbandonedOnUndeclaredExit");
   });
 });
+
+// ---------------------------------------------------------------------------
+// CTL-2192 Phase 2 — the runner records its own child pid.
+//
+// The projection's `pid` is the DAEMON's for every worker, so after a bounce it
+// is dead by construction and an on-disk liveness read has nothing to probe.
+// The child's pid is the one durable fact — and an SDK child can outlive its
+// daemon as a PID-1 orphan (measured: 14 min). Discovery is a ONE-SHOT at the
+// first streamed message, and the marker is stamped whatever it returns.
+// ---------------------------------------------------------------------------
+
+describe("sdkRunPhaseAgent — CTL-2192 child-pid discovery", () => {
+  const childPidRegistry = () => {
+    const state = { registered: [], childPids: [], resolvedCalls: 0 };
+    const registerWorker = (entry) => {
+      state.registered.push(entry);
+      return {
+        setAbortController() {},
+        touch() {},
+        setSessionId() {},
+        setChildPid(pid) {
+          state.childPids.push(pid);
+          state.resolvedCalls += 1;
+        },
+        deregister() {},
+      };
+    };
+    return { registerWorker, state };
+  };
+
+  test("calls setChildPid EXACTLY ONCE per run, with the discovered pid", async () => {
+    const { spawn } = spawnReturningSpec();
+    const { registerWorker, state } = childPidRegistry();
+    const runQuery = () =>
+      (async function* () {
+        yield { type: "assistant", message: {} };
+        yield { type: "assistant", message: {} };
+        yield { type: "assistant", message: {} };
+        yield resultMsg();
+      })();
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH,
+      spawn,
+      runQuery,
+      registerWorker,
+      // Injected process table: pid 4242 is new after launch and its cwd is the
+      // worktree — the (ppid == daemon) ∧ (cwd == worktreePath) join.
+      listChildPids: (() => {
+        let n = 0;
+        return () => (n++ === 0 ? [11] : [11, 4242]);
+      })(),
+      cwdOfPid: (pid) => (pid === 4242 ? "/wt/CTL-100" : "/elsewhere"),
+    });
+    expect(r.code).toBe(0);
+    expect(state.resolvedCalls).toBe(1); // ONE-SHOT, not per streamed message
+    expect(state.childPids).toEqual([4242]);
+  });
+
+  test("stamps the resolution even when discovery finds NOTHING (setChildPid(null))", async () => {
+    // "We looked and there was no child" is the fact that makes a later verdict
+    // `dead` instead of `unknown`. Skipping the call would leave the projection
+    // legacy-shaped forever.
+    const { spawn } = spawnReturningSpec();
+    const { registerWorker, state } = childPidRegistry();
+    const runQuery = () =>
+      (async function* () {
+        yield { type: "assistant", message: {} };
+        yield resultMsg();
+      })();
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH,
+      spawn,
+      runQuery,
+      registerWorker,
+      listChildPids: () => [11], // no new child at all
+      cwdOfPid: () => "/elsewhere",
+    });
+    expect(r.code).toBe(0);
+    expect(state.resolvedCalls).toBe(1);
+    expect(state.childPids).toEqual([null]);
+  });
+
+  test("a THROWING enumerator is swallowed — the query still runs to completion", async () => {
+    // A liveness nicety must never take down a dispatch.
+    const { spawn } = spawnReturningSpec();
+    const { registerWorker, state } = childPidRegistry();
+    const runQuery = () =>
+      (async function* () {
+        yield { type: "assistant", message: {} };
+        yield resultMsg();
+      })();
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH,
+      spawn,
+      runQuery,
+      registerWorker,
+      listChildPids: () => {
+        throw new Error("ps exploded");
+      },
+      cwdOfPid: () => "/wt/CTL-100",
+    });
+    expect(r.code).toBe(0); // the run completed
+    expect(state.registered).toHaveLength(1);
+  });
+
+  test("a registry handle with NO setChildPid (older fake) does not break the run", async () => {
+    const { spawn } = spawnReturningSpec();
+    const registerWorker = () => ({
+      setAbortController() {},
+      touch() {},
+      deregister() {},
+    });
+    const runQuery = () =>
+      (async function* () {
+        yield { type: "assistant", message: {} };
+        yield resultMsg();
+      })();
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH,
+      spawn,
+      runQuery,
+      registerWorker,
+      listChildPids: () => [11, 4242],
+      cwdOfPid: () => "/wt/CTL-100",
+    });
+    expect(r.code).toBe(0);
+  });
+
+  test("discovery does not re-run across a 429 retry (still exactly one stamp)", async () => {
+    const { spawn } = spawnReturningSpec();
+    const { registerWorker, state } = childPidRegistry();
+    let attempt = 0;
+    const runQuery = () => {
+      const i = attempt++;
+      return (async function* () {
+        yield { type: "assistant", message: {} };
+        // Same 529 shape the neighbouring overload-retry tests use.
+        yield i === 0 ? resultMsg({ subtype: "error", is_error: true, api_error_status: 529 }) : resultMsg();
+      })();
+    };
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH,
+      spawn,
+      runQuery,
+      registerWorker,
+      sleep: async () => {},
+      backoff: { baseMs: 1, capMs: 2 },
+      listChildPids: (() => {
+        let n = 0;
+        return () => (n++ === 0 ? [11] : [11, 4242]);
+      })(),
+      cwdOfPid: () => "/wt/CTL-100",
+    });
+    expect(r.code).toBe(0);
+    expect(state.resolvedCalls).toBe(1);
+  });
+});

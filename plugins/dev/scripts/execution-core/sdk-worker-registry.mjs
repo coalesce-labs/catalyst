@@ -81,6 +81,12 @@ function writeProjection(entry) {
         // OUTLIVE a daemon crash, so its own pid must be durable here to let boot
         // reconcile kill the orphan. null for in-process sdk/bg (never set).
         childPid: entry.childPid ?? null,
+        // CTL-2192 (Phase 2): did we LOOK for a child? Distinguishes "no child"
+        // from "never asked" — the two are byte-identical without this marker,
+        // and classifySdkWorkerLiveness must answer `dead` for the first and
+        // `unknown` for the second (a legacy projection, or a worker parked at
+        // the semaphore before its child exists).
+        childPidResolved: entry.childPidResolved === true,
       }),
     );
     renameSync(tmp, file);
@@ -119,6 +125,7 @@ function publicView(entry) {
     sessionId: entry.sessionId,
     executor: entry.executor, // CTL-1457: which launch verb owns this worker
     childPid: entry.childPid, // CTL-1457 (N2): out-of-process child pid (codex-exec) or null
+    childPidResolved: entry.childPidResolved, // CTL-2192: did we look for a child?
   };
 }
 
@@ -171,7 +178,11 @@ export function registerSdkWorker(
     executor,
     // CTL-1457 (N2): the out-of-process child pid (codex-exec). Unknown at register
     // time (the child spawns later) → null; set via setChildPid after spawn.
+    // CTL-2192 (Phase 2): the SDK runner now populates it too, via a per-pid
+    // ppid+cwd join (sdk-child-discovery.mjs).
     childPid: null,
+    // CTL-2192 (Phase 2): false until setChildPid runs, whatever it discovers.
+    childPidResolved: false,
     now,
   };
   _live.set(ticket, entry);
@@ -215,9 +226,13 @@ export function registerSdkWorker(
     // THIS daemon leaves a durable pointer to any orphaned child on the projection.
     // Written immediately (durability is the point) and token-fenced like touch/
     // setSessionId. A non-integer pid clears it to null. No-op for in-process sdk/bg.
+    // CTL-2192 (Phase 2): stamps childPidResolved: true REGARDLESS of what was
+    // discovered. A null pid here means "we looked and found none" — a fact the
+    // liveness oracle reads as dead; without the stamp it must read `unknown`.
     setChildPid(pid) {
       if (_live.get(ticket)?.token !== entry.token) return;
       entry.childPid = Number.isInteger(pid) && pid > 0 ? pid : null;
+      entry.childPidResolved = true;
       entry.updatedAt = entry.now();
       writeProjection(entry);
     },

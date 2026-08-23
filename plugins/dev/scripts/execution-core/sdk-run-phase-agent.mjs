@@ -69,6 +69,13 @@ import { classifyEventStream } from "../lib/event-stream-class.mjs"; // CTL-1488
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 import { nodeClass } from "./lib/node-class.mjs";
 import { registerSdkWorker as defaultRegisterSdkWorker } from "./sdk-worker-registry.mjs";
+// CTL-2192 (Phase 2): the worker's OWN child pid — the only liveness fact that
+// survives a daemon bounce (the projection's `pid` is the daemon's).
+import {
+  listChildPids as defaultListChildPids,
+  cwdOfPid as defaultCwdOfPid,
+  discoverSdkChildPid,
+} from "./sdk-child-discovery.mjs";
 import { YIELDED_STATUS, shouldFlipOnUndeclaredExit } from "../lib/phase-yield.mjs";
 import { ASSERTED_BY } from "./assertion-evidence.mjs"; // CTL-1789: terminal-writer attribution
 
@@ -1167,6 +1174,9 @@ export async function sdkRunPhaseAgent(
     maxRetries = 5, // bound the 429/529 backoff
     backoff = {}, // { baseMs, capMs } overrides for tests
     registerWorker = defaultRegisterSdkWorker, // CTL-1410 Phase B: the in-process worker registry
+    // CTL-2192 (Phase 2): process-table probes, injectable so tests never shell out.
+    listChildPids = defaultListChildPids,
+    cwdOfPid = defaultCwdOfPid,
   } = {},
 ) {
   // ── AUTH GUARD: refuse BEFORE any side effect (no claim, no signal) ───────
@@ -1265,6 +1275,19 @@ export async function sdkRunPhaseAgent(
   // announced on the unified event log (worker.session.started|resumed) so the
   // fleet view / orphan lookback can be built centrally (Loki ships the same log).
   let sessionId = null;
+  // CTL-2192 (Phase 2): snapshot the daemon's children BEFORE any query launches,
+  // so the child this run spawns is the one that shows up in the diff. Taken
+  // after sem.acquire() to keep the window tight. Whole thing is fail-open — a
+  // liveness nicety must never take down a dispatch.
+  let childPidsBefore = [];
+  try {
+    childPidsBefore = listChildPids(process.pid);
+  } catch {
+    /* best-effort — an unusable process table just means no discovery */
+  }
+  // ONE-SHOT per run (not per streamed message, and not per 429 retry attempt):
+  // `lsof` is not a per-message cost, and the projection field is durable.
+  let childPidResolved = false;
   try {
     let lastOverload = null;
     for (let i = 0; i <= maxRetries; i++) {
@@ -1278,6 +1301,25 @@ export async function sdkRunPhaseAgent(
         const q = runQuery({ prompt: spec.prompt, options: { ...options, abortController: ac } });
         for await (const m of q) {
           reg.touch(); // registry heartbeat (internally throttled to disk)
+          // CTL-2192 (Phase 2): the first streamed message is the earliest point
+          // at which the child certainly exists. Stamp the projection with what
+          // we found — INCLUDING a null, which records that we LOOKED. Without
+          // that record a childless projection is indistinguishable from a
+          // legacy one, and the liveness oracle must answer `unknown` for both.
+          if (!childPidResolved) {
+            childPidResolved = true;
+            try {
+              const discovered = discoverSdkChildPid({
+                before: childPidsBefore,
+                after: listChildPids(process.pid),
+                cwdOf: cwdOfPid,
+                worktreePath: spec.worktreePath ?? worktreePath,
+              });
+              reg.setChildPid?.(discovered); // optional-chained: Phase B test fakes lack it
+            } catch {
+              /* discovery is best-effort; the run continues either way */
+            }
+          }
           if (typeof m?.session_id === "string" && m.session_id && m.session_id !== sessionId) {
             // A 429-retry starts a NEW session: close the old id first so the
             // log never carries a dangling started (the "interrupted" shape is
