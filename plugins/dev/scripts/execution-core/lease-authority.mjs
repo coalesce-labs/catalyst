@@ -16,9 +16,15 @@
 //               grant = {nonce, expiresAtMs, scope:{ticket,phase}, coordinationHeadSeqAtGrant}
 //        loss → {claimed:false, refusal:"not_entitled"|"lease_held", current, attribution:null}
 //   POST /lease/release  {ticket, phase, holder, nonce} → ReleaseResult (advances the generation)
-//   POST /lease/renew    — OUT OF SCOPE here: the store requires a non-empty progress
-//        assertion (invariant I2), so a mechanical keep-alive is forbidden. `renew` is a
-//        loud stub; progress-asserted renewal is the follow-up ticket.
+//   POST /lease/renew    {ticket, phase, holder, nonce, assertion, ttlMs?}
+//        renewed → {renewed:true,  lease, grant}   — the nonce is PRESERVED, not advanced
+//        refused → {renewed:false, refusal:"no_lease"|"not_holder"|"stale_generation"|"expired",
+//                   current}
+//        ⛔ The store requires a non-empty progress `assertion` (invariant I2), so a mechanical
+//        keep-alive is forbidden BY THE STORE. `nowMs` is stamped server-side — never sent.
+//        Deciding whether progress has actually happened is `decideRenewal`'s job, below: the
+//        client refuses to re-assert a mark it has already renewed on, so a stalled holder makes
+//        no call at all and its lease lapses on its own deadline (CTC-921).
 //
 // ⛔ `grant.nonce` IS the `generation`. `fence-guard.mjs` compares generations by EQUALITY,
 // so any unique token is a drop-in — the nonce is mapped to `generation` at THIS boundary so
@@ -306,13 +312,44 @@ export function createLeaseAuthorityClient({
     },
 
     /**
-     * renew — OUT OF SCOPE (CTL-1786). The store requires a non-empty progress assertion
-     * (invariant I2), so a mechanical keep-alive is forbidden by the store. A loud stub rather
-     * than a silent no-op so a future caller cannot believe it renewed. Progress-asserted
-     * renewal is the follow-up ticket.
+     * renew — extend THIS tenure on the strength of an assertion of progress (CTC-921).
+     *
+     * ⛔ A REFUSAL IS A NORMAL RETURN. `{renewed:false, refusal}` means the store arbitrated —
+     * empty assertion, wrong holder, stale generation, or an already-expired lease — and there is
+     * nothing to retry. Only a transport failure or an unreadable 2xx body throws, exactly as for
+     * `claim`. A renewal may NEVER be reported that the store did not grant, so an ambiguous 2xx
+     * throws rather than defaulting to renewed.
+     *
+     * ⛔ The generation does NOT advance across a renewal (server-side invariant, lease-verbs.ts):
+     * one tenure, one fencing token, however many renewals. Callers must keep passing the SAME
+     * `nonce` they were granted — `res.grant.nonce` is returned unchanged, not a new token.
+     *
+     * `nowMs` is stamped by the server (`handleLeaseRenew`), so it is deliberately absent from the
+     * body; `ttlMs` rides only when the caller overrides the server default.
      */
-    renew() {
-      throw new LeaseAuthorityError("renew-not-implemented", { retryable: false });
+    renew({ ticket, phase, holder, nonce, assertion, ttlMs = null }) {
+      const payload = { ticket, phase, holder, nonce, assertion };
+      if (ttlMs != null) payload.ttlMs = ttlMs;
+      const { status, body } = callVerb("renew", payload);
+
+      if (is2xx(status)) {
+        if (!body || typeof body !== "object") {
+          throw new LeaseAuthorityError("renew-unreadable-body", { retryable: true, status });
+        }
+        if (body.renewed === true) {
+          return { renewed: true, lease: body.lease ?? null, grant: body.grant ?? null };
+        }
+        if (body.renewed === false) {
+          return {
+            renewed: false,
+            refusal: typeof body.refusal === "string" ? body.refusal : "unknown",
+            current: body.current ?? null,
+          };
+        }
+        // A 2xx that is neither a renewal nor a refusal is an answer we do not have.
+        throw new LeaseAuthorityError("renew-unreadable", { retryable: false, status });
+      }
+      throw leaseErrorForStatus(status, body);
     },
   };
 }
