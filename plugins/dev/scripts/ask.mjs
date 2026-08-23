@@ -31,6 +31,7 @@ import { spawnSync } from "node:child_process";
 // module — the documented form threw a ReferenceError before reading anything.
 import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { resolveCommentBody } from "./lib/comment-body-arg.mjs";
 
 // ⚠️ ONE alternation-free pattern, deliberately: JS alternation prefers the earliest MATCH
 // POSITION, so a bare `Options:` branch matches at the preceding newline and consumes
@@ -333,7 +334,7 @@ function usage() {
                  --option <label> --option <label> [--option ...]   (at least TWO)
                  --default <text> --blocks <ISSUE> [--blocks <ISSUE> ...]
                  [--priority <1-4>] [--dry-run]
-  ask.mjs accept <ISSUE> --as <AGENT> --body <markdown|-> [--dry-run]
+  ask.mjs accept <ISSUE> --as <AGENT> (--body <markdown|-> | --body-file <path>) [--dry-run]
 
 create files a correctly-shaped ask ticket, then READS IT BACK and proves the decision
 trigger can parse its options AND that every requested blocking relation landed. accept
@@ -574,13 +575,26 @@ function cmdCreate(argv) {
 function cmdAccept(argv) {
   const id = argv[0];
   const as = argOf(argv, "--as");
-  let body = argOf(argv, "--body");
   const dryRun = argv.includes("--dry-run");
-  if (!id || !as || !body) {
-    console.error("ask accept: <ISSUE> --as <AGENT> --body <markdown|-> are required");
+  if (!id || !as) {
+    console.error("ask accept: <ISSUE> --as <AGENT> (--body <markdown|-> | --body-file <path>) are required");
     return 1;
   }
-  if (body === "-") body = readFileSync(0, "utf8");
+  // CTL-2204: same rule as linear-reply.mjs, from the same leaf. Decided HERE so it also
+  // covers --dry-run, which never reaches the linear-reply child process.
+  const resolved = resolveCommentBody({
+    body: argOf(argv, "--body"),
+    bodyFile: argOf(argv, "--body-file"),
+  });
+  if (!resolved.ok) {
+    console.error(`ask accept: ${resolved.message}`);
+    return 1;
+  }
+  let body = resolved.stdin ? readFileSync(0, "utf8") : resolved.body;
+  if (!body.trim()) {
+    console.error("ask accept: comment body is empty (stdin produced nothing)");
+    return 1;
+  }
 
   // Refuse on a non-ask: `accept` moves a ticket to Done, and doing that to a work ticket
   // because someone mistyped an id is not recoverable by the person who typed it.

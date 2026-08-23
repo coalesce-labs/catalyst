@@ -578,3 +578,138 @@ esac
     expect(r.stderr).toContain("NO relation field");
   });
 });
+
+// ── CTL-2204 ────────────────────────────────────────────────────────────────────
+// ask.mjs accept forwards --body straight to linear-reply.mjs's child process
+// (ask.mjs:619). A guard in linear-reply.mjs alone still leaves a gap: --dry-run
+// never spawns that child, so before this change `ask accept ... --body
+// /tmp/x.md --dry-run` happily printed wouldReply:"/tmp/x.md" and exited 0. The
+// same shared resolver (lib/comment-body-arg.mjs) is wired directly into
+// cmdAccept so the refusal fires in ask.mjs's OWN process, before the replica
+// read — which is why the refusal tests below need no replica/linearis stub at
+// all: a refused body never reaches that code.
+//
+// Every test drives the REAL CLI through spawnSync, same discipline as the
+// CTL-2157 block above.
+
+const runAccept = (args, { env = {} } = {}) =>
+  spawnSync(process.execPath, [ASK_MJS, "accept", ...args], {
+    encoding: "utf8",
+    env: { ...process.env, ...env },
+  });
+
+describe("ask accept — CTL-2204 body guard", () => {
+  const ASK_ID = "CTL-1";
+
+  test("--body pointing at an existing file is refused before anything is written", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ask-body-"));
+    const f = join(dir, "real.md");
+    writeFileSync(f, "# real body\n");
+    const r = runAccept([ASK_ID, "--as", "COORD", "--body", f, "--dry-run"]);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("--body-file");
+  });
+
+  test("--dry-run does NOT report a path as the would-be reply", () => {
+    // The gap a linear-reply-only guard leaves: dry-run never reaches the child
+    // process, so before this change it printed wouldReply:"/tmp/real.md" and
+    // exited 0.
+    const dir = mkdtempSync(join(tmpdir(), "ask-body-"));
+    const f = join(dir, "real.md");
+    writeFileSync(f, "# real body\n");
+    const r = runAccept([ASK_ID, "--as", "COORD", "--body", f, "--dry-run"]);
+    expect(r.status).not.toBe(0);
+    expect(r.stdout).not.toContain(f);
+  });
+
+  test("--body-file missing → refused, naming the path", () => {
+    const r = runAccept([ASK_ID, "--as", "COORD", "--body-file", "/tmp/gone-xyz-ctl2204.md", "--dry-run"]);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("/tmp/gone-xyz-ctl2204.md");
+  });
+
+  test("both --body and --body-file → refused as ambiguous", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ask-body-"));
+    const f = join(dir, "real.md");
+    writeFileSync(f, "x");
+    const r = runAccept([ASK_ID, "--as", "COORD", "--body", "hi", "--body-file", f, "--dry-run"]);
+    expect(r.status).not.toBe(0);
+  });
+
+  test("whitespace-only --body → refused", () => {
+    const r = runAccept([ASK_ID, "--as", "COORD", "--body", "   ", "--dry-run"]);
+    expect(r.status).not.toBe(0);
+  });
+
+  test("an ordinary body clears the guard — the refusal is not what stops it", () => {
+    // The guard runs BEFORE the replica read, so an ordinary body must advance
+    // PAST it. It then legitimately fails at the (nonexistent, isolated) replica
+    // — that failure proves the guard was cleared, not tripped: none of the
+    // guard's own refusal strings appear.
+    const r = runAccept(
+      [ASK_ID, "--as", "COORD", "--body", "accepted — has what it needs", "--dry-run"],
+      { env: { CATALYST_REPLICA_DB: "/nonexistent/replica-ctl2204.db", CATALYST_DIR: mkdtempSync(join(tmpdir(), "ask-noreplica-")) } }
+    );
+    expect(r.stderr).not.toContain("--body-file");
+    expect(r.stderr).not.toContain("ambiguous");
+    expect(r.stderr).not.toContain("comment body is empty");
+  });
+});
+
+describe("ask accept — CTL-2204 --body-file happy path (fresh local replica)", () => {
+  const ASK_ID = "CTL-220499"; // linear_read_ticket requires TEAM-<digits>; no letter suffix
+
+  // Build a hermetic replica the SAME shape lib/linear-read-replica.sh's
+  // linear_read_ticket reads: issues/labels/issue_labels + a FRESH writer.lock
+  // + a sync_meta cursor row, so the read is a replica HIT and never falls back
+  // to a live `linearis` call (none is stubbed on PATH here).
+  const buildFreshReplica = (id, { askLabel = true } = {}) => {
+    const dir = mkdtempSync(join(tmpdir(), "ask-replica-"));
+    const db = join(dir, "replica.db");
+    const labelRows = askLabel
+      ? "INSERT INTO labels VALUES ('L1','catalyst-ask');" +
+        "INSERT INTO issue_labels VALUES ('issue-1','L1');"
+      : "";
+    const sql = `
+CREATE TABLE issues (id TEXT PRIMARY KEY, identifier TEXT, title TEXT, description TEXT,
+  priority INTEGER, estimate INTEGER, url TEXT, branch_name TEXT, state TEXT,
+  assignee_id TEXT, assignee TEXT, removed_at INTEGER);
+CREATE TABLE labels (id TEXT PRIMARY KEY, name TEXT);
+CREATE TABLE issue_labels (issue_id TEXT, label_id TEXT);
+CREATE TABLE sync_meta (key TEXT PRIMARY KEY, value TEXT);
+INSERT INTO issues (id, identifier, title, removed_at) VALUES ('issue-1', '${id}', 't', NULL);
+${labelRows}
+INSERT INTO sync_meta VALUES ('cursor', '1');
+`;
+    const r = spawnSync("sqlite3", [db, sql], { encoding: "utf8" });
+    if (r.status !== 0) throw new Error(`buildFreshReplica: sqlite3 failed: ${r.stderr}`);
+    writeFileSync(`${db}.writer.lock`, ""); // fresh mtime = now
+    return db;
+  };
+
+  test("--body-file resolves to the file's contents in the dry-run preview, never the path", () => {
+    const db = buildFreshReplica(ASK_ID);
+    const bodyDir = mkdtempSync(join(tmpdir(), "ask-body-"));
+    const f = join(bodyDir, "real.md");
+    writeFileSync(f, "# real body\n");
+    const r = runAccept([ASK_ID, "--as", "COORD", "--body-file", f, "--dry-run"], {
+      env: { CATALYST_REPLICA_DB: db },
+    });
+    expect(r.status).toBe(0);
+    const out = JSON.parse(r.stdout);
+    expect(out.wouldReply).toContain("real body");
+    expect(out.wouldReply).not.toContain(f);
+  });
+
+  test("an ordinary --body reaches the dry-run preview and exits 0 (guard does not regress the happy path)", () => {
+    const db = buildFreshReplica(ASK_ID);
+    const r = runAccept(
+      [ASK_ID, "--as", "COORD", "--body", "accepted — has what it needs", "--dry-run"],
+      { env: { CATALYST_REPLICA_DB: db } }
+    );
+    expect(r.status).toBe(0);
+    const out = JSON.parse(r.stdout);
+    expect(out.action).toBe("dry-run");
+    expect(out.wouldReply).toContain("accepted");
+  });
+});
