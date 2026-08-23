@@ -1448,7 +1448,22 @@ export function startDaemon({
     // a leftover of the previous daemon; delete it BEFORE boot-resume and the
     // scheduler run, so no liveness consumer trusts a ghost projection.
     const sdkRegistryBoot = reconcileSdkRegistryOnBoot(orchDir);
-    if (sdkRegistryBoot.removed.length > 0 || (sdkRegistryBoot.killedChildren?.length ?? 0) > 0) {
+    // CTL-2192 (Phase 4): orphans that survived their SIGTERM. Their projections
+    // are KEPT (the only durable pointer to a live worker) and the tickets are
+    // dropped from boot-resume candidacy — never dispatch a second generation
+    // into a worktree whose first one we could not prove is gone.
+    const sdkReapFailedTickets = new Set((sdkRegistryBoot.reapFailed ?? []).map((r) => r.ticket));
+    if (sdkReapFailedTickets.size > 0) {
+      log.warn(
+        { tickets: [...sdkReapFailedTickets], reapFailed: sdkRegistryBoot.reapFailed },
+        "boot: orphaned worker children survived SIGTERM — projections kept, tickets excluded from boot-resume (CTL-2192)"
+      );
+    }
+    if (
+      sdkRegistryBoot.removed.length > 0 ||
+      (sdkRegistryBoot.killedChildren?.length ?? 0) > 0 ||
+      sdkReapFailedTickets.size > 0
+    ) {
       log.info(
         {
           removed: sdkRegistryBoot.removed,
@@ -1457,6 +1472,8 @@ export function startDaemon({
           // CTL-1457 (N2): orphaned codex children SIGTERM'd before their dead-daemon
           // projections were reaped (empty on a pure sdk/bg fleet).
           killedChildren: (sdkRegistryBoot.killedChildren ?? []).map((k) => k.ticket),
+          // CTL-2192: reaps we could NOT confirm — an assumed kill is not a kill.
+          reapFailed: (sdkRegistryBoot.reapFailed ?? []).map((r) => r.ticket),
         },
         "boot: reaped stale sdk-worker projections (CTL-1410); harvested warm-resume sessions (CTL-1422); killed orphaned codex children (CTL-1457 N2)"
       );
@@ -1575,6 +1592,9 @@ export function startDaemon({
         concurrency,
         dispatch: dispatchFn,
         sdkSessionHarvest,
+        // CTL-2192: reap-then-confirm-then-decide. reconcileSdkRegistryOnBoot ran
+        // above; its unconfirmed reaps are excluded from candidacy here.
+        reapFailedTickets: sdkReapFailedTickets,
       }); // CTL-665: config-first ceiling; CTL-1422: warm-resume harvest
       _bootResume = bootResume;
       // CTL-644: dispatch any gated tickets that already have an approval sentinel on disk

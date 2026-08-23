@@ -78,6 +78,8 @@ import { defaultDispatch } from "./dispatch.mjs";
 import { liveAgents } from "./cli/sessions.mjs";
 import { YIELDED_STATUS } from "../lib/phase-yield.mjs"; // CTL-1854: the declared bounded wait
 import { countYieldedOccupancy } from "./signal-reader.mjs"; // CTL-1854: mode-independent yield occupancy
+// CTL-2192: the three-valued SDK liveness oracle (leaf module).
+import { classifySdkWorkerLiveness } from "./sdk-worker-registry.mjs";
 
 // ─── CTL-644: cheap/expensive classification ───────────────────────────────
 //
@@ -444,6 +446,18 @@ export function selectBootResumeCandidates({
   // occupying slots before the restart, and the runner's semaphore still caps
   // real concurrency.
   sdkSessionHarvest = new Map(),
+  // CTL-2192 (Phase 4): the SDK-native liveness arm. hasLiveBgWorker matches only
+  // `claude agents` BACKGROUND sessions, and an SDK worker never registers there
+  // — so it reads false for EVERY live SDK worker and every in-flight SDK ticket
+  // is a boot-resume candidate on every daemon start. Default is a no-op
+  // `unknown` (preserving today's behaviour and leaving the 12 existing pure
+  // tests untouched), the same defaulting discipline onPhaseRegression uses;
+  // reconcileBootResume threads the real classifySdkWorkerLiveness.
+  sdkLiveness = () => ({ state: "unknown", reason: "no-oracle-injected", childPid: null }),
+  // CTL-2192 (Phase 4): tickets whose orphan reap could NOT be confirmed. Never
+  // dispatch beside a worker we could not prove is dead — that is two live
+  // generations in one worktree, the harm this ticket exists to prevent.
+  reapFailedTickets = new Set(),
 } = {}) {
   const inFlight = listInFlightTickets(orchDir);
   if (inFlight.size === 0) return [];
@@ -549,7 +563,29 @@ export function selectBootResumeCandidates({
       );
       continue;
     }
-    if (hasLiveBgWorker(agents, active.worktreePath)) {
+    // CTL-2192 (Phase 4): a ticket whose orphan survived its SIGTERM is not a
+    // candidate at any liveness verdict — we could not prove its worker is gone.
+    if (reapFailedTickets?.has?.(ticket)) {
+      logger.warn(
+        { ticket, phase: active.phase },
+        "boot-resume: orphan reap unconfirmed — not resuming beside a possibly-live worker (CTL-2192)"
+      );
+      liveCount++; // it may still hold its slot; charge it rather than over-dispatch
+      continue;
+    }
+    // CTL-2192 (Phase 4): ONE liveness question, two arms. EITHER arm reporting
+    // live is enough — a bg worker and an SDK worker are different shapes of the
+    // same fact. A throwing oracle degrades to `unknown` (candidate), because a
+    // liveness read must never take down the boot pass.
+    let sdkVerdict;
+    try {
+      sdkVerdict = sdkLiveness(ticket, active.worktreePath);
+    } catch (err) {
+      sdkVerdict = { state: "unknown", reason: "oracle-threw", childPid: null };
+      logger.warn({ ticket, err: err?.message }, "boot-resume: sdk liveness oracle threw — treating as unknown (CTL-2192)");
+    }
+    const sdkState = sdkVerdict?.state ?? "unknown";
+    if (hasLiveBgWorker(agents, active.worktreePath) || sdkState === "live") {
       liveCount++;
     } else {
       // CTL-690: capture bg_job_id (signal-reader exposes it as liveness.value
@@ -562,7 +598,18 @@ export function selectBootResumeCandidates({
         phase: active.phase,
         worktreePath: active.worktreePath,
         bgJobId,
+        // CTL-2192: stamp the verdict so the audit log can WATCH the legacy
+        // `unknown` population drain rather than assuming it has. Per the plan's
+        // Migration Notes: do not alarm on `unknown` until a full ticket has
+        // cycled on every host.
+        liveness: { source: "sdk", state: sdkState, reason: sdkVerdict?.reason ?? null },
       });
+      if (sdkState === "unknown") {
+        logger.debug(
+          { ticket, phase: active.phase, reason: sdkVerdict?.reason ?? null },
+          "boot-resume: sdk liveness unknown — resuming (today's behaviour); breadcrumb for the rollout drain (CTL-2192)"
+        );
+      }
     }
   }
 
@@ -701,6 +748,12 @@ export function reconcileBootResume({
   // and a deferred warm candidate would lose its UUID (the harvest lives only in
   // this boot pass — Sweep 1.5 has no access to it).
   sdkSessionHarvest = new Map(),
+  // CTL-2192 (Phase 4): the SDK-native liveness oracle and the set of tickets
+  // whose orphan reap could not be confirmed. Both come from
+  // reconcileSdkRegistryOnBoot's result, which startDaemon already runs before
+  // this pass — reap first, confirm the reap, THEN decide candidacy.
+  sdkLiveness = (ticket) => classifySdkWorkerLiveness(orchDir, ticket),
+  reapFailedTickets = new Set(),
 } = {}) {
   // CTL-1006 Scenario 1: eligible on a cold start OR a daemon bounce. The old
   // `report.coldStart !== true` gate was a permanent production no-op because
@@ -721,6 +774,8 @@ export function reconcileBootResume({
     onPhaseRegression: ({ ticket, phase, dominantPhase }) =>
       appendRegressionEvent({ phase, ticket, dominantPhase, orchId }),
     sdkSessionHarvest, // CTL-1422 (B): warm candidates are slice-exempt
+    sdkLiveness, // CTL-2192: the SDK arm of the liveness question
+    reapFailedTickets, // CTL-2192: never dispatch beside an unconfirmed orphan
   });
 
   // CTL-1084: planned = total candidates found (before any cap or cooldown filter).
