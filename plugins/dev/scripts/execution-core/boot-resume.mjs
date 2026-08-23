@@ -935,9 +935,29 @@ export function processApprovedResumes({
   // CTL-2192 (Phase 4): tickets whose boot-time orphan reap could NOT be
   // confirmed (reconcileSdkRegistryOnBoot().reapFailed). Same fact, same fail
   // direction, as reconcileBootResume's parameter of the same name. Defaults to
-  // an empty Set so the per-tick scheduler call — which runs long after boot,
-  // when the boot reap verdict no longer describes the fleet — is unchanged.
+  // an empty Set for the per-tick scheduler call, which carries no boot verdict.
+  //
+  // ⛔ That default is NOT the whole guard, and reading it as one was the defect
+  // Codex #3955 round 2 caught. `startScheduler` runs `runTick()` immediately as
+  // its "authoritative initial pass", and that tick calls this function with the
+  // empty default — on the SAME boot whose reap just failed. So the boot call
+  // would correctly retain an approval, and the scheduler's very first tick,
+  // moments later, would dispatch it beside the still-live orphan. The guard was
+  // applied at one door and walked around through the adjacent one, which is
+  // exactly the failure this parameter exists to prevent.
   reapFailedTickets = new Set(),
+  // CTL-2192 (Codex #3955 round 2 P1): the second half of that guard, and the
+  // half that does not go stale. Rather than freezing the boot verdict and
+  // threading it through startScheduler — where it would describe the fleet less
+  // and less accurately every tick, eventually stranding approvals forever — the
+  // per-tick path RE-DERIVES the answer: is there a live SDK worker for this
+  // ticket right now? A reapFailed orphan keeps its projection, so the oracle
+  // reads `orphan-child-alive` → live, and a child that has since died reads
+  // `orphan-child-dead` → the approval dispatches on the very next tick with no
+  // restart. Same fail direction as every other liveness read in this ticket:
+  // ONLY a definite `live` blocks; `unknown` proceeds (today's behaviour), so a
+  // legacy projection can never strand an operator's approval.
+  sdkLiveness = (ticket) => classifySdkWorkerLiveness(orchDir, ticket),
   // CTL-1443: the stale-gate expiry sweep rides the same every-tick call so no
   // scheduler wiring is needed. Injectable for tests; emitAlert defaults to the
   // real dispatch-alert emitter (lazy import avoided — passed by the caller or
@@ -979,12 +999,39 @@ export function processApprovedResumes({
     // CTL-2192: never dispatch beside an orphan we could not prove is gone.
     // Checked BEFORE the marker read so an unreadable marker cannot mask it, and
     // BOTH sentinels are RETAINED — the approval is still valid, it is just not
-    // actionable on this boot. The next boot re-derives the reap verdict and
-    // dispatches then, so this defers the resume rather than dropping it.
+    // actionable right now. A later boot or a later tick re-derives the verdict
+    // and dispatches then, so this DEFERS the resume rather than dropping it.
+    //
+    // Two independent sources of the same fact, because neither covers the other:
+    // the boot set is authoritative for the boot pass but carries no information
+    // on a later tick, and the live oracle is self-maintaining but cannot see a
+    // reap failure whose projection was already removed. Either one blocks.
     if (reapFailedTickets?.has?.(ticket)) {
       log.warn(
         { ticket },
         "processApprovedResumes: orphan reap unconfirmed — approval retained, not dispatching beside a possibly-live worker (CTL-2192)"
+      );
+      reapBlocked++;
+      continue;
+    }
+
+    // CTL-2192 (Codex #3955 round 2 P1): the per-tick half. A throwing oracle is
+    // `unknown`, never a block — a broken liveness read must not strand every
+    // operator approval on the host.
+    let liveVerdict;
+    try {
+      liveVerdict = sdkLiveness(ticket);
+    } catch (err) {
+      liveVerdict = { state: "unknown", reason: "oracle-threw", childPid: null };
+      log.warn(
+        { ticket, err: err?.message },
+        "processApprovedResumes: sdk liveness oracle threw — treating as unknown (CTL-2192)"
+      );
+    }
+    if ((liveVerdict?.state ?? "unknown") === "live") {
+      log.warn(
+        { ticket, reason: liveVerdict?.reason ?? null, childPid: liveVerdict?.childPid ?? null },
+        "processApprovedResumes: an SDK worker is still live for this ticket — approval retained, not dispatching a second generation (CTL-2192)"
       );
       reapBlocked++;
       continue;
