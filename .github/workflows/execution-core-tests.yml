@@ -1069,6 +1069,7 @@ jobs:
         run: |
           bash __tests__/catalyst-layer2-read.test.sh
           bash __tests__/layer2-read-parity.test.sh
+          bash __tests__/layer2-consumer-fallback.test.sh
 
       - name: Broker tests (CTL-1529, CTL-1809)
         # CTL-1529 round 2: broker/worker-state-projection.test.mjs guards the

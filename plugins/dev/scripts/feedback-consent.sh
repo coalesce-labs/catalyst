@@ -66,12 +66,31 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 1
 fi
 
+# CTL-1214: the merged-Layer-2 leaf. catalyst.feedback.* had NO Layer-2 reader,
+# so once the committed config is slimmed a granted consent reads back as
+# "unset" — silently, because an absent key and a withheld consent are the same
+# empty string here.
+_FC_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -r "${_FC_SCRIPT_DIR}/lib/catalyst-layer2-read.sh" ]; then
+  # shellcheck disable=SC1090
+  . "${_FC_SCRIPT_DIR}/lib/catalyst-layer2-read.sh"
+fi
+
 read_auto_file() {
-  if [ ! -f "$CONFIG_PATH" ]; then
-    echo ""
-    return 0
+  _fc_val=""
+  if [ -f "$CONFIG_PATH" ]; then
+    _fc_val="$(jq -r '.catalyst.feedback.autoFile // empty' "$CONFIG_PATH" 2>/dev/null)"
   fi
-  jq -r '.catalyst.feedback.autoFile // empty' "$CONFIG_PATH" 2>/dev/null
+  # Layer-1 wins when present; Layer-2 answers only when Layer-1 is silent.
+  # ⚠️ catalyst.feedback is a STRING in the live Layer-2 config
+  # ("https://github.com/coalesce-labs/catalyst.git"), so a bare jq walk of
+  # .catalyst.feedback.autoFile would die with "Cannot index string with
+  # autoFile". catalyst_layer2_json wraps the walk in try/catch and yields empty.
+  if [ -z "$_fc_val" ] && command -v catalyst_layer2_json >/dev/null 2>&1; then
+    _fc_val="$(catalyst_layer2_json '.catalyst.feedback.autoFile')"
+  fi
+  echo "$_fc_val"
+  return 0
 }
 
 case "$SUBCOMMAND" in

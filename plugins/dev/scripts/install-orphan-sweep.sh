@@ -26,6 +26,14 @@ SCRIPT_DIR="$(cd "$(dirname "$_SRC")" && pwd)"
   echo "install-orphan-sweep.sh: missing lib/launchd-domain-guard.sh next to this script" >&2; exit 1; }
 # shellcheck source=lib/launchd-domain-guard.sh
 . "${SCRIPT_DIR}/lib/launchd-domain-guard.sh"
+
+# CTL-1214: the merged-Layer-2 leaf, sourced once. Optional by design — the two
+# call sites below both guard with `command -v catalyst_layer2_json`, so a
+# checkout without the leaf keeps its Layer-1-only behavior rather than failing.
+if [[ -r "${SCRIPT_DIR}/lib/catalyst-layer2-read.sh" ]]; then
+  # shellcheck source=lib/catalyst-layer2-read.sh
+  . "${SCRIPT_DIR}/lib/catalyst-layer2-read.sh"
+fi
 launchd_agent_guard() {
   launchd_guard_ok "the orphan-sweep agent" && return 0
   launchd_guard_message "the orphan-sweep agent" >&2
@@ -138,12 +146,18 @@ _interval_seconds() {
     dir="$(dirname "$dir")"
   done
 
+  local raw=""
   if [[ -n "$config_candidate" ]] && command -v jq >/dev/null 2>&1; then
-    local raw
     raw="$(jq -r '.catalyst.sweep.intervalHours // empty' "$config_candidate" 2>/dev/null || true)"
-    if [[ -n "$raw" ]] && [[ "$raw" =~ ^[0-9]+$ ]]; then
-      hours="$raw"
-    fi
+  fi
+  # CTL-1214: Layer-2 fallback — a slimmed Layer-1 config otherwise silently
+  # installs the DEFAULT cadence instead of the configured one, and this value is
+  # baked into a launchd plist where the drift is invisible afterwards.
+  if [[ -z "$raw" ]] && command -v catalyst_layer2_json >/dev/null 2>&1; then
+    raw="$(catalyst_layer2_json '.catalyst.sweep.intervalHours')"
+  fi
+  if [[ -n "$raw" ]] && [[ "$raw" =~ ^[0-9]+$ ]]; then
+    hours="$raw"
   fi
 
   # Clamp to 1–3.
@@ -208,8 +222,16 @@ _config_widen_mode() {
     if [[ -f "$dir/.catalyst/config.json" ]]; then cfg="$dir/.catalyst/config.json"; break; fi
     dir="$(dirname "$dir")"
   done
-  [[ -n "$cfg" ]] && command -v jq >/dev/null 2>&1 || { printf ''; return 0; }
-  jq -r '.catalyst.sweep.procWiden // empty' "$cfg" 2>/dev/null || printf ''
+  local _v=""
+  if [[ -n "$cfg" ]] && command -v jq >/dev/null 2>&1; then
+    _v="$(jq -r '.catalyst.sweep.procWiden // empty' "$cfg" 2>/dev/null || printf '')"
+  fi
+  # CTL-1214: Layer-2 fallback (see _resolve_interval_hours above).
+  if [[ -z "$_v" ]] && command -v catalyst_layer2_json >/dev/null 2>&1; then
+    _v="$(catalyst_layer2_json '.catalyst.sweep.procWiden')"
+  fi
+  printf '%s' "$_v"
+  return 0
 }
 
 _resolve_widen_mode() {
