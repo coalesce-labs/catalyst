@@ -26,6 +26,45 @@ already on disk from the investigation, so they can disagree.
   `inbox*.jsonl` in each worker dir. They are Linear comment prose, several KB each, and no part of
   the claim-ladder replay reads them.
 
+## ⚠️ The `.fixture` suffix — a committed phase signal is NOT inert
+
+The 13 captured phase signals are committed as **`phase-<name>.json.fixture`**, not under their live
+name. `loadFixture` strips the suffix as it copies into its tmp orchDir, so the replay still sees
+`phase-implement.json`; nothing about the captured bytes changes.
+
+The suffix exists because the **production** `orphan-sweep.sh` mutates these files. Its
+`sweep_signals` runs a fully recursive `find "$SWEEP_WORKERS_GLOB_ROOT" -name 'phase-*.json' -type f`
+(`orphan-sweep.sh:803`) whose default root is `$HOME/catalyst` (`:355`) — and every Catalyst worktree
+lives under that root (`~/catalyst/wt/...`), so a checkout of this repo puts these fixtures directly in
+the sweep's path. Any match whose `.status` is `running`, whose `updatedAt` is stale, and whose
+`bg_job_id` is not live is rewritten in place to `status: "failed"`, `failureReason:
+"orphan-sweep-stale"` (`:745-:798`).
+
+Measured, not hypothetical: with the files under their live name the sweep fired on the CTL-2192
+worktree twice on 2026-08-23 (09:12:25Z and 10:35:37Z). Two consequences, both real:
+
+1. **This suite goes RED.** The mutation breaks `CHECKSUMS.txt`, and re-applying it fails 4/19 of
+   `ctl-2192-claim-ladder.test.mjs` (the checksum test, the PRE-FIX POSITIVE CONTROL, the AC2
+   recovery test, and the legacy-projection test). It is green on CI only because a plain CI clone
+   runs no orphan-sweep daemon — precisely the class of defect CI cannot catch.
+2. **The worktree is left permanently dirty on a TRACKED file.** The path is in neither
+   `WORKTREE_NOISE_PATHS` nor `_is_settling_debris_path`, so `_precheck_has_real_source` returns
+   true and the CTL-707 dispatch-time rebase stalls `rebase_refused_dirty_tree` rc=2 — destroy +
+   recreate on research/plan, a parked escalation on implement/verify/review. Every worktree that
+   rebases onto this branch would inherit it.
+
+Only one of the 13 captures was exposed (the other 12 are `done`/`stalled`/`needs-human`/
+`stalled-retryable`, which `sweep_signals` skips at `:748`) — but one tracked dirty file is all
+`_precheck_has_real_source` needs, and `running` is the state under replay, so narrowing the captured
+status would have left the hole open for the next capture.
+
+**Capturing new signals?** Keep the suffix. The repo-wide guard
+`no tracked file is shaped like a live phase signal` in `ctl-2192-claim-ladder.test.mjs` enumerates
+`git ls-files` and fails on any tracked `phase-*.json` carrying a `.status`, so a future capture
+cannot reintroduce this silently. (Bounding orphan-sweep's own recursion — it descends into every git
+worktree under `$HOME/catalyst` — is a separate follow-up; this fixture is only the first repo file to
+collide with it.)
+
 ## Checksums
 
 `CHECKSUMS.txt` holds `sha256  path` for all 82 committed files, and

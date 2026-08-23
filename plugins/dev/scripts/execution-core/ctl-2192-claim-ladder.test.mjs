@@ -21,8 +21,18 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test ctl-2192-claim-ladder.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -47,15 +57,35 @@ afterEach(() => {
 
 // ── fixture loading ─────────────────────────────────────────────────────────
 
-// Copy the captured tree into a tmp orchDir and re-expand the scrub tokens.
-// %ORCH% becomes THIS test's orchDir; %WT%/%HOME% become stable synthetic roots
-// (nothing in the replay touches a real worktree).
+// The captured phase signals are committed as `phase-<name>.json.fixture`, NOT
+// under their live name. `orphan-sweep.sh` runs a fully RECURSIVE
+// `find "$SWEEP_WORKERS_GLOB_ROOT" -name 'phase-*.json' -type f` (:803) whose
+// default root is `$HOME/catalyst` — and every Catalyst worktree lives under it
+// (`~/catalyst/wt/...`), so the PRODUCTION sweep matched these committed files
+// and rewrote `status: "running"` → `failed` in place. Measured, not
+// hypothetical: it fired on this worktree twice on 2026-08-23 (09:12:25Z and
+// 10:35:37Z), red-failing this very file (4/19) via the checksum test and
+// leaving a TRACKED file dirty, which `_precheck_has_real_source` classifies as
+// real source and the CTL-707 dispatch-time rebase stalls on (rc=2). The
+// `.fixture` suffix takes the committed bytes out of that glob; the live name is
+// restored here, on the copy, inside the tmp orchDir. `no-live-phase-signal-name`
+// below is the guard that keeps the next fixture capture from reopening it.
+const FIXTURE_SUFFIX = ".fixture";
+
+// Copy the captured tree into a tmp orchDir, restore the live `phase-*.json`
+// names, and re-expand the scrub tokens. %ORCH% becomes THIS test's orchDir;
+// %WT%/%HOME% become stable synthetic roots (nothing in the replay touches a
+// real worktree).
 function loadFixture(tickets) {
   for (const t of tickets) {
     cpSync(join(FIXTURE_DIR, "workers", t), join(orchDir, "workers", t), { recursive: true });
   }
   if (existsSync(join(FIXTURE_DIR, ".sdk-workers"))) {
     cpSync(join(FIXTURE_DIR, ".sdk-workers"), join(orchDir, ".sdk-workers"), { recursive: true });
+  }
+  for (const file of walk(orchDir)) {
+    if (!file.endsWith(FIXTURE_SUFFIX)) continue;
+    renameSync(file, file.slice(0, -FIXTURE_SUFFIX.length));
   }
   for (const file of walk(orchDir)) {
     let text;
@@ -179,6 +209,99 @@ describe("fixture integrity", () => {
     expect(proj.childPid).toBe(null);
     expect("childPidResolved" in proj).toBe(false);
     expect(typeof proj.pid).toBe("number");
+  });
+});
+
+// ── the repo-wide guard ─────────────────────────────────────────────────────
+//
+// A committed file that LOOKS like a live phase signal is not inert: the
+// production `orphan-sweep.sh` recurses the whole of `$HOME/catalyst` — which
+// contains every worktree — matching `phase-*.json` and rewriting any whose
+// `.status` is `running` (:731-:803). That mutation dirties a TRACKED file,
+// which `_precheck_has_real_source` classifies as real source and the CTL-707
+// dispatch-time rebase stalls on. This guard is repo-wide rather than
+// fixture-local on purpose: the exposure belongs to the NAME, so the next
+// capture — for any ticket, under any directory — must not be able to
+// reintroduce it silently.
+describe("no tracked file is shaped like a live phase signal", () => {
+  // A committed file is exposed iff BOTH hold: the sweep's glob matches its
+  // basename, AND jq can read a `.status` out of it (`.status // empty`,
+  // orphan-sweep.sh:743). Split out so the positive control can exercise the
+  // classifier on bytes that are deliberately NOT in the repo.
+  function isSweepExposed(basename, contents) {
+    if (!/^phase-.*\.json$/.test(basename)) return false;
+    let parsed;
+    try {
+      parsed = JSON.parse(contents);
+    } catch {
+      return false; // jq fails → `|| continue` → the sweep skips it
+    }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+    return typeof parsed.status === "string" && parsed.status.length > 0;
+  }
+
+  test("POSITIVE CONTROL: the classifier flags a real captured signal, and clears the .fixture form", () => {
+    // The exact bytes the sweep mutated on this worktree, read from the
+    // committed fixture — not a hand-written stand-in.
+    const captured = readFileSync(
+      join(FIXTURE_DIR, "workers", "CTL-2192", `phase-implement.json${FIXTURE_SUFFIX}`),
+      "utf8",
+    );
+    expect(JSON.parse(captured).status).toBe("running");
+
+    // Under the LIVE name it is exposed — this is the defect, reproduced.
+    expect(isSweepExposed("phase-implement.json", captured)).toBe(true);
+    // Under the committed name it is not: `phase-*.json` does not match.
+    expect(isSweepExposed(`phase-implement.json${FIXTURE_SUFFIX}`, captured)).toBe(false);
+    // And a same-named file the sweep cannot parse is skipped by `|| continue`.
+    expect(isSweepExposed("phase-implement.json", "not json")).toBe(false);
+  });
+
+  test("⛔ THE INVARIANT: no file tracked by git is sweep-exposed", () => {
+    const repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd: dirname(fileURLToPath(import.meta.url)),
+      encoding: "utf8",
+    }).trim();
+    const tracked = execFileSync("git", ["ls-files", "-z", "--full-name"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+    })
+      .split("\0")
+      .filter(Boolean);
+
+    // POSITIVE CONTROL on the ENUMERATION, not just the predicate. Two failure
+    // modes this closes, both of which read as a clean pass: `git ls-files`
+    // returning nothing (wrong cwd, no repo) makes the loop below run zero times
+    // and print green; and an enumeration that never descends into
+    // `__fixtures__/` would miss the only files that have ever tripped this.
+    expect(tracked.length).toBeGreaterThan(500);
+    expect(tracked).toContain(
+      "plugins/dev/scripts/execution-core/__fixtures__/ctl-2192/workers/CTL-2192/phase-implement.json.fixture",
+    );
+
+    const exposed = [];
+    for (const rel of tracked) {
+      const base = rel.slice(rel.lastIndexOf("/") + 1);
+      if (!/^phase-.*\.json$/.test(base)) continue; // cheap gate before any read
+      const abs = join(repoRoot, rel);
+      if (!existsSync(abs)) continue; // tracked-but-absent (sparse checkout)
+      let contents;
+      try {
+        contents = readFileSync(abs, "utf8");
+      } catch {
+        continue;
+      }
+      if (isSweepExposed(base, contents)) exposed.push(rel);
+    }
+
+    expect(
+      exposed,
+      `these tracked files are rewritten in place by the production orphan-sweep ` +
+        `(find $HOME/catalyst -name 'phase-*.json' → flip .status) — commit them under ` +
+        `a name outside that glob (e.g. the '${FIXTURE_SUFFIX}' suffix loadFixture strips):\n` +
+        exposed.join("\n"),
+    ).toEqual([]);
   });
 });
 
