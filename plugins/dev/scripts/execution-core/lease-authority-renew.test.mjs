@@ -10,8 +10,12 @@
 // client from re-POSTing the same string forever — a mechanical keep-alive wearing a costume.
 // The refusal has to happen HERE, before the call: a holder whose progress mark has not moved
 // makes no call at all and its lease lapses on its own deadline.
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, test } from "bun:test";
-import { decideRenewal, renewActiveLeases } from "./lease-authority.mjs";
+import { decideRenewal, defaultIsPhaseDispatched, renewActiveLeases } from "./lease-authority.mjs";
 
 describe("decideRenewal — the progress gate", () => {
   test("first-ever check with positive progress → renew", () => {
@@ -115,6 +119,7 @@ const scan = (opts) =>
     progressMark: opts.progressMark ?? (() => 1),
     readGeneration: opts.readGeneration ?? (() => 7),
     resolveRepoRoot: opts.resolveRepoRoot,
+    ...(opts.isPhaseDispatched ? { isPhaseDispatched: opts.isPhaseDispatched } : {}),
   });
 
 describe("renewActiveLeases — which of this host's phases get renewed", () => {
@@ -168,10 +173,21 @@ describe("renewActiveLeases — which of this host's phases get renewed", () => 
     }
   });
 
-  test("a running phase with no bg_job_id is skipped (not a daemon-dispatched worker)", () => {
+  // ⛔ CTC-921 regression: `bg_job_id` alone is NOT the dispatch test. It is written only by the
+  // legacy `claude --bg` executor; every `executor:"sdk"` phase carries `bg_job_id:null` for its
+  // whole life. Gating on it made this scan inert for essentially every phase the fleet runs.
+  // What is actually required is that SOME liveness source vouches for the phase.
+  test("a running phase no liveness source vouches for is skipped", () => {
     const client = fakeClient();
-    scan({ client, signals: [signal({ bg: null })] });
+    scan({ client, signals: [signal({ bg: null })], isPhaseDispatched: () => false });
     expect(client.calls).toHaveLength(0);
+  });
+
+  test("a running SDK phase (bg_job_id null) IS renewed when the SDK registry vouches for it", () => {
+    const client = fakeClient();
+    scan({ client, signals: [signal({ bg: null })], isPhaseDispatched: () => true });
+    expect(client.calls).toHaveLength(1);
+    expect(client.calls[0].ticket).toBe("CTC-1");
   });
 
   test("a legacy FLAT signal is ignored (numeric phase, no lease scope)", () => {
@@ -356,5 +372,59 @@ describe("renewActiveLeases — repoRoot is resolved PER TICKET and handed to th
     });
     expect(seen[0].repoRoot).toBeNull();
     expect(client.calls).toHaveLength(1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CTC-921 — the dispatch predicate itself, against a real .sdk-workers projection.
+//
+// This block exists because the bug it guards was INVISIBLE to every injected-fake test above:
+// `renewActiveLeases` was correct, and the default predicate handed it a `false` for every
+// SDK-executor phase. Measured on the live fleet orchDir when this was found: 340/353 nested
+// signals were `executor:"sdk"` with `bg_job_id:null`, 13 were `executor:"bg"` with it set, and
+// the sole `status:"running"` signal was an SDK one — i.e. the scan could never have renewed
+// anything. So these tests use the real filesystem reader, not a stub.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("defaultIsPhaseDispatched — both executors' liveness sources", () => {
+  /** An orchDir with a .sdk-workers/<ticket>.json projection, as the SDK executor writes it. */
+  function orchWithProjection({ ticket = "CTC-1", phase = "implement", pid = process.pid, updatedAt = Date.now() }) {
+    const dir = mkdtempSync(join(tmpdir(), "ctc921-"));
+    mkdirSync(join(dir, ".sdk-workers"), { recursive: true });
+    writeFileSync(join(dir, ".sdk-workers", `${ticket}.json`), JSON.stringify({ ticket, phase, pid, updatedAt }));
+    return dir;
+  }
+
+  test("legacy bg executor: a set bg_job_id vouches on its own, no projection needed", () => {
+    expect(defaultIsPhaseDispatched(signal({ bg: "job-1" }), "/nonexistent")).toBe(true);
+  });
+
+  test("SDK executor: bg_job_id null + a live, phase-matching projection → dispatched", () => {
+    const orch = orchWithProjection({ ticket: "CTC-1", phase: "implement" });
+    expect(defaultIsPhaseDispatched(signal({ bg: null }), orch)).toBe(true);
+  });
+
+  test("the projection is per-TICKET, so it may not vouch for a SIBLING phase's signal", () => {
+    const orch = orchWithProjection({ ticket: "CTC-1", phase: "implement" });
+    expect(defaultIsPhaseDispatched(signal({ bg: null, phase: "review" }), orch)).toBe(false);
+  });
+
+  test("a dead pid does not vouch — errs toward letting the lease lapse", () => {
+    // pid 1 is alive but not ours; use an unassignable pid instead.
+    const orch = orchWithProjection({ ticket: "CTC-1", pid: 2 ** 31 - 1 });
+    expect(defaultIsPhaseDispatched(signal({ bg: null }), orch)).toBe(false);
+  });
+
+  test("a stale projection (older than the freshness window) does not vouch", () => {
+    const orch = orchWithProjection({ ticket: "CTC-1", updatedAt: Date.now() - 24 * 60 * 60 * 1000 });
+    expect(defaultIsPhaseDispatched(signal({ bg: null }), orch)).toBe(false);
+  });
+
+  test("no projection at all → not dispatched, never throws", () => {
+    const orch = mkdtempSync(join(tmpdir(), "ctc921-"));
+    expect(defaultIsPhaseDispatched(signal({ bg: null }), orch)).toBe(false);
+  });
+
+  test("a missing/!string orchDir is tolerated rather than thrown", () => {
+    expect(defaultIsPhaseDispatched(signal({ bg: null }), undefined)).toBe(false);
   });
 });

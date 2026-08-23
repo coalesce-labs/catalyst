@@ -55,6 +55,11 @@ import {
   scrub,
 } from "./linear-write-proxy.mjs";
 import { getEventLogPath } from "./config.mjs";
+// CTC-921: SDK-executor liveness. `bg_job_id` is populated ONLY by the legacy
+// `claude --bg` executor; every `executor:"sdk"` phase carries `bg_job_id:null`, so a
+// bg-only dispatch test would skip ~every phase the fleet actually runs (see
+// `defaultIsPhaseDispatched`).
+import { isSdkWorkerLiveOnDisk } from "./sdk-worker-registry.mjs";
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 
 /** The lease verb family. Frozen — this is DATA. Distinct from the write-proxy /agent/* family. */
@@ -509,12 +514,50 @@ function defaultReadClusterGeneration(orchDir, ticket) {
 }
 
 /**
+ * defaultIsPhaseDispatched — "is this signal a phase THIS daemon is actually running right now?"
+ *
+ * ⛔ THIS MAY NOT BE A BARE `bg_job_id != null` TEST. That field is written only by the legacy
+ * `claude --bg` executor. Every `executor:"sdk"` phase — the executor the fleet runs on today —
+ * leaves it `null` for the whole of its life, so a bg-only test returns false for essentially
+ * every live phase and `renewActiveLeases` becomes a scan that can never renew anything: the
+ * feature would ship INERT and look healthy doing it (measured on this fleet's orchDir: 340/353
+ * nested signals `executor:"sdk"` with `bg_job_id:null`, versus 13 `executor:"bg"` with it set —
+ * and the only `status:"running"` signal present was an SDK one).
+ *
+ * So a phase counts as dispatched when EITHER liveness source vouches for it:
+ *   • `liveness.value` (i.e. `bg_job_id`) is set — the legacy bg executor; or
+ *   • the `.sdk-workers/<ticket>.json` projection is live (pid alive AND fresh) and names THIS
+ *     phase — the SDK executor's equivalent record.
+ *
+ * The phase equality check is what keeps the per-TICKET projection from vouching for a sibling
+ * phase's signal left at `status:"running"` by an unclean exit.
+ *
+ * Errs toward NOT renewing: any unreadable/missing projection is simply "not dispatched". That is
+ * the safe direction — a missed renewal lets a lease lapse on its own deadline (recoverable, and
+ * exactly what happens today), whereas a spurious renewal would prop up a holder that has died.
+ */
+export function defaultIsPhaseDispatched(sig, orchDir) {
+  if (sig?.liveness?.value != null) return true;
+  const ticket = sig?.ticket;
+  if (typeof ticket !== "string" || typeof orchDir !== "string") return false;
+  try {
+    if (!isSdkWorkerLiveOnDisk(orchDir, ticket)) return false;
+    const proj = JSON.parse(readFileSync(join(orchDir, ".sdk-workers", `${ticket}.json`), "utf8"));
+    return proj?.phase === sig?.phase;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * renewActiveLeases — one tick of the renewal scan. Walks this host's actively-running phases,
  * asks `decideRenewal` whether each has earned a renewal, and renews the ones that have.
  *
  * Scoping, in order — every one of these is a REFUSAL to act, never a best guess:
  *   • nested phase signals only (a legacy flat signal has a numeric phase and no lease scope)
- *   • `status === "running"` with a `bg_job_id` — a phase this daemon actually dispatched
+ *   • `status === "running"` AND vouched for by a liveness source — `bg_job_id` for the legacy
+ *     bg executor, or a live+phase-matching `.sdk-workers` projection for the SDK executor. See
+ *     `defaultIsPhaseDispatched`: a bg-only test here would make this whole scan inert.
  *   • `host.name` equal to THIS node — never renew a tenure another host holds. The holder
  *     identity on the wire IS the host name (`claimViaLease` claims with `node: getHostName()`).
  *   • a `cluster-generation.json` on record — that generation IS the grant nonce, and renewing
@@ -543,6 +586,7 @@ export function renewActiveLeases({
   readSignals,
   progressMark,
   readGeneration = defaultReadClusterGeneration,
+  isPhaseDispatched = defaultIsPhaseDispatched,
   resolveRepoRoot = () => null,
   log: logger = null,
 }) {
@@ -561,7 +605,7 @@ export function renewActiveLeases({
     try {
       if (sig?.layout !== "nested") continue;
       if (sig.status !== "running") continue;
-      if (sig.liveness?.value == null) continue;
+      if (!isPhaseDispatched(sig, orchDir)) continue;
       if (sig.host?.name !== hostName) continue;
       const ticket = sig.ticket;
       const phase = sig.phase;
