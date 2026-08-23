@@ -11,6 +11,7 @@ import { join } from "node:path";
 
 import {
   SDK_WORKER_FRESH_MS,
+  SDK_LIVENESS,
   WARM_HARVEST_MAX_AGE_MS,
   PREEMPTION_ABORT_REASON,
   isPreemptionAbort,
@@ -23,6 +24,7 @@ import {
   abortSdkWorker,
   cancelSdkRun,
   isSdkWorkerLiveOnDisk,
+  classifySdkWorkerLiveness,
   reconcileSdkRegistryOnBoot,
   resetSdkWorkerRegistry,
 } from "./sdk-worker-registry.mjs";
@@ -570,6 +572,226 @@ describe("codex child pid + orphan reap (CTL-1457 N2)", () => {
     });
     expect(killed).toEqual([]);
     expect(res.removed).toEqual(["CTL-1"]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CTL-2192 Phase 1 — the three-valued SDK liveness oracle.
+//
+// Two failure modes have shipped from a TWO-valued answer: collapsing `unknown`
+// into "alive" strands a genuinely dead worker (AC2), collapsing it into "dead"
+// re-claims a live one (AC1). Every branch below pins one rung of the ladder AND
+// its `reason`, so a verdict stays diagnosable instead of degrading to a boolean.
+// ---------------------------------------------------------------------------
+
+function writeProj(dir, ticket, proj) {
+  mkdirSync(join(dir, ".sdk-workers"), { recursive: true });
+  writeFileSync(join(dir, ".sdk-workers", `${ticket}.json`), JSON.stringify(proj));
+}
+
+describe("classifySdkWorkerLiveness (CTL-2192 Phase 1)", () => {
+  test("SDK_LIVENESS is a frozen three-valued enum", () => {
+    expect(SDK_LIVENESS.LIVE).toBe("live");
+    expect(SDK_LIVENESS.DEAD).toBe("dead");
+    expect(SDK_LIVENESS.UNKNOWN).toBe("unknown");
+    expect(Object.isFrozen(SDK_LIVENESS)).toBe(true);
+  });
+
+  test("in-memory _live wins even when the projection is MISSING", () => {
+    const dir = freshDir();
+    // Register with no orchDir → no projection is ever written. Same-daemon
+    // authority must not need a disk read at all.
+    registerSdkWorker({ ticket: "CTL-1", phase: "implement", worktreePath: "/wt/ctl-1", generation: 1 });
+    const v = classifySdkWorkerLiveness(dir, "CTL-1");
+    expect(v.state).toBe("live");
+    expect(v.reason).toBe("in-memory");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("in-memory _live wins even when the projection is STALE and corrupt", () => {
+    const dir = freshDir();
+    mkdirSync(join(dir, ".sdk-workers"), { recursive: true });
+    writeFileSync(join(dir, ".sdk-workers", "CTL-1.json"), "{ not json");
+    registerSdkWorker({ ticket: "CTL-1", phase: "implement", worktreePath: "/wt/ctl-1", generation: 1 });
+    expect(classifySdkWorkerLiveness(dir, "CTL-1", { pidAlive: () => false }).state).toBe("live");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("ABSENT projection → unknown / no-projection (never dead)", () => {
+    const dir = freshDir();
+    const v = classifySdkWorkerLiveness(dir, "CTL-404", { pidAlive: () => false });
+    expect(v.state).toBe("unknown");
+    expect(v.reason).toBe("no-projection");
+    expect(v.childPid).toBe(null);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("CORRUPT projection → unknown / corrupt-projection (a DISTINCT reason from absent)", () => {
+    const dir = freshDir();
+    mkdirSync(join(dir, ".sdk-workers"), { recursive: true });
+    writeFileSync(join(dir, ".sdk-workers", "CTL-1.json"), "{{{ not json at all");
+    const v = classifySdkWorkerLiveness(dir, "CTL-1", { pidAlive: () => false });
+    expect(v.state).toBe("unknown");
+    expect(v.reason).toBe("corrupt-projection");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("projection pid ALIVE and === selfPid but ticket NOT in _live → unknown / self-daemon-not-registered", () => {
+    // A deregistered-but-not-yet-removed file. Do NOT infer death from it.
+    const dir = freshDir();
+    writeProj(dir, "CTL-1", { ticket: "CTL-1", pid: 4242, childPid: null, childPidResolved: true, updatedAt: T0 });
+    const v = classifySdkWorkerLiveness(dir, "CTL-1", { pidAlive: (p) => p === 4242, selfPid: 4242 });
+    expect(v.state).toBe("unknown");
+    expect(v.reason).toBe("self-daemon-not-registered");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("projection pid ALIVE but !== selfPid → unknown / foreign-daemon (never live, never dead)", () => {
+    const dir = freshDir();
+    writeProj(dir, "CTL-1", { ticket: "CTL-1", pid: 9999, childPid: null, childPidResolved: true, updatedAt: T0 });
+    const v = classifySdkWorkerLiveness(dir, "CTL-1", { pidAlive: (p) => p === 9999, selfPid: 4242 });
+    expect(v.state).toBe("unknown");
+    expect(v.reason).toBe("foreign-daemon");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("daemon pid DEAD but childPid ALIVE → live / orphan-child-alive (the PID-1 orphan case)", () => {
+    const dir = freshDir();
+    writeProj(dir, "CTL-1", { ticket: "CTL-1", pid: 11111, childPid: 33333, childPidResolved: true, updatedAt: T0 });
+    const v = classifySdkWorkerLiveness(dir, "CTL-1", { pidAlive: (p) => p === 33333, selfPid: 4242 });
+    expect(v.state).toBe("live");
+    expect(v.reason).toBe("orphan-child-alive");
+    expect(v.childPid).toBe(33333);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("daemon pid DEAD and childPid DEAD → dead / orphan-child-dead", () => {
+    const dir = freshDir();
+    writeProj(dir, "CTL-1", { ticket: "CTL-1", pid: 11111, childPid: 33333, childPidResolved: true, updatedAt: T0 });
+    const v = classifySdkWorkerLiveness(dir, "CTL-1", { pidAlive: () => false, selfPid: 4242 });
+    expect(v.state).toBe("dead");
+    expect(v.reason).toBe("orphan-child-dead");
+    expect(v.childPid).toBe(33333);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("daemon pid DEAD, childPid null, childPidResolved TRUE → dead / no-child-resolved (we looked)", () => {
+    const dir = freshDir();
+    writeProj(dir, "CTL-1", { ticket: "CTL-1", pid: 11111, childPid: null, childPidResolved: true, updatedAt: T0 });
+    const v = classifySdkWorkerLiveness(dir, "CTL-1", { pidAlive: () => false, selfPid: 4242 });
+    expect(v.state).toBe("dead");
+    expect(v.reason).toBe("no-child-resolved");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("LEGACY projection (dead daemon, childPid null, NO childPidResolved) → unknown, NOT dead", () => {
+    // The rollout population: every projection written before Phase 2. Reading
+    // it as `dead` would re-claim a live worker on the first boot after deploy.
+    const dir = freshDir();
+    writeProj(dir, "CTL-1", { ticket: "CTL-1", pid: 11111, childPid: null, updatedAt: T0 });
+    const v = classifySdkWorkerLiveness(dir, "CTL-1", { pidAlive: () => false, selfPid: 4242 });
+    expect(v.state).toBe("unknown");
+    expect(v.reason).toBe("legacy-projection-no-child-record");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("childPidResolved present but FALSY is still legacy-shaped → unknown", () => {
+    const dir = freshDir();
+    writeProj(dir, "CTL-1", { ticket: "CTL-1", pid: 11111, childPid: null, childPidResolved: false, updatedAt: T0 });
+    expect(classifySdkWorkerLiveness(dir, "CTL-1", { pidAlive: () => false, selfPid: 4242 }).state).toBe("unknown");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a non-positive / non-integer childPid is NOT treated as a pid", () => {
+    const dir = freshDir();
+    writeProj(dir, "CTL-1", { ticket: "CTL-1", pid: 11111, childPid: 0, childPidResolved: true, updatedAt: T0 });
+    // Daemon pid 11111 DEAD; EVERY other pid reads alive. childPid 0 must still
+    // not be probed as a pid — otherwise a `0` would read as a live worker.
+    const v = classifySdkWorkerLiveness(dir, "CTL-1", { pidAlive: (p) => p !== 11111, selfPid: 4242 });
+    expect(v.state).toBe("dead");
+    expect(v.reason).toBe("no-child-resolved");
+    expect(v.childPid).toBe(null);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("NEVER throws: a throwing pidAlive degrades to unknown / threw", () => {
+    const dir = freshDir();
+    writeProj(dir, "CTL-1", { ticket: "CTL-1", pid: 11111, childPid: 33333, childPidResolved: true, updatedAt: T0 });
+    const v = classifySdkWorkerLiveness(dir, "CTL-1", {
+      pidAlive: () => { throw new Error("boom"); },
+      selfPid: 4242,
+    });
+    expect(v.state).toBe("unknown");
+    expect(v.reason).toBe("threw");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("every branch returns a {state, reason, childPid} shape — never a bare boolean", () => {
+    const dir = freshDir();
+    const seen = new Set();
+    const cases = [
+      // absent
+      () => classifySdkWorkerLiveness(dir, "CTL-ABSENT", { pidAlive: () => false, selfPid: 1 }),
+      // corrupt
+      () => {
+        writeProj(dir, "CTL-CORRUPT", {});
+        writeFileSync(join(dir, ".sdk-workers", "CTL-CORRUPT.json"), "nope");
+        return classifySdkWorkerLiveness(dir, "CTL-CORRUPT", { pidAlive: () => false, selfPid: 1 });
+      },
+      () => {
+        writeProj(dir, "CTL-SELF", { pid: 1, childPidResolved: true });
+        return classifySdkWorkerLiveness(dir, "CTL-SELF", { pidAlive: (p) => p === 1, selfPid: 1 });
+      },
+      () => {
+        writeProj(dir, "CTL-FOREIGN", { pid: 2, childPidResolved: true });
+        return classifySdkWorkerLiveness(dir, "CTL-FOREIGN", { pidAlive: (p) => p === 2, selfPid: 1 });
+      },
+      () => {
+        writeProj(dir, "CTL-ORPHAN-LIVE", { pid: 2, childPid: 3, childPidResolved: true });
+        return classifySdkWorkerLiveness(dir, "CTL-ORPHAN-LIVE", { pidAlive: (p) => p === 3, selfPid: 1 });
+      },
+      () => {
+        writeProj(dir, "CTL-ORPHAN-DEAD", { pid: 2, childPid: 3, childPidResolved: true });
+        return classifySdkWorkerLiveness(dir, "CTL-ORPHAN-DEAD", { pidAlive: () => false, selfPid: 1 });
+      },
+      () => {
+        writeProj(dir, "CTL-NOCHILD", { pid: 2, childPid: null, childPidResolved: true });
+        return classifySdkWorkerLiveness(dir, "CTL-NOCHILD", { pidAlive: () => false, selfPid: 1 });
+      },
+      () => {
+        writeProj(dir, "CTL-LEGACY", { pid: 2, childPid: null });
+        return classifySdkWorkerLiveness(dir, "CTL-LEGACY", { pidAlive: () => false, selfPid: 1 });
+      },
+      () => {
+        writeProj(dir, "CTL-THREW", { pid: 2, childPid: 3, childPidResolved: true });
+        return classifySdkWorkerLiveness(dir, "CTL-THREW", { pidAlive: () => { throw new Error("x"); }, selfPid: 1 });
+      },
+    ];
+    for (const c of cases) {
+      const v = c();
+      expect(typeof v).toBe("object");
+      expect(["live", "dead", "unknown"]).toContain(v.state);
+      expect(typeof v.reason).toBe("string");
+      expect(v.reason.length).toBeGreaterThan(0);
+      expect("childPid" in v).toBe(true);
+      seen.add(v.reason);
+    }
+    // in-memory is the 10th reason, exercised above.
+    registerSdkWorker({ ticket: "CTL-MEM" });
+    seen.add(classifySdkWorkerLiveness(dir, "CTL-MEM").reason);
+    expect([...seen].sort()).toEqual([
+      "corrupt-projection",
+      "foreign-daemon",
+      "in-memory",
+      "legacy-projection-no-child-record",
+      "no-child-resolved",
+      "no-projection",
+      "orphan-child-alive",
+      "orphan-child-dead",
+      "self-daemon-not-registered",
+      "threw",
+    ]);
     rmSync(dir, { recursive: true, force: true });
   });
 });

@@ -344,6 +344,83 @@ export function isSdkWorkerLiveOnDisk(orchDir, ticket, { pidAlive = defaultPidAl
   return now() - updatedAt <= freshMs;
 }
 
+export const SDK_LIVENESS = Object.freeze({ LIVE: "live", DEAD: "dead", UNKNOWN: "unknown" });
+
+/**
+ * CTL-2192: the ONE liveness question the re-dispatch paths (preemption sweep,
+ * boot-resume) may ask about an SDK worker.
+ *
+ * Three-valued ON PURPOSE. A two-valued answer has shipped both failure modes:
+ * collapsing "I could not look" into `dead` re-claims a live worker every ~2
+ * minutes (AC1), and collapsing it into `live` strands a genuinely dead one
+ * (AC2). Measured during planning: 6 projections carried the live daemon's pid
+ * while only 3 SDK children existed — `childPid: null` on a live registration is
+ * NORMAL (registerSdkWorker runs before sem.acquire()), not evidence of death.
+ *
+ * Deliberately NOT a re-point of isSdkWorkerLiveOnDisk: that one's ADVISORY
+ * contract has existing consumers, and promoting it would change them.
+ *
+ * @returns {{state: "live"|"dead"|"unknown", reason: string, childPid: number|null}}
+ */
+export function classifySdkWorkerLiveness(orchDir, ticket, { pidAlive = defaultPidAlive, selfPid = process.pid } = {}) {
+  // 1. Same-daemon authority. The query promise runs on THIS event loop, so the
+  //    Map is ground truth here and beats every disk read — including a missing
+  //    or corrupt projection (a worker registered with no orchDir writes none).
+  if (_live.has(ticket)) return { state: SDK_LIVENESS.LIVE, reason: "in-memory", childPid: _live.get(ticket)?.childPid ?? null };
+
+  let proj;
+  try {
+    proj = JSON.parse(readFileSync(projectionPath(orchDir, ticket), "utf8"));
+  } catch (err) {
+    // 2. Absent and corrupt are DISTINCT reasons: one says the worker was never
+    //    projected, the other says we could not read what was projected. Both
+    //    are `unknown` — neither is evidence of death.
+    return {
+      state: SDK_LIVENESS.UNKNOWN,
+      reason: err?.code === "ENOENT" ? "no-projection" : "corrupt-projection",
+      childPid: null,
+    };
+  }
+
+  try {
+    const childPidRaw = Number(proj?.childPid);
+    const childPid = Number.isInteger(childPidRaw) && childPidRaw > 0 ? childPidRaw : null;
+
+    if (pidAlive(proj?.pid)) {
+      // 3/4. The projection's `pid` is the DAEMON's, never the worker's. A live
+      //      daemon pid that is us means the file outlived its registration
+      //      (deregistered, not yet unlinked) — do not infer death from it. A
+      //      live pid that is NOT us means another daemon owns the answer.
+      return {
+        state: SDK_LIVENESS.UNKNOWN,
+        reason: Number(proj?.pid) === Number(selfPid) ? "self-daemon-not-registered" : "foreign-daemon",
+        childPid,
+      };
+    }
+
+    // 5. Dead daemon + a recorded child: the child's own pid is the only durable
+    //    fact, and it can outlive its daemon as a PID-1 orphan (measured: 14 min).
+    if (childPid != null) {
+      return pidAlive(childPid)
+        ? { state: SDK_LIVENESS.LIVE, reason: "orphan-child-alive", childPid }
+        : { state: SDK_LIVENESS.DEAD, reason: "orphan-child-dead", childPid };
+    }
+
+    // 6. We LOOKED for a child and there was none (Phase 2 stamps the marker
+    //    whatever discovery returns) — with the daemon gone too, that is dead.
+    if (proj?.childPidResolved === true) {
+      return { state: SDK_LIVENESS.DEAD, reason: "no-child-resolved", childPid: null };
+    }
+
+    // 7. Legacy projection written before CTL-2192 Phase 2: no marker means we
+    //    never asked, which is not the same as "no child". The rollout
+    //    population drains as workers cycle — see the plan's Migration Notes.
+    return { state: SDK_LIVENESS.UNKNOWN, reason: "legacy-projection-no-child-record", childPid: null };
+  } catch {
+    return { state: SDK_LIVENESS.UNKNOWN, reason: "threw", childPid: null };
+  }
+}
+
 /**
  * Boot reconcile: no in-process worker survives a daemon restart, so any
  * projection whose pid is dead (or that is unreadable) is a leftover from the
