@@ -102,6 +102,45 @@ else
   bad "absent issue path (rc=${LAST_RC}, out=${LAST_OUT})"
 fi
 
+# --- CTL-2204: --body may never be a path; --body-file is the recipe (network-free cases) ---
+BODY_TMP="$(mktemp -d)"
+printf '# a real comment body\nwith two lines\n' >"${BODY_TMP}/real.md"
+
+# (a) path-as-body → exit 2 naming --body-file. Exit 2 (usage family) not 1 (REFUSED family).
+run_tool - "$DB_WITH" CTL-1 --as COORD --body "${BODY_TMP}/real.md"
+if [[ "$LAST_RC" -eq 2 ]] && printf '%s' "$LAST_OUT" | grep -q -- "--body-file"; then
+  ok "path-as-body → exit 2 naming --body-file"
+else
+  bad "path-as-body guard (rc=${LAST_RC}, out=${LAST_OUT})"
+fi
+
+# (b) an absolute path that does NOT exist stays a legitimate body (guard is existence-gated,
+#     so it must fall through to the ordinary refuse path, exit 1 / REFUSED — not exit 2).
+run_tool - "$DB_WITH" CTL-1 --as COORD --body "${BODY_TMP}/nope.md"
+if [[ "$LAST_RC" -ne 2 ]]; then
+  ok "non-existent path is not treated as path-as-body"
+else
+  bad "non-existent path wrongly refused as a path (out=${LAST_OUT})"
+fi
+
+# (c) --body-file pointing at nothing → exit 2 naming the path
+run_tool - "$DB_WITH" CTL-1 --as COORD --body-file "${BODY_TMP}/gone.md"
+if [[ "$LAST_RC" -eq 2 ]] && printf '%s' "$LAST_OUT" | grep -q "gone.md"; then
+  ok "--body-file missing → exit 2 naming the path"
+else
+  bad "--body-file missing (rc=${LAST_RC}, out=${LAST_OUT})"
+fi
+
+# (d) whitespace-only body → exit 2
+run_tool - "$DB_WITH" CTL-1 --as COORD --body "   "
+if [[ "$LAST_RC" -eq 2 ]]; then ok "whitespace-only --body → exit 2"
+else bad "whitespace-only body (rc=${LAST_RC}, out=${LAST_OUT})"; fi
+
+# (e) both flags → exit 2
+run_tool - "$DB_WITH" CTL-1 --as COORD --body "hi" --body-file "${BODY_TMP}/real.md"
+if [[ "$LAST_RC" -eq 2 ]]; then ok "--body + --body-file → exit 2 (ambiguous)"
+else bad "ambiguous flags (rc=${LAST_RC}, out=${LAST_OUT})"; fi
+
 # ============================ MOCK CLOUD (success path) ============================
 MOCK_DIR="$(mktemp -d)"
 MOCK_JS="${MOCK_DIR}/mock.mjs"
@@ -154,6 +193,21 @@ else
       CATALYST_LINEAR_WRITE_PROXY=enforce CATALYST_CLOUD_BASE_URL="http://127.0.0.1:${PORT}" \
       CATALYST_CLOUD_TOKEN=test-token CATALYST_CLOUD_ACCOUNT=test-acct \
       "$RUNTIME" "$TOOL" "$@" 2>&1)" || rc=$?
+    rm -rf "$home"; LAST_OUT="$out"; LAST_RC="$rc"
+  }
+  # CTL-2204 remediation: the same runner, with fd 0 supplied. `--body -` was REWRITTEN by
+  # this ticket (from `if (body === "-") readFileSync(0)` to `resolved.stdin ? …` plus a new
+  # post-read emptiness check) and had no end-to-end test in either CLI — a regression that
+  # dropped the resolved.stdin branch would have shipped green.
+  run_mock_stdin() { # $1=db $2=stdin-source-file rest=args ; sets LAST_OUT/LAST_RC
+    local db="$1"; shift
+    local stdin_src="$1"; shift
+    local home; home="$(mktemp -d)"; local out rc=0
+    : >"$CAP_FILE"
+    out="$(HOME="$home" CATALYST_DIR="$home/catalyst" CATALYST_REPLICA_DB="$db" \
+      CATALYST_LINEAR_WRITE_PROXY=enforce CATALYST_CLOUD_BASE_URL="http://127.0.0.1:${PORT}" \
+      CATALYST_CLOUD_TOKEN=test-token CATALYST_CLOUD_ACCOUNT=test-acct \
+      "$RUNTIME" "$TOOL" "$@" <"$stdin_src" 2>&1)" || rc=$?
     rm -rf "$home"; LAST_OUT="$out"; LAST_RC="$rc"
   }
   comment_capture() { grep '"/agent/issue-comment"' "$CAP_FILE" | tail -1; }
@@ -213,11 +267,170 @@ else
   else
     bad "eyes-clear best-effort (rc=${LAST_RC}, out=${LAST_OUT})"
   fi
+  # (CTL-2204) THE NEGATIVE CONTROL. Under enforce + a REACHABLE mock, an unguarded tool
+  # would really post. Two assertions, in this order:
+  #   1. POSITIVE CONTROL — a good body DOES produce an /agent/issue-comment capture, so an
+  #      empty capture below means "refused", not "the mock is broken". (run_mock truncates
+  #      $CAP_FILE on every call, so the two runs cannot contaminate each other.)
+  #   2. the path-as-body run leaves ZERO captures.
+  echo "200" >"$CTRL_FILE"
+  run_mock "$DB_DEF" CTL-1 --as COORD --body "control body"
+  if [[ "$LAST_RC" -eq 0 ]] && [[ -n "$(comment_capture)" ]]; then
+    ok "positive control: a good body DOES reach /agent/issue-comment under the mock"
+    run_mock "$DB_DEF" CTL-1 --as COORD --body "${BODY_TMP}/real.md"
+    if [[ "$LAST_RC" -eq 2 ]] \
+       && [[ -z "$(comment_capture)" ]] \
+       && printf '%s' "$LAST_OUT" | grep -q -- "--body-file"; then
+      ok "path-as-body under ENFORCE: exit 2, NOTHING posted (no /agent/issue-comment capture)"
+    else
+      bad "path-as-body must post nothing under enforce (rc=${LAST_RC}, cap=$(comment_capture), out=${LAST_OUT})"
+    fi
+  else
+    bad "positive control FAILED — the no-capture assertion below would be untrustworthy"
+  fi
+
+  # (CTL-2204) --body-file posts the file's CONTENTS, and never the path.
+  run_mock "$DB_DEF" CTL-1 --as COORD --body-file "${BODY_TMP}/real.md"
+  CAP="$(comment_capture)"
+  if [[ "$LAST_RC" -eq 0 ]] && cap_has 'a real comment body' && cap_lacks "${BODY_TMP}"; then
+    ok "--body-file → the comment carries the file CONTENTS, not the path"
+  else
+    bad "--body-file contents (rc=${LAST_RC}, cap=${CAP})"
+  fi
+
+  # (CTL-2204 remediation) `--body -` reads fd 0 end-to-end, and empty stdin is a clean
+  # refusal rather than a crash. The leaf only pins the {ok:true,stdin:true} SENTINEL —
+  # nothing proved the CALLER actually reads fd 0.
+  STDIN_BODY="${BODY_TMP}/piped.md"
+  printf 'piped through stdin\n' >"$STDIN_BODY"
+  run_mock_stdin "$DB_DEF" "$STDIN_BODY" CTL-1 --as COORD --body -
+  CAP="$(comment_capture)"
+  if [[ "$LAST_RC" -eq 0 ]] && cap_has 'piped through stdin'; then
+    ok "--body - → the comment carries the text piped on stdin"
+  else
+    bad "--body - stdin body (rc=${LAST_RC}, cap=${CAP})"
+  fi
+
+  run_mock_stdin "$DB_DEF" /dev/null CTL-1 --as COORD --body -
+  if [[ "$LAST_RC" -eq 2 ]] \
+     && [[ -z "$(comment_capture)" ]] \
+     && printf '%s' "$LAST_OUT" | grep -q 'stdin produced nothing'; then
+    ok "--body - with EMPTY stdin → exit 2, nothing posted, names the cause"
+  else
+    bad "--body - empty stdin (rc=${LAST_RC}, cap=$(comment_capture), out=${LAST_OUT})"
+  fi
+
+  # (CTL-2204 remediation) The stdin path is what ask.mjs `accept` now uses to hand the body
+  # to this tool, so the two argv artifacts that shape closed must be pinned HERE.
+  #
+  # Artifact 1 — a body whose whole value is a FLAG. `--top` is matched by whole-element
+  # equality (process.argv.includes), so while the body rode argv a reply body of "--top"
+  # silently flipped the post to top-level. On stdin it cannot reach argv at all.
+  printf -- '--top\n' >"$STDIN_BODY"
+  run_mock_stdin "$DB_DEF" "$STDIN_BODY" CTL-1 --as COORD --body -
+  CAP="$(comment_capture)"
+  if [[ "$LAST_RC" -eq 0 ]] && cap_has '"parentId":"c-1"'; then
+    ok "a stdin body of '--top' still THREADS — a body can no longer flip routing"
+  else
+    bad "stdin body must not be parsed as a flag (rc=${LAST_RC}, cap=${CAP})"
+  fi
+
+  # Artifact 2 — a body that IS a path. --body-file/stdin mean "these bytes are the body",
+  # so the path guard deliberately does NOT apply to them; re-refusing here is what left an
+  # ask open with a message about a --body the operator never passed. The guard still fires
+  # on --body (asserted above under ENFORCE) — this is the other side of that same rule.
+  printf '%s\n' "${BODY_TMP}/real.md" >"$STDIN_BODY"
+  run_mock_stdin "$DB_DEF" "$STDIN_BODY" CTL-1 --as COORD --body -
+  CAP="$(comment_capture)"
+  if [[ "$LAST_RC" -eq 0 ]] && cap_has "${BODY_TMP}/real.md"; then
+    ok "a stdin body that LOOKS like a path is posted verbatim (guard is --body-only)"
+  else
+    bad "stdin body that looks like a path (rc=${LAST_RC}, cap=${CAP})"
+  fi
+
   rm -f "$DB_DEF" "$DB_PAIR"
 fi
 # =================================================================================
 
 rm -f "$DB_WITH" "$DB_NOISSUE"
+rm -rf "$BODY_TMP"
+
+# --- CTL-2204: the documented recipe must teach --body-file ---
+# Every doc file Phase 4 rewrote gets its OWN positive-controlled check — not just
+# threading.md. A future edit that reverts ask/SKILL.md's top-level usage sample back to
+# `--body "<markdown>"` (the exact mistake this ticket exists to stop) is the file an agent
+# actually reads first; without its own check that regression would pass CI silently.
+#
+# ⛔ ANCHORED ON THE INVOCATION LINE, NOT THE FILE (CTL-2204 remediation). The first cut
+# grepped each file for `--body-file` ANYWHERE, which could not detect the very regression
+# the paragraph above names. Measured occurrence counts: ask/SKILL.md 1, closing.md 1,
+# threading.md 3, linearis/SKILL.md 3 — so for the latter two, reverting the PRIMARY sample
+# line while leaving a `#   --body-file …` comment line intact still satisfied a file-wide
+# grep. Confirmed by mutation on a /tmp copy: reverting threading.md's primary sample to
+# `--body "<markdown>"` still yielded 29 passed, 0 failed. The check was strict for
+# ask/SKILL.md only by ACCIDENT — that file happens to have exactly one occurrence.
+#
+# So each file now declares the exact invocation LINE an agent copies, and the check asserts
+# that line is present. A comment line elsewhere in the file can no longer stand in for it.
+DOCS_ROOT="${SCRIPT_DIR}/../../skills"
+check_doc_teaches_body_file() { # $1=rel path  $2=positive-control string  $3=required invocation-line fragment
+  local rel="$1" ctrl="$2" invocation="$3"
+  local f="${DOCS_ROOT}/${rel}"
+  if ! grep -q -- "$ctrl" "$f" 2>/dev/null; then
+    bad "positive control FAILED — docs path/content wrong (${f}), grep result untrustworthy"
+    return
+  fi
+  ok "positive control: docs grep instrument reads ${rel}"
+  if grep -q -F -- "$invocation" "$f"; then
+    ok "${rel} teaches --body-file ON the invocation line"
+  else
+    bad "${rel}: the documented invocation line no longer carries --body-file (wanted: ${invocation})"
+  fi
+}
+check_doc_teaches_body_file "ask/references/threading.md" "linear-reply.mjs" \
+  'linear-reply.mjs" CTL-NNNN --as <ROLE> --body-file'
+check_doc_teaches_body_file "ask/SKILL.md" "linear-reply.mjs" \
+  'linear-reply.mjs" CTL-NNNN --as <ROLE> --body-file'
+check_doc_teaches_body_file "ask/references/closing.md" "ask.mjs" \
+  '--body-file <path>  post a FILE'"'"'S CONTENTS'
+check_doc_teaches_body_file "linearis/SKILL.md" "linear-reply.mjs" \
+  '--body-file <path>  for anything longer than a one-line body'
+
+# The other half of the same property: the FIRST agent-facing invocation in each file must
+# not hand a bare `--body "` sample to an agent that copies the first recipe it sees. This
+# is what actually catches a revert of the primary line — the presence check above cannot,
+# because a reverted file could still carry the flag on a following comment line.
+check_first_invocation_is_not_bare_body() { # $1=rel path  $2=tool basename
+  local rel="$1" tool="$2"
+  local f="${DOCS_ROOT}/${rel}" first
+  first="$(grep -n -- "$tool" "$f" | grep -v '^\s*#' | grep -- '--body' | head -1)"
+  if [[ -z "$first" ]]; then
+    bad "positive control FAILED — no ${tool} --body line found in ${rel}"
+    return
+  fi
+  if printf '%s' "$first" | grep -q -- '--body-file'; then
+    ok "${rel}: the FIRST ${tool} invocation uses --body-file"
+  else
+    bad "${rel}: the FIRST ${tool} invocation uses a bare --body (${first})"
+  fi
+}
+check_first_invocation_is_not_bare_body "ask/references/threading.md" "linear-reply.mjs"
+check_first_invocation_is_not_bare_body "ask/SKILL.md" "linear-reply.mjs"
+
+# linearis/SKILL.md is the skill most agents read for a Linear invocation, so its primary
+# reply recipe is among the most-copied in the repo — yet it had only the weaker presence
+# check above, which a `#   --body-file …` comment line satisfies while the invocation line
+# itself still taught a bare --body. That is exactly the regression this strict check exists
+# to catch (CTL-2204 verify finding), so linearis is covered here too, not just ask/.
+check_first_invocation_is_not_bare_body "linearis/SKILL.md" "linear-reply.mjs"
+
+# ask/SKILL.md §5 is the `accept` recipe an agent copies when CLOSING an ask, and it is a
+# SECOND invocation in the same file — so the ask.mjs recipe needs its own anchor. Before the
+# CTL-2204 remediation this file's only --body-file mention was on the linear-reply line, so
+# every file-level check passed while §5 taught a bare --body.
+check_doc_teaches_body_file "ask/SKILL.md" "ask.mjs" \
+  '--body-file <path>  for anything longer than a one-line body'
+
 
 echo ""
 echo "Results: ${PASS} passed, ${FAIL} failed"

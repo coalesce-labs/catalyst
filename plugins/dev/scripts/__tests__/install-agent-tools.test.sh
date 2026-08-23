@@ -86,6 +86,21 @@ else
   bad "symlink target(s) still contain client_credentials:${TARGET_HITS}"
 fi
 
+# 5. CTL-2204: the deployed tool is a SYMLINK, and linear-reply.mjs now imports ./lib/…
+#    in addition to ./execution-core/…. Node resolves relative imports from the REALPATH
+#    (no --preserve-symlinks), so this should work — but nothing executed the deployed copy
+#    before, so the property was unguarded. `node --check` does NOT resolve imports; running
+#    the tool does, because top-level imports run before the usage gate.
+DEPLOY_RC=0
+DEPLOY_OUT="$(node "${TOOLS_DIR}/linear-reply.mjs" 2>&1)" || DEPLOY_RC=$?
+if [[ "$DEPLOY_RC" -eq 2 ]] && printf '%s' "$DEPLOY_OUT" | grep -q "usage:"; then
+  ok "deployed symlink executes: imports resolve, reaches the usage gate (exit 2)"
+elif printf '%s' "$DEPLOY_OUT" | grep -qi "ERR_MODULE_NOT_FOUND\|Cannot find module"; then
+  bad "deployed symlink cannot resolve an import: ${DEPLOY_OUT}"
+else
+  bad "deployed symlink unexpected result (rc=${DEPLOY_RC}, out=${DEPLOY_OUT})"
+fi
+
 rm -rf "$CATALYST_DIR"
 
 echo ""

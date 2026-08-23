@@ -832,6 +832,17 @@ jobs:
         working-directory: plugins/dev/scripts/lib
         run: bun test entitlement.test.mjs
 
+      - name: comment-body-arg resolver unit tests (bun, CTL-2204)
+        # lib/comment-body-arg.mjs is the shared, zero-import leaf that decides what a
+        # Linear comment's body is for BOTH linear-reply.mjs and ask.mjs's `accept` verb —
+        # it refuses a file PATH passed to --body (the mistake that published 23 bad
+        # comments across 16 tickets) and adds --body-file as the correct recipe. Own step
+        # for the same reason as deployment-mode/entitlement above: this lib/ leaf sits
+        # outside the execution-core/ tree the "Run stable unit tests" step below is
+        # scoped to, so it needs an explicit run: line or it never executes in CI.
+        working-directory: plugins/dev/scripts/lib
+        run: bun test comment-body-arg.test.mjs
+
       - name: ask-verb unit tests (bun, CTL-1922 / CTL-1944)
         # ⛔ `ask-verbs.test.mjs` shipped with #3509 and was registered in NO workflow —
         # 20 tests that had never run in CI. Verified with the instrument note above:

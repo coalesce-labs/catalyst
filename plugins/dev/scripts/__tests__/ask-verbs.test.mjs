@@ -20,7 +20,7 @@ import {
   verifyAskBody,
 } from "../ask.mjs";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -335,6 +335,13 @@ describe("trap (a) — the documented path must not silently no-op", () => {
     expect(r.status).toBe(1);
     expect(r.stdout).toBe("");
     expect(r.stderr).toContain("could not resolve the ask labels");
+    // CTL-2204 verify round 3: run() was changed to surface spawnSync's `r.error`, because
+    // a spawn that NEVER STARTED leaves status null and stderr UNDEFINED — the operator saw
+    // a bare `rc=1` with an empty stderr tail, a failure with no cause. That branch had no
+    // test of its own; this is the one environment that fires it positively (an empty PATH
+    // hides `linearis`, so spawn returns ENOENT). Deleting the `if (r.error)` block in run()
+    // makes this assertion fail.
+    expect(r.stderr).toContain("the child never started (ENOENT)");
   });
 
   test("⛔ a no-op is LOUD: a real verb that does not reach the entry point exits non-zero", () => {
@@ -576,5 +583,317 @@ esac
     expect(out.blocksVerified).toBe(false);
     expect(out.missingBlocks).toEqual([]); // NOT accused — unproven is not absent
     expect(r.stderr).toContain("NO relation field");
+  });
+});
+
+// ── CTL-2204 ────────────────────────────────────────────────────────────────────
+// ask.mjs accept forwards the resolved body to linear-reply.mjs's child process. A guard in
+// linear-reply.mjs alone still leaves a gap: --dry-run never spawns that child, so before
+// this change `ask accept ... --body /tmp/x.md --dry-run` happily printed
+// wouldReply:"/tmp/x.md" and exited 0. The same shared resolver (lib/comment-body-arg.mjs)
+// is wired directly into cmdAccept so the refusal fires in ask.mjs's OWN process, before the
+// replica read.
+//
+// ⛔ EVERY TEST HERE RUNS AGAINST A FRESH REPLICA. The first cut of this block ran the
+// refusal cases with NO replica env, reasoning that "a refused body never reaches that
+// code". That is true — and it is exactly why three of them could not fail: ask.mjs exits 1
+// at the replica read whether or not the guard exists, so `expect(status).not.toBe(0)`
+// passed for a reason unrelated to the property under test. Proven by mutation: with the
+// CTL-2204 resolver block removed from cmdAccept, the suite went 52/0 → 49 pass / 3 fail and
+// those three stayed GREEN. A test whose subject can be deleted without it failing is not
+// evidence. Each case now (a) reaches the guard via buildFreshReplica and (b) asserts the
+// EXACT refusal string plus status === 1, so deleting the guard fails it.
+//
+// Every test drives the REAL CLI through spawnSync, same discipline as the
+// CTL-2157 block above.
+
+const runAccept = (args, { env = {} } = {}) =>
+  spawnSync(process.execPath, [ASK_MJS, "accept", ...args], {
+    encoding: "utf8",
+    env: { ...process.env, ...env },
+  });
+
+// Build a hermetic replica the SAME shape lib/linear-read-replica.sh's linear_read_ticket
+// reads: issues/labels/issue_labels + a FRESH writer.lock + a sync_meta cursor row, so the
+// read is a replica HIT and never falls back to a live `linearis` call.
+//
+// Hoisted to block scope (CTL-2204 remediation): the refusal cases need it too, or they
+// never reach the guard they claim to test.
+const buildFreshReplica = (id, { askLabel = true } = {}) => {
+  const dir = mkdtempSync(join(tmpdir(), "ask-replica-"));
+  const db = join(dir, "replica.db");
+  const labelRows = askLabel
+    ? "INSERT INTO labels VALUES ('L1','catalyst-ask');" +
+      "INSERT INTO issue_labels VALUES ('issue-1','L1');"
+    : "";
+  const sql = `
+CREATE TABLE issues (id TEXT PRIMARY KEY, identifier TEXT, title TEXT, description TEXT,
+  priority INTEGER, estimate INTEGER, url TEXT, branch_name TEXT, state TEXT,
+  assignee_id TEXT, assignee TEXT, removed_at INTEGER);
+CREATE TABLE labels (id TEXT PRIMARY KEY, name TEXT);
+CREATE TABLE issue_labels (issue_id TEXT, label_id TEXT);
+CREATE TABLE sync_meta (key TEXT PRIMARY KEY, value TEXT);
+INSERT INTO issues (id, identifier, title, removed_at) VALUES ('issue-1', '${id}', 't', NULL);
+${labelRows}
+INSERT INTO sync_meta VALUES ('cursor', '1');
+`;
+  const r = spawnSync("sqlite3", [db, sql], { encoding: "utf8" });
+  if (r.status !== 0) throw new Error(`buildFreshReplica: sqlite3 failed: ${r.stderr}`);
+  writeFileSync(`${db}.writer.lock`, ""); // fresh mtime = now
+  return db;
+};
+
+// A `linearis` stub that RECORDS every invocation, so "linearis was never called" can be
+// asserted as evidence rather than assumed. Prints the labels JSON so `create` (used below
+// purely as the positive control for this recorder) gets past its first call.
+const recordingLinearisStub = () => {
+  const bin = mkdtempSync(join(tmpdir(), "ask-recstub-"));
+  const log = join(bin, "invocations.log");
+  const stub = join(bin, "linearis");
+  writeFileSync(stub, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${log}\nprintf '%s\\n' '${LABELS_JSON}'\n`);
+  chmodSync(stub, 0o755);
+  return { bin, log, calls: () => (existsSync(log) ? readFileSync(log, "utf8").trim() : "") };
+};
+
+describe("ask accept — CTL-2204 body guard", () => {
+  // A replica-resolvable id: linear_read_ticket requires TEAM-<digits>.
+  const ASK_ID = "CTL-220499";
+
+  test("--body pointing at an existing file is refused before anything is written", () => {
+    const db = buildFreshReplica(ASK_ID);
+    const dir = mkdtempSync(join(tmpdir(), "ask-body-"));
+    const f = join(dir, "real.md");
+    writeFileSync(f, "# real body\n");
+    const r = runAccept([ASK_ID, "--as", "COORD", "--body", f, "--dry-run"], {
+      env: { CATALYST_REPLICA_DB: db },
+    });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("A path is never a valid comment body");
+    expect(r.stderr).toContain(`--body-file ${f}`);
+  });
+
+  test("--dry-run does NOT report a path as the would-be reply", () => {
+    // The gap a linear-reply-only guard leaves: dry-run never reaches the child process, so
+    // before this change it printed wouldReply:"/tmp/real.md" and exited 0.
+    //
+    // ⛔ The replica MUST be present here. Without it ask.mjs exits 1 at the replica read and
+    // prints no stdout at all, so both assertions below hold with the guard DELETED — the
+    // mutation-proven false pass this remediation exists to fix.
+    const db = buildFreshReplica(ASK_ID);
+    const dir = mkdtempSync(join(tmpdir(), "ask-body-"));
+    const f = join(dir, "real.md");
+    writeFileSync(f, "# real body\n");
+    const r = runAccept([ASK_ID, "--as", "COORD", "--body", f, "--dry-run"], {
+      env: { CATALYST_REPLICA_DB: db },
+    });
+    expect(r.status).toBe(1);
+    expect(r.stdout).not.toContain(f);
+    expect(r.stderr).toContain("A path is never a valid comment body");
+  });
+
+  test("positive control: the SAME argv minus the path reaches the dry-run preview", () => {
+    // Proves the replica fixture above is live and the run really does get past the read —
+    // so "status 1 + no stdout" in the two tests above is the GUARD talking, not the replica.
+    const db = buildFreshReplica(ASK_ID);
+    const r = runAccept([ASK_ID, "--as", "COORD", "--body", "an ordinary body", "--dry-run"], {
+      env: { CATALYST_REPLICA_DB: db },
+    });
+    expect(r.status).toBe(0);
+    expect(JSON.parse(r.stdout).action).toBe("dry-run");
+  });
+
+  test("--body-file missing → refused, naming the path", () => {
+    const db = buildFreshReplica(ASK_ID);
+    const r = runAccept([ASK_ID, "--as", "COORD", "--body-file", "/tmp/gone-xyz-ctl2204.md", "--dry-run"], {
+      env: { CATALYST_REPLICA_DB: db },
+    });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("--body-file not found: /tmp/gone-xyz-ctl2204.md");
+  });
+
+  test("both --body and --body-file → refused as ambiguous", () => {
+    const db = buildFreshReplica(ASK_ID);
+    const dir = mkdtempSync(join(tmpdir(), "ask-body-"));
+    const f = join(dir, "real.md");
+    writeFileSync(f, "x");
+    const r = runAccept([ASK_ID, "--as", "COORD", "--body", "hi", "--body-file", f, "--dry-run"], {
+      env: { CATALYST_REPLICA_DB: db },
+    });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("both --body and --body-file were given");
+  });
+
+  test("whitespace-only --body → refused", () => {
+    const db = buildFreshReplica(ASK_ID);
+    const r = runAccept([ASK_ID, "--as", "COORD", "--body", "   ", "--dry-run"], {
+      env: { CATALYST_REPLICA_DB: db },
+    });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("comment body is empty");
+  });
+
+  test("a ~/ --body-file is expanded, so the refusal's own suggested remedy works", () => {
+    // The --body refusal prints `use --body-file <the string you passed>`. If only --body
+    // expanded ~/, that suggestion came straight back as "--body-file not found".
+    const home = mkdtempSync(join(tmpdir(), "ask-home-"));
+    mkdirSync(join(home, ".p"));
+    writeFileSync(join(home, ".p", "b.md"), "# tilde body\n");
+    const db = buildFreshReplica(ASK_ID);
+    const r = runAccept([ASK_ID, "--as", "COORD", "--body-file", "~/.p/b.md", "--dry-run"], {
+      env: { CATALYST_REPLICA_DB: db, HOME: home },
+    });
+    expect(r.status).toBe(0);
+    expect(JSON.parse(r.stdout).wouldReply).toContain("tilde body");
+  });
+
+  test("an ordinary body clears the guard — the refusal is not what stops it", () => {
+    // The guard runs BEFORE the replica read, so an ordinary body must advance
+    // PAST it. It then legitimately fails at the (nonexistent, isolated) replica
+    // — that failure proves the guard was cleared, not tripped: none of the
+    // guard's own refusal strings appear.
+    const r = runAccept(
+      [ASK_ID, "--as", "COORD", "--body", "accepted — has what it needs", "--dry-run"],
+      { env: { CATALYST_REPLICA_DB: "/nonexistent/replica-ctl2204.db", CATALYST_DIR: mkdtempSync(join(tmpdir(), "ask-noreplica-")) } }
+    );
+    expect(r.stderr).not.toContain("--body-file");
+    expect(r.stderr).not.toContain("ambiguous");
+    expect(r.stderr).not.toContain("comment body is empty");
+  });
+});
+
+describe("ask accept — CTL-2204 --body-file happy path (fresh local replica)", () => {
+  const ASK_ID = "CTL-220499"; // linear_read_ticket requires TEAM-<digits>; no letter suffix
+
+  test("--body-file resolves to the file's contents in the dry-run preview, never the path", () => {
+    const db = buildFreshReplica(ASK_ID);
+    const bodyDir = mkdtempSync(join(tmpdir(), "ask-body-"));
+    const f = join(bodyDir, "real.md");
+    writeFileSync(f, "# real body\n");
+    const r = runAccept([ASK_ID, "--as", "COORD", "--body-file", f, "--dry-run"], {
+      env: { CATALYST_REPLICA_DB: db },
+    });
+    expect(r.status).toBe(0);
+    const out = JSON.parse(r.stdout);
+    expect(out.wouldReply).toContain("real body");
+    expect(out.wouldReply).not.toContain(f);
+  });
+
+  test("an ordinary --body reaches the dry-run preview and exits 0 (guard does not regress the happy path)", () => {
+    const db = buildFreshReplica(ASK_ID);
+    const r = runAccept(
+      [ASK_ID, "--as", "COORD", "--body", "accepted — has what it needs", "--dry-run"],
+      { env: { CATALYST_REPLICA_DB: db } }
+    );
+    expect(r.status).toBe(0);
+    const out = JSON.parse(r.stdout);
+    expect(out.action).toBe("dry-run");
+    expect(out.wouldReply).toContain("accepted");
+  });
+});
+
+// ── CTL-2204 remediation: the NON-dry-run tail ──────────────────────────────────
+// The ticket's core safety property is an ORDERING one — a path passed to --body must be
+// refused BEFORE the ask is closed — and every test above passes --dry-run, which returns
+// early. So cmdAccept's tail (spawn linear-reply, then `linearis issues update --status
+// Done`) was executed by NO test at all: nothing asserted that a refused body leaves
+// `linearis` uninvoked and the ask OPEN. The ordering is correct by construction today
+// (the guard is the first statement after arg validation), but an edit that moved the
+// guard below the reply/close block would have shipped green.
+describe("ask accept — CTL-2204 a refused body never closes the ask (no --dry-run)", () => {
+  const ASK_ID = "CTL-220499";
+
+  test("a path as --body → non-zero exit AND linearis is never invoked", () => {
+    const { bin, calls } = recordingLinearisStub();
+    const db = buildFreshReplica(ASK_ID);
+    const dir = mkdtempSync(join(tmpdir(), "ask-body-"));
+    const f = join(dir, "real.md");
+    writeFileSync(f, "# real body\n");
+
+    const r = spawnSync(process.execPath, [ASK_MJS, "accept", ASK_ID, "--as", "COORD", "--body", f], {
+      encoding: "utf8",
+      env: { ...process.env, CATALYST_REPLICA_DB: db, PATH: `${bin}:${process.env.PATH ?? ""}` },
+    });
+
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("A path is never a valid comment body");
+    // The ask is left OPEN: no Done transition, and no linearis call of ANY kind.
+    expect(calls()).toBe("");
+  });
+
+  test("positive control: the same stub DOES record when ask.mjs really calls linearis", () => {
+    // Without this, `calls() === ""` above is equally consistent with a stub that never
+    // ran, was not on PATH, or could not write its log — i.e. with no evidence at all.
+    const { bin, calls } = recordingLinearisStub();
+    const r = spawnSync(
+      process.execPath,
+      [ASK_MJS, "create", "--team", "CTL", "--title", "t", "--why", "w",
+       "--option", "a", "--option", "b", "--default", "a", "--blocks", "CTL-1"],
+      { encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` } }
+    );
+    // We do not care whether create SUCCEEDS (the stub returns label JSON for every call, so
+    // it will not) — only that the recorder captured a real invocation from ask.mjs.
+    expect(calls()).toContain("labels list");
+    expect(r.status).not.toBe(null); // the child ran; this is not a spawn failure
+  });
+});
+
+// ── CTL-2204 verify round 3: the ask.mjs → linear-reply.mjs MARSHALLING boundary ─────────
+// The remediation that introduced `run(..., ["--body", "-"], { input: body })` justified
+// itself with three measured failures (E2BIG, argv injection via a body of `--top`, and a
+// double refusal). None of them had a regression test: reverting that one line to the old
+// `["--body", body]` left ALL 137 tests across all four CTL-2204 suites GREEN
+// (ask-verbs 56/0, linear-reply-write-path 38/0, comment-body-arg 33/0,
+// install-agent-tools 10/0). A fix whose removal is invisible is a fix that will be removed.
+//
+// The discriminator is exact and needs no stub: with argv marshalling, spawn fails and
+// run()'s r.error branch reports "the child never started (E2BIG)"; with stdin marshalling
+// the child really starts and fails later, downstream, inside the replica read. So this
+// asserts BOTH directions — the spawn-failure marker is absent, and positive evidence that
+// the child actually ran is present.
+describe("ask accept — CTL-2204 the body reaches the child on STDIN, never through argv", () => {
+  const ASK_ID = "CTL-220497";
+
+  // Over MAX_ARG_STRLEN on both platforms: macOS kern.argmax is 1 MiB, and Linux's
+  // per-argument limit (32 pages = 128 KiB) is LOWER, so CI trips it sooner than a laptop.
+  const OVERSIZED = `# big\n${"x".repeat(2_000_000)}`;
+
+  test("a body past the per-argument limit does NOT fail the spawn (E2BIG regression guard)", () => {
+    const db = buildFreshReplica(ASK_ID);
+    const dir = mkdtempSync(join(tmpdir(), "ask-big-"));
+    const f = join(dir, "big.md");
+    writeFileSync(f, OVERSIZED);
+
+    const r = runAccept([ASK_ID, "--as", "COORD", "--body-file", f], {
+      env: { CATALYST_REPLICA_DB: db },
+    });
+
+    // The reply cannot SUCCEED here (no write proxy in a unit test) and that is fine —
+    // the property under test is WHERE it fails. It must not be at the spawn.
+    expect(r.stderr).not.toContain("never started");
+    expect(r.stderr).not.toContain("E2BIG");
+    // Positive control: prove the child was genuinely reached rather than the assertions
+    // above passing on an ask.mjs that exited earlier for some unrelated reason.
+    expect(r.stderr).toContain("reply FAILED");
+    expect(r.status).not.toBe(0);
+  });
+
+  test("positive control: the SAME oversized body through argv DOES fail the spawn", () => {
+    // Without this, the test above is equally consistent with 2 MB simply being under the
+    // limit on this host — i.e. with no evidence about marshalling at all. This reproduces
+    // the old code path directly through spawnSync and pins that it really does break.
+    const r = spawnSync(process.execPath, [ASK_MJS, "--body", OVERSIZED], { encoding: "utf8" });
+    expect(r.error?.code).toBe("E2BIG");
+    // A spawn that never ran reports no exit status. node uses null here and bun uses
+    // undefined, and this suite runs under both — normalize rather than pin one runtime.
+    expect(r.status ?? null).toBe(null);
+  });
+
+  test("a SMALL body also reaches the child — the stdin path is not large-body-only", () => {
+    const db = buildFreshReplica(ASK_ID);
+    const r = runAccept([ASK_ID, "--as", "COORD", "--body", "accepted — go ahead"], {
+      env: { CATALYST_REPLICA_DB: db },
+    });
+    expect(r.stderr).not.toContain("never started");
+    expect(r.stderr).toContain("reply FAILED");
   });
 });

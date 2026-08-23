@@ -5,8 +5,9 @@ then:
 
 ```bash
 node "$CLAUDE_PLUGIN_ROOT/scripts/ask.mjs" accept CTL-NNNN --as <AGENT> --body "accepted — …"
-#   --body -     read the reply from stdin
-#   --dry-run    show what it would reply and close, without writing
+#   --body-file <path>  post a FILE'S CONTENTS (preferred for anything multi-line)
+#   --body -            read the reply from stdin
+#   --dry-run           show what it would reply and close, without writing
 ```
 
 `accept` replies in-thread as the app actor and moves the ticket to Done. Two refusals are

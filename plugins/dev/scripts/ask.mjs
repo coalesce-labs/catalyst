@@ -31,6 +31,7 @@ import { spawnSync } from "node:child_process";
 // module — the documented form threw a ReferenceError before reading anything.
 import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { resolveCommentBody } from "./lib/comment-body-arg.mjs";
 
 // ⚠️ ONE alternation-free pattern, deliberately: JS alternation prefers the earliest MATCH
 // POSITION, so a bare `Options:` branch matches at the preceding newline and consumes
@@ -297,9 +298,26 @@ export function resolveTeamLabelIds(team, { runFn = run, names = ASK_LABEL_NAMES
 
 const RYAN = process.env.ASK_HUMAN_ID || "c2a8cc92-cab6-4536-9500-0f24abdf702b";
 
-function run(cmd, args) {
-  const r = spawnSync(cmd, args, { encoding: "utf8" });
-  return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+/**
+ * run — spawnSync with a THREE-part result, including the case where the child never ran.
+ *
+ * ⛔ CTL-2204: this used to `return { code: r.status ?? 1, ... stderr: r.stderr ?? "" }` and
+ * DISCARD `r.error`. When spawn itself fails — E2BIG (argv over the per-arg limit), ENOENT
+ * (binary not on PATH), EACCES — node leaves `status` null and `stderr` UNDEFINED and puts
+ * the whole diagnosis in `r.error`. So the operator saw a bare `rc=1` followed by an EMPTY
+ * stderr tail: a failure with no cause. Measured on this host (kern.argmax 1048576), a
+ * ~1.1MB argument gives status=null, stderr=undefined, error.code=E2BIG — and Linux's
+ * per-argument MAX_ARG_STRLEN is LOWER, so CI trips it sooner than a laptop does.
+ * A spawn that never started must be distinguishable from a child that exited non-zero.
+ */
+function run(cmd, args, opts = {}) {
+  const r = spawnSync(cmd, args, { encoding: "utf8", ...opts });
+  let stderr = r.stderr ?? "";
+  if (r.error) {
+    const detail = `spawn ${cmd} FAILED — the child never started (${r.error.code ?? r.error.message})`;
+    stderr = stderr ? `${stderr}\n${detail}` : detail;
+  }
+  return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr };
 }
 
 /**
@@ -333,7 +351,7 @@ function usage() {
                  --option <label> --option <label> [--option ...]   (at least TWO)
                  --default <text> --blocks <ISSUE> [--blocks <ISSUE> ...]
                  [--priority <1-4>] [--dry-run]
-  ask.mjs accept <ISSUE> --as <AGENT> --body <markdown|-> [--dry-run]
+  ask.mjs accept <ISSUE> --as <AGENT> (--body <markdown|-> | --body-file <path>) [--dry-run]
 
 create files a correctly-shaped ask ticket, then READS IT BACK and proves the decision
 trigger can parse its options AND that every requested blocking relation landed. accept
@@ -574,13 +592,26 @@ function cmdCreate(argv) {
 function cmdAccept(argv) {
   const id = argv[0];
   const as = argOf(argv, "--as");
-  let body = argOf(argv, "--body");
   const dryRun = argv.includes("--dry-run");
-  if (!id || !as || !body) {
-    console.error("ask accept: <ISSUE> --as <AGENT> --body <markdown|-> are required");
+  if (!id || !as) {
+    console.error("ask accept: <ISSUE> --as <AGENT> (--body <markdown|-> | --body-file <path>) are required");
     return 1;
   }
-  if (body === "-") body = readFileSync(0, "utf8");
+  // CTL-2204: same rule as linear-reply.mjs, from the same leaf. Decided HERE so it also
+  // covers --dry-run, which never reaches the linear-reply child process.
+  const resolved = resolveCommentBody({
+    body: argOf(argv, "--body"),
+    bodyFile: argOf(argv, "--body-file"),
+  });
+  if (!resolved.ok) {
+    console.error(`ask accept: ${resolved.message}`);
+    return 1;
+  }
+  let body = resolved.stdin ? readFileSync(0, "utf8") : resolved.body;
+  if (!body.trim()) {
+    console.error("ask accept: comment body is empty (stdin produced nothing)");
+    return 1;
+  }
 
   // Refuse on a non-ask: `accept` moves a ticket to Done, and doing that to a work ticket
   // because someone mistyped an id is not recoverable by the person who typed it.
@@ -615,8 +646,24 @@ function cmdAccept(argv) {
     return 0;
   }
 
+  // ⛔ CTL-2204: the body goes to the child on STDIN, never back through argv.
+  //
+  // Re-marshalling the resolved body as `--body <body>` put an arbitrarily large,
+  // arbitrarily shaped string into the child's argv, and produced three failures with no
+  // diagnosable cause:
+  //   1. E2BIG. --body-file is now documented as "preferred for anything multi-line", i.e.
+  //      precisely the large-body shape; a body past the per-argument limit made spawn fail
+  //      before the child existed (see run()'s header).
+  //   2. argv injection. linear-reply.mjs matches --top by WHOLE-ELEMENT equality, so a body
+  //      whose entire value is `--top` silently flipped the reply to top-level posting.
+  //   3. Double refusal. A --body-file whose CONTENTS trim to an existing absolute path was
+  //      re-refused by the child's own (correct) guard, leaving the ask open with a confusing
+  //      message about a --body the operator never passed.
+  // `--body -` + spawnSync `input` closes all three at once, and covers all three body
+  // sources (--body, --body-file, --body -) with ONE path — the parent has already resolved
+  // the bytes, so the child re-reading a file that may have changed underneath is also gone.
   const replyScript = new URL("./linear-reply.mjs", import.meta.url).pathname;
-  const reply = run("node", [replyScript, id, "--as", as, "--body", body]);
+  const reply = run("node", [replyScript, id, "--as", as, "--body", "-"], { input: body });
   if (reply.code !== 0) {
     // ⛔ Do NOT close on a failed reply: a Done ask with no recorded answer is worse than
     // an open one — it leaves the human's view clean and the decision unrecorded.

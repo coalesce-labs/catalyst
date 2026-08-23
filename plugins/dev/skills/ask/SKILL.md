@@ -29,8 +29,7 @@ node "$CLAUDE_PLUGIN_ROOT/scripts/ask.mjs" create \
   --title "ASK: <one line>" \
   --why "<what it unblocks>" \
   --option "<option A>" --option "<option B>" \
-  --default "<what happens if silent>" \
-  --blocks CTL-NNNN
+  --default "<what happens if silent>" --blocks CTL-NNNN
 #   --dry-run   print the body and the parsed options without writing
 ```
 
@@ -56,7 +55,7 @@ in one place: **[`references/threading.md`](references/threading.md)** — one-l
 what a reply must contain. Read it before your first reply.
 
 ```bash
-direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" CTL-NNNN --as <ROLE> --body "<markdown>"
+direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" CTL-NNNN --as <ROLE> --body-file <path>
 ```
 
 ## 5. Closing (the raising agent)
@@ -66,6 +65,7 @@ permission), then:
 
 ```bash
 node "$CLAUDE_PLUGIN_ROOT/scripts/ask.mjs" accept CTL-NNNN --as <ROLE> --body "accepted — …"
+#   --body-file <path>  for anything longer than a one-line body; --body REFUSES a path (CTL-2204)
 ```
 
 It replies in-thread as the app actor and moves the ticket to Done. The two deliberate refusals, the
