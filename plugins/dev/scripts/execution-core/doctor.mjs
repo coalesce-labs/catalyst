@@ -4364,14 +4364,38 @@ export function checkNodeConfigPresent(deps = {}) {
 // "keep PROJ / keep null / don't commit Linear IDs" rule).
 //
 // Reuses the single-source-of-truth leak-category list (RELOCATED_LAYER1_KEYS) +
-// pure validator (validateLayer1Config) from lib/validate-catalyst-config.mjs —
-// the same module the Phase-1 schema tests exercise — so there is exactly one
-// definition of "what leaks". Back-compat: presence of a relocated key does NOT
-// invalidate the config at runtime; this check is an advisory migration tracker
-// (STATUS.WARN, never FAIL during the back-compat window) that tells operators
-// which repos still need slimming. It must stay WARN until Phase 6 slims the
-// committed configs, because runDoctor's exit code = FAIL count and
-// catalyst-join.sh gates member activation on doctor exit 0.
+// pure validator (validateLayer1Config) from lib/validate-catalyst-config.mjs, so
+// there is exactly one definition of "what leaks".
+//
+// GRADING (CTL-1214 Phase 5). This check was pinned at STATUS.WARN because the
+// committed Layer-1 configs were not yet slimmed, so EVERY node carried the
+// relocated keys and a FAIL would have exited `catalyst doctor` non-zero
+// fleet-wide. That gate is real and still binding: runDoctor returns the FAIL
+// COUNT as the process exit code, and catalyst-join.sh's do_doctor_gate()
+// activates a cluster member strictly on exit 0
+// (run_stage "doctor" do_doctor_gate || exit 1). A FAIL here fail-closes the join.
+//
+// The pin is now replaced by a SELF-GATING promotion rather than removed:
+//   FAIL  — the validator reports hard errors, which happens only when the config
+//           has DECLARED schemaVersion >= 1 (i.e. it says it is slimmed) AND still
+//           carries a NODE-scoped relocated key. That is a config contradicting
+//           its own declaration — a hand-edit or a partial rollback — and it is
+//           exactly the state that silently reverts knobs to code defaults.
+//   WARN  — any other leak: an un-migrated repo (no schemaVersion), or a
+//           CLUSTER-scoped leak such as monitor.linear.teams / .catalyst/hosts.json,
+//           whose relocation is CTL-1885 and deliberately out of scope here.
+//   PASS  — clean.  INFO — unreadable/malformed (never a false PASS).
+//
+// So a fleet member that has simply not migrated can still join, while a repo that
+// claims to be slimmed is held to it. This repo's own committed config is asserted
+// NOT-FAIL by doctor-config-scope-leak.test.mjs, reading the real file on disk —
+// that assertion is what keeps the fleet joinable, so it is not a fixture.
+//
+// The lockstep argument still holds independently (doctor and this repo's config
+// ship in the same repo, and layer1Path() is this-repo-relative, so doctor never
+// grades adva / catalyst-otel / slides / evergreen). The schemaVersion gate is
+// kept ON TOP of that because it additionally survives a hand-edited or
+// rolled-back config, which lockstep alone does not.
 //
 // Injected deps (all have real defaults):
 //   readLayer1      — () => string   (raw Layer-1 config body; "" when absent)
@@ -4407,7 +4431,7 @@ export function checkConfigScopeLeak(deps = {}) {
     }
   }
 
-  const { deprecatedKeys } = validateLayer1Config(parsed ?? {});
+  const { deprecatedKeys, errors } = validateLayer1Config(parsed ?? {});
   const hostsLeak = hostsJsonExists();
 
   if (deprecatedKeys.length === 0 && !hostsLeak) {
@@ -4434,25 +4458,27 @@ export function checkConfigScopeLeak(deps = {}) {
     );
   }
 
+  // The validator only produces hard errors for a config that declared
+  // schemaVersion >= 1 and still carries a NODE-scoped relocated key — see the
+  // grading note in this function's header for why that is the one FAIL-able state.
+  const hard = errors.length > 0;
+
   checks.push(
     mkCheck(
       "config-scope-leak",
-      // WARN, not FAIL, during the back-compat migration window (CTL-1214). runDoctor
-      // returns the FAIL count as the process exit code, and catalyst-join.sh
-      // do_doctor_gate() gates cluster-member activation strictly on exit 0
-      // (run_stage "doctor" do_doctor_gate || exit 1). The committed Layer-1
-      // .catalyst/config.json is NOT yet slimmed (Phase 6 deferred), so EVERY node
-      // today still carries these relocated keys. Emitting FAIL here would make
-      // `catalyst doctor` exit non-zero on every host and fail-close the join gate —
-      // a runtime regression, contradicting the "purely observational" contract.
-      // This mirrors checkReaper's deliberate WARN ("a FAILing reaper check would
-      // BLOCK a node from self-healing via join"). Promote to FAIL only after Phase 6
-      // slims the committed configs.
-      STATUS.WARN,
-      `Layer-1 .catalyst/config.json carries node/cluster-scoped keys (advisory migration tracker): ${leaks.join("; ")}. ` +
-        `Remediation: run plugins/dev/scripts/migrate-config-to-node.sh to seed the node config ` +
-        `(~/.config/catalyst/config.json), move the project roster into ` +
-        `catalyst-cluster/cluster.json, then remove these keys from the committed .catalyst/config.json.`,
+      hard ? STATUS.FAIL : STATUS.WARN,
+      hard
+        ? `Layer-1 .catalyst/config.json declares schemaVersion >= 1 (slimmed) but still carries ` +
+          `node-scoped keys: ${leaks.join("; ")}. Those keys are read from Layer-1 only when present, ` +
+          `so leaving them here silently overrides the node config. Remediation: run ` +
+          `\`plugins/dev/scripts/catalyst-config-migrate\` to move them into ` +
+          `~/.config/catalyst/node.json.` +
+          (hostsLeak || deprecatedKeys.includes("monitor.linear.teams")
+            ? ` (The roster entries above are cluster-scoped and are NOT part of this failure — CTL-1885 owns them.)`
+            : "")
+        : `Layer-1 .catalyst/config.json carries node/cluster-scoped keys (advisory migration tracker): ${leaks.join("; ")}. ` +
+          `Remediation: run \`plugins/dev/scripts/catalyst-config-migrate\` to relocate the node-scoped keys into ` +
+          `~/.config/catalyst/node.json; the project roster relocates to catalyst-cluster/cluster.json under CTL-1885.`,
     ),
   );
   return checks;

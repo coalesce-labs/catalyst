@@ -57,6 +57,74 @@ statuses.
 | `catalyst.linear.teamKey`           | Linear team key; must match `ticketPrefix`                 |
 | `catalyst.linear.stateMap`          | Maps each workflow step to one of your Linear status names |
 
+### Slimmed Layer-1 and `schemaVersion` (CTL-1214)
+
+`.catalyst/config.json` is committed to git, so it must carry **project identity only**. Four
+categories of machine-scoped keys historically leaked into it and have now relocated to the
+node-scoped `~/.config/catalyst/node.json`:
+
+| Layer-1 key (relative to `catalyst.`)                                       | Scope     | Destination                                          |
+| --------------------------------------------------------------------------- | --------- | ---------------------------------------------------- |
+| `orchestration.dispatchMode`                                                 | node      | `node.json` → `catalyst.orchestration.dispatchMode`   |
+| `orchestration.executionCore.*`                                              | node      | `node.json` → `catalyst.orchestration.executionCore.*`|
+| `orchestration.worktreeRefresh.*`                                            | node      | `node.json` → `catalyst.orchestration.worktreeRefresh.*` |
+| `orchestration.reconcile.*`                                                  | node      | `node.json` → `catalyst.orchestration.reconcile.*`    |
+| `feedback.*`                                                                 | node      | `node.json` → `catalyst.feedback.*`                   |
+| `sweep.*`                                                                    | node      | `node.json` → `catalyst.sweep.*`                      |
+| `monitor.github.repoColors`                                                  | node      | `node.json` → `catalyst.monitor.github.repoColors`    |
+| `monitor.linear.teams`                                                       | cluster   | `catalyst-cluster/cluster.json` → `projects[]` (CTL-1885, **not yet moved**) |
+
+⚠️ **`catalyst.orchestration` as a whole is NOT machine-scoped.** Only the four subpaths above
+relocate. `executor`, `executorByPhase`, `codex`, `publishPreflight`, `fleetHealth`,
+`daemonWatchdog`, `orphanReaper.workerGc`, `draftPr`, `stalePrRescue`, `orphanPrSweep`,
+`stalledPrSweep` and `phaseAgents` are genuinely Layer-1 and stay in the committed config.
+
+**Precedence.** Every relocated knob resolves **Layer-2 over Layer-1, per field**, with each site's
+existing env-var override still winning over both:
+
+```
+env var  >  cluster-secrets.json  >  node.json  >  ~/.config/catalyst/config.json  >  .catalyst/config.json  >  code default
+```
+
+So an un-migrated repo keeps working (Layer-1 supplies the value) and a slimmed one resolves from
+`node.json`. Nothing is required to move on any particular schedule.
+
+**Migrating a repo.**
+
+```bash
+plugins/dev/scripts/catalyst-config-migrate --dry-run   # report only
+plugins/dev/scripts/catalyst-config-migrate             # move the keys
+plugins/dev/scripts/catalyst-config-migrate --json      # machine-readable report — keep it with the PR
+```
+
+It is non-clobbering (a key the merged Layer-2 already defines is **kept**, never overwritten),
+idempotent, and writes `node.json` **before** slimming Layer-1 so a failure can never leave a repo
+slimmed with its values nowhere. It refuses to run on a checkout that predates the Layer-2
+fallbacks.
+
+⛔ **Never run it against a host running an older plugin checkout.** That host has no Layer-2
+fallbacks, so a slimmed config silently reverts `dispatchMode` to `oneshot-legacy` and halves the
+sweep cadence. Update the checkout first.
+
+**`catalyst.schemaVersion` is a self-gating opt-in, not a global requirement.**
+
+| `schemaVersion` | A node-scoped relocated key is…                | A cluster-scoped one (`monitor.linear.teams`) is… |
+| --------------- | ---------------------------------------------- | -------------------------------------------------- |
+| absent          | a recommendation (`catalyst doctor` **WARN**)   | a recommendation (**WARN**)                        |
+| `1` or higher   | a **hard error** (`catalyst doctor` **FAIL**)   | still just a recommendation (**WARN**, CTL-1885)   |
+
+A config becomes strict exactly when it is slimmed, so repos that have not migrated are never
+flagged as invalid. The asymmetry matters operationally: `catalyst doctor`'s exit code is its FAIL
+count and `catalyst-join.sh` gates cluster-member activation on exit 0, so a FAIL here fail-closes
+the join — it may only fire on a config that has *declared* it is slimmed and then contradicts
+itself. A present-but-malformed `schemaVersion` (not an integer ≥ 1) is its own hard error and does
+**not** count as opting in.
+
+**Rolling back.** `git revert` the slimming commit, then delete the migrated stanzas from
+`node.json` — because the fallbacks are Layer-2-wins-**over**-Layer-1, a restored Layer-1 stanza is
+*shadowed* by `node.json` rather than ignored. The migration's `--json` report records exactly which
+keys those are.
+
 ### State map
 
 As work moves, Catalyst updates the ticket's Linear status for you. `stateMap` says which status

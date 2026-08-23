@@ -1728,6 +1728,8 @@ jobs:
             work-done-probes.test.mjs \
             worktree-refresh-timer.test.mjs \
             layer2-fallback.test.mjs \
+            doctor-config-scope-leak.test.mjs \
+            config-dump.test.mjs \
             worktree-safety.test.mjs \
             worktree.test.mjs \
             recovery-seam-deps.test.mjs \

@@ -172,7 +172,13 @@ describe("validateLayer1Config (CTL-1214)", () => {
   });
 
   test("legacy keys validate but are flagged deprecated (back-compat window)", () => {
-    const r = validateLayer1Config(kitchenSinkLayer1());
+    // The BACK-COMPAT window is by definition a config that has not opted into
+    // the new schema (CTL-1214 D3), so this fixture drops schemaVersion — which
+    // minimalLayer1() supplies. With it present the same config is correctly
+    // INVALID; that direction is asserted in the D3 describe block below.
+    const legacy = kitchenSinkLayer1();
+    delete legacy.catalyst.schemaVersion;
+    const r = validateLayer1Config(legacy);
     expect(r.valid).toBe(true); // still valid during migration
     expect(r.deprecatedKeys.length).toBeGreaterThan(0);
     // CTL-1214 D6: the blanket `orchestration` row is gone — it is now the four
@@ -191,6 +197,17 @@ describe("validateLayer1Config (CTL-1214)", () => {
       expect(r.deprecatedKeys).toContain(path);
     }
     expect(r.deprecatedKeys).not.toContain("orchestration");
+  });
+
+  test("the SAME kitchen-sink config IS invalid once it declares schemaVersion 1", () => {
+    // The other half of the back-compat contract: opting in is what makes the
+    // leaks fatal. Without this, the test above passes for a validator that never
+    // errors at all.
+    const r = validateLayer1Config(kitchenSinkLayer1());
+    expect(r.valid).toBe(false);
+    expect(r.errors.length).toBeGreaterThan(0);
+    // The cluster-scoped roster is never the cause (D4).
+    expect(r.errors.join(" ")).not.toContain("monitor.linear.teams");
   });
 
   // CTL-1214 D6 — the narrowing, asserted in both directions. Without the
@@ -364,6 +381,106 @@ describe("config.template.json is sanitized (CTL-1214)", () => {
     expect(template.catalyst.filter).toBeDefined();
     expect("botUserId" in template.catalyst.monitor.linear).toBe(true);
     expect(template.catalyst.thoughts).toBeDefined();
+  });
+});
+
+// CTL-1214 Phase 5 (D3) — schemaVersion is the SELF-GATING opt-in to strictness.
+// Taken literally, "Phase 6 promotes schemaVersion to required" would flag every
+// not-yet-migrated config in the fleet as invalid, in editors and validators, for
+// no benefit. Instead: a PRESENT schemaVersion >= 1 means "this config has opted
+// into the new schema", and in that config a NODE-scoped relocated key becomes a
+// hard error. A config without schemaVersion keeps today's lenient behavior
+// verbatim — so a repo becomes strict exactly when it is slimmed.
+describe("schemaVersion-gated strictness (CTL-1214 D3/D4)", () => {
+  const withLeak = (leak, opts = {}) => {
+    const cfg = minimalLayer1();
+    if (opts.noSchemaVersion) delete cfg.catalyst.schemaVersion;
+    Object.assign(cfg.catalyst, leak);
+    return cfg;
+  };
+
+  test("schemaVersion ABSENT + node leak -> valid, recommendation only (unchanged)", () => {
+    const r = validateLayer1Config(
+      withLeak({ sweep: { idleHours: 48 } }, { noSchemaVersion: true }),
+    );
+    expect(r.valid).toBe(true);
+    expect(r.errors).toEqual([]);
+    expect(r.deprecatedKeys).toEqual(["sweep"]);
+    expect(r.recommendations.length).toBeGreaterThan(0);
+  });
+
+  test("schemaVersion 1 + node leak -> INVALID, and the error names the path", () => {
+    const r = validateLayer1Config(withLeak({ sweep: { idleHours: 48 } }));
+    expect(r.valid).toBe(false);
+    expect(r.errors.length).toBeGreaterThan(0);
+    expect(r.errors.join(" ")).toContain("sweep");
+    // The remediation must be actionable, not just a complaint.
+    expect(r.errors.join(" ")).toContain("catalyst-config-migrate");
+  });
+
+  test("schemaVersion 1 + CLUSTER leak (the roster) stays VALID (D4/CTL-1885)", () => {
+    const r = validateLayer1Config(
+      withLeak({ monitor: { linear: { teams: [{ key: "CTL", vcsRepo: "a/b" }] } } }),
+    );
+    expect(r.valid).toBe(true);
+    expect(r.errors).toEqual([]);
+    expect(r.deprecatedKeys).toEqual(["monitor.linear.teams"]);
+  });
+
+  test("schemaVersion 1 + a MIX -> invalid for the node half only", () => {
+    const r = validateLayer1Config(
+      withLeak({
+        monitor: { linear: { teams: [{ key: "CTL", vcsRepo: "a/b" }] } },
+        sweep: { idleHours: 48 },
+      }),
+    );
+    expect(r.valid).toBe(false);
+    expect(r.errors.join(" ")).toContain("sweep");
+    expect(r.errors.join(" ")).not.toContain("monitor.linear.teams");
+  });
+
+  test("schemaVersion 1 + clean -> valid, no recommendations", () => {
+    const r = validateLayer1Config(minimalLayer1());
+    expect(r.valid).toBe(true);
+    expect(r.errors).toEqual([]);
+    expect(r.recommendations).toEqual([]);
+    expect(r.deprecatedKeys).toEqual([]);
+  });
+
+  test("each of the four relocated orchestration subpaths FAILs under schemaVersion 1", () => {
+    for (const [key, value] of [
+      ["dispatchMode", "phase-agents"],
+      ["executionCore", { maxParallel: 4 }],
+      ["worktreeRefresh", { enabled: true }],
+      ["reconcile", { mode: "notify" }],
+    ]) {
+      const r = validateLayer1Config(withLeak({ orchestration: { [key]: value } }));
+      expect(r.valid).toBe(false);
+      expect(r.errors.join(" ")).toContain(`orchestration.${key}`);
+    }
+  });
+
+  test("a genuinely Layer-1 orchestration stanza does NOT fail under schemaVersion 1 (D6)", () => {
+    for (const stanza of [
+      { codex: { codexHome: "/x" } },
+      { executor: "sdk" },
+      { fleetHealth: { mode: "shadow" } },
+      { draftPr: { enabled: true } },
+    ]) {
+      const r = validateLayer1Config(withLeak({ orchestration: stanza }));
+      expect(r.valid).toBe(true);
+      expect(r.errors).toEqual([]);
+    }
+  });
+
+  test("a malformed schemaVersion is still a hard error, and does not gate strictness", () => {
+    const cfg = withLeak({ sweep: { idleHours: 48 } });
+    cfg.catalyst.schemaVersion = 0;
+    const r = validateLayer1Config(cfg);
+    expect(r.valid).toBe(false);
+    expect(r.errors.join(" ")).toContain("schemaVersion");
+    // 0 is not >= 1, so it has NOT opted in — the leak stays a deprecation.
+    expect(r.errors.join(" ")).not.toContain("catalyst-config-migrate");
   });
 });
 

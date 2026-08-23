@@ -107,16 +107,34 @@ function getPath(obj, dottedPath) {
 /**
  * Validate a parsed Layer-1 `.catalyst/config.json` object.
  *
- * This is intentionally lenient about the back-compat migration window: neither
- * the relocated stanzas (`deprecatedKeys`) NOR a missing `catalyst.schemaVersion`
- * makes the config invalid. During the back-compat window schemaVersion is
- * RECOMMENDED, not required — every not-yet-slimmed config still lacks it (Phase 6,
- * which slims the committed configs and promotes schemaVersion to required, is
- * deferred), so failing on its absence would flag every live config as invalid in
- * editors/validators. A missing schemaVersion is surfaced as a `recommendation`
- * instead; a PRESENT-but-malformed value (not an integer >= 1) is still a hard
- * error (if you bother to set it, set it correctly). The only other hard
- * requirement is a top-level `catalyst` object.
+ * SELF-GATING STRICTNESS (CTL-1214 D3). `catalyst.schemaVersion` is the opt-in
+ * switch, NOT a hard global requirement:
+ *
+ *   - schemaVersion ABSENT  → today's lenient behavior verbatim. Relocated keys
+ *     are `deprecatedKeys` only, and the missing version is a `recommendation`.
+ *     The in-tree comments used to say Phase 6 would "promote schemaVersion to
+ *     required"; taken literally that flags every not-yet-migrated config in the
+ *     fleet as invalid, in editors and validators, for no benefit.
+ *   - schemaVersion >= 1    → this config has opted into the slimmed schema, so a
+ *     NODE-scoped relocated key is a HARD ERROR. A repo therefore becomes strict
+ *     exactly when it is slimmed, and a hand-edit or a rollback that re-adds a
+ *     relocated stanza fails loudly instead of silently reverting knobs.
+ *   - a PRESENT-but-malformed value (not an integer >= 1) is a hard error in its
+ *     own right and does NOT count as opting in — if you bother to set it, set it
+ *     correctly, and a bogus value must not be a back door into strict mode.
+ *
+ * CLUSTER-scoped leaks stay lenient in BOTH modes (D4). `monitor.linear.teams` is
+ * explicitly out of scope for CTL-1214 — the roster move is CTL-1885 — so it
+ * remains in slimmed configs and must not fail them. The gate keys off the
+ * registry's existing `scope` field; no new field, no second list.
+ *
+ * ⚠️ Why the asymmetry matters operationally: `catalyst doctor`'s exit code is its
+ * FAIL count, and catalyst-join.sh gates member activation on doctor exit 0. A
+ * hard error here becomes a fail-closed join gate, so it may only fire on a config
+ * that has DECLARED it is slimmed — never on a fleet member that simply has not
+ * migrated yet.
+ *
+ * The only other hard requirement is a top-level `catalyst` object.
  *
  * @param {unknown} obj - the parsed config object, expected shape `{ catalyst: {...} }`.
  * @returns {{ valid: boolean, deprecatedKeys: string[], errors: string[], recommendations: string[] }}
@@ -159,10 +177,22 @@ export function validateLayer1Config(obj) {
     );
   }
 
-  // Soft: scope-leak detection. Presence of a relocated key is deprecated, not invalid.
+  // Has this config OPTED IN to the strict contract? Only a well-formed integer
+  // >= 1 counts — the malformed-value branch above already errored, and letting a
+  // bogus value opt in would make garbage stricter than a blank.
+  const optedIn = Number.isInteger(schemaVersion) && schemaVersion >= 1;
+
+  // Scope-leak detection. Presence of a relocated key is always a deprecation;
+  // under an opted-in config a NODE-scoped one is additionally a hard error.
   for (const entry of RELOCATED_LAYER1_KEYS) {
-    if (getPath(catalyst, entry.path) !== undefined) {
-      deprecatedKeys.push(entry.path);
+    if (getPath(catalyst, entry.path) === undefined) continue;
+    deprecatedKeys.push(entry.path);
+    if (optedIn && entry.scope === "node") {
+      errors.push(
+        `catalyst.${entry.path} is node-scoped and must not appear in a schemaVersion ` +
+          `>= 1 Layer-1 config — relocate it to ${entry.destination} by running ` +
+          `\`catalyst-config-migrate\``,
+      );
     }
   }
 
