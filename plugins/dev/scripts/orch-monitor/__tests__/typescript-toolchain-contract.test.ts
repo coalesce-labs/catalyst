@@ -5,18 +5,7 @@ import { execFileSync } from "node:child_process";
 
 const ROOT = join(import.meta.dir, "..");
 
-/**
- * Read a package's version off DISK by walking the node_modules ladder upward
- * from `fromDir`, exactly as the runtime resolver would.
- *
- * Deliberately NOT require.resolve / createRequire: module resolution is cached
- * process-wide and a fresh createRequire does not clear it, so a resolver-based
- * read can answer from cache rather than from the bytes on disk
- * (docs/architecture.md → "Installed-in-name-only", CTL-1831).
- *
- * Returns null when the package cannot be located — callers must treat null as
- * a FAILURE, never as a pass.
- */
+// Reads a package's version off disk (not via require.resolve, which is process-cached); null (a failure) if not found.
 function resolvePackageVersionOnDisk(id: string, fromDir: string): string | null {
   let dir = realpathSync(fromDir);
   for (;;) {
@@ -43,16 +32,21 @@ function packageDirOnDisk(id: string, fromDir: string): string | null {
   }
 }
 
+function tscVersionAt(root: string): string {
+  const tsc = join(root, "node_modules", ".bin", "tsc");
+  expect(existsSync(tsc)).toBe(true); // fail closed: absent bin is a failure
+  return execFileSync(tsc, ["--version"], { encoding: "utf8" }).trim();
+}
+
 describe("TypeScript toolchain contract (CTL-2179)", () => {
-  // RED until Phase 2: today `.bin/tsc` is TypeScript 6.0.3.
   test("the tsc binary `bun run typecheck` invokes is TypeScript 7.x", () => {
-    const tsc = join(ROOT, "node_modules", ".bin", "tsc");
-    expect(existsSync(tsc)).toBe(true); // fail closed: absent bin is a failure
-    const out = execFileSync(tsc, ["--version"], { encoding: "utf8" }).trim();
-    expect(out).toMatch(/^Version 7\./);
+    expect(tscVersionAt(ROOT)).toMatch(/^Version 7\./);
   });
 
-  // GREEN today; must STAY green. This is the direct pin for the #3909 failure.
+  test("the UI workspace's own resolved tsc binary is also TypeScript 7.x", () => {
+    expect(tscVersionAt(join(ROOT, "ui"))).toMatch(/^Version 7\./);
+  });
+
   test("typescript-eslint resolves a TypeScript 6.x API, satisfying its peer bound", () => {
     const teslintDir = packageDirOnDisk("typescript-eslint", ROOT);
     expect(teslintDir).not.toBeNull(); // fail closed
@@ -62,14 +56,12 @@ describe("TypeScript toolchain contract (CTL-2179)", () => {
     expect(major).toBe(6);
   });
 
-  // GREEN today; must STAY green. The guard throws at import time on major >= 7,
-  // so a successful import is the whole regression signal.
+  // The guard throws at import time on major >= 7, so a successful import is the whole regression signal.
   test("typescript-eslint imports without throwing its TS-version guard", async () => {
     const mod = await import("typescript-eslint");
     expect(typeof mod.configs).toBe("object");
   });
 
-  // AC2 pin: the split must not be paid for with lint coverage.
   test("the type-aware lint rule set and file scope are unchanged", () => {
     const cfg = readFileSync(join(ROOT, "eslint.config.js"), "utf8");
     for (const rule of [
@@ -88,8 +80,6 @@ describe("TypeScript toolchain contract (CTL-2179)", () => {
     expect(cfg).not.toContain('"lib/**"');
   });
 
-  // AC3 pin: the UI's compiler declaration must be explicit and must not have
-  // silently regressed below the pre-migration 5.8.3 floor (Phase 3, Branch A).
   test("the UI workspace declares an intentional, non-downgraded TypeScript", () => {
     const ui = JSON.parse(
       readFileSync(join(ROOT, "ui", "package.json"), "utf8"),
@@ -97,14 +87,11 @@ describe("TypeScript toolchain contract (CTL-2179)", () => {
     const dev = ui.devDependencies ?? {};
     const declared = dev["typescript"];
     expect(typeof declared).toBe("string");
-    // Anchored at the start: an unanchored /\^?[0-4]\./ would false-positive on
-    // e.g. "^6.0.2" itself (it matches the "0." inside ".0.2").
+    // Anchored: unanchored /\^?[0-4]\./ false-matches the "0." inside a valid "^6.0.2".
     expect(declared).not.toMatch(/^\^?[0-4]\./);
   });
 
-  // Cross-runner pin (Phase 4): ubuntu-latest (quality) and macos-latest
-  // (publish-desktop) both consume this lockfile, so the optional platform
-  // binaries for each must be present.
+  // ubuntu-latest (quality) and macos-latest (publish-desktop) both consume this lockfile.
   test("the lockfile carries TS 7 binaries for every CI runner platform", () => {
     const gitRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
       encoding: "utf8",
