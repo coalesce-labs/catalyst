@@ -1,0 +1,22 @@
+{
+  "ticket": "CTC-355",
+  "phase": "triage",
+  "orchestrator": "CTC-355",
+  "model": "opus",
+  "executor": "sdk",
+  "turnCap": 500,
+  "status": "done",
+  "bg_job_id": null,
+  "worktreePath": "%WT%/catalyst-cloud/CTC-355",
+  "generation": 2,
+  "attempt": 1,
+  "startedAt": "2026-08-19T11:16:40Z",
+  "updatedAt": "2026-08-19T11:19:08Z",
+  "host": {
+    "name": "mini-2",
+    "id": "100aaff3cc33d9f7"
+  },
+  "completedAt": "2026-08-19T11:19:08Z",
+  "assertedBy": "phase-agent-emit-complete",
+  "failureReason": null
+}

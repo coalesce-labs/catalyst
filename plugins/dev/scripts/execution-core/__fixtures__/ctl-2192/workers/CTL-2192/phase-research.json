@@ -1,0 +1,24 @@
+{
+  "ticket": "CTL-2192",
+  "phase": "research",
+  "orchestrator": "CTL-2192",
+  "model": "opus",
+  "executor": "sdk",
+  "turnCap": 500,
+  "status": "done",
+  "bg_job_id": null,
+  "worktreePath": "%WT%/catalyst-workspace/CTL-2192",
+  "generation": 2,
+  "attempt": 1,
+  "startedAt": "2026-08-23T04:02:58Z",
+  "updatedAt": "2026-08-23T04:10:05Z",
+  "host": {
+    "name": "mini-2",
+    "id": "100aaff3cc33d9f7"
+  },
+  "catalystSessionId": "sess_20260823T040007_762102e7",
+  "artifact": "thoughts/shared/research/2026-08-23-ctl-2192.md",
+  "completedAt": "2026-08-23T04:10:05Z",
+  "assertedBy": "phase-agent-emit-complete",
+  "failureReason": null
+}

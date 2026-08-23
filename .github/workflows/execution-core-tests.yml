@@ -1485,6 +1485,7 @@ jobs:
             clear-stall-advance-reentry.test.mjs \
             boot-resume-approval.test.mjs \
             boot-resume.test.mjs \
+            ctl-2192-claim-ladder.test.mjs \
             claim.test.mjs \
             claude-agents.test.mjs \
             claude-ids.test.mjs \

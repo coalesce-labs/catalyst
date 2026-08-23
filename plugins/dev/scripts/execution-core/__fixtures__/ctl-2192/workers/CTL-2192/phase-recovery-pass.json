@@ -1,0 +1,14 @@
+{
+  "ticket": "CTL-2192",
+  "status": "stalled-retryable",
+  "stalledReason": "escalated",
+  "stallClass": "system",
+  "stallClassRule": "family:system",
+  "needsHumanSince": "2026-08-23T04:36:08.585Z",
+  "updatedAt": "2026-08-23T04:36:08.585Z",
+  "phase": "recovery-pass",
+  "explanation": {
+    "problem": "CTL-2192 has a stalled phase signal (sdk-overloaded-exhausted) and is not terminal",
+    "call_to_action": "decide whether to retry CTL-2192 or close it"
+  }
+}
