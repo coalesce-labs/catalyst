@@ -335,6 +335,13 @@ describe("trap (a) — the documented path must not silently no-op", () => {
     expect(r.status).toBe(1);
     expect(r.stdout).toBe("");
     expect(r.stderr).toContain("could not resolve the ask labels");
+    // CTL-2204 verify round 3: run() was changed to surface spawnSync's `r.error`, because
+    // a spawn that NEVER STARTED leaves status null and stderr UNDEFINED — the operator saw
+    // a bare `rc=1` with an empty stderr tail, a failure with no cause. That branch had no
+    // test of its own; this is the one environment that fires it positively (an empty PATH
+    // hides `linearis`, so spawn returns ENOENT). Deleting the `if (r.error)` block in run()
+    // makes this assertion fail.
+    expect(r.stderr).toContain("the child never started (ENOENT)");
   });
 
   test("⛔ a no-op is LOUD: a real verb that does not reach the entry point exits non-zero", () => {
@@ -827,5 +834,66 @@ describe("ask accept — CTL-2204 a refused body never closes the ask (no --dry-
     // it will not) — only that the recorder captured a real invocation from ask.mjs.
     expect(calls()).toContain("labels list");
     expect(r.status).not.toBe(null); // the child ran; this is not a spawn failure
+  });
+});
+
+// ── CTL-2204 verify round 3: the ask.mjs → linear-reply.mjs MARSHALLING boundary ─────────
+// The remediation that introduced `run(..., ["--body", "-"], { input: body })` justified
+// itself with three measured failures (E2BIG, argv injection via a body of `--top`, and a
+// double refusal). None of them had a regression test: reverting that one line to the old
+// `["--body", body]` left ALL 137 tests across all four CTL-2204 suites GREEN
+// (ask-verbs 56/0, linear-reply-write-path 38/0, comment-body-arg 33/0,
+// install-agent-tools 10/0). A fix whose removal is invisible is a fix that will be removed.
+//
+// The discriminator is exact and needs no stub: with argv marshalling, spawn fails and
+// run()'s r.error branch reports "the child never started (E2BIG)"; with stdin marshalling
+// the child really starts and fails later, downstream, inside the replica read. So this
+// asserts BOTH directions — the spawn-failure marker is absent, and positive evidence that
+// the child actually ran is present.
+describe("ask accept — CTL-2204 the body reaches the child on STDIN, never through argv", () => {
+  const ASK_ID = "CTL-220497";
+
+  // Over MAX_ARG_STRLEN on both platforms: macOS kern.argmax is 1 MiB, and Linux's
+  // per-argument limit (32 pages = 128 KiB) is LOWER, so CI trips it sooner than a laptop.
+  const OVERSIZED = `# big\n${"x".repeat(2_000_000)}`;
+
+  test("a body past the per-argument limit does NOT fail the spawn (E2BIG regression guard)", () => {
+    const db = buildFreshReplica(ASK_ID);
+    const dir = mkdtempSync(join(tmpdir(), "ask-big-"));
+    const f = join(dir, "big.md");
+    writeFileSync(f, OVERSIZED);
+
+    const r = runAccept([ASK_ID, "--as", "COORD", "--body-file", f], {
+      env: { CATALYST_REPLICA_DB: db },
+    });
+
+    // The reply cannot SUCCEED here (no write proxy in a unit test) and that is fine —
+    // the property under test is WHERE it fails. It must not be at the spawn.
+    expect(r.stderr).not.toContain("never started");
+    expect(r.stderr).not.toContain("E2BIG");
+    // Positive control: prove the child was genuinely reached rather than the assertions
+    // above passing on an ask.mjs that exited earlier for some unrelated reason.
+    expect(r.stderr).toContain("reply FAILED");
+    expect(r.status).not.toBe(0);
+  });
+
+  test("positive control: the SAME oversized body through argv DOES fail the spawn", () => {
+    // Without this, the test above is equally consistent with 2 MB simply being under the
+    // limit on this host — i.e. with no evidence about marshalling at all. This reproduces
+    // the old code path directly through spawnSync and pins that it really does break.
+    const r = spawnSync(process.execPath, [ASK_MJS, "--body", OVERSIZED], { encoding: "utf8" });
+    expect(r.error?.code).toBe("E2BIG");
+    // A spawn that never ran reports no exit status. node uses null here and bun uses
+    // undefined, and this suite runs under both — normalize rather than pin one runtime.
+    expect(r.status ?? null).toBe(null);
+  });
+
+  test("a SMALL body also reaches the child — the stdin path is not large-body-only", () => {
+    const db = buildFreshReplica(ASK_ID);
+    const r = runAccept([ASK_ID, "--as", "COORD", "--body", "accepted — go ahead"], {
+      env: { CATALYST_REPLICA_DB: db },
+    });
+    expect(r.stderr).not.toContain("never started");
+    expect(r.stderr).toContain("reply FAILED");
   });
 });
