@@ -146,6 +146,10 @@ const kitchenSinkLayer1 = () => {
   cfg.catalyst.orchestration = {
     dispatchMode: "phase-agents",
     worktreeRefresh: { enabled: true, intervalSeconds: 300, quietSeconds: 30 },
+    // CTL-1214 D7: reconcile is in the relocating set — it is in the committed
+    // config, it is node-scoped (CATALYST_RECONCILE_MODE is documented as the
+    // hardest per-node override), and it already had a two-layer reader.
+    reconcile: { mode: "notify", intervalSeconds: 600 },
     executionCore: {
       maxParallel: 4,
       minParallel: 1,
@@ -170,15 +174,67 @@ describe("validateLayer1Config (CTL-1214)", () => {
     const r = validateLayer1Config(kitchenSinkLayer1());
     expect(r.valid).toBe(true); // still valid during migration
     expect(r.deprecatedKeys.length).toBeGreaterThan(0);
+    // CTL-1214 D6: the blanket `orchestration` row is gone — it is now the four
+    // subpaths that actually relocate, so a config carrying only a genuinely
+    // Layer-1 orchestration stanza (codex, executor, …) is NOT flagged.
     for (const path of [
       "monitor.linear.teams",
       "monitor.github.repoColors",
-      "orchestration",
+      "orchestration.dispatchMode",
+      "orchestration.executionCore",
+      "orchestration.worktreeRefresh",
+      "orchestration.reconcile",
       "feedback",
       "sweep",
     ]) {
       expect(r.deprecatedKeys).toContain(path);
     }
+    expect(r.deprecatedKeys).not.toContain("orchestration");
+  });
+
+  // CTL-1214 D6 — the narrowing, asserted in both directions. Without the
+  // negative cases a blanket row would still pass the positive one.
+  test("D6: a genuinely Layer-1 orchestration stanza is not a leak", () => {
+    for (const stanza of [
+      { codex: { codexHome: "/x/codex-home" } },
+      { executor: "sdk" },
+      { executorByPhase: { implement: "sdk" } },
+      { fleetHealth: { mode: "shadow" } },
+      { daemonWatchdog: { mode: "shadow" } },
+      { publishPreflight: { mode: "shadow" } },
+      { draftPr: { enabled: true } },
+      { orphanReaper: { workerGc: { emptyDirGraceSeconds: 600 } } },
+    ]) {
+      const cfg = minimalLayer1();
+      cfg.catalyst.orchestration = stanza;
+      const r = validateLayer1Config(cfg);
+      expect(r.deprecatedKeys).toEqual([]);
+      expect(r.valid).toBe(true);
+    }
+  });
+
+  test("D6: each relocating orchestration subpath IS a leak, on its own", () => {
+    for (const [key, value] of [
+      ["dispatchMode", "phase-agents"],
+      ["executionCore", { maxParallel: 4 }],
+      ["worktreeRefresh", { enabled: true }],
+      ["reconcile", { mode: "notify" }],
+    ]) {
+      const cfg = minimalLayer1();
+      cfg.catalyst.orchestration = { [key]: value };
+      const r = validateLayer1Config(cfg);
+      expect(r.deprecatedKeys).toEqual([`orchestration.${key}`]);
+    }
+  });
+
+  test("D6: a mixed stanza flags only the relocating half", () => {
+    const cfg = minimalLayer1();
+    cfg.catalyst.orchestration = {
+      codex: { codexHome: "/x" },
+      executor: "sdk",
+      dispatchMode: "phase-agents",
+    };
+    expect(validateLayer1Config(cfg).deprecatedKeys).toEqual(["orchestration.dispatchMode"]);
   });
 
   test("monitor.linear.botUserId is NOT treated as a leak", () => {
@@ -232,17 +288,29 @@ describe("validateLayer1Config (CTL-1214)", () => {
     expect(validateLayer1Config(null).valid).toBe(false);
   });
 
-  test("RELOCATED_LAYER1_KEYS enumerates the five leak categories", () => {
+  test("RELOCATED_LAYER1_KEYS enumerates the leak categories (D6-narrowed)", () => {
     const paths = RELOCATED_LAYER1_KEYS.map((e) => e.path);
     expect(paths).toEqual(
       expect.arrayContaining([
         "monitor.linear.teams",
         "monitor.github.repoColors",
-        "orchestration",
+        "orchestration.dispatchMode",
+        "orchestration.executionCore",
+        "orchestration.worktreeRefresh",
+        "orchestration.reconcile",
         "feedback",
         "sweep",
       ]),
     );
+    // D6: FOUR orchestration rows, never one blanket row.
+    expect(paths.filter((p) => p.startsWith("orchestration"))).toHaveLength(4);
+    expect(paths).not.toContain("orchestration");
+    // D1: every node-scoped destination names node.json, matching where the
+    // migration actually writes. A destination string that named the legacy
+    // config.json would send an operator to a file the migration never touches.
+    for (const entry of RELOCATED_LAYER1_KEYS) {
+      if (entry.scope === "node") expect(entry.destination).toContain("node.json");
+    }
     // every entry names a scope + destination so the doctor check can format remediation
     for (const entry of RELOCATED_LAYER1_KEYS) {
       expect(["cluster", "node"]).toContain(entry.scope);

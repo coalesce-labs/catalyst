@@ -1071,6 +1071,25 @@ jobs:
           bash __tests__/layer2-read-parity.test.sh
           bash __tests__/layer2-consumer-fallback.test.sh
 
+      - name: Layer-1 → node.json migration tests (CTL-1214)
+        # ⛔ PINNED IN THE SAME CHANGE THAT ADDED THE SUITE — CI here runs an
+        # EXPLICIT list, never a glob. Verified before adding:
+        # `grep -n 'layer1-relocation\|config-schema.test' .github/workflows/`
+        # returned NOTHING for either, so config-schema.test.mjs — the existing
+        # CTL-1214 Phase-1 suite — has never gated anything either; it is
+        # registered here alongside the new one. Positive control: the same grep
+        # for `deployment-mode-parity` returns its run line above.
+        #
+        # These carry the migration's DECISION TABLE (the non-clobber rule that
+        # keeps this host's machine-canonical maxParallel: 4 from being shadowed,
+        # the cluster/node scope split, the dead-key drop) and the ordering
+        # property that node.json is written BEFORE the Layer-1 slim — so a
+        # failure can never leave a repo slimmed with its values nowhere.
+        working-directory: plugins/dev/scripts
+        run: |
+          bun test __tests__/layer1-relocation.test.mjs
+          bun test __tests__/config-schema.test.mjs
+
       - name: Broker tests (CTL-1529, CTL-1809)
         # CTL-1529 round 2: broker/worker-state-projection.test.mjs guards the
         # bounded event-log scan in broker/projection.mjs (replayWorkerStateProjection),

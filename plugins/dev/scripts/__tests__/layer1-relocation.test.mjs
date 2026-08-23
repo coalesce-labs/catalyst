@@ -1,0 +1,390 @@
+// layer1-relocation.test.mjs — CTL-1214 Phase 2. The Layer-1 → node.json
+// migration's DECISION TABLE, exercised against the pure planner so every rule
+// is testable with no I/O, plus the atomic-write ordering of the applier.
+//
+// Run: cd plugins/dev/scripts && bun test __tests__/layer1-relocation.test.mjs
+
+import { describe, it, expect, afterEach } from "bun:test";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, statSync, existsSync, chmodSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import {
+  planLayer1Migration,
+  applyLayer1Migration,
+  RELOCATED_PATHS,
+} from "../lib/migrate-layer1-config.mjs";
+
+let dirs = [];
+afterEach(() => {
+  for (const d of dirs) {
+    try {
+      chmodSync(d, 0o755);
+    } catch {
+      /* best effort */
+    }
+    rmSync(d, { recursive: true, force: true });
+  }
+  dirs = [];
+});
+function mkdir() {
+  const d = mkdtempSync(join(tmpdir(), "ctl1214-mig-"));
+  dirs.push(d);
+  return d;
+}
+
+// The full committed shape this repo really carries at a8d4946c.
+const FULL_LAYER1 = () => ({
+  catalyst: {
+    projectKey: "catalyst-workspace",
+    project: { ticketPrefix: "CTL" },
+    linear: { teamKey: "CTL", teamId: "f317bf00", stateMap: { todo: "Todo", done: "Done" } },
+    thoughts: { org: "coalesce-labs", profile: "coalesce-labs", directory: "catalyst-workspace", user: null },
+    monitor: {
+      github: { repoColors: { "coalesce-labs/catalyst": "green" } },
+      linear: { teams: [{ key: "CTL", vcsRepo: "coalesce-labs/catalyst" }] },
+    },
+    deployment: { mode: "cluster" },
+    orchestration: {
+      dispatchMode: "phase-agents",
+      worktreeRefresh: { enabled: true, intervalSeconds: 300, quietSeconds: 30 },
+      reconcile: { mode: "notify", intervalSeconds: 600 },
+      executionCore: {
+        maxParallel: 4,
+        minParallel: 1,
+        maxParallelCeiling: 40,
+        eligibleQuery: { status: "Todo", team: null, project: null, label: null, priority: null },
+      },
+    },
+    feedback: { autoFile: true, githubRepo: "coalesce-labs/catalyst", labels: ["auto-submitted"] },
+    sweep: { idleHours: 48, intervalHours: 1, salvagePush: false, maxRemovalsPerRun: 10 },
+  },
+});
+
+const movedPaths = (plan) => plan.moves.map((m) => m.path).sort();
+const keptPaths = (plan) => plan.kept.map((k) => k.path).sort();
+
+describe("planLayer1Migration — the non-clobber rule (D1)", () => {
+  it("does NOT write a key the merged Layer-2 already defines, and names it kept", () => {
+    // This host's real state: maxParallel:4 is machine-canonical in Layer-2
+    // (CTL-678). node.json outranks it, so a blind copy of the Layer-1 seed
+    // would SHADOW the operator's value.
+    const plan = planLayer1Migration({
+      layer1: FULL_LAYER1(),
+      mergedLayer2: { catalyst: { orchestration: { executionCore: { maxParallel: 4 } } } },
+    });
+    expect(movedPaths(plan)).not.toContain("orchestration.executionCore.maxParallel");
+    expect(movedPaths(plan)).toContain("orchestration.executionCore.minParallel");
+    expect(movedPaths(plan)).toContain("orchestration.executionCore.maxParallelCeiling");
+
+    const kept = plan.kept.find((k) => k.path === "orchestration.executionCore.maxParallel");
+    expect(kept).toBeDefined();
+    expect(kept.existingValue).toBe(4);
+  });
+
+  it("writes a whole stanza the merged Layer-2 defines nothing for", () => {
+    const plan = planLayer1Migration({ layer1: FULL_LAYER1(), mergedLayer2: { catalyst: {} } });
+    expect(movedPaths(plan)).toContain("sweep.idleHours");
+    expect(movedPaths(plan)).toContain("sweep.intervalHours");
+    expect(movedPaths(plan)).toContain("sweep.salvagePush");
+    expect(movedPaths(plan)).toContain("sweep.maxRemovalsPerRun");
+    expect(plan.nodePatch.catalyst.sweep.intervalHours).toBe(1);
+    // `false` must survive: it is a real value, not an absence.
+    expect(plan.nodePatch.catalyst.sweep.salvagePush).toBe(false);
+  });
+
+  it("a Layer-2 value of `false` still counts as DEFINED (jq-falsy trap)", () => {
+    const plan = planLayer1Migration({
+      layer1: FULL_LAYER1(),
+      mergedLayer2: { catalyst: { sweep: { salvagePush: false } } },
+    });
+    expect(movedPaths(plan)).not.toContain("sweep.salvagePush");
+    expect(keptPaths(plan)).toContain("sweep.salvagePush");
+  });
+
+  it("a Layer-2 value of `null` is NOT defined — null is an absence", () => {
+    const plan = planLayer1Migration({
+      layer1: FULL_LAYER1(),
+      mergedLayer2: { catalyst: { sweep: { intervalHours: null } } },
+    });
+    expect(movedPaths(plan)).toContain("sweep.intervalHours");
+  });
+});
+
+describe("planLayer1Migration — scope", () => {
+  it("moves only RELOCATED_LAYER1_KEYS entries; identity is untouched", () => {
+    const plan = planLayer1Migration({ layer1: FULL_LAYER1(), mergedLayer2: { catalyst: {} } });
+    const slim = plan.slimmedLayer1.catalyst;
+    expect(slim.projectKey).toBe("catalyst-workspace");
+    expect(slim.project).toEqual({ ticketPrefix: "CTL" });
+    expect(slim.linear.teamKey).toBe("CTL");
+    expect(slim.linear.teamId).toBe("f317bf00");
+    expect(slim.linear.stateMap).toEqual({ todo: "Todo", done: "Done" });
+    expect(slim.thoughts.org).toBe("coalesce-labs");
+    expect(slim.deployment).toEqual({ mode: "cluster" });
+    for (const p of movedPaths(plan)) {
+      expect(p.startsWith("projectKey") || p.startsWith("linear.") || p.startsWith("thoughts.")).toBe(false);
+    }
+  });
+
+  it("does NOT move scope:'cluster' entries — monitor.linear.teams stays (D4)", () => {
+    const plan = planLayer1Migration({ layer1: FULL_LAYER1(), mergedLayer2: { catalyst: {} } });
+    expect(movedPaths(plan).join("|")).not.toContain("monitor.linear.teams");
+    expect(plan.slimmedLayer1.catalyst.monitor.linear.teams).toHaveLength(1);
+    expect(plan.nodePatch.catalyst.monitor?.linear).toBeUndefined();
+  });
+
+  it("moves monitor.github.repoColors (node-scoped) and leaves monitor itself intact", () => {
+    const plan = planLayer1Migration({ layer1: FULL_LAYER1(), mergedLayer2: { catalyst: {} } });
+    expect(movedPaths(plan)).toContain("monitor.github.repoColors");
+    expect(plan.slimmedLayer1.catalyst.monitor.github).toBeUndefined();
+    expect(plan.slimmedLayer1.catalyst.monitor.linear).toBeDefined();
+    expect(plan.nodePatch.catalyst.monitor.github.repoColors).toEqual({
+      "coalesce-labs/catalyst": "green",
+    });
+  });
+
+  it("does NOT move the non-relocating orchestration stanzas (D6)", () => {
+    const layer1 = FULL_LAYER1();
+    layer1.catalyst.orchestration.codex = { codexHome: "/x/codex" };
+    layer1.catalyst.orchestration.executor = "sdk";
+    layer1.catalyst.orchestration.fleetHealth = { mode: "shadow" };
+    const plan = planLayer1Migration({ layer1, mergedLayer2: { catalyst: {} } });
+    const moved = movedPaths(plan).join("|");
+    expect(moved).not.toContain("orchestration.codex");
+    expect(moved).not.toContain("orchestration.executor");
+    expect(moved).not.toContain("orchestration.fleetHealth");
+    expect(plan.slimmedLayer1.catalyst.orchestration.codex).toEqual({ codexHome: "/x/codex" });
+    expect(plan.slimmedLayer1.catalyst.orchestration.executor).toBe("sdk");
+  });
+
+  it("DROPS the dead eligibleQuery instead of relocating it", () => {
+    const plan = planLayer1Migration({ layer1: FULL_LAYER1(), mergedLayer2: { catalyst: {} } });
+    expect(plan.dropped.map((d) => d.path)).toContain(
+      "orchestration.executionCore.eligibleQuery",
+    );
+    expect(movedPaths(plan).join("|")).not.toContain("eligibleQuery");
+    expect(JSON.stringify(plan.nodePatch)).not.toContain("eligibleQuery");
+    expect(JSON.stringify(plan.slimmedLayer1)).not.toContain("eligibleQuery");
+  });
+
+  it("removes the orchestration stanza entirely once its four members are gone", () => {
+    const plan = planLayer1Migration({ layer1: FULL_LAYER1(), mergedLayer2: { catalyst: {} } });
+    expect(plan.slimmedLayer1.catalyst.orchestration).toBeUndefined();
+    expect(plan.slimmedLayer1.catalyst.feedback).toBeUndefined();
+    expect(plan.slimmedLayer1.catalyst.sweep).toBeUndefined();
+  });
+
+  it("exports the relocated paths so the bash side cannot drift", () => {
+    expect(Array.isArray(RELOCATED_PATHS)).toBe(true);
+    expect(RELOCATED_PATHS).toContain("orchestration.dispatchMode");
+    expect(RELOCATED_PATHS).toContain("sweep");
+    expect(RELOCATED_PATHS).toContain("feedback");
+  });
+});
+
+describe("planLayer1Migration — output shape", () => {
+  it("stamps schemaVersion 1 on the slimmed Layer-1", () => {
+    const plan = planLayer1Migration({ layer1: FULL_LAYER1(), mergedLayer2: { catalyst: {} } });
+    expect(plan.slimmedLayer1.catalyst.schemaVersion).toBe(1);
+  });
+
+  it("preserves an existing higher schemaVersion", () => {
+    const layer1 = FULL_LAYER1();
+    layer1.catalyst.schemaVersion = 2;
+    const plan = planLayer1Migration({ layer1, mergedLayer2: { catalyst: {} } });
+    expect(plan.slimmedLayer1.catalyst.schemaVersion).toBe(2);
+  });
+
+  it("is idempotent: re-planning an already-slimmed config reports zero moves", () => {
+    const first = planLayer1Migration({ layer1: FULL_LAYER1(), mergedLayer2: { catalyst: {} } });
+    const second = planLayer1Migration({
+      layer1: first.slimmedLayer1,
+      mergedLayer2: first.nodePatch,
+    });
+    expect(second.moves).toHaveLength(0);
+    expect(second.changed).toBe(false);
+    // Positive control: the FIRST plan really did move things, so "zero moves"
+    // above is convergence and not a planner that never moves anything.
+    expect(first.moves.length).toBeGreaterThan(0);
+    expect(first.changed).toBe(true);
+  });
+
+  it("rejects a malformed Layer-1 rather than guessing", () => {
+    expect(() => planLayer1Migration({ layer1: null, mergedLayer2: { catalyst: {} } })).toThrow();
+    expect(() => planLayer1Migration({ layer1: { nope: 1 }, mergedLayer2: { catalyst: {} } })).toThrow();
+    expect(() => planLayer1Migration({ layer1: [], mergedLayer2: { catalyst: {} } })).toThrow();
+  });
+});
+
+describe("applyLayer1Migration — atomic writes and ordering", () => {
+  const setup = (layer1Obj, nodeObj) => {
+    const d = mkdir();
+    const l1 = join(d, "config.json");
+    const node = join(d, "node.json");
+    writeFileSync(l1, JSON.stringify(layer1Obj, null, 2));
+    if (nodeObj !== undefined) writeFileSync(node, JSON.stringify(nodeObj, null, 2));
+    return { d, l1, node };
+  };
+
+  it("creates node.json 0600 when absent and slims Layer-1", () => {
+    const { l1, node } = setup(FULL_LAYER1());
+    const plan = planLayer1Migration({ layer1: FULL_LAYER1(), mergedLayer2: { catalyst: {} } });
+    const res = applyLayer1Migration({ plan, layer1Path: l1, nodePath: node });
+    expect(res.wrote).toEqual(expect.arrayContaining([node, l1]));
+    expect(statSync(node).mode & 0o777).toBe(0o600);
+    const written = JSON.parse(readFileSync(node, "utf8"));
+    expect(written.catalyst.orchestration.dispatchMode).toBe("phase-agents");
+    const slim = JSON.parse(readFileSync(l1, "utf8"));
+    expect(slim.catalyst.orchestration).toBeUndefined();
+    expect(slim.catalyst.schemaVersion).toBe(1);
+  });
+
+  it("deep-merges an existing node.json, never replaces it", () => {
+    const { l1, node } = setup(FULL_LAYER1(), {
+      catalyst: { host: { name: "mini-2" }, orchestration: { pluginDirs: "/x" } },
+    });
+    const plan = planLayer1Migration({ layer1: FULL_LAYER1(), mergedLayer2: { catalyst: {} } });
+    applyLayer1Migration({ plan, layer1Path: l1, nodePath: node });
+    const written = JSON.parse(readFileSync(node, "utf8"));
+    expect(written.catalyst.host.name).toBe("mini-2");
+    expect(written.catalyst.orchestration.pluginDirs).toBe("/x");
+    expect(written.catalyst.orchestration.dispatchMode).toBe("phase-agents");
+  });
+
+  it("--dry-run writes nothing", () => {
+    const { l1, node } = setup(FULL_LAYER1());
+    const before = readFileSync(l1, "utf8");
+    const plan = planLayer1Migration({ layer1: FULL_LAYER1(), mergedLayer2: { catalyst: {} } });
+    const res = applyLayer1Migration({ plan, layer1Path: l1, nodePath: node, dryRun: true });
+    expect(res.wrote).toEqual([]);
+    expect(readFileSync(l1, "utf8")).toBe(before);
+    expect(existsSync(node)).toBe(false);
+  });
+
+  it("an unwritable node.json leaves Layer-1 UNSLIMMED (never slim-then-fail)", () => {
+    // The load-bearing ordering assertion: node.json is written FIRST, so a
+    // failure can never leave a repo slimmed with its values nowhere.
+    const { d, l1, node } = setup(FULL_LAYER1());
+    const before = readFileSync(l1, "utf8");
+    chmodSync(d, 0o500); // read+execute only: no new file may be created
+    const plan = planLayer1Migration({ layer1: FULL_LAYER1(), mergedLayer2: { catalyst: {} } });
+    expect(() => applyLayer1Migration({ plan, layer1Path: l1, nodePath: node })).toThrow();
+    chmodSync(d, 0o755);
+    expect(readFileSync(l1, "utf8")).toBe(before);
+  });
+
+  it("re-running is a no-op: second apply writes nothing", () => {
+    const { l1, node } = setup(FULL_LAYER1());
+    const plan = planLayer1Migration({ layer1: FULL_LAYER1(), mergedLayer2: { catalyst: {} } });
+    applyLayer1Migration({ plan, layer1Path: l1, nodePath: node });
+
+    const layer1b = JSON.parse(readFileSync(l1, "utf8"));
+    const nodeb = JSON.parse(readFileSync(node, "utf8"));
+    const plan2 = planLayer1Migration({ layer1: layer1b, mergedLayer2: nodeb });
+    const res2 = applyLayer1Migration({ plan: plan2, layer1Path: l1, nodePath: node });
+    expect(res2.wrote).toEqual([]);
+    expect(plan2.moves).toHaveLength(0);
+  });
+
+  it("leaves no .tmp residue behind", () => {
+    const { d, l1, node } = setup(FULL_LAYER1());
+    const plan = planLayer1Migration({ layer1: FULL_LAYER1(), mergedLayer2: { catalyst: {} } });
+    applyLayer1Migration({ plan, layer1Path: l1, nodePath: node });
+    const { readdirSync } = require("node:fs");
+    expect(readdirSync(d).filter((f) => f.includes(".tmp"))).toEqual([]);
+  });
+});
+
+describe("catalyst-config-migrate CLI", () => {
+  const CLI = join(import.meta.dir, "..", "catalyst-config-migrate");
+  const run = (args, env = {}) =>
+    Bun.spawnSync(["bun", CLI, ...args], {
+      env: { ...process.env, ...env },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+  it("--paths prints the registry, so the bash side never re-types it", () => {
+    const r = run(["--paths"]);
+    expect(r.exitCode).toBe(0);
+    const lines = new TextDecoder().decode(r.stdout).trim().split("\n");
+    expect(lines).toContain("orchestration.dispatchMode");
+    expect(lines).toContain("sweep");
+    expect(lines).toContain("feedback");
+    expect(lines).toContain("monitor.linear.teams");
+    // Positive control: it is the REGISTRY, not a hardcoded list — the count
+    // must match RELOCATED_PATHS exactly.
+    expect(lines).toHaveLength(RELOCATED_PATHS.length);
+  });
+
+  it("--help exits 0 and an unknown flag exits non-zero", () => {
+    expect(run(["--help"]).exitCode).toBe(0);
+    expect(run(["--no-such-flag"]).exitCode).not.toBe(0);
+  });
+
+  it("--dry-run reports the moves and writes nothing", () => {
+    // Layer-1 and node.json live in SEPARATE directories, as they do in
+    // production (<repo>/.catalyst/config.json vs ~/.config/catalyst/node.json).
+    // The CLI resolves the merged Layer-2 root as node.json's sibling
+    // config.json; sharing one dir would make the Layer-1 file masquerade as
+    // Layer-2, so every key would look already-defined and nothing would move.
+    const d = mkdir();
+    const l1 = join(d, "config.json");
+    const node = join(mkdir(), "node.json");
+    writeFileSync(l1, JSON.stringify(FULL_LAYER1(), null, 2));
+    const before = readFileSync(l1, "utf8");
+
+    const r = run(["--dry-run", "--json", "--config", l1, "--node", node]);
+    expect(r.exitCode).toBe(0);
+    const report = JSON.parse(new TextDecoder().decode(r.stdout));
+    expect(report.dryRun).toBe(true);
+    expect(report.wrote).toEqual([]);
+    expect(report.moved.map((m) => m.path)).toContain("orchestration.dispatchMode");
+    expect(report.dropped.map((x) => x.path)).toContain(
+      "orchestration.executionCore.eligibleQuery",
+    );
+    expect(readFileSync(l1, "utf8")).toBe(before);
+    expect(existsSync(node)).toBe(false);
+  });
+
+  it("a real run migrates, and a second run is a clean no-op", () => {
+    const d = mkdir();
+    const l1 = join(d, "config.json");
+    const node = join(mkdir(), "node.json");
+    writeFileSync(l1, JSON.stringify(FULL_LAYER1(), null, 2));
+
+    const first = run(["--json", "--config", l1, "--node", node]);
+    expect(first.exitCode).toBe(0);
+    const r1 = JSON.parse(new TextDecoder().decode(first.stdout));
+    expect(r1.wrote).toContain(node);
+    expect(r1.wrote).toContain(l1);
+    expect(statSync(node).mode & 0o777).toBe(0o600);
+
+    const second = run(["--json", "--config", l1, "--node", node]);
+    expect(second.exitCode).toBe(0);
+    const r2 = JSON.parse(new TextDecoder().decode(second.stdout));
+    expect(r2.changed).toBe(false);
+    expect(r2.moved).toEqual([]);
+    expect(r2.wrote).toEqual([]);
+    // Positive control: the FIRST run really did move things, so the no-op above
+    // is convergence rather than a CLI that never migrates anything.
+    expect(r1.moved.length).toBeGreaterThan(0);
+  });
+
+  it("a malformed Layer-1 exits non-zero and writes nothing", () => {
+    const d = mkdir();
+    const l1 = join(d, "config.json");
+    const node = join(mkdir(), "node.json");
+    writeFileSync(l1, "{ not json at all");
+    const r = run(["--config", l1, "--node", node]);
+    expect(r.exitCode).not.toBe(0);
+    expect(new TextDecoder().decode(r.stderr)).toContain("malformed");
+    expect(existsSync(node)).toBe(false);
+  });
+
+  it("a missing Layer-1 exits non-zero", () => {
+    const r = run(["--config", "/no/such/config.json", "--node", "/tmp/x-node.json"]);
+    expect(r.exitCode).not.toBe(0);
+  });
+});

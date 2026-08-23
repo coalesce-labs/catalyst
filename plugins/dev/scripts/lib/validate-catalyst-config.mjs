@@ -7,7 +7,9 @@
 //     scope (catalyst-cluster/cluster.json → projects[]);
 //   - repo display colors (monitor.github.repoColors), the orchestration.*,
 //     feedback.*, and sweep.* stanzas → relocate to the NODE scope
-//     (~/.config/catalyst/config.json).
+//     (~/.config/catalyst/node.json — CTL-1214 D1; readLayer2Merged already
+//     composes config.json < node.json < cluster-secrets.json, and node.json is
+//     the per-node file that is never mirrored across the cluster).
 //
 // This module is the single source of truth for that leak-category list
 // (RELOCATED_LAYER1_KEYS) and a pure validator (validateLayer1Config) that both
@@ -24,6 +26,21 @@
  * relocated — they are genuinely Layer-1 (the daemon reads botUserId flat from
  * Layer-1, see docs/architecture.md) — so they are deliberately absent here.
  *
+ * ⚠️ CTL-1214 D6 — `catalyst.orchestration` is NOT wholly machine-scoped, so the
+ * blanket `orchestration` row this list used to carry is replaced by the FOUR
+ * subpaths that actually relocate. config-dump.mjs heads that block
+ * "orchestration (Layer-1 owned)", and the daemon reads at least these further
+ * stanzas from Layer-1, every one of which stays:
+ *   executor, executorByPhase, codex (the documented codexHome pin — see
+ *   docs/architecture.md "The Codex account selector seam"), publishPreflight,
+ *   fleetHealth, daemonWatchdog, orphanReaper.workerGc, stalePrRescue,
+ *   orphanPrSweep, stalledPrSweep, draftPr, pluginDirs, phaseAgents.
+ * The narrowing is what lets the Phase-5 promotion be a hard error without making
+ * a documented, supported configuration fail doctor — and doctor's exit code
+ * gates member activation in catalyst-join.sh, so a false FAIL there fail-closes
+ * the fleet. This repo's committed config carries only the four, so the
+ * "no orchestration stanza after migration" outcome is unchanged.
+ *
  * @type {ReadonlyArray<{path: string, scope: "cluster"|"node", destination: string}>}
  */
 export const RELOCATED_LAYER1_KEYS = Object.freeze([
@@ -35,22 +52,37 @@ export const RELOCATED_LAYER1_KEYS = Object.freeze([
   {
     path: "monitor.github.repoColors",
     scope: "node",
-    destination: "~/.config/catalyst/config.json → catalyst.monitor.github.repoColors",
+    destination: "~/.config/catalyst/node.json → catalyst.monitor.github.repoColors",
   },
   {
-    path: "orchestration",
+    path: "orchestration.dispatchMode",
     scope: "node",
-    destination: "~/.config/catalyst/config.json → catalyst.orchestration.*",
+    destination: "~/.config/catalyst/node.json → catalyst.orchestration.dispatchMode",
+  },
+  {
+    path: "orchestration.executionCore",
+    scope: "node",
+    destination: "~/.config/catalyst/node.json → catalyst.orchestration.executionCore.*",
+  },
+  {
+    path: "orchestration.worktreeRefresh",
+    scope: "node",
+    destination: "~/.config/catalyst/node.json → catalyst.orchestration.worktreeRefresh.*",
+  },
+  {
+    path: "orchestration.reconcile",
+    scope: "node",
+    destination: "~/.config/catalyst/node.json → catalyst.orchestration.reconcile.*",
   },
   {
     path: "feedback",
     scope: "node",
-    destination: "~/.config/catalyst/config.json → catalyst.feedback.*",
+    destination: "~/.config/catalyst/node.json → catalyst.feedback.*",
   },
   {
     path: "sweep",
     scope: "node",
-    destination: "~/.config/catalyst/config.json → catalyst.sweep.*",
+    destination: "~/.config/catalyst/node.json → catalyst.sweep.*",
   },
 ]);
 
