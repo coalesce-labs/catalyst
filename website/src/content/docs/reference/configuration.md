@@ -128,9 +128,42 @@ The `orchestration.dispatchMode` key picks how Catalyst runs each ticket:
 }
 ```
 
+### Push remote (`catalyst.pr.pushRemote`, CAT-60)
+
+The push remote is machine-local routing, so its canonical home is Layer 2 at
+`~/.config/catalyst/config.json`, not the repository's committed Layer-1 file. Keeping it outside
+the git tree means a rebase cannot rewrite the setting that selects where the branch is published.
+
+Resolution is `CATALYST_PUSH_REMOTE` → `catalyst.pr.pushRemote` → the branch's configured upstream
+remote → `origin`. The value must name an existing, safe git remote. It controls branch publication
+and remote-branch discovery when a worker resumes. It does **not** change the rebase or diff base:
+those continue to use `origin/<base>`. The operator-facing branch listing in `cli/branches.mjs` is
+still an `origin`-only surface and does not determine dispatch or publication behavior.
+
+```json
+{ "catalyst": { "pr": { "pushRemote": "fork" } } }
+```
+
+### Publish-capability preflight (`catalyst.orchestration.publishPreflight.mode`, CAT-60)
+
+Before dispatch, execution-core asks GitHub whether the active identity has push permission for the
+repository behind the resolved push remote. `CATALYST_PUBLISH_PREFLIGHT` overrides the Layer-2
+`catalyst.orchestration.publishPreflight.mode`; the default is `shadow`:
+
+- `off` does not probe.
+- `shadow` emits `publish.preflight.would-block` for denial but still dispatches.
+- `enforce` emits `publish.preflight.blocked` and stops that dispatch on definitive denial.
+
+Verdicts are `allowed`, `denied`, or `unknown`. An inconclusive `unknown` (missing `gh`, timeout,
+transient API failure, or unparseable remote) never blocks. Results are cached per repository,
+remote, and GitHub identity for a bounded TTL so scheduler ticks conserve GitHub API quota.
+`catalyst doctor` reports the same capability independently: denied is advisory in `shadow` and a
+failure in `enforce`.
+
 | Key                                                           | Default                      | What it does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | ------------------------------------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `orchestration.dispatchMode`                                  | `oneshot-legacy`             | Which run mode to use (above)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `catalyst.orchestration.publishPreflight.mode` _(Layer-2)_    | `shadow`                     | Before dispatch, verify that the resolved GitHub identity can push to the configured push remote. `off` skips the probe; `shadow` reports denied capability but still dispatches; `enforce` blocks dispatch only on a definitive denied verdict. `CATALYST_PUBLISH_PREFLIGHT` overrides this value. Unknown values fall back to `shadow`. |
 | `orchestration.executor`                                      | `bg`                         | Which substrate runs a phase worker: `bg` (a `claude --bg` background job, today's behavior), `oneshot-legacy`, or `sdk` (the in-process Claude Agent SDK — **not yet implemented; falls back to `bg`**, CTL-1365b). Resolution: `CATALYST_EXECUTOR` env → this key → node-class default (all classes → `bg` today). Distinct from `dispatchMode`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `orchestration.maxParallel`                                   | `3`                          | How many tickets run at once                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `orchestration.worktreeDir`                                   | `~/catalyst/wt/<projectKey>` | Where worktrees are created                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
@@ -1631,6 +1664,34 @@ In `enforce` mode a member whose escalation cannot complete (for example a faile
 label write) records a pointer at its anchor under `<orchDir>/.escalation-correlation/<TICKET>.json`,
 so its retry on a later tick stays a pointer instead of becoming a second operator decision. The
 pointer expires with `CATALYST_RECOVERY_CORRELATION_WINDOW_MIN`.
+
+### Steward escalation routing (CTL-2000 / CTL-2129)
+
+When an instrument (today: the stalled-PR sweep, `stale-pr-rescue`) can no longer make progress on an
+item, it must page the **steward whose scope contains that item** — never drop a `needs-human` label
+into a human's queue. The ladder is `instrument → steward → concierge → human (as an ask)`; the router
+(`escalation-router.mjs`) resolves the steward rung, and the human is reachable **only** as an ask, so
+no instrument can page a human directly.
+
+The router matches an item's **scope key** — its Linear **project id** — against each supervised role's
+`manifest.scopeKeys`:
+
+| Field / key                          | Where                                                  | Notes                                                                                                                                                                                                                                             |
+| ------------------------------------ | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `scopeKeys` _(role manifest field)_  | `~/catalyst/roles/<role>/manifest.json`                | Array of Linear **project ids** the steward owns. Populated at scaffold time by `role-supervisor/install.sh --scope-keys "<projectId>[,<id>...]"` (→ `cli.mjs set-scope-keys` → `state.mjs setScopeKeys`, an atomic merge-into-existing). `resolveSteward` returns this role for any item whose project id is in the array. A role with no `scopeKeys` — the default — never matches, so its items fall through to the concierge (the correct backstop). |
+| `CATALYST_STEWARD_ESCALATION` _(env)_ | escalation gate                                        | `off` / `shadow` (default) / `enforce`. `shadow` is byte-identical to the pre-CTL-2000 path plus a `delegate.would-route` (`phase.rescue.would-route-steward`) log; `enforce` routes through the ladder and applies **no** `needs-human`. Overrides Layer-2. |
+| `catalyst.stewardEscalation.mode` _(Layer-2)_ | `.catalyst/config.json`                         | Same three values; honored when the env var is absent or unrecognised. Default `shadow`.                                                                                                                                                          |
+
+CTL-2129 is what makes `enforce` actually reach a steward: it populates the `scopeKeys` registry, maps
+a ticket to its project id (`scopeForTicket` via the replica's `issues.project_id`), and counts pages
+**per item** so the same flagged item paged twice without a steward turn escalates inward to the
+concierge. No new flag — the wiring rides the existing `stewardEscalation` gate at its `shadow`
+default, so no host changes live behavior until an operator flips `enforce`. Roles without `scopeKeys`
+continue to resolve to the concierge, so a partial rollout (some stewards registered, some not) is safe.
+
+Observable on the event log (`delegate.routed` with a `phase.rescue.routed-to-{steward,concierge}`
+type discriminator):
+`{job="catalyst-events"} | json | attributes["event.name"] = "delegate.routed"`
 
 ### Monitor reply-route trusted origins (CTL-1573)
 

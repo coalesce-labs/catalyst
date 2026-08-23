@@ -13025,6 +13025,44 @@ describe("CTL-764 Phase 5 — schedulerTick emits worker.transition events", () 
     expect(needsHuman).toBeDefined();
   });
 
+  // CTL-2061 — end to end, through the REAL readWorkerSignals projection (not a
+  // hand-built in-memory fixture — see infra-class-reasons.mjs's own header on the
+  // canonical-shaped-fixture trap). A failed phase carrying a registered infra-class
+  // failureReason must NOT reach needs-human at the terminal-sweep site.
+  test("terminal-sweep: an infra-class failureReason never applies needs-human", () => {
+    writeSignal("CTL-764", "research", "done");
+    writeSignalRaw("CTL-764", "implement", {
+      ticket: "CTL-764",
+      phase: "implement",
+      status: "failed",
+      failureReason: "sdk-overloaded-exhausted", // registered infra-class reason
+    });
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const transitions = [];
+    const labelCalls = [];
+    const delegateEvents = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus: {
+        ...noWrites(),
+        applyLabel: ({ ticket, label }) => {
+          labelCalls.push({ ticket, label });
+          return { applied: true, label };
+        },
+        removeLabel: () => ({ removed: false }),
+      },
+      appendWorkerTransitionEvent: (ev) => transitions.push(ev),
+      appendDelegateEvent: (ev) => delegateEvents.push(ev),
+      env: {},
+    });
+    expect(labelCalls.find((c) => c.ticket === "CTL-764" && c.label === "needs-human")).toBeUndefined();
+    expect(
+      transitions.find((e) => e.toDisposition === "needs-human" && e.ticket === "CTL-764")
+    ).toBeUndefined();
+    expect(delegateEvents.find((e) => e.name === "infra-retry.retry")).toBeDefined();
+  });
+
   // Codex #2970 post-merge round 4: clearDispositionEmit(ticket, expectedDisposition)
   // must only clear the live entry when it MATCHES what the caller believes it just
   // cleared — an unconditional clear would corrupt an UNRELATED disposition (e.g. the

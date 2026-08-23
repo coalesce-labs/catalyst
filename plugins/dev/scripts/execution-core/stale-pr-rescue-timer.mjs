@@ -43,7 +43,15 @@ import { DEFAULTS, classifyMergeTree, decideRescue } from "./stale-pr-rescue.mjs
 // node:*-only leaves (agent-liveness/state/paths), safe under bun.
 import { nextEscalationTarget, resolveSteward as resolveStewardCore, TARGET } from "./escalation-router.mjs";
 import { listRoles } from "../role-supervisor/doctor.mjs";
-import { readManifest } from "../role-supervisor/state.mjs";
+import { readManifest, readHeartbeat } from "../role-supervisor/state.mjs";
+// CTL-2129: the ticket→scope resolution + per-item counter that light up the
+// steward tier. scopeForTicket maps the ticket to its project id (the steward
+// scope key); readItemPages/recordItemPage give Scenario 2 its per-item priorPages
+// (two silences on the same item escalate INWARD to the concierge). readProjectId
+// is the bun-side replica read behind defaultReadProjectId.
+import { scopeForTicket } from "./scope-for-ticket.mjs";
+import { readProjectId } from "./replica-read.mjs";
+import { readItemPages, recordItemPage } from "./steward-item-pages.mjs";
 // Default Linear transport for the escalation path. The daemon does not thread
 // a writer (scheduler.mjs threads its own), so without this default every
 // escalation reason would silently degrade to a log line and the ticket would
@@ -368,6 +376,43 @@ export function defaultResolveSteward(scope) {
   }
 }
 
+// CTL-2129: the default (production) ticket→scope-key read. Fail-open to null so
+// scopeForTicket falls back to the raw ticket id (→ no steward → concierge).
+export function defaultReadProjectId(ticket) {
+  try {
+    return readProjectId(ticket);
+  } catch {
+    return null;
+  }
+}
+
+// CTL-2129: the default per-item reset predicate — has the resolved steward taken
+// a turn since it was last paged on this scope? v1 reads the steward heartbeat's
+// `last_turn_ts`, but note: NO beat() caller populates that field today (state.mjs
+// defaults `lastTurnTs=null` and every supervisor.mjs beat() omits it), so this
+// predicate is currently INERT — it always returns false and the per-item count
+// never resets on a steward turn. The fail direction is safe (the count only
+// climbs → escalates INWARD to the concierge, never a human page, never silence),
+// but the reset does not fire until a real turn signal is wired. The precise
+// "steward commented in THIS ticket's thread since the page" signal — the
+// comms-channel turn dead-man.mjs already reads via `defaultLastChannelTurnMs` —
+// is the documented, injectable drop-in replacement (see the plan's Decisions §4);
+// deferred, not designed around. Fail-open to false: an unresolvable steward or
+// unreadable heartbeat means "no turn observed", which keeps the count climbing
+// rather than silently clearing it.
+export function defaultStewardTookTurn(scopeKey, lastPagedAtMs) {
+  try {
+    const steward = resolveStewardCore(scopeKey, { listRoles, readManifest });
+    if (!steward?.role) return false;
+    const turnTs = Number(readHeartbeat(steward.role)?.last_turn_ts);
+    const paged = Number(lastPagedAtMs);
+    if (!Number.isFinite(turnTs) || !Number.isFinite(paged)) return false;
+    return turnTs > paged;
+  } catch {
+    return false;
+  }
+}
+
 // CTL-2000: page the resolved ladder rung on the shared channel (never a human).
 // Honors `target` (from nextEscalationTarget): a STEWARD route is delivered TO
 // the resolved steward, not to the concierge — otherwise the emitted event and
@@ -418,6 +463,10 @@ export function defaultEscalate(
     fenceGuardFn = fenceGuard,
     recordDurableEscalationFn = recordDurableEscalation,
     appendStandoffEvent = appendFenceStandoffEvent,
+    // CTL-2129: the ticket→scope-key read and the per-item reset predicate.
+    // Tests inject; production wires the real replica read + steward-heartbeat read.
+    readProjectId = defaultReadProjectId,
+    stewardTookTurn = defaultStewardTookTurn,
   } = {}
 ) {
   const stewardMode = readStewardEscalationConfig(env).mode; // off | shadow | enforce (default shadow)
@@ -438,8 +487,20 @@ export function defaultEscalate(
       return { confirmed: false, routed: false, reason: "fence-suppressed", escalatedTo: null };
     }
     const rs = typeof resolveSteward === "function" ? resolveSteward : () => null;
-    const t = nextEscalationTarget({ scope: ticket, priorPages: 0, instrument: "stale-pr-rescue", resolveSteward: rs });
+    // CTL-2129: page resolveSteward(PROJECT ID), not resolveSteward(ticket) — a
+    // steward owns a project, so a raw ticket id can never match its scopeKeys.
+    // priorPages is the PER-ITEM count (Scenario 2): the same flagged item paged
+    // STEWARD_TURNS_BEFORE_CONCIERGE times without a steward turn escalates INWARD.
+    const scopeKey = scopeForTicket(ticket, { readProjectId });
+    const priorPages = readItemPages(orchDir, scopeKey, { stewardTookTurn });
+    const t = nextEscalationTarget({ scope: scopeKey, priorPages, instrument: "stale-pr-rescue", resolveSteward: rs });
     const posted = postConciergePage({ ticket, detail, target: t, env });
+    // Count this page ONLY on a STEWARD route — a concierge route is already the
+    // inward escalation, so counting it would double-advance the ladder. The count
+    // advances on the resolved TARGET, not on postConciergePage's advisory success
+    // bool: a flaky comms send must still let the ladder progress inward toward the
+    // concierge, never stick at the steward rung forever.
+    if (t.target === TARGET.STEWARD) recordItemPage(orchDir, scopeKey);
     // Observable page event on the unified log (queryable by ticket). The `type`
     // discriminator names the ladder rung; the registered delegate.routed name
     // keeps it a valid, non-broker-protected line.

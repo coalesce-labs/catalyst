@@ -33,6 +33,29 @@ export function writeManifest(role, manifest, env = process.env) {
   writeJsonAtomic(roleFiles(role, env).manifest, manifest);
 }
 
+/**
+ * CTL-2129. Merge `keys` into manifest.scopeKeys (create the field if absent),
+ * atomic, deduped, order-stable. This is the one write that makes
+ * escalation-router.resolveSteward return non-null: a steward's manifest declares
+ * which scope keys (Linear project ids) it owns, and the router keys off that
+ * array. Written here (beside writeManifest) to preserve the single-writer
+ * manifest discipline; the concierge scaffold calls it at steward launch via
+ * install.sh --scope-keys → cli.mjs set-scope-keys.
+ *
+ * Merge-into-existing (not create-only) so an already-installed role can be
+ * back-filled. A fresh role gets a minimal `{ role, scopeKeys }` manifest.
+ * Non-string / empty keys are filtered — a scope key must be a real path key.
+ */
+export function setScopeKeys(role, keys, env = process.env) {
+  const m = readManifest(role, env) ?? { role };
+  const prior = Array.isArray(m.scopeKeys) ? m.scopeKeys : [];
+  const next = Array.from(new Set([...prior, ...(Array.isArray(keys) ? keys : [])])).filter(
+    (k) => typeof k === "string" && k.length > 0,
+  );
+  writeManifest(role, { ...m, scopeKeys: next }, env);
+  return next;
+}
+
 export function readHeartbeat(role, env = process.env) {
   return readJson(roleFiles(role, env).heartbeat);
 }

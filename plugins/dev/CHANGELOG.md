@@ -1,5 +1,24 @@
 # Changelog
 
+## [12.63.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.62.0...catalyst-dev-v12.63.0) (2026-08-22)
+
+
+### Features
+
+* **dev:** CAT-60 — publish capability preflight ([#3837](https://github.com/coalesce-labs/catalyst/issues/3837)) ([cd5e0d1](https://github.com/coalesce-labs/catalyst/commit/cd5e0d166a71d077dc6d8548667ad735518c7fe7))
+* **dev:** CTL-2011 — tell operator when GitHub-feed readers disagree ([#3757](https://github.com/coalesce-labs/catalyst/issues/3757)) ([a7600c2](https://github.com/coalesce-labs/catalyst/commit/a7600c2fe84e0d429db313ddf0d59616580e91c7))
+* **dev:** CTL-2061 — an infra-class phase failure retries with backoff, never parks needs-human ([#3722](https://github.com/coalesce-labs/catalyst/issues/3722)) ([7104d6d](https://github.com/coalesce-labs/catalyst/commit/7104d6d8f7c72be2bc73d8c9ec2505397b16abef))
+* **dev:** CTL-2129 — scope→steward resolver (scopeKeys registry + ticket→scope + per-item turn counting + instrument wiring) ([#3845](https://github.com/coalesce-labs/catalyst/issues/3845)) ([5ef0d4e](https://github.com/coalesce-labs/catalyst/commit/5ef0d4ead993d512687bb48ff63ae8cc96828142))
+* **dev:** gate zero — diagnose why it is stuck before escalating to a human ([#3881](https://github.com/coalesce-labs/catalyst/issues/3881)) ([e5f5c13](https://github.com/coalesce-labs/catalyst/commit/e5f5c13061622d7b533071a0b3e55ab48d2c3176))
+
+
+### Bug Fixes
+
+* **dev:** CAT-216 make journey event log injectable ([#3905](https://github.com/coalesce-labs/catalyst/issues/3905)) ([006281d](https://github.com/coalesce-labs/catalyst/commit/006281ddafad7301b9c2a4b0c79f4d5d9824ba77))
+* **dev:** CTL-2073 — doctor graded the daemon's write budget against a shell env it never runs in ([#3727](https://github.com/coalesce-labs/catalyst/issues/3727)) ([d430568](https://github.com/coalesce-labs/catalyst/commit/d430568c0c7144a465f3dbdca28c635b2bb06d95))
+* **dev:** CTL-2083 — back off removeLabel on a budget refusal (mirror COORD-236's apply-side cool-down) ([#3740](https://github.com/coalesce-labs/catalyst/issues/3740)) ([b9cc783](https://github.com/coalesce-labs/catalyst/commit/b9cc783d53ebe16035f393e1fbe83d28f563f2c0))
+* **dev:** CTL-2098 — restore the dropped converged flag so needs-human marker-retention is reachable on enforce ([#3885](https://github.com/coalesce-labs/catalyst/issues/3885)) ([f2711b5](https://github.com/coalesce-labs/catalyst/commit/f2711b54c249242701eeec859fd1152795f87642))
+
 ## [12.62.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.61.0...catalyst-dev-v12.62.0) (2026-08-21)
 
 

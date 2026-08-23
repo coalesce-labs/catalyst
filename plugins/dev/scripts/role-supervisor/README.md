@@ -34,7 +34,7 @@ and never a re-pasted brief.
 | `supervisor.mjs` | the loop — one role, until it is told to stop |
 | `sdk-session.mjs` | the only file that talks to the SDK; kept thin |
 | `doctor.mjs` | one row per role, and a red row names the artifact that is missing |
-| `cli.mjs` | `run` · `doctor` · `stop` · `list` |
+| `cli.mjs` | `run` · `doctor` · `stop` · `list` · `set-scope-keys` |
 | `install.sh` + `com.catalyst.role.plist` | one launchd label per role |
 
 `agent-liveness.mjs` lives in `lib/` rather than in this package because two very different processes
@@ -78,11 +78,20 @@ would lock the role out permanently, which is the opposite of the goal.
 
 ```bash
 bash install.sh --role steward-p13 --scope "P13 · Coordination SOP" \
-                --skill catalyst-dev:steward --brief ~/catalyst/comms/coord/launch-p13-1.txt
+                --skill catalyst-dev:steward --brief ~/catalyst/comms/coord/launch-p13-1.txt \
+                --scope-keys "fa63609d-5078-4f64-951c-872a03852532"   # the Linear project id(s)
 
 node cli.mjs doctor          # one row per role; exit 1 if any row is red
 node cli.mjs stop steward-p13
+node cli.mjs set-scope-keys steward-p13 "<projectId>[,<id>...]"   # back-fill an existing role
 ```
+
+**`scopeKeys` (CTL-2129).** A steward's `manifest.json` carries a `scopeKeys` array of Linear **project
+ids** — the machine keys the escalation router (`escalation-router.mjs resolveSteward`) matches a stalled
+item's project id against so an instrument can page **this** steward instead of the human. `--scope-keys`
+(and the `set-scope-keys` verb behind it) is an atomic merge-into-existing, so it lands on both a freshly
+created and an already-installed manifest. A role with no `scopeKeys` never matches → items fall through
+to the concierge (the correct backstop). See `docs/reference/configuration.md` → "Steward escalation routing".
 
 `doctor` prints `no roles configured (this is not the same as 'all roles healthy')` when there are none —
 a green line there would be a false clean result.
