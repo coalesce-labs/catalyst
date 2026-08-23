@@ -3099,16 +3099,29 @@ function maybeArmRemoveCooldown(orchDir, ticket, label, res, now) {
   if (!orchDir || res == null) return;
   if (res.removed === false && shouldCoolDownLabel(res.reason)) {
     recordLabelCooldown(orchDir, ticket, label, now);
-    // COORD-236: the two failure classes get DIFFERENT sentences — an operator
+    // COORD-236: the failure classes get DIFFERENT sentences — an operator
     // reading "unrecoverable" for a budget refusal would go hunting for a label
     // that is not actually missing.
-    const throttled = isThrottledLabelReason(res.reason);
-    log.warn(
-      { ticket, label, reason: res.reason, label_failure_class: throttled ? "throttled" : "terminal" },
-      throttled
-        ? "coord-236/ctl-2083: held-label REMOVE THROTTLED (host write budget / rate limit) — backing off; this removal is not re-issued until the cool-down elapses"
-        : "ctl-2083: held-label remove unrecoverable — backing off (cool-down)"
-    );
+    //
+    // CTL-2043: routed through classifyLabelCooldownLog rather than re-deriving the
+    // split here. This helper used to be TWO-way (throttled | terminal), which was
+    // complete while only throttled reasons could reach it — but broadening
+    // shouldCoolDownLabel to the whole `cloud:*` family means a REMOVE refused with
+    // `cloud:exhausted` now arms this cool-down and fell into the terminal arm,
+    // reporting a temporary budget exhaustion as an unrecoverable missing label. That
+    // is the very mis-cue the comment above exists to prevent, re-introduced on the
+    // remove side by this ticket's own widening. The apply path already had the
+    // four-way; sharing it is what stops the two drifting again.
+    const { cls, message } = classifyLabelCooldownLog(res.reason, {
+      cloudMsg:
+        "ctl-2052/ctl-2083: held-label REMOVE rejected by the cloud (deterministic) — backing off (cool-down)",
+      cloudFamilyMsg:
+        "ctl-2043/ctl-2083: held-label REMOVE refused by the cloud (budget / exhausted — NOT missing) — backing off; retried once the cool-down elapses",
+      throttledMsg:
+        "coord-236/ctl-2083: held-label REMOVE THROTTLED (host write budget / rate limit) — backing off; this removal is not re-issued until the cool-down elapses",
+      terminalMsg: "ctl-2083: held-label remove unrecoverable — backing off (cool-down)",
+    });
+    log.warn({ ticket, label, reason: res.reason, label_failure_class: cls }, message);
   }
 }
 

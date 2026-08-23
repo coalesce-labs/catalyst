@@ -592,6 +592,28 @@ describe("COORD-236 wiring: the cool-down is armed by the WIDE predicate", () =>
     expect(imports).toContain("isThrottledLabelReason");
     expect(imports).toContain("isCloudReason");
   });
+
+  // ⛔ CTL-2043 (Codex round 1): the REMOVE side must share the four-way discriminator.
+  // maybeArmRemoveCooldown hand-rolled a TWO-way split (throttled | terminal), which was
+  // complete only while throttled reasons were the sole ones that could reach it.
+  // Widening shouldCoolDownLabel to the whole `cloud:*` family means a remove refused
+  // with `cloud:exhausted` now arms this cool-down and fell into the TERMINAL arm —
+  // reporting a temporary budget exhaustion as an unrecoverable missing label, which is
+  // the exact mis-cue COORD-236 added that split to prevent, re-introduced on the remove
+  // side by this ticket's own widening.
+  test("CTL-2043: maybeArmRemoveCooldown routes through the shared four-way classifier", () => {
+    const lines = SCHED.split("\n");
+    const start = lines.findIndex((l) => l.includes("function maybeArmRemoveCooldown"));
+    expect(start).toBeGreaterThan(-1); // fail closed if the helper is renamed
+    const end = lines.findIndex((l, i) => i > start && l === "}");
+    expect(end).toBeGreaterThan(start);
+    const body = lines.slice(start, end).join("\n");
+
+    expect(body).toContain("classifyLabelCooldownLog");
+    // And it must not re-derive the class locally — a hand-rolled ternary here is how
+    // the two sides drifted apart in the first place.
+    expect(body).not.toContain('? "throttled" : "terminal"');
+  });
 });
 
 // ── CTL-2043 Decision C — the primitives moved to a shared leaf ──────────────
