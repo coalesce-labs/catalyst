@@ -3167,23 +3167,28 @@ function main() {
   const configPath =
     process.env.CATALYST_CONFIG_FILE || resolve(process.cwd(), ".catalyst", "config.json");
   const orphanReaperConfig = readOrphanReaperConfig(configPath);
+  // CTL-665 / CTL-678 / CTL-1214: the Layer-2 root. Resolved HERE (ahead of its
+  // first consumer) because CTL-1214 made worktree-refresh a Layer-2-capable
+  // reader too — node.json and cluster-secrets.json are read as this file's
+  // siblings. CATALYST_LAYER2_CONFIG_FILE overrides for tests.
+  const layer2Path =
+    process.env.CATALYST_LAYER2_CONFIG_FILE ||
+    resolve(homedir(), ".config", "catalyst", "config.json");
   // CTL-707: read the worktree-refresh config from the same config file.
-  const worktreeRefreshConfig = readWorktreeRefreshConfig(configPath);
+  // CTL-1214: ...merged with Layer-2, so a slimmed Layer-1 resolves from node.json
+  // instead of silently reverting to the code defaults.
+  const worktreeRefreshConfig = readWorktreeRefreshConfig(configPath, layer2Path);
   // CTL-782: read the stale-PR-rescue config from the same config file.
   const stalePrRescueConfig = readStalePrRescueConfig(configPath);
   // CTL-1175: read the orphan-PR sweep config from the same config file.
   const orphanPrSweepConfig = readOrphanPrSweepConfig(configPath);
   // CTL-1608: read the stalled-PR sweep config from the same config file.
   const stalledPrSweepConfig = readStalledPrSweepConfig(configPath);
-  // CTL-665 / CTL-678: resolve the executionCore concurrency knobs once here
-  // and thread them into startDaemon → scheduler + boot-resume. The
-  // machine-canonical Layer-2 file (~/.config/catalyst/config.json) wins
-  // per-field over the committed Layer-1 seed; absent/partial in both yields
-  // {} → the scheduler falls back to state.json + the hardcoded default. The
-  // env var CATALYST_LAYER2_CONFIG_FILE overrides the Layer-2 path for tests.
-  const layer2Path =
-    process.env.CATALYST_LAYER2_CONFIG_FILE ||
-    resolve(homedir(), ".config", "catalyst", "config.json");
+  // CTL-665 / CTL-678: the executionCore concurrency knobs are resolved once here
+  // (off layer2Path above) and threaded into startDaemon → scheduler +
+  // boot-resume. Layer-2 wins per-field over the committed Layer-1 seed;
+  // absent/partial in both yields {} → the scheduler falls back to state.json +
+  // the hardcoded default.
   // CTL-1371: reconcile config is node-scoped — Layer-2 (+ CATALYST_RECONCILE_MODE
   // env) overrides the committed Layer-1 seed so an operator can flip the writer
   // off/notify/write per node.

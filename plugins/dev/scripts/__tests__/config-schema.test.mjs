@@ -15,7 +15,8 @@
 // three schemas actually use.
 
 import { describe, test, expect } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -146,6 +147,10 @@ const kitchenSinkLayer1 = () => {
   cfg.catalyst.orchestration = {
     dispatchMode: "phase-agents",
     worktreeRefresh: { enabled: true, intervalSeconds: 300, quietSeconds: 30 },
+    // CTL-1214 D7: reconcile is in the relocating set — it is in the committed
+    // config, it is node-scoped (CATALYST_RECONCILE_MODE is documented as the
+    // hardest per-node override), and it already had a two-layer reader.
+    reconcile: { mode: "notify", intervalSeconds: 600 },
     executionCore: {
       maxParallel: 4,
       minParallel: 1,
@@ -167,18 +172,87 @@ describe("validateLayer1Config (CTL-1214)", () => {
   });
 
   test("legacy keys validate but are flagged deprecated (back-compat window)", () => {
-    const r = validateLayer1Config(kitchenSinkLayer1());
+    // The BACK-COMPAT window is by definition a config that has not opted into
+    // the new schema (CTL-1214 D3), so this fixture drops schemaVersion — which
+    // minimalLayer1() supplies. With it present the same config is correctly
+    // INVALID; that direction is asserted in the D3 describe block below.
+    const legacy = kitchenSinkLayer1();
+    delete legacy.catalyst.schemaVersion;
+    const r = validateLayer1Config(legacy);
     expect(r.valid).toBe(true); // still valid during migration
     expect(r.deprecatedKeys.length).toBeGreaterThan(0);
+    // CTL-1214 D6: the blanket `orchestration` row is gone — it is now the four
+    // subpaths that actually relocate, so a config carrying only a genuinely
+    // Layer-1 orchestration stanza (codex, executor, …) is NOT flagged.
     for (const path of [
       "monitor.linear.teams",
       "monitor.github.repoColors",
-      "orchestration",
+      "orchestration.dispatchMode",
+      "orchestration.executionCore",
+      "orchestration.worktreeRefresh",
+      "orchestration.reconcile",
       "feedback",
       "sweep",
     ]) {
       expect(r.deprecatedKeys).toContain(path);
     }
+    expect(r.deprecatedKeys).not.toContain("orchestration");
+  });
+
+  test("the SAME kitchen-sink config IS invalid once it declares schemaVersion 1", () => {
+    // The other half of the back-compat contract: opting in is what makes the
+    // leaks fatal. Without this, the test above passes for a validator that never
+    // errors at all.
+    const r = validateLayer1Config(kitchenSinkLayer1());
+    expect(r.valid).toBe(false);
+    expect(r.errors.length).toBeGreaterThan(0);
+    // The cluster-scoped roster is never the cause (D4).
+    expect(r.errors.join(" ")).not.toContain("monitor.linear.teams");
+  });
+
+  // CTL-1214 D6 — the narrowing, asserted in both directions. Without the
+  // negative cases a blanket row would still pass the positive one.
+  test("D6: a genuinely Layer-1 orchestration stanza is not a leak", () => {
+    for (const stanza of [
+      { codex: { codexHome: "/x/codex-home" } },
+      { executor: "sdk" },
+      { executorByPhase: { implement: "sdk" } },
+      { fleetHealth: { mode: "shadow" } },
+      { daemonWatchdog: { mode: "shadow" } },
+      { publishPreflight: { mode: "shadow" } },
+      { draftPr: { enabled: true } },
+      { orphanReaper: { workerGc: { emptyDirGraceSeconds: 600 } } },
+    ]) {
+      const cfg = minimalLayer1();
+      cfg.catalyst.orchestration = stanza;
+      const r = validateLayer1Config(cfg);
+      expect(r.deprecatedKeys).toEqual([]);
+      expect(r.valid).toBe(true);
+    }
+  });
+
+  test("D6: each relocating orchestration subpath IS a leak, on its own", () => {
+    for (const [key, value] of [
+      ["dispatchMode", "phase-agents"],
+      ["executionCore", { maxParallel: 4 }],
+      ["worktreeRefresh", { enabled: true }],
+      ["reconcile", { mode: "notify" }],
+    ]) {
+      const cfg = minimalLayer1();
+      cfg.catalyst.orchestration = { [key]: value };
+      const r = validateLayer1Config(cfg);
+      expect(r.deprecatedKeys).toEqual([`orchestration.${key}`]);
+    }
+  });
+
+  test("D6: a mixed stanza flags only the relocating half", () => {
+    const cfg = minimalLayer1();
+    cfg.catalyst.orchestration = {
+      codex: { codexHome: "/x" },
+      executor: "sdk",
+      dispatchMode: "phase-agents",
+    };
+    expect(validateLayer1Config(cfg).deprecatedKeys).toEqual(["orchestration.dispatchMode"]);
   });
 
   test("monitor.linear.botUserId is NOT treated as a leak", () => {
@@ -232,23 +306,279 @@ describe("validateLayer1Config (CTL-1214)", () => {
     expect(validateLayer1Config(null).valid).toBe(false);
   });
 
-  test("RELOCATED_LAYER1_KEYS enumerates the five leak categories", () => {
+  test("RELOCATED_LAYER1_KEYS enumerates the leak categories (D6-narrowed)", () => {
     const paths = RELOCATED_LAYER1_KEYS.map((e) => e.path);
     expect(paths).toEqual(
       expect.arrayContaining([
         "monitor.linear.teams",
         "monitor.github.repoColors",
-        "orchestration",
+        "orchestration.dispatchMode",
+        "orchestration.executionCore",
+        "orchestration.worktreeRefresh",
+        "orchestration.reconcile",
         "feedback",
         "sweep",
       ]),
     );
+    // D6: FOUR orchestration rows, never one blanket row.
+    expect(paths.filter((p) => p.startsWith("orchestration"))).toHaveLength(4);
+    expect(paths).not.toContain("orchestration");
+    // D1: every node-scoped destination names node.json, matching where the
+    // migration actually writes. A destination string that named the legacy
+    // config.json would send an operator to a file the migration never touches.
+    for (const entry of RELOCATED_LAYER1_KEYS) {
+      if (entry.scope === "node") expect(entry.destination).toContain("node.json");
+    }
     // every entry names a scope + destination so the doctor check can format remediation
     for (const entry of RELOCATED_LAYER1_KEYS) {
       expect(["cluster", "node"]).toContain(entry.scope);
       expect(typeof entry.destination).toBe("string");
       expect(entry.destination.length).toBeGreaterThan(0);
     }
+  });
+});
+
+// CTL-1214 Phase 3 — the AC's "template is sanitized" scenario, asserted against
+// the SHIPPED file on disk rather than a fixture. The template is what every new
+// repo starts from, so a relocated stanza here re-leaks into every future config
+// no matter how well the migration works.
+describe("config.template.json is sanitized (CTL-1214)", () => {
+  const templatePath = join(import.meta.dir, "..", "..", "templates", "config.template.json");
+  const template = JSON.parse(readFileSync(templatePath, "utf8"));
+
+  test("validates clean under validateLayer1Config", () => {
+    const r = validateLayer1Config(template);
+    expect(r.deprecatedKeys).toEqual([]);
+    expect(r.errors).toEqual([]);
+    expect(r.recommendations).toEqual([]);
+    expect(r.valid).toBe(true);
+  });
+
+  test("carries schemaVersion 1", () => {
+    expect(template.catalyst.schemaVersion).toBe(1);
+  });
+
+  test("ships no relocated stanza", () => {
+    expect(template.catalyst.orchestration).toBeUndefined();
+    expect(template.catalyst.feedback).toBeUndefined();
+    expect(template.catalyst.sweep).toBeUndefined();
+    expect(template.catalyst.monitor?.github?.repoColors).toBeUndefined();
+  });
+
+  test("keeps ticketPrefix PROJ, no teamId, no roster (the AC's template scenario)", () => {
+    expect(template.catalyst.project.ticketPrefix).toBe("PROJ");
+    expect("teamId" in template.catalyst.linear).toBe(false);
+    expect(template.catalyst.monitor?.linear?.teams).toBeUndefined();
+  });
+
+  test("keeps the genuinely Layer-1 blocks (a template that over-slims is as bad)", () => {
+    expect(template.catalyst.projectKey).toBeDefined();
+    expect(template.catalyst.linear.teamKey).toBe("PROJ");
+    expect(Object.keys(template.catalyst.linear.stateMap)).toHaveLength(12);
+    expect(template.catalyst.deployment.mode).toBe("single-host");
+    expect(template.catalyst.repository).toBeDefined();
+    expect(template.catalyst.deploy).toBeDefined();
+    expect(template.catalyst.filter).toBeDefined();
+    expect("botUserId" in template.catalyst.monitor.linear).toBe(true);
+    expect(template.catalyst.thoughts).toBeDefined();
+  });
+});
+
+// CTL-1214 remediation — the sanitization assertion above read ONE of the two
+// SHIPPED templates. config-template-statemap.test.sh treats both as maintained
+// artifacts, and the .claude/ one still carried monitor.github.repoColors (a
+// RELOCATED_LAYER1_KEYS path) with no schemaVersion — so the "template is
+// sanitized" AC was satisfied by a file while its sibling re-leaked. Both paths
+// are now asserted from ONE list, so adding a third template surfaces here rather
+// than silently going uncovered.
+describe("every shipped config template is sanitized (CTL-1214)", () => {
+  const SHIPPED_TEMPLATES = [
+    ["plugins/dev/templates/config.template.json", join(import.meta.dir, "..", "..", "templates", "config.template.json")],
+    [".claude/config.template.json", join(import.meta.dir, "..", "..", "..", "..", ".claude", "config.template.json")],
+  ];
+
+  // Positive control on the LIST itself: a path typo would otherwise make the
+  // loop below iterate over a file that does not exist, and a `[].every(p)`-style
+  // clean pass is exactly the false-clean this repo keeps closing.
+  test("every listed template path exists on disk", () => {
+    expect(SHIPPED_TEMPLATES.length).toBeGreaterThan(1);
+    for (const [label, path] of SHIPPED_TEMPLATES) {
+      expect(existsSync(path), `${label} missing`).toBe(true);
+    }
+  });
+
+  for (const [label, path] of SHIPPED_TEMPLATES) {
+    test(`${label} ships no node-scoped relocated key and declares schemaVersion`, () => {
+      const tpl = JSON.parse(readFileSync(path, "utf8"));
+      const r = validateLayer1Config(tpl);
+      expect(tpl.catalyst.schemaVersion).toBe(1);
+      // Node-scoped leaks only: monitor.linear.teams is cluster-scoped (CTL-1885)
+      // and stays lenient by design, so asserting on `errors` (which is
+      // schemaVersion-gated to the node scope) is the right instrument.
+      expect(r.errors).toEqual([]);
+      expect(tpl.catalyst.monitor?.github?.repoColors).toBeUndefined();
+      expect(tpl.catalyst.feedback).toBeUndefined();
+      expect(tpl.catalyst.sweep).toBeUndefined();
+      expect(tpl.catalyst.orchestration?.dispatchMode).toBeUndefined();
+      expect(tpl.catalyst.orchestration?.executionCore).toBeUndefined();
+      expect(tpl.catalyst.orchestration?.worktreeRefresh).toBeUndefined();
+      expect(tpl.catalyst.orchestration?.reconcile).toBeUndefined();
+    });
+  }
+});
+
+// CTL-1214 Phase 5 (D3) — schemaVersion is the SELF-GATING opt-in to strictness.
+// Taken literally, "Phase 6 promotes schemaVersion to required" would flag every
+// not-yet-migrated config in the fleet as invalid, in editors and validators, for
+// no benefit. Instead: a PRESENT schemaVersion >= 1 means "this config has opted
+// into the new schema", and in that config a NODE-scoped relocated key becomes a
+// hard error. A config without schemaVersion keeps today's lenient behavior
+// verbatim — so a repo becomes strict exactly when it is slimmed.
+describe("schemaVersion-gated strictness (CTL-1214 D3/D4)", () => {
+  const withLeak = (leak, opts = {}) => {
+    const cfg = minimalLayer1();
+    if (opts.noSchemaVersion) delete cfg.catalyst.schemaVersion;
+    Object.assign(cfg.catalyst, leak);
+    return cfg;
+  };
+
+  test("schemaVersion ABSENT + node leak -> valid, recommendation only (unchanged)", () => {
+    const r = validateLayer1Config(
+      withLeak({ sweep: { idleHours: 48 } }, { noSchemaVersion: true }),
+    );
+    expect(r.valid).toBe(true);
+    expect(r.errors).toEqual([]);
+    expect(r.deprecatedKeys).toEqual(["sweep"]);
+    expect(r.recommendations.length).toBeGreaterThan(0);
+  });
+
+  test("schemaVersion 1 + node leak -> INVALID, and the error names the path", () => {
+    const r = validateLayer1Config(withLeak({ sweep: { idleHours: 48 } }));
+    expect(r.valid).toBe(false);
+    expect(r.errors.length).toBeGreaterThan(0);
+    expect(r.errors.join(" ")).toContain("sweep");
+    // The remediation must be actionable, not just a complaint.
+    expect(r.errors.join(" ")).toContain("catalyst-config-migrate");
+  });
+
+  test("schemaVersion 1 + CLUSTER leak (the roster) stays VALID (D4/CTL-1885)", () => {
+    const r = validateLayer1Config(
+      withLeak({ monitor: { linear: { teams: [{ key: "CTL", vcsRepo: "a/b" }] } } }),
+    );
+    expect(r.valid).toBe(true);
+    expect(r.errors).toEqual([]);
+    expect(r.deprecatedKeys).toEqual(["monitor.linear.teams"]);
+  });
+
+  test("schemaVersion 1 + a MIX -> invalid for the node half only", () => {
+    const r = validateLayer1Config(
+      withLeak({
+        monitor: { linear: { teams: [{ key: "CTL", vcsRepo: "a/b" }] } },
+        sweep: { idleHours: 48 },
+      }),
+    );
+    expect(r.valid).toBe(false);
+    expect(r.errors.join(" ")).toContain("sweep");
+    expect(r.errors.join(" ")).not.toContain("monitor.linear.teams");
+  });
+
+  test("schemaVersion 1 + clean -> valid, no recommendations", () => {
+    const r = validateLayer1Config(minimalLayer1());
+    expect(r.valid).toBe(true);
+    expect(r.errors).toEqual([]);
+    expect(r.recommendations).toEqual([]);
+    expect(r.deprecatedKeys).toEqual([]);
+  });
+
+  test("each of the four relocated orchestration subpaths FAILs under schemaVersion 1", () => {
+    for (const [key, value] of [
+      ["dispatchMode", "phase-agents"],
+      ["executionCore", { maxParallel: 4 }],
+      ["worktreeRefresh", { enabled: true }],
+      ["reconcile", { mode: "notify" }],
+    ]) {
+      const r = validateLayer1Config(withLeak({ orchestration: { [key]: value } }));
+      expect(r.valid).toBe(false);
+      expect(r.errors.join(" ")).toContain(`orchestration.${key}`);
+    }
+  });
+
+  test("a genuinely Layer-1 orchestration stanza does NOT fail under schemaVersion 1 (D6)", () => {
+    for (const stanza of [
+      { codex: { codexHome: "/x" } },
+      { executor: "sdk" },
+      { fleetHealth: { mode: "shadow" } },
+      { draftPr: { enabled: true } },
+    ]) {
+      const r = validateLayer1Config(withLeak({ orchestration: stanza }));
+      expect(r.valid).toBe(true);
+      expect(r.errors).toEqual([]);
+    }
+  });
+
+  test("a malformed schemaVersion is still a hard error, and does not gate strictness", () => {
+    const cfg = withLeak({ sweep: { idleHours: 48 } });
+    cfg.catalyst.schemaVersion = 0;
+    const r = validateLayer1Config(cfg);
+    expect(r.valid).toBe(false);
+    expect(r.errors.join(" ")).toContain("schemaVersion");
+    // 0 is not >= 1, so it has NOT opted in — the leak stays a deprecation.
+    expect(r.errors.join(" ")).not.toContain("catalyst-config-migrate");
+  });
+});
+
+// CTL-1214 Phase 4 — THIS repo's committed .catalyst/config.json, read from disk.
+// The regression guard cuts both ways: a migration that OVER-slims is as bad as
+// one that under-slims, and losing stateMap would break every phase transition in
+// the pipeline.
+describe("this repo's committed .catalyst/config.json is slimmed (CTL-1214)", () => {
+  const layer1Path = join(import.meta.dir, "..", "..", "..", "..", ".catalyst", "config.json");
+  const cfg = JSON.parse(readFileSync(layer1Path, "utf8"));
+
+  test("validates with no hard errors and schemaVersion 1", () => {
+    const r = validateLayer1Config(cfg);
+    expect(r.errors).toEqual([]);
+    expect(r.valid).toBe(true);
+    expect(cfg.catalyst.schemaVersion).toBe(1);
+    expect(r.recommendations).toEqual([]);
+  });
+
+  test("the only remaining leak is the roster, which CTL-1885 owns (D4)", () => {
+    expect(validateLayer1Config(cfg).deprecatedKeys).toEqual(["monitor.linear.teams"]);
+  });
+
+  test("carries no orchestration / feedback / sweep / repoColors", () => {
+    expect(cfg.catalyst.orchestration).toBeUndefined();
+    expect(cfg.catalyst.feedback).toBeUndefined();
+    expect(cfg.catalyst.sweep).toBeUndefined();
+    expect(cfg.catalyst.monitor?.github).toBeUndefined();
+    // The dead key is gone entirely, not relocated.
+    expect(JSON.stringify(cfg)).not.toContain("eligibleQuery");
+  });
+
+  test("the identity block is INTACT (the over-slim guard)", () => {
+    expect(cfg.catalyst.projectKey).toBe("catalyst-workspace");
+    expect(cfg.catalyst.project.ticketPrefix).toBe("CTL");
+    expect(cfg.catalyst.linear.teamKey).toBe("CTL");
+    expect(typeof cfg.catalyst.linear.teamId).toBe("string");
+    expect(cfg.catalyst.linear.teamId.length).toBeGreaterThan(0);
+    // All 12 states — losing stateMap breaks every phase transition.
+    expect(Object.keys(cfg.catalyst.linear.stateMap)).toHaveLength(12);
+    for (const k of [
+      "backlog", "todo", "triage", "research", "planning", "inProgress",
+      "verifying", "reviewing", "remediating", "inReview", "done", "canceled",
+    ]) {
+      expect(typeof cfg.catalyst.linear.stateMap[k]).toBe("string");
+    }
+    expect(cfg.catalyst.thoughts.org).toBe("coalesce-labs");
+    expect(cfg.catalyst.thoughts.directory).toBe("catalyst-workspace");
+    expect(cfg.catalyst.deployment.mode).toBe("cluster");
+    // The roster stays (CTL-1885) and still names this repo — resolveRepoFullName
+    // falls through to monitor.linear.teams[].vcsRepo once feedback.githubRepo is
+    // gone from Layer-1, so an empty roster here would break the plugin-refresh
+    // merge-event matcher.
+    expect(cfg.catalyst.monitor.linear.teams.length).toBeGreaterThan(0);
+    expect(cfg.catalyst.monitor.linear.teams[0].vcsRepo).toBe("coalesce-labs/catalyst");
   });
 });
 

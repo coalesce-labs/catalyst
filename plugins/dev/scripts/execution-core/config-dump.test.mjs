@@ -297,6 +297,93 @@ describe("provenance — beliefs flags, merges, and plain values", () => {
     expect(row(d, "catalyst.orchestration.dispatchMode")).toMatchObject({ value: "phase-agents", layer: "layer1" });
   });
 
+  // ── CTL-1214 remediation: the bash-read ladder + the derived setpoint ────────
+  test("a layer1-first knob reports LAYER1 as the winner when both layers carry it", () => {
+    const d = dump({
+      layer1Text: JSON.stringify({ catalyst: { orchestration: { dispatchMode: "phase-agents" } } }),
+      layer2Text: JSON.stringify({ catalyst: { orchestration: { dispatchMode: "oneshot-legacy" } } }),
+    });
+    // The bash readers consult Layer-2 only when Layer-1 is silent, so naming
+    // layer2 here would send an operator to edit a file that changes nothing.
+    expect(row(d, "catalyst.orchestration.dispatchMode")).toMatchObject({
+      value: "phase-agents",
+      layer: "layer1",
+    });
+    // Positive control on the SAME pair of layers: a Layer-2-wins row built from
+    // identical inputs resolves the other way, so the assertion above is a
+    // property of the ladder and not of the fixture.
+    const control = dump({
+      layer1Text: JSON.stringify({ catalyst: { orchestration: { reconcile: { mode: "notify" } } } }),
+      layer2Text: JSON.stringify({ catalyst: { orchestration: { reconcile: { mode: "apply" } } } }),
+    });
+    expect(row(control, "catalyst.orchestration.reconcile.mode")).toMatchObject({ layer: "layer2" });
+  });
+
+  test("a layer1-first knob falls back to layer2 when Layer-1 is silent (the slimmed repo)", () => {
+    const d = dump({
+      layer1Text: JSON.stringify({ catalyst: { projectKey: "p" } }),
+      layer2Text: JSON.stringify({ catalyst: { sweep: { intervalHours: 1 } } }),
+    });
+    expect(row(d, "catalyst.sweep.intervalHours")).toMatchObject({ value: 1, layer: "layer2" });
+    // …and to the code default when neither layer carries it. 2, not 1: this is
+    // the halved-cadence trap the relocation had to keep visible.
+    expect(row(dump(), "catalyst.sweep.intervalHours")).toMatchObject({
+      value: 2,
+      provenance: PROVENANCE.DEFAULT,
+    });
+  });
+
+  test("the three previously-invisible relocated categories now emit rows", () => {
+    const d = dump({
+      layer2Text: JSON.stringify({
+        catalyst: {
+          sweep: { idleHours: 48 },
+          feedback: { autoFile: true },
+          monitor: { github: { repoColors: { "a/b": "green" } } },
+        },
+      }),
+    });
+    // AC-2's before/after comparison is only as good as the rows it covers.
+    expect(row(d, "catalyst.sweep.idleHours")).toMatchObject({ value: 48 });
+    expect(row(d, "catalyst.feedback.autoFile")).toMatchObject({ value: true });
+    expect(row(d, "catalyst.monitor.github.repoColors")).toMatchObject({ value: { "a/b": "green" } });
+    expect(row(d, "catalyst.orchestration.reconcile.intervalSeconds")).toBeDefined();
+  });
+
+  test("the DERIVED setpoint row moves when the raw rows do not — the AC-2 blind spot", () => {
+    const layer2Text = JSON.stringify({ catalyst: { orchestration: { executionCore: { maxParallel: 9 } } } });
+    // BEFORE: a fat Layer-1 supplies maxParallel, so the setpoint resolves to 4.
+    const before = dump({
+      layer1Text: JSON.stringify({ catalyst: { orchestration: { executionCore: { maxParallel: 4 } } } }),
+      layer2Text,
+    });
+    expect(row(before, "catalyst.orchestration.executionCore.targetParallel.resolved")).toMatchObject({
+      value: 4,
+      layer: "merged",
+    });
+
+    // AFTER: Layer-1 slimmed, no targetParallel seeded. The setpoint is GONE.
+    const after = dump({ layer1Text: JSON.stringify({ catalyst: { projectKey: "p" } }), layer2Text });
+    expect(row(after, "catalyst.orchestration.executionCore.targetParallel.resolved")).toMatchObject({
+      value: null,
+      provenance: PROVENANCE.DEFAULT,
+    });
+
+    // ⚠️ The whole point: the RAW targetParallel row is identical across the two,
+    // so the before/after comparison reported zero differences over this change.
+    expect(row(before, "catalyst.orchestration.executionCore.targetParallel").value).toEqual(
+      row(after, "catalyst.orchestration.executionCore.targetParallel").value,
+    );
+  });
+
+  test("an explicit Layer-2 targetParallel wins the derived row over Layer-1 maxParallel", () => {
+    const d = dump({
+      layer1Text: JSON.stringify({ catalyst: { orchestration: { executionCore: { maxParallel: 4 } } } }),
+      layer2Text: JSON.stringify({ catalyst: { orchestration: { executionCore: { targetParallel: 7 } } } }),
+    });
+    expect(row(d, "catalyst.orchestration.executionCore.targetParallel.resolved")).toMatchObject({ value: 7 });
+  });
+
   test("a Layer-2-only knob reports layer2 and is overridden by its env var", () => {
     const l2 = JSON.stringify({ catalyst: { node: { class: "monitor" } } });
     expect(row(dump({ layer2Text: l2 }), "catalyst.node.class")).toMatchObject({ value: "monitor", layer: "layer2" });
@@ -448,7 +535,23 @@ describe("registry drift guards", () => {
     "lib/deployment-mode.mjs",
     "lib/draft-pr.sh",
     "lib/secret-contract.mjs",
+    // CTL-1214: resolveTargetSetpoint (and with it the only mention of
+    // `targetParallel`) moved OUT of scheduler.mjs into this zero-import leaf, so
+    // that `catalyst doctor` — which runs under bare Node and cannot load
+    // scheduler.mjs's bun:sqlite graph — can grade the setpoint through the same
+    // ladder instead of a second copy. This guard caught the move, which is what
+    // it is for: the corpus has to follow the reader.
+    "lib/autotune-setpoint.mjs",
     "orchestrate-register-interests.sh",
+    // CTL-1214 remediation: the dump now carries the three relocated categories
+    // read by BASH (sweep.*, feedback.*) and by orch-monitor (repoColors), so the
+    // corpus has to carry their readers too — otherwise the leaf guard fails on
+    // rows whose reader is real but unrepresented, and the honest fix would look
+    // like deleting the rows. The corpus follows the reader, per the note above.
+    "orphan-sweep.sh",
+    "feedback-consent.sh",
+    "file-feedback.sh",
+    "orch-monitor/lib/monitor-config.ts",
   ]
     .map((p) => {
       try {
@@ -518,5 +621,109 @@ describe("registry drift guards", () => {
     }
     // ...while the fingerprint stream still uses NUL as its separator.
     expect(readFileSync(resolve(HERE, "config-dump.mjs"), "utf8")).toContain("\\u0000");
+  });
+});
+
+// ─── CTL-1214: the merged Layer-2 + the relocated rows ───────────────────────
+describe("CTL-1214 — merged Layer-2 and relocated rows", () => {
+  const l1 = JSON.stringify({ catalyst: { projectKey: "p", schemaVersion: 1 } });
+
+  test("a value in node.json resolves, with layer2 provenance", () => {
+    const d = dumpConfig({
+      layer1Text: l1,
+      layer2Text: JSON.stringify({ catalyst: {} }),
+      nodeText: JSON.stringify({
+        catalyst: { orchestration: { dispatchMode: "phase-agents" } },
+      }),
+    });
+    const row = d.rows.find((r) => r.key === "catalyst.orchestration.dispatchMode");
+    expect(row.value).toBe("phase-agents");
+    expect(row.layer).toBe("layer2");
+    // The sharp half: NOT the silent default a Layer-1-only read would report.
+    expect(row.value).not.toBe("oneshot-legacy");
+  });
+
+  test("a slimmed Layer-1 with NO node.json falls to the default (negative control)", () => {
+    const d = dumpConfig({ layer1Text: l1, layer2Text: JSON.stringify({ catalyst: {} }) });
+    const row = d.rows.find((r) => r.key === "catalyst.orchestration.dispatchMode");
+    expect(row.value).toBe("oneshot-legacy");
+    expect(row.provenance).toBe("default");
+  });
+
+  test("cluster-secrets.json outranks node.json, node.json outranks config.json", () => {
+    const mk = (v) => JSON.stringify({ catalyst: { orchestration: { dispatchMode: v } } });
+    const pick = (d) => d.rows.find((r) => r.key === "catalyst.orchestration.dispatchMode").value;
+    expect(pick(dumpConfig({ layer1Text: l1, layer2Text: mk("oneshot-legacy") }))).toBe("oneshot-legacy");
+    expect(
+      pick(dumpConfig({ layer1Text: l1, layer2Text: mk("oneshot-legacy"), nodeText: mk("phase-agents") })),
+    ).toBe("phase-agents");
+    expect(
+      pick(
+        dumpConfig({
+          layer1Text: l1,
+          layer2Text: mk("oneshot-legacy"),
+          nodeText: mk("phase-agents"),
+          clusterSecretsText: mk("execution-core"),
+        }),
+      ),
+    ).toBe("execution-core");
+  });
+
+  test("the Layer-2 merge is DEEP, not a replace", () => {
+    const d = dumpConfig({
+      layer1Text: l1,
+      layer2Text: JSON.stringify({
+        catalyst: { orchestration: { executionCore: { maxParallel: 4 } } },
+      }),
+      nodeText: JSON.stringify({
+        catalyst: { orchestration: { executionCore: { minParallel: 1 } } },
+      }),
+    });
+    const get = (k) => d.rows.find((r) => r.key === k).value;
+    expect(get("catalyst.orchestration.executionCore.maxParallel")).toBe(4);
+    expect(get("catalyst.orchestration.executionCore.minParallel")).toBe(1);
+  });
+
+  test("a malformed sibling is layer-ABSENT, never fatal", () => {
+    const d = dumpConfig({
+      layer1Text: l1,
+      layer2Text: JSON.stringify({ catalyst: { orchestration: { dispatchMode: "phase-agents" } } }),
+      nodeText: "{ not json at all",
+    });
+    expect(d.rows.find((r) => r.key === "catalyst.orchestration.dispatchMode").value).toBe("phase-agents");
+    expect(d.layer2.node.parsed).toBe(false);
+    expect(d.layer2.node.present).toBe(true);
+  });
+
+  test("the dead eligibleQuery.status row is GONE from CONFIG_KEYS", () => {
+    const keys = CONFIG_KEYS.map((r) => r.key);
+    expect(keys).not.toContain("catalyst.orchestration.executionCore.eligibleQuery.status");
+    // Positive control: the row set is otherwise intact and still names its
+    // orchestration neighbours, so "not contains" is not an empty-list artifact.
+    expect(keys).toContain("catalyst.orchestration.dispatchMode");
+    expect(keys).toContain("catalyst.orchestration.executor");
+    expect(keys.length).toBeGreaterThan(20);
+  });
+
+  test("the four relocated row families declare a layer2 source", () => {
+    const byKey = Object.fromEntries(CONFIG_KEYS.map((r) => [r.key, r]));
+    for (const k of [
+      "catalyst.orchestration.dispatchMode",
+      "catalyst.orchestration.reconcile.mode",
+      "catalyst.orchestration.executionCore.maxParallel",
+      "catalyst.orchestration.executionCore.minParallel",
+      "catalyst.orchestration.executionCore.maxParallelCeiling",
+      "catalyst.orchestration.worktreeRefresh.enabled",
+      "catalyst.orchestration.worktreeRefresh.intervalSeconds",
+    ]) {
+      expect(byKey[k]?.layer2).toBeTruthy();
+    }
+    // D6 negative control: the NON-relocating orchestration keys must NOT have
+    // grown a layer2 source — they are genuinely Layer-1.
+    // (some rows declare an explicit `layer2: null`, so the assertion is
+    // "declares no Layer-2 source", not "the property is absent")
+    expect(byKey["catalyst.orchestration.executor"].layer2 ?? null).toBeNull();
+    expect(byKey["catalyst.orchestration.executorByPhase"].layer2 ?? null).toBeNull();
+    expect(byKey["catalyst.orchestration.draftPr.enabled"].layer2 ?? null).toBeNull();
   });
 });

@@ -205,6 +205,93 @@ describe("autoTuneTick", () => {
     expect(decisions[0]).toBe(4); // jumped to layer1Max, not 2
   });
 
+  // --- CTL-1214: the setpoint must survive a SLIMMED Layer-1 -----------------
+  //
+  // Slimming .catalyst/config.json removed catalyst.orchestration.executionCore
+  // from Layer-1, and readLayer1Concurrency is Layer-1-ONLY. MEASURED on the live
+  // host before this remediation: resolveTargetSetpoint 4 → undefined and
+  // layer1Max 4 → null, which silently no-ops the cold-start seed (RULE 2),
+  // recovery-to-layer1 (RULE 7) and all three RULE 9 setpoint branches. The
+  // migration now re-homes the committed target to Layer-2 `targetParallel`
+  // (never `maxParallel`, which the tuner itself writes), and layer1Max is
+  // sourced from the resolved target rather than from Layer-1 alone.
+
+  test("CTL-1214: slimmed Layer-1 + node.json targetParallel → setpoint is NON-NULL and converges", () => {
+    const flatIdle = [
+      { load1: 1.2, load5: 1.2, load15: 1.3, memFreePct: 50, coreCount: 8 },
+      { load1: 1.2, load5: 1.3, load15: 1.2, memFreePct: 50, coreCount: 8 },
+    ];
+    const state = makeState({ window: flatIdle, loadSafeFactor: 2 });
+    const writes = [];
+    const seams = makeSeams({
+      loadavg: () => [1.3, 1.2, 1.2],
+      freemem: () => 8e9,
+      totalmem: () => 16e9,
+      cpus: () => Array(8),
+      readConcurrency: () => ({ maxParallel: 1, minParallel: 1, maxParallelCeiling: 20 }),
+      // The slimmed committed config: NO executionCore stanza at all.
+      readLayer1Concurrency: () => ({}),
+      readLayer2Concurrency: () => ({ minParallel: 1, maxParallelCeiling: 40, targetParallel: 4 }),
+      writeLayer2: (v) => { writes.push(v); return true; },
+    });
+    autoTuneTick(state, seams);
+    // A null setpoint would take the no-op path and write NOTHING — the exact
+    // silent degradation this pins. cores=8 → bound max(1,6)=6, min(4,6)=4.
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toBe(4);
+  });
+
+  test("CTL-1214: layer1Max comes from the resolved target, so recovery-to-layer1 fires on a slimmed config", () => {
+    const downSamples = [
+      { load1: 2, load5: 4, load15: 6, memFreePct: 50, coreCount: 4 },
+      { load1: 1, load5: 3, load15: 5, memFreePct: 50, coreCount: 4 },
+    ];
+    const state = makeState({ window: downSamples, trendMinSamples: 3 });
+    const decisions = [];
+    const seams = makeSeams({
+      loadavg: () => [1, 2, 4],
+      freemem: () => 8e9,
+      totalmem: () => 16e9,
+      cpus: () => Array(4),
+      readConcurrency: () => ({ maxParallel: 1, minParallel: 1, maxParallelCeiling: 20 }),
+      readLayer1Concurrency: () => ({}),                    // slimmed
+      readLayer2Concurrency: () => ({ targetParallel: 4 }),  // the re-homed target
+      writeLayer2: (v) => { decisions.push(v); return true; },
+    });
+    autoTuneTick(state, seams);
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]).toBe(4); // recovery JUMP to 4, not the +1 trend-down step to 2
+  });
+
+  // ⚠️ RATCHET REGRESSION PIN. The obvious fix — merging Layer-2 into
+  // readLayer1Concurrency — makes layer1Max identically equal to `current` every
+  // tick, because layer2.maxParallel IS the tuner's own live mirror
+  // (writeLayer2MaxParallel). RULE 7's `current < layer1Max` could then never be
+  // true: a dead branch dressed as a fixed one. With ONLY a Layer-2 maxParallel
+  // and no declared target anywhere, there is no committed target to recover to,
+  // so the tuner must take the ordinary +1 trend-down step.
+  test("CTL-1214: a Layer-2 maxParallel (the tuner's own mirror) is NOT treated as a recovery target", () => {
+    const downSamples = [
+      { load1: 2, load5: 4, load15: 6, memFreePct: 50, coreCount: 4 },
+      { load1: 1, load5: 3, load15: 5, memFreePct: 50, coreCount: 4 },
+    ];
+    const state = makeState({ window: downSamples, trendMinSamples: 3 });
+    const decisions = [];
+    const seams = makeSeams({
+      loadavg: () => [1, 2, 4],
+      freemem: () => 8e9,
+      totalmem: () => 16e9,
+      cpus: () => Array(4),
+      readConcurrency: () => ({ maxParallel: 1, minParallel: 1, maxParallelCeiling: 20 }),
+      readLayer1Concurrency: () => ({}),
+      readLayer2Concurrency: () => ({ maxParallel: 4 }), // live mirror only, no targetParallel
+      writeLayer2: (v) => { decisions.push(v); return true; },
+    });
+    autoTuneTick(state, seams);
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]).toBe(2); // +1 trend-down, NOT a jump to the mirrored 4
+  });
+
   // --- CTL-770: setpoint resolution + plumbing -------------------------------
 
   test("autoTuneTick resolves setpoint from Layer-2 targetParallel and passes it to decideMaxParallel", () => {

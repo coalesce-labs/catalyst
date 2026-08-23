@@ -709,3 +709,87 @@ describe("fetchRepoIcon — avatar fallback re-probes on the short TTL (CTL-1375
     expect(res.selectedPath).toBe("public/favicon.svg");
   });
 });
+
+// ── loadMonitorConfig — repoColors across the Layer-2 chain (CTL-1214) ───────
+//
+// The plan's reader-coverage table marked monitor.github.repoColors
+// "Layer-2-first → safe", but loadMonitorConfig read only Layer-1 + the LEGACY
+// ~/.config/catalyst/config.json. The migration's destination for this key is
+// node.json — which also OUTRANKS the legacy file in the merged Layer-2 view the
+// JS readers use — so on an already-migrated host the colors measured
+// {"coalesce-labs/catalyst":"green"} → {}.
+
+describe("loadMonitorConfig — repoColors reads node.json (CTL-1214)", () => {
+  let tmpDir: string;
+  let configPath: string;
+  let layer2Path: string;
+  let nodePath: string;
+  let noRegistry: string;
+
+  const write = (p: string, o: unknown) => writeFileSync(p, JSON.stringify(o));
+
+  beforeEach(() => {
+    tmpDir = join(tmpdir(), `ctl-1214-colors-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(tmpDir, { recursive: true });
+    configPath = join(tmpDir, "layer1.json");
+    layer2Path = join(tmpDir, "config.json");
+    nodePath = join(tmpDir, "node.json");
+    noRegistry = join(tmpDir, "no-registry.json");
+    // A slimmed Layer-1: project identity only, no monitor.github stanza.
+    write(configPath, { catalyst: { projectKey: "p", schemaVersion: 1 } });
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("resolves repoColors from node.json when Layer-1 is slimmed", () => {
+    write(layer2Path, {});
+    write(nodePath, {
+      catalyst: { monitor: { github: { repoColors: { "coalesce-labs/catalyst": "green" } } } },
+    });
+    const cfg = loadMonitorConfig(configPath, noRegistry, layer2Path);
+    expect(cfg.repoColors["coalesce-labs/catalyst"]).toBe("green");
+  });
+
+  it("node.json OUTRANKS the legacy Layer-2 file, matching the merged-Layer-2 order", () => {
+    write(layer2Path, {
+      catalyst: { monitor: { github: { repoColors: { "coalesce-labs/catalyst": "blue" } } } },
+    });
+    write(nodePath, {
+      catalyst: { monitor: { github: { repoColors: { "coalesce-labs/catalyst": "green" } } } },
+    });
+    const cfg = loadMonitorConfig(configPath, noRegistry, layer2Path);
+    expect(cfg.repoColors["coalesce-labs/catalyst"]).toBe("green");
+  });
+
+  it("still reads Layer-1 when nothing has been migrated (back-compat)", () => {
+    write(configPath, {
+      catalyst: { monitor: { github: { repoColors: { "coalesce-labs/catalyst": "red" } } } },
+    });
+    write(layer2Path, {});
+    const cfg = loadMonitorConfig(configPath, noRegistry, layer2Path);
+    expect(cfg.repoColors["coalesce-labs/catalyst"]).toBe("red");
+  });
+
+  it("an ABSENT or MALFORMED node.json contributes nothing and never throws", () => {
+    write(configPath, {
+      catalyst: { monitor: { github: { repoColors: { "coalesce-labs/catalyst": "red" } } } },
+    });
+    write(layer2Path, {});
+    expect(loadMonitorConfig(configPath, noRegistry, layer2Path).repoColors).toEqual({
+      "coalesce-labs/catalyst": "red",
+    });
+    writeFileSync(nodePath, "{ not json");
+    expect(loadMonitorConfig(configPath, noRegistry, layer2Path).repoColors).toEqual({
+      "coalesce-labs/catalyst": "red",
+    });
+  });
+
+  // NEGATIVE CONTROL: without it, every assertion above could pass from a reader
+  // that returns a hardcoded map.
+  it("no layer defining repoColors -> empty map", () => {
+    write(layer2Path, {});
+    expect(loadMonitorConfig(configPath, noRegistry, layer2Path).repoColors).toEqual({});
+  });
+});

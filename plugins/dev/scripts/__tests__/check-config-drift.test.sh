@@ -29,10 +29,21 @@ run() {
 
 expect_exit() {
   local expected="$1"; shift
+  # ⚠️ Restore the shell's PREVIOUS errexit state, never force it ON. This used
+  # to end with a bare `set -e`, which TURNED ERREXIT ON for the rest of the file
+  # even though the suite runs `set -uo pipefail` and never enabled it. Every
+  # test after the first expect_exit call then ran under errexit; the existing
+  # ones survived only because `run()` wraps its command in an `if`, which
+  # suppresses it. The first bare invocation that legitimately returns non-zero
+  # — e.g. `bash "$DRIFT" ...` when drift IS found, which is the expected
+  # outcome of a positive control — silently killed the whole suite mid-run,
+  # taking the trailing "All N tests passed" summary with it. It exited 1, so it
+  # looked like an ordinary failure while the remaining assertions never ran.
+  local _prev_e; case "$-" in *e*) _prev_e=1 ;; *) _prev_e=0 ;; esac
   set +e
   "$@" > "${SCRATCH}/out" 2>&1
   local rc=$?
-  set -e
+  [ "$_prev_e" = "1" ] && set -e
   if [ "$rc" = "$expected" ]; then
     return 0
   else
@@ -64,7 +75,7 @@ cat > "$TPL1" <<'EOF'
 {
   "catalyst": {
     "projectKey": "x",
-    "orchestration": { "dispatchMode": "phase-agents" }
+    "orchestration": { "executor": "sdk" }
   }
 }
 EOF
@@ -72,7 +83,7 @@ cat > "$CFG1" <<'EOF'
 {
   "catalyst": {
     "projectKey": "x",
-    "orchestration": { "dispatchMode": "phase-agents" }
+    "orchestration": { "executor": "sdk" }
   }
 }
 EOF
@@ -89,7 +100,7 @@ cat > "$TPL2" <<'EOF'
 {
   "catalyst": {
     "projectKey": "x",
-    "orchestration": { "dispatchMode": "phase-agents" }
+    "orchestration": { "executor": "sdk" }
   }
 }
 EOF
@@ -98,8 +109,8 @@ cat > "$CFG2" <<'EOF'
 EOF
 run "missing leaf → exit 1" expect_exit 1 bash "$DRIFT" --template "$TPL2" --config "$CFG2"
 bash "$DRIFT" --template "$TPL2" --config "$CFG2" > "${SCRATCH}/out2" 2>/dev/null || true
-run "missing dispatchMode mentioned" expect_contains "${SCRATCH}/out2" "Missing catalyst.orchestration.dispatchMode"
-run "template default quoted" expect_contains "${SCRATCH}/out2" 'template suggests "phase-agents"'
+run "missing executor mentioned" expect_contains "${SCRATCH}/out2" "Missing catalyst.orchestration.executor"
+run "template default quoted" expect_contains "${SCRATCH}/out2" 'template suggests "sdk"'
 run "hint mentions setup-catalyst" expect_contains "${SCRATCH}/out2" "/catalyst-foundry:setup-catalyst"
 
 # ── Test 3: nested object exists but leaf inside is missing ──────────────────
@@ -150,7 +161,7 @@ cat > "$TPL5" <<'EOF'
     "deploy": {
       "[YOUR_ORG]/[YOUR_REPO]": { "timeoutSec": 1800 }
     },
-    "orchestration": { "dispatchMode": "phase-agents" }
+    "orchestration": { "executor": "sdk" }
   }
 }
 EOF
@@ -162,7 +173,7 @@ bash "$DRIFT" --template "$TPL5" --config "$CFG5" > "${SCRATCH}/out5" 2>/dev/nul
 run "no placeholder drift for YOUR_ORG" expect_not_contains "${SCRATCH}/out5" "YOUR_ORG"
 run "no placeholder drift for YOUR_REPO" expect_not_contains "${SCRATCH}/out5" "YOUR_REPO"
 run "no placeholder drift for deploy" expect_not_contains "${SCRATCH}/out5" "Missing catalyst.deploy"
-run "dispatchMode drift still fires" expect_contains "${SCRATCH}/out5" "Missing catalyst.orchestration.dispatchMode"
+run "executor drift still fires" expect_contains "${SCRATCH}/out5" "Missing catalyst.orchestration.executor"
 
 # ── Test 6: allow-listed roots suppressed (already covered by check-project-setup.sh) ──
 TPL6="${SCRATCH}/tpl6.json"
@@ -177,7 +188,7 @@ cat > "$TPL6" <<'EOF'
       "stateMap": { "research": "In Progress" },
       "stateIds": { "research": "uuid-x" }
     },
-    "orchestration": { "dispatchMode": "phase-agents" }
+    "orchestration": { "executor": "sdk" }
   }
 }
 EOF
@@ -191,7 +202,7 @@ run "suppresses ticketPrefix" expect_not_contains "${SCRATCH}/out6" "Missing cat
 run "suppresses teamKey" expect_not_contains "${SCRATCH}/out6" "Missing catalyst.linear.teamKey"
 run "suppresses stateMap sub-keys" expect_not_contains "${SCRATCH}/out6" "Missing catalyst.linear.stateMap"
 run "suppresses stateIds sub-keys" expect_not_contains "${SCRATCH}/out6" "Missing catalyst.linear.stateIds"
-run "non-allow-listed dispatchMode still warns" expect_contains "${SCRATCH}/out6" "Missing catalyst.orchestration.dispatchMode"
+run "non-allow-listed executor still warns" expect_contains "${SCRATCH}/out6" "Missing catalyst.orchestration.executor"
 
 # ── Test 7: --json mode emits structured array ───────────────────────────────
 bash "$DRIFT" --json --template "$TPL2" --config "$CFG2" > "${SCRATCH}/out7" 2>/dev/null || true
@@ -216,7 +227,7 @@ cat > "$TPL8" <<'EOF'
 {
   "catalyst": {
     "projectKey": "default",
-    "orchestration": { "dispatchMode": "phase-agents" }
+    "orchestration": { "executor": "sdk" }
   }
 }
 EOF
@@ -229,9 +240,9 @@ run "merge preserves projectKey" bash -c "
   v=\$(jq -r '.catalyst.projectKey' < '$OUT8')
   [ \"\$v\" = \"user-chosen-name\" ]
 "
-run "merge adds dispatchMode" bash -c "
-  v=\$(jq -r '.catalyst.orchestration.dispatchMode' < '$OUT8')
-  [ \"\$v\" = \"phase-agents\" ]
+run "merge adds executor" bash -c "
+  v=\$(jq -r '.catalyst.orchestration.executor' < '$OUT8')
+  [ \"\$v\" = \"sdk\" ]
 "
 
 # ── Test 9: --merge-into never overwrites user values ────────────────────────
@@ -297,8 +308,8 @@ fi
 
 # ── Test 14: arrays are leaves, not descended into (regression for paths(scalars)) ──
 # Without the fix, paths(scalars) descends into arrays and yields integer-indexed
-# leaves; a project missing the feedback block would see
-# "Missing catalyst.feedback.labels.0" — semantically wrong since users never set
+# leaves; a project missing the filter block would see
+# "Missing catalyst.filter.groqModels.0" — semantically wrong since users never set
 # array elements by integer index. With the fix the array itself is the leaf.
 TPL14="${SCRATCH}/tpl14.json"
 CFG14="${SCRATCH}/cfg14.json"
@@ -306,7 +317,7 @@ cat > "$TPL14" <<'EOF'
 {
   "catalyst": {
     "projectKey": "k",
-    "feedback": { "labels": ["auto-submitted", "needs-triage"] }
+    "filter": { "groqModels": ["llama-3.1-8b-instant", "llama-3.3-70b"] }
   }
 }
 EOF
@@ -317,16 +328,16 @@ run "array template leaves: no integer-indexed warning" bash -c "
   out=\$(bash '$DRIFT' --template '$TPL14' --config '$CFG14' 2>/dev/null || true)
   ! echo \"\$out\" | grep -q 'labels\\.0'
 "
-run "array template leaves: single warning for the labels array" bash -c "
+run "array template leaves: single warning for the groqModels array" bash -c "
   out=\$(bash '$DRIFT' --template '$TPL14' --config '$CFG14' 2>/dev/null || true)
-  count=\$(echo \"\$out\" | grep -c 'Missing catalyst\\.feedback\\.labels' || true)
+  count=\$(echo \"\$out\" | grep -c 'Missing catalyst\\.filter\\.groqModels' || true)
   # one warning + one indented hint line both contain the substring → expect 2
   [ \"\$count\" -ge 1 ]
 "
 run "array template leaves: --json reports the array verbatim" bash -c "
   out=\$(bash '$DRIFT' --json --template '$TPL14' --config '$CFG14' 2>/dev/null || true)
-  v=\$(echo \"\$out\" | jq -c '[.[] | select(.path == [\"catalyst\",\"feedback\",\"labels\"])][0].template_value')
-  [ \"\$v\" = '[\"auto-submitted\",\"needs-triage\"]' ]
+  v=\$(echo \"\$out\" | jq -c '[.[] | select(.path == [\"catalyst\",\"filter\",\"groqModels\"])][0].template_value')
+  [ \"\$v\" = '[\"llama-3.1-8b-instant\",\"llama-3.3-70b\"]' ]
 "
 
 # ── Test 15: --merge-into strips placeholder VALUES, not just placeholder KEYS ──
@@ -340,7 +351,7 @@ cat > "$TPL15" <<'EOF'
 {
   "catalyst": {
     "repository": { "org": "[YOUR_ORG]", "name": "[YOUR_REPO]" },
-    "orchestration": { "dispatchMode": "phase-agents" }
+    "orchestration": { "executor": "sdk" }
   }
 }
 EOF
@@ -368,9 +379,85 @@ run "--merge-into: no [YOUR_*] literal injected when block is absent" bash -c "
   ! jq -r '.. | strings' < '$OUT15B' | grep -q '\\[YOUR_'
 "
 run "--merge-into: non-placeholder template keys still merged" bash -c "
-  v=\$(jq -r '.catalyst.orchestration.dispatchMode' < '$OUT15B')
-  [ \"\$v\" = 'phase-agents' ]
+  v=\$(jq -r '.catalyst.orchestration.executor' < '$OUT15B')
+  [ \"\$v\" = 'sdk' ]
 "
+
+# ─── CTL-1214: a slimmed config vs an OLD (unsanitized) template ─────────────
+# This detector's direction is the inverse of CTL-1214's: it reports template
+# keys MISSING from a project config and can --merge-into them. A repo pinned to
+# a pre-CTL-1214 template would therefore see every relocated key as drift, and a
+# --merge-into would put the whole stanza straight back — undoing the slimming.
+OLD_TPL="${SCRATCH}/tpl-old.json"
+cat > "$OLD_TPL" <<'EOF'
+{
+  "catalyst": {
+    "projectKey": "my-project",
+    "project": { "ticketPrefix": "PROJ" },
+    "filter": { "groqModel": "llama-3.1-8b-instant" },
+    "feedback": { "autoFile": false, "githubRepo": "coalesce-labs/catalyst", "labels": ["auto-submitted"] },
+    "sweep": { "idleHours": 48, "intervalHours": 1 },
+    "monitor": { "github": { "repoColors": { "a/b": "green" } } },
+    "orchestration": {
+      "dispatchMode": "phase-agents",
+      "worktreeRefresh": { "enabled": true },
+      "reconcile": { "mode": "notify" },
+      "executionCore": { "maxParallel": 4 }
+    }
+  }
+}
+EOF
+
+SLIM_CFG="${SCRATCH}/cfg-slim.json"
+cat > "$SLIM_CFG" <<'EOF'
+{
+  "catalyst": {
+    "schemaVersion": 1,
+    "projectKey": "my-project",
+    "project": { "ticketPrefix": "PROJ" },
+    "filter": { "groqModel": "llama-3.1-8b-instant" }
+  }
+}
+EOF
+
+OUT_SLIM="${SCRATCH}/out-slim.txt"
+SLIM_RC=0
+bash "$DRIFT" --template "$OLD_TPL" --config "$SLIM_CFG" > "$OUT_SLIM" 2>&1 || SLIM_RC=$?
+
+run "CTL-1214: a slimmed config vs the OLD template exits 0" \
+  bash -c "[ '$SLIM_RC' = '0' ]"
+run "CTL-1214: zero drift lines for any relocated path" \
+  bash -c "
+    n=\$(grep -cE 'Missing catalyst\\.(orchestration|feedback|sweep|monitor\\.github\\.repoColors)' '$OUT_SLIM' || true)
+    [ \"\$n\" = '0' ]
+  "
+
+# ⚠️ POSITIVE CONTROL. Without it, "zero drift" above could just mean the
+# detector stopped working — a genuine, NON-relocated missing key must still be
+# reported against the very same template.
+OLD_TPL_PLUS="${SCRATCH}/tpl-old-plus.json"
+jq '.catalyst.deployment = {"mode":"single-host"}' "$OLD_TPL" > "$OLD_TPL_PLUS"
+OUT_PC="${SCRATCH}/out-slim-pc.txt"
+PC_RC=0
+bash "$DRIFT" --template "$OLD_TPL_PLUS" --config "$SLIM_CFG" > "$OUT_PC" 2>&1 || PC_RC=$?
+run "CTL-1214 positive control: a non-relocated missing key IS still reported" \
+  bash -c "grep -q 'Missing catalyst\\.deployment\\.mode' '$OUT_PC'"
+run "CTL-1214 positive control: and it still exits non-zero" \
+  bash -c "[ '$PC_RC' != '0' ]"
+
+# --merge-into must never re-add a relocated key.
+MERGED_SLIM="${SCRATCH}/merged-slim.json"
+bash "$DRIFT" --template "$OLD_TPL" --config "$SLIM_CFG" --merge-into "$MERGED_SLIM" >/dev/null 2>&1 || true
+run "CTL-1214: --merge-into does not re-add orchestration" \
+  bash -c "jq -e '.catalyst.orchestration == null' '$MERGED_SLIM'"
+run "CTL-1214: --merge-into does not re-add feedback" \
+  bash -c "jq -e '.catalyst.feedback == null' '$MERGED_SLIM'"
+run "CTL-1214: --merge-into does not re-add sweep" \
+  bash -c "jq -e '.catalyst.sweep == null' '$MERGED_SLIM'"
+run "CTL-1214: --merge-into does not re-add monitor.github.repoColors" \
+  bash -c "jq -e '.catalyst.monitor.github.repoColors == null' '$MERGED_SLIM' 2>/dev/null || jq -e '.catalyst.monitor == null' '$MERGED_SLIM'"
+run "CTL-1214: --merge-into positive control — identity keys ARE still merged" \
+  bash -c "jq -e '.catalyst.projectKey == \"my-project\" and .catalyst.filter.groqModel != null' '$MERGED_SLIM'"
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

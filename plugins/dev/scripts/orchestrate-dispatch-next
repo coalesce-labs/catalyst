@@ -155,11 +155,25 @@ fi
 # for orchestrators that haven't been migrated yet. Explicit --phase always
 # wins over the resolved dispatchMode.
 DISPATCH_MODE="oneshot-legacy"
+RAW_MODE=""
 if [ -n "$CONFIG_PATH" ] && [ -f "$CONFIG_PATH" ]; then
-	RAW_MODE=$(jq -r '.catalyst.orchestration.dispatchMode // "oneshot-legacy"' "$CONFIG_PATH" 2>/dev/null || echo "oneshot-legacy")
+	RAW_MODE=$(jq -r '.catalyst.orchestration.dispatchMode // empty' "$CONFIG_PATH" 2>/dev/null || echo "")
+fi
+# CTL-1214: Layer-2 fallback. dispatchMode had NO Layer-2 reader, so once the
+# committed config is slimmed a bare Layer-1 read returns nothing and this
+# resolves to "oneshot-legacy" — the wrong orchestration mode for the whole
+# fleet, arrived at silently because the miss is indistinguishable from an
+# intentional legacy setting. Layer-1 still WINS when present (this is a
+# fallback, not an override); Layer-2 answers only when Layer-1 is silent.
+if [ -z "$RAW_MODE" ] && [ -r "${SCRIPT_DIR}/lib/catalyst-layer2-read.sh" ]; then
+	# shellcheck disable=SC1090
+	. "${SCRIPT_DIR}/lib/catalyst-layer2-read.sh"
+	RAW_MODE="$(catalyst_layer2_json '.catalyst.orchestration.dispatchMode')"
+fi
+if [ -n "$RAW_MODE" ]; then
 	case "$RAW_MODE" in
 	phase-agents | oneshot-legacy | execution-core) DISPATCH_MODE="$RAW_MODE" ;;
-	*) echo "WARN: invalid dispatchMode '$RAW_MODE' in $CONFIG_PATH — defaulting to oneshot-legacy" >&2 ;;
+	*) echo "WARN: invalid dispatchMode '$RAW_MODE' — defaulting to oneshot-legacy" >&2 ;;
 	esac
 fi
 

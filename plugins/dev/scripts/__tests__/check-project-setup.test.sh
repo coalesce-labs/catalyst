@@ -174,8 +174,20 @@ EOF
 }
 
 # ─── Test: drift detected → warning appears in output (CTL-489) ─────────────
-# make_project's baseline config lacks orchestration.dispatchMode, so the drift
-# walker should surface a "Missing catalyst.orchestration.dispatchMode" warning.
+# make_project's baseline config lacks several template leaves, so the drift
+# walker should surface a "Missing catalyst.<path>" warning for each.
+#
+# CTL-1214 re-anchor: this used to assert on catalyst.orchestration.dispatchMode.
+# That key is now NODE-scoped — Phase 3 removed the orchestration stanza from
+# config.template.json AND the drift comparison strips RELOCATED_LAYER1_KEYS — so
+# a committed Layer-1 that omits it is CORRECT, not drifted, and offering it as
+# drift would tell an operator to re-commit the very key this ticket relocated.
+#
+# The probe is therefore re-pointed at catalyst.deployment.mode, a leaf that is
+# still templated and still project-scoped, and PAIRED with a negative assertion
+# on the relocated keys. Both halves are load-bearing: the positive control is
+# what stops "no relocated key is offered as drift" from silently meaning "the
+# drift detector stopped working", which a bare not-grep can never distinguish.
 test_drift_warning_appears() {
   echo "test: missing template key → drift warning in check-project-setup output"
   local proj="$SCRATCH/proj-drift" key="proj-drift"
@@ -191,10 +203,23 @@ EOF
 
   local out
   out=$(run_script "$proj" 2>&1)
-  assert_grep "drift warning fires for dispatchMode" "$out" \
-    "Missing catalyst.orchestration.dispatchMode"
+  # POSITIVE CONTROL — a still-templated, still-project-scoped leaf must drift.
+  assert_grep "drift warning fires for a project-scoped key" "$out" \
+    "Missing catalyst.deployment.mode"
   assert_grep "drift warning quotes template default" "$out" \
-    'template suggests "phase-agents"'
+    'template suggests "single-host"'
+  # The CTL-1214 contract itself: no NODE-scoped relocated key is offered as
+  # drift, on either the template side or the RELOCATED_LAYER1_KEYS strip.
+  assert_not_grep "relocated dispatchMode not offered as drift" "$out" \
+    "Missing catalyst.orchestration.dispatchMode"
+  assert_not_grep "relocated sweep not offered as drift" "$out" \
+    "Missing catalyst.sweep"
+  assert_not_grep "relocated feedback not offered as drift" "$out" \
+    "Missing catalyst.feedback"
+  assert_not_grep "relocated repoColors not offered as drift" "$out" \
+    "Missing catalyst.monitor.github.repoColors"
+  assert_not_grep "relocated executionCore not offered as drift" "$out" \
+    "Missing catalyst.orchestration.executionCore"
   # Drift lines must land in the WARN: block (not leak out unformatted) — guards
   # against a regression where the `while read line; do warnings+=("$line"); done`
   # loop is removed and drift script output reaches stdout directly.

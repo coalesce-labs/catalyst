@@ -1,0 +1,179 @@
+#!/usr/bin/env bun
+// catalyst-config-migrate — CTL-1214 Phase 2. Move a repo's relocated Layer-1
+// keys into the node-scoped ~/.config/catalyst/node.json and stamp
+// schemaVersion on what remains.
+//
+// All decisions live in lib/migrate-layer1-config.mjs's pure planner; this is
+// argument parsing, I/O and reporting.
+//
+// Usage:
+//   catalyst-config-migrate [--config PATH] [--node PATH] [--dry-run] [--json]
+//   catalyst-config-migrate --paths [--json]
+//
+// --paths prints the relocated dotted paths, one per line, so the BASH side can
+// consume the single JS registry instead of re-typing it (the ASSERTED_BY
+// mirror discipline: one registry, mechanically shared, never two lists).
+
+import { readFileSync, existsSync } from "node:fs";
+import { resolve, dirname } from "node:path";
+import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
+
+import {
+  planLayer1Migration,
+  applyLayer1Migration,
+  RELOCATED_PATHS,
+} from "./lib/migrate-layer1-config.mjs";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+
+const USAGE = `catalyst-config-migrate — relocate machine-scoped keys out of a committed
+.catalyst/config.json into the node-scoped ~/.config/catalyst/node.json (CTL-1214).
+
+Usage: catalyst-config-migrate [options]
+
+Options:
+  --config PATH   Layer-1 config to slim   (default: <cwd>/.catalyst/config.json)
+  --node PATH     node.json to write into  (default: ~/.config/catalyst/node.json)
+  --dry-run       report what would change; write nothing
+  --json          machine-readable report
+  --paths         print the relocated dotted paths and exit
+  -h, --help      this help
+
+Writes node.json FIRST and the slimmed Layer-1 LAST, so a failure can never
+leave a repo slimmed with its values nowhere. Re-running is a no-op.
+
+⛔ Never run this against a host on a pre-Phase-1 plugin checkout: that host has
+no Layer-2 fallbacks, so a slimmed config silently reverts dispatchMode to
+oneshot-legacy. This CLI refuses when lib/catalyst-layer2-read.sh is missing
+from its own checkout.
+`;
+
+function die(msg, code = 1) {
+  process.stderr.write(`catalyst-config-migrate: ${msg}\n`);
+  process.exit(code);
+}
+
+const argv = process.argv.slice(2);
+const opts = { dryRun: false, json: false, paths: false, config: null, node: null };
+for (let i = 0; i < argv.length; i++) {
+  const a = argv[i];
+  if (a === "-h" || a === "--help") {
+    process.stdout.write(USAGE);
+    process.exit(0);
+  } else if (a === "--dry-run") opts.dryRun = true;
+  else if (a === "--json") opts.json = true;
+  else if (a === "--paths") opts.paths = true;
+  else if (a === "--config") opts.config = argv[++i];
+  else if (a === "--node") opts.node = argv[++i];
+  else die(`unknown argument: ${a}\n\n${USAGE}`, 2);
+}
+
+if (opts.paths) {
+  if (opts.json) process.stdout.write(`${JSON.stringify(RELOCATED_PATHS)}\n`);
+  else for (const p of RELOCATED_PATHS) process.stdout.write(`${p}\n`);
+  process.exit(0);
+}
+
+// ⛔ The order-dependency guard from the migration notes. Slimming a config on a
+// host whose checkout predates the Phase-1 fallbacks is the one way this tool can
+// cause the silent revert it exists to prevent, so refuse rather than warn.
+const fallbackLeaf = resolve(HERE, "lib", "catalyst-layer2-read.sh");
+if (!existsSync(fallbackLeaf)) {
+  die(
+    `refusing to migrate: ${fallbackLeaf} is missing from this checkout, so the ` +
+      "Layer-2 fallbacks (CTL-1214 Phase 1) are not present. Slimming the config here " +
+      "would silently revert dispatchMode to oneshot-legacy and halve the sweep cadence. " +
+      "Update the plugin checkout first.",
+  );
+}
+
+const layer1Path = opts.config ?? resolve(process.cwd(), ".catalyst", "config.json");
+const nodePath =
+  opts.node ??
+  (process.env.CATALYST_LAYER2_CONFIG_FILE
+    ? resolve(process.env.CATALYST_LAYER2_CONFIG_FILE, "..", "node.json")
+    : resolve(homedir(), ".config", "catalyst", "node.json"));
+
+if (!existsSync(layer1Path)) die(`Layer-1 config not found: ${layer1Path}`);
+
+let layer1;
+try {
+  layer1 = JSON.parse(readFileSync(layer1Path, "utf8"));
+} catch (err) {
+  // Fail closed: a malformed Layer-1 must never be treated as empty, which would
+  // "successfully" migrate nothing and report a clean run over a broken file.
+  die(`Layer-1 config is unreadable or malformed (${err.message}): ${layer1Path}`);
+}
+
+// The merged Layer-2 view drives the non-clobber rule. Read it through the same
+// composition the daemon uses, rooted at node.json's own directory so --node
+// redirects the whole view rather than just the write target.
+let mergedLayer2 = { catalyst: {} };
+try {
+  const { readLayer2MergedFrom } = await import("./execution-core/config.mjs");
+  mergedLayer2 = readLayer2MergedFrom(resolve(nodePath, "..", "config.json"));
+} catch (err) {
+  die(`could not read the merged Layer-2 view (${err.message})`);
+}
+
+let plan;
+try {
+  plan = planLayer1Migration({ layer1, mergedLayer2 });
+} catch (err) {
+  die(err.message);
+}
+
+let result = { wrote: [], dryRun: opts.dryRun };
+if (!opts.dryRun) {
+  try {
+    result = applyLayer1Migration({ plan, layer1Path, nodePath });
+  } catch (err) {
+    die(`write failed (${err.message}) — Layer-1 left UNSLIMMED at ${layer1Path}`);
+  }
+}
+
+const report = {
+  layer1Path,
+  nodePath,
+  dryRun: opts.dryRun,
+  changed: plan.changed,
+  // CTL-1214: `from`/`reason` are carried for the one RE-HOMED leaf
+  // (executionCore.maxParallel → executionCore.targetParallel). The docs tell
+  // operators to keep this report as the record of what went where, so dropping
+  // the rename here would make the report claim a straight move that never
+  // happened. Both are undefined for an ordinary move and JSON.stringify omits
+  // them, so the report shape is unchanged for every other row.
+  moved: plan.moves.map((m) => ({ path: m.path, value: m.value, from: m.from, reason: m.reason })),
+  kept: plan.kept.map((k) => ({ path: k.path, existingValue: k.existingValue, reason: k.reason })),
+  dropped: plan.dropped,
+  wrote: result.wrote,
+};
+
+if (opts.json) {
+  process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+} else {
+  const tag = opts.dryRun ? "[dry-run] " : "";
+  process.stdout.write(`${tag}Layer-1: ${layer1Path}\n${tag}node.json: ${nodePath}\n\n`);
+  if (!plan.changed) {
+    process.stdout.write(`${tag}nothing to do — already migrated\n`);
+  } else {
+    for (const m of report.moved) {
+      const via = m.from ? ` (re-homed from ${m.from} — ${m.reason})` : "";
+      process.stdout.write(`${tag}  moved   ${m.path} = ${JSON.stringify(m.value)}${via}\n`);
+    }
+    for (const k of report.kept) {
+      process.stdout.write(
+        `${tag}  kept    ${k.path} — Layer-2 already defines it as ${JSON.stringify(k.existingValue)}\n`,
+      );
+    }
+    for (const d of report.dropped) {
+      process.stdout.write(`${tag}  dropped ${d.path} — ${d.reason}\n`);
+    }
+    process.stdout.write(
+      `\n${tag}${report.moved.length} moved, ${report.kept.length} kept, ${report.dropped.length} dropped\n`,
+    );
+    if (result.wrote.length) process.stdout.write(`wrote: ${result.wrote.join(", ")}\n`);
+  }
+}
+process.exit(0);

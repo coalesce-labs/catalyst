@@ -16,7 +16,7 @@
 
 import { readFileSync, writeFileSync, renameSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
-import { log, getEventLogPath } from "./config.mjs";
+import { log, getEventLogPath, readLayer2MergedFrom } from "./config.mjs";
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 import { DEFAULTS, reconcileDeclarations, orderedStatesForMap } from "./linear-reconcile.mjs";
 import { listDeclarations, markReconciled } from "./linear-reconcile-store.mjs";
@@ -30,7 +30,7 @@ import { isLinearTerminal } from "./terminal-state.mjs";
 // CATALYST_RECONCILE_MODE env override (the per-node safety switch for this
 // WRITER — Codex P2). Returns {} for missing/unreadable/absent keys.
 export function readLinearReconcileConfig(layer1Path, layer2Path) {
-  const readOne = (p) => {
+  const readLayer1 = (p) => {
     if (!p) return {};
     try {
       return JSON.parse(readFileSync(p, "utf8"))?.catalyst?.orchestration?.reconcile ?? {};
@@ -44,8 +44,25 @@ export function readLinearReconcileConfig(layer1Path, layer2Path) {
       return {};
     }
   };
+  // CTL-1214: the Layer-2 arm reads the MERGED view (config.json < node.json <
+  // cluster-secrets.json) so a value the migration wrote to node.json is seen.
+  // Same never-throw, {}-on-any-miss contract; byte-identical with no node.json.
+  const readLayer2 = (p) => {
+    if (!p) return {};
+    try {
+      const block = readLayer2MergedFrom(p)?.catalyst?.orchestration?.reconcile;
+      if (!block || typeof block !== "object" || Array.isArray(block)) return {};
+      return block;
+    } catch (err) {
+      log.warn(
+        { configPath: p, err: err.message },
+        "linear-reconcile: Layer-2 config unreadable; ignoring"
+      );
+      return {};
+    }
+  };
   // Layer-2 wins per field (node-scoped override of the committed Layer-1 seed).
-  const merged = { ...readOne(layer1Path), ...readOne(layer2Path) };
+  const merged = { ...readLayer1(layer1Path), ...readLayer2(layer2Path) };
   const envMode = process.env.CATALYST_RECONCILE_MODE;
   if (envMode) merged.mode = envMode; // hardest per-node override
   return merged;

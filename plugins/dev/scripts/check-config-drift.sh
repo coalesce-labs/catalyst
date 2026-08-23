@@ -73,6 +73,31 @@ SUPPRESSED_ROOTS_JSON='[
   ["catalyst","linear","stateIds"]
 ]'
 
+# CTL-1214: the RELOCATED keys are stripped from the TEMPLATE before any
+# comparison, in BOTH modes. This detector's direction is the inverse of that
+# ticket's — it reports template keys MISSING from a project config and can
+# --merge-into them — so a slimmed config would read as drifted, and a
+# --merge-into would put the relocated stanza straight back. Sanitizing the
+# shipped template (same change) already removes them at the source; this is the
+# belt-and-braces arm that also covers a repo pinned to an OLDER template.
+#
+# The path list is read from the shared JS registry via `catalyst-config-migrate
+# --paths`, never re-typed here — one definition of what leaks, exactly as the
+# ASSERTED_BY bash mirrors are held to their registry. If the CLI is unavailable
+# the list is EMPTY and the detector behaves exactly as before: no relocated path
+# is stripped, which is the pre-CTL-1214 behavior rather than a silent
+# over-suppression.
+_CCD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RELOCATED_PATHS_JSON='[]'
+if [ -x "${_CCD_DIR}/catalyst-config-migrate" ] && command -v bun >/dev/null 2>&1; then
+  _ccd_paths="$("${_CCD_DIR}/catalyst-config-migrate" --paths --json 2>/dev/null || printf '')"
+  if [ -n "$_ccd_paths" ] && printf '%s' "$_ccd_paths" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    # "orchestration.dispatchMode" -> ["catalyst","orchestration","dispatchMode"]
+    RELOCATED_PATHS_JSON="$(printf '%s' "$_ccd_paths" \
+      | jq -c '[.[] | ["catalyst"] + (. | split("."))]' 2>/dev/null || printf '[]')"
+  fi
+fi
+
 # --merge-into: jq's `*` operator does a recursive merge. Project on the right
 # means user values always win; template keys missing from project are added.
 # Comment/$schema keys and placeholder branches are stripped from the template
@@ -87,11 +112,19 @@ if [ "$MODE" = "merge" ]; then
   if ! jq -n \
       --slurpfile t "$TEMPLATE_PATH" \
       --slurpfile p "$CONFIG_PATH" \
+      --argjson relocated "$RELOCATED_PATHS_JSON" \
       '
       def strip_meta:
         walk(if type == "object"
              then with_entries(select(.key | IN("_comment","$comment","$schema") | not))
              else . end);
+      # CTL-1214: --merge-into must never re-add a relocated key to a Layer-1
+      # config. Same strip as the drift arm, with the empty-container prune.
+      def strip_relocated:
+        reduce $relocated[] as $rp (.; delpaths([$rp]))
+        | walk(if type == "object"
+               then with_entries(select((.value | type) != "object" or ((.value | length) > 0)))
+               else . end);
       # Drop entries whose KEY is a [YOUR_*] placeholder (e.g. the deploy
       # "[YOUR_ORG]/[YOUR_REPO]" sub-tree) AND entries whose VALUE is a
       # [YOUR_*] placeholder string (e.g. repository.org="[YOUR_ORG]").
@@ -107,7 +140,7 @@ if [ "$MODE" = "merge" ]; then
                       or ((.value | test("\\[YOUR_(ORG|REPO)\\]")) | not))
                ))
              else . end);
-      ($t[0] | strip_meta | strip_placeholders) * ($p[0] // {})
+      ($t[0] | strip_meta | strip_placeholders | strip_relocated) * ($p[0] // {})
       ' > "$TMP" 2>"$JQ_ERR"; then
     err=$(cat "$JQ_ERR" 2>/dev/null || true)
     rm -f "$TMP" "$JQ_ERR"
@@ -140,11 +173,20 @@ DRIFT_JSON=$(jq -n \
   --slurpfile t "$TEMPLATE_PATH" \
   --slurpfile p "$CONFIG_PATH" \
   --argjson suppress "$SUPPRESSED_ROOTS_JSON" \
+  --argjson relocated "$RELOCATED_PATHS_JSON" \
   '
   def strip_meta:
     walk(if type == "object"
          then with_entries(select(.key | IN("_comment","$comment","$schema") | not))
          else . end);
+  # CTL-1214: delete every relocated path from the template, then prune any
+  # container the deletion emptied — otherwise an emptied `orchestration: {}`
+  # would still be enumerated as a drifted leaf.
+  def strip_relocated:
+    reduce $relocated[] as $rp (.; delpaths([$rp]))
+    | walk(if type == "object"
+           then with_entries(select((.value | type) != "object" or ((.value | length) > 0)))
+           else . end);
   def has_placeholder($p):
     any($p[]; tostring | test("\\[YOUR_(ORG|REPO)\\]"));
   def is_suppressed($p; $roots):
@@ -153,7 +195,7 @@ DRIFT_JSON=$(jq -n \
                   and ($p[0:($root|length)] == $root));
   def is_object_key_path($p):
     ($p | length) > 0 and (($p | .[-1] | type) == "string");
-  ($t[0] | strip_meta) as $tmpl
+  ($t[0] | strip_meta | strip_relocated) as $tmpl
   | ($p[0] // {}) as $proj
   | [ $tmpl
       | paths(type != "object") as $pp

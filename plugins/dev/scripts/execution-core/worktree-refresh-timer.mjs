@@ -10,31 +10,65 @@ import { fileURLToPath } from "node:url";
 import { readWorkerSignals } from "./signal-reader.mjs";
 import { isBgJobAlive } from "./claude-agents.mjs";
 import { isSdkWorkerLive as registrySdkWorkerLive } from "./sdk-worker-registry.mjs";
-import { log } from "./config.mjs";
+import { log, readLayer2MergedFrom } from "./config.mjs";
 
 const REFRESH_BIN = fileURLToPath(
   new URL("../lib/worktree-refresh.sh", import.meta.url)
 );
 
 /**
- * readWorktreeRefreshConfig — read catalyst.orchestration.worktreeRefresh.*
- * from .catalyst/config.json. Returns {} for missing/unreadable/absent key.
+ * readWorktreeRefreshConfig — read catalyst.orchestration.worktreeRefresh.*,
+ * merged across Layer-1 (the committed .catalyst/config.json seed) and Layer-2
+ * (the node-scoped ~/.config/catalyst/{config,node,cluster-secrets}.json), with
+ * Layer-2 winning PER FIELD (CTL-1214 D8 — the same rule
+ * mergeExecutionCoreConcurrency and readLinearReconcileConfig already use).
+ *
+ * Before CTL-1214 this was a Layer-1-ONLY read that returns {} on any miss, so
+ * once Phase 4 slims the committed config the whole stanza would have vanished
+ * into the code defaults with no error — enabled/intervalSeconds/quietSeconds
+ * silently reverting. The Layer-2 arm is what makes the slimming safe; with
+ * layer2Path omitted (or no Layer-2 files present) the result is byte-identical
+ * to the old behavior, which is why daemon.mjs's one-argument call still works.
+ *
+ * @param {string} configPath - Layer-1 .catalyst/config.json
+ * @param {string} [layer2Path] - Layer-2 config.json; node.json and
+ *   cluster-secrets.json are resolved as its siblings.
  */
-export function readWorktreeRefreshConfig(configPath) {
-  if (!configPath) return {};
-  let parsed;
-  try {
-    parsed = JSON.parse(readFileSync(configPath, "utf8"));
-  } catch (err) {
-    if (err?.code !== "ENOENT") {
-      log.warn(
-        { configPath, err: err.message },
-        "worktree-refresh: config unreadable; using defaults"
-      );
+export function readWorktreeRefreshConfig(configPath, layer2Path) {
+  const layer1 = (() => {
+    if (!configPath) return {};
+    let parsed;
+    try {
+      parsed = JSON.parse(readFileSync(configPath, "utf8"));
+    } catch (err) {
+      if (err?.code !== "ENOENT") {
+        log.warn(
+          { configPath, err: err.message },
+          "worktree-refresh: config unreadable; using defaults"
+        );
+      }
+      return {};
     }
-    return {};
+    return parsed?.catalyst?.orchestration?.worktreeRefresh ?? {};
+  })();
+
+  if (!layer2Path) return layer1;
+
+  // Fail-open: readLayer2MergedFrom swallows absent/malformed layers per file, so
+  // a broken Layer-2 can never take down a healthy Layer-1 value.
+  let layer2 = {};
+  try {
+    layer2 = readLayer2MergedFrom(layer2Path)?.catalyst?.orchestration?.worktreeRefresh ?? {};
+  } catch (err) {
+    log.warn(
+      { layer2Path, err: err.message },
+      "worktree-refresh: Layer-2 config unreadable; using Layer-1"
+    );
+    layer2 = {};
   }
-  return parsed?.catalyst?.orchestration?.worktreeRefresh ?? {};
+  if (!layer2 || typeof layer2 !== "object" || Array.isArray(layer2)) return layer1;
+
+  return { ...layer1, ...layer2 };
 }
 
 function realClock() {

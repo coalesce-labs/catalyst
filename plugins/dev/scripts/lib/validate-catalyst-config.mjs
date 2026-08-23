@@ -7,7 +7,9 @@
 //     scope (catalyst-cluster/cluster.json → projects[]);
 //   - repo display colors (monitor.github.repoColors), the orchestration.*,
 //     feedback.*, and sweep.* stanzas → relocate to the NODE scope
-//     (~/.config/catalyst/config.json).
+//     (~/.config/catalyst/node.json — CTL-1214 D1; readLayer2Merged already
+//     composes config.json < node.json < cluster-secrets.json, and node.json is
+//     the per-node file that is never mirrored across the cluster).
 //
 // This module is the single source of truth for that leak-category list
 // (RELOCATED_LAYER1_KEYS) and a pure validator (validateLayer1Config) that both
@@ -24,35 +26,116 @@
  * relocated — they are genuinely Layer-1 (the daemon reads botUserId flat from
  * Layer-1, see docs/architecture.md) — so they are deliberately absent here.
  *
- * @type {ReadonlyArray<{path: string, scope: "cluster"|"node", destination: string}>}
+ * ⚠️ CTL-1214 D6 — `catalyst.orchestration` is NOT wholly machine-scoped, so the
+ * blanket `orchestration` row this list used to carry is replaced by the FOUR
+ * subpaths that actually relocate. config-dump.mjs heads that block
+ * "orchestration (Layer-1 owned)", and the daemon reads at least these further
+ * stanzas from Layer-1, every one of which stays:
+ *   executor, executorByPhase, codex (the documented codexHome pin — see
+ *   docs/architecture.md "The Codex account selector seam"), publishPreflight,
+ *   fleetHealth, daemonWatchdog, orphanReaper.workerGc, stalePrRescue,
+ *   orphanPrSweep, stalledPrSweep, draftPr, pluginDirs, phaseAgents.
+ * The narrowing is what lets the Phase-5 promotion be a hard error without making
+ * a documented, supported configuration fail doctor — and doctor's exit code
+ * gates member activation in catalyst-join.sh, so a false FAIL there fail-closes
+ * the fleet. This repo's committed config carries only the four, so the
+ * "no orchestration stanza after migration" outcome is unchanged.
+ *
+ * ⚠️ CTL-1214 remediation — `precedence` records which layer WINS when BOTH still
+ * carry the key, because the two stacks genuinely differ and the difference is
+ * what an operator needs at the moment doctor reports a leak:
+ *   - `"destination-wins"` — the JS readers (readLayer2MergedFrom consumers) and
+ *     the cluster roster overlay Layer-2/cluster ON TOP of Layer-1 per field, so a
+ *     leftover Layer-1 key is SHADOWED (silently divergent, not authoritative).
+ *   - `"layer1-wins"` — the bash readers treat Layer-2 as a FALLBACK consulted
+ *     only when Layer-1 is silent (mirroring phase-agent-dispatch's pre-existing
+ *     `config_value()`), so a leftover Layer-1 key OVERRIDES node.json.
+ * `readBy` names the stack that establishes it. Both are documented per knob in
+ * website/src/content/docs/reference/configuration.md → "Precedence"; this array
+ * is the single source of truth the doctor message formats from, so the two
+ * cannot drift into the "one blanket ladder" claim that was wrong for 4 of 7 rows.
+ *
+ * @type {ReadonlyArray<{path: string, scope: "cluster"|"node", destination: string,
+ *   precedence: "destination-wins"|"layer1-wins", readBy: "js"|"bash"}>}
  */
 export const RELOCATED_LAYER1_KEYS = Object.freeze([
   {
     path: "monitor.linear.teams",
     scope: "cluster",
     destination: "catalyst-cluster/cluster.json → projects[]",
+    precedence: "destination-wins",
+    readBy: "js",
   },
   {
     path: "monitor.github.repoColors",
     scope: "node",
-    destination: "~/.config/catalyst/config.json → catalyst.monitor.github.repoColors",
+    destination: "~/.config/catalyst/node.json → catalyst.monitor.github.repoColors",
+    precedence: "destination-wins",
+    readBy: "js",
   },
   {
-    path: "orchestration",
+    path: "orchestration.dispatchMode",
     scope: "node",
-    destination: "~/.config/catalyst/config.json → catalyst.orchestration.*",
+    destination: "~/.config/catalyst/node.json → catalyst.orchestration.dispatchMode",
+    precedence: "layer1-wins",
+    readBy: "bash",
+  },
+  {
+    path: "orchestration.executionCore",
+    scope: "node",
+    destination: "~/.config/catalyst/node.json → catalyst.orchestration.executionCore.*",
+    precedence: "destination-wins",
+    readBy: "js",
+  },
+  {
+    path: "orchestration.worktreeRefresh",
+    scope: "node",
+    destination: "~/.config/catalyst/node.json → catalyst.orchestration.worktreeRefresh.*",
+    precedence: "destination-wins",
+    readBy: "js",
+  },
+  {
+    path: "orchestration.reconcile",
+    scope: "node",
+    destination: "~/.config/catalyst/node.json → catalyst.orchestration.reconcile.*",
+    precedence: "destination-wins",
+    readBy: "js",
   },
   {
     path: "feedback",
     scope: "node",
-    destination: "~/.config/catalyst/config.json → catalyst.feedback.*",
+    destination: "~/.config/catalyst/node.json → catalyst.feedback.*",
+    precedence: "layer1-wins",
+    readBy: "bash",
   },
   {
     path: "sweep",
     scope: "node",
-    destination: "~/.config/catalyst/config.json → catalyst.sweep.*",
+    destination: "~/.config/catalyst/node.json → catalyst.sweep.*",
+    precedence: "layer1-wins",
+    readBy: "bash",
   },
 ]);
+
+/**
+ * LAYER1_ERROR_CODES — the hard-error CLASSES validateLayer1Config can report.
+ *
+ * CTL-1214 remediation: `errors` is a flat string[], so its only consumer
+ * (doctor's checkConfigScopeLeak) graded FAIL on `errors.length > 0` and thereby
+ * reported a malformed `catalyst.schemaVersion` as a *scope leak*, with a message
+ * that named no leaked key and asserted a schemaVersion the config did not have.
+ * That FAIL is not cosmetic: runDoctor returns the FAIL count as its exit code and
+ * catalyst-join.sh gates member activation on exit 0.
+ *
+ * `errorDetails` carries the same errors tagged with one of these codes so a
+ * consumer can grade per class. `errors` keeps its exact prior shape and content —
+ * this is additive, and the two are built from one push so they cannot drift.
+ */
+export const LAYER1_ERROR_CODES = Object.freeze({
+  MISSING_ROOT: "missing-catalyst-root",
+  SCHEMA_VERSION: "schema-version-malformed",
+  NODE_SCOPE_LEAK: "node-scope-leak",
+});
 
 /**
  * Read a dotted path out of an object without throwing on missing intermediate
@@ -75,38 +158,68 @@ function getPath(obj, dottedPath) {
 /**
  * Validate a parsed Layer-1 `.catalyst/config.json` object.
  *
- * This is intentionally lenient about the back-compat migration window: neither
- * the relocated stanzas (`deprecatedKeys`) NOR a missing `catalyst.schemaVersion`
- * makes the config invalid. During the back-compat window schemaVersion is
- * RECOMMENDED, not required — every not-yet-slimmed config still lacks it (Phase 6,
- * which slims the committed configs and promotes schemaVersion to required, is
- * deferred), so failing on its absence would flag every live config as invalid in
- * editors/validators. A missing schemaVersion is surfaced as a `recommendation`
- * instead; a PRESENT-but-malformed value (not an integer >= 1) is still a hard
- * error (if you bother to set it, set it correctly). The only other hard
- * requirement is a top-level `catalyst` object.
+ * SELF-GATING STRICTNESS (CTL-1214 D3). `catalyst.schemaVersion` is the opt-in
+ * switch, NOT a hard global requirement:
+ *
+ *   - schemaVersion ABSENT  → today's lenient behavior verbatim. Relocated keys
+ *     are `deprecatedKeys` only, and the missing version is a `recommendation`.
+ *     The in-tree comments used to say Phase 6 would "promote schemaVersion to
+ *     required"; taken literally that flags every not-yet-migrated config in the
+ *     fleet as invalid, in editors and validators, for no benefit.
+ *   - schemaVersion >= 1    → this config has opted into the slimmed schema, so a
+ *     NODE-scoped relocated key is a HARD ERROR. A repo therefore becomes strict
+ *     exactly when it is slimmed, and a hand-edit or a rollback that re-adds a
+ *     relocated stanza fails loudly instead of silently reverting knobs.
+ *   - a PRESENT-but-malformed value (not an integer >= 1) is a hard error in its
+ *     own right and does NOT count as opting in — if you bother to set it, set it
+ *     correctly, and a bogus value must not be a back door into strict mode.
+ *
+ * CLUSTER-scoped leaks stay lenient in BOTH modes (D4). `monitor.linear.teams` is
+ * explicitly out of scope for CTL-1214 — the roster move is CTL-1885 — so it
+ * remains in slimmed configs and must not fail them. The gate keys off the
+ * registry's existing `scope` field; no new field, no second list.
+ *
+ * ⚠️ Why the asymmetry matters operationally: `catalyst doctor`'s exit code is its
+ * FAIL count, and catalyst-join.sh gates member activation on doctor exit 0. A
+ * hard error here becomes a fail-closed join gate, so it may only fire on a config
+ * that has DECLARED it is slimmed — never on a fleet member that simply has not
+ * migrated yet.
+ *
+ * The only other hard requirement is a top-level `catalyst` object.
  *
  * @param {unknown} obj - the parsed config object, expected shape `{ catalyst: {...} }`.
- * @returns {{ valid: boolean, deprecatedKeys: string[], errors: string[], recommendations: string[] }}
+ * @returns {{ valid: boolean, deprecatedKeys: string[], errors: string[],
+ *   errorDetails: Array<{code: string, message: string}>, recommendations: string[] }}
  *   - `valid`: true when there are no hard errors (deprecated keys / missing schemaVersion do not affect this);
  *   - `deprecatedKeys`: dotted paths (relative to `catalyst.`) that have relocated;
  *   - `errors`: human-readable hard-validation failures;
+ *   - `errorDetails`: the same failures as `{code, message}`, `code` drawn from
+ *     LAYER1_ERROR_CODES, so a caller can grade per error class instead of on
+ *     `errors.length`;
  *   - `recommendations`: non-failing migration signals (e.g. a missing schemaVersion).
  */
 export function validateLayer1Config(obj) {
   /** @type {string[]} */
   const errors = [];
+  /** @type {Array<{code: string, message: string}>} */
+  const errorDetails = [];
   /** @type {string[]} */
   const deprecatedKeys = [];
   /** @type {string[]} */
   const recommendations = [];
 
+  // One push site for both lists, so `errors` and `errorDetails` can never drift.
+  const addError = (code, message) => {
+    errors.push(message);
+    errorDetails.push({ code, message });
+  };
+
   const root = obj != null && typeof obj === "object" && !Array.isArray(obj) ? obj : {};
   const catalyst = root.catalyst;
 
   if (catalyst == null || typeof catalyst !== "object" || Array.isArray(catalyst)) {
-    errors.push("missing top-level `catalyst` object");
-    return { valid: false, deprecatedKeys, errors, recommendations };
+    addError(LAYER1_ERROR_CODES.MISSING_ROOT, "missing top-level `catalyst` object");
+    return { valid: false, deprecatedKeys, errors, errorDetails, recommendations };
   }
 
   // Back-compat (CTL-1214): catalyst.schemaVersion is RECOMMENDED, not required.
@@ -122,17 +235,31 @@ export function validateLayer1Config(obj) {
     !Number.isInteger(schemaVersion) ||
     schemaVersion < 1
   ) {
-    errors.push(
+    addError(
+      LAYER1_ERROR_CODES.SCHEMA_VERSION,
       `catalyst.schemaVersion must be an integer >= 1 (got ${JSON.stringify(schemaVersion)})`,
     );
   }
 
-  // Soft: scope-leak detection. Presence of a relocated key is deprecated, not invalid.
+  // Has this config OPTED IN to the strict contract? Only a well-formed integer
+  // >= 1 counts — the malformed-value branch above already errored, and letting a
+  // bogus value opt in would make garbage stricter than a blank.
+  const optedIn = Number.isInteger(schemaVersion) && schemaVersion >= 1;
+
+  // Scope-leak detection. Presence of a relocated key is always a deprecation;
+  // under an opted-in config a NODE-scoped one is additionally a hard error.
   for (const entry of RELOCATED_LAYER1_KEYS) {
-    if (getPath(catalyst, entry.path) !== undefined) {
-      deprecatedKeys.push(entry.path);
+    if (getPath(catalyst, entry.path) === undefined) continue;
+    deprecatedKeys.push(entry.path);
+    if (optedIn && entry.scope === "node") {
+      addError(
+        LAYER1_ERROR_CODES.NODE_SCOPE_LEAK,
+        `catalyst.${entry.path} is node-scoped and must not appear in a schemaVersion ` +
+          `>= 1 Layer-1 config — relocate it to ${entry.destination} by running ` +
+          `\`catalyst-config-migrate\``,
+      );
     }
   }
 
-  return { valid: errors.length === 0, deprecatedKeys, errors, recommendations };
+  return { valid: errors.length === 0, deprecatedKeys, errors, errorDetails, recommendations };
 }

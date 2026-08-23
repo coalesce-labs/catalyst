@@ -105,9 +105,29 @@ TEAM_KEY=""
 if [ -n "$CONFIG_PATH" ] && [ -f "$CONFIG_PATH" ]; then
   AUTO_FILE=$(jq -r '.catalyst.feedback.autoFile // empty' "$CONFIG_PATH" 2>/dev/null)
   GITHUB_REPO=$(jq -r '.catalyst.feedback.githubRepo // empty' "$CONFIG_PATH" 2>/dev/null)
-  CONFIG_LABELS=$(jq -r '.catalyst.feedback.labels // ["auto-submitted"] | join(",")' \
+  CONFIG_LABELS=$(jq -r '.catalyst.feedback.labels // empty | if type == "array" then join(",") else empty end' \
     "$CONFIG_PATH" 2>/dev/null)
   TEAM_KEY=$(jq -r '.catalyst.linear.teamKey // empty' "$CONFIG_PATH" 2>/dev/null)
+fi
+
+# CTL-1214: Layer-2 fallback for the relocated catalyst.feedback.* keys. Layer-1
+# wins when present; Layer-2 answers only when Layer-1 is silent. teamKey is
+# NOT relocated (it is project identity) and keeps its Layer-1-only read.
+# ⚠️ catalyst.feedback is a STRING in the live Layer-2 config, so these must go
+# through catalyst_layer2_json's try/catch rather than a bare jq walk.
+_FF_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -r "${_FF_SCRIPT_DIR}/lib/catalyst-layer2-read.sh" ]; then
+  # shellcheck disable=SC1090
+  . "${_FF_SCRIPT_DIR}/lib/catalyst-layer2-read.sh"
+  [ -z "$AUTO_FILE" ]   && AUTO_FILE="$(catalyst_layer2_json '.catalyst.feedback.autoFile')"
+  [ -z "$GITHUB_REPO" ] && GITHUB_REPO="$(catalyst_layer2_json '.catalyst.feedback.githubRepo')"
+  if [ -z "$CONFIG_LABELS" ]; then
+    _ff_labels="$(catalyst_layer2_json '.catalyst.feedback.labels')"
+    if [ -n "$_ff_labels" ]; then
+      CONFIG_LABELS="$(printf '%s' "$_ff_labels" \
+        | jq -r 'if type == "array" then join(",") else empty end' 2>/dev/null || printf '')"
+    fi
+  fi
 fi
 
 # Defaults when config is silent.

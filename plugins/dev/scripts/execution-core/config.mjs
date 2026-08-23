@@ -530,6 +530,24 @@ function _deepMergeLayer2(target, source) {
   return out;
 }
 export function readLayer2Merged() {
+  return readLayer2MergedFrom(getLayer2ConfigPath());
+}
+
+// CTL-1214: readLayer2Merged, parameterized on the legacy file's path. The two
+// siblings are resolved off THAT file's directory, exactly as
+// resolveNodeConfigPath()/resolveClusterSecretsPath() resolve them off
+// getLayer2ConfigPath() — so the composition rule is identical while the root is
+// injectable.
+//
+// The injectable root is what keeps the Phase-1 fallbacks hermetic. The readers
+// below (worktree-refresh, execution-core concurrency, linear-reconcile) are
+// handed an explicit layer2Path by the daemon and an explicit FIXTURE path by
+// their tests. Had they called readLayer2Merged() directly, a test passing a
+// fixture path would still have picked up the real ~/.config/catalyst/node.json
+// on the developer's machine — a suite whose result depends on the host it runs
+// on. Same composition, injectable root, no ambient read.
+export function readLayer2MergedFrom(layer2Path) {
+  if (!layer2Path) return { catalyst: {} };
   const readCatalyst = (p) => {
     try {
       return JSON.parse(readFileSync(p, "utf8"))?.catalyst ?? {};
@@ -537,9 +555,10 @@ export function readLayer2Merged() {
       return {};
     }
   };
-  const legacy = readCatalyst(getLayer2ConfigPath());
-  const node = readCatalyst(resolveNodeConfigPath());
-  const shared = readCatalyst(resolveClusterSecretsPath());
+  const dir = resolve(layer2Path, "..");
+  const legacy = readCatalyst(layer2Path);
+  const node = readCatalyst(resolve(dir, "node.json"));
+  const shared = readCatalyst(resolve(dir, "cluster-secrets.json"));
   return { catalyst: _deepMergeLayer2(_deepMergeLayer2(legacy, node), shared) };
 }
 

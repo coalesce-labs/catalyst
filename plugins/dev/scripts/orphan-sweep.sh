@@ -271,16 +271,32 @@ _resolve_sweep_config_path() {
   printf ''
 }
 
+# CTL-1214: the merged-Layer-2 leaf, sourced ONCE per process (not per key) so
+# the sweep pays at most one extra jq per key rather than re-resolving the
+# library on every lookup — matching how _load_sweep_config already batches.
+if [[ -r "${SCRIPT_DIR}/lib/catalyst-layer2-read.sh" ]]; then
+  # shellcheck disable=SC1090
+  . "${SCRIPT_DIR}/lib/catalyst-layer2-read.sh"
+fi
+
 _cfg_str() {
   # CTL-1612 round 7 post-merge hygiene: explicit if/else instead of
   # `A && B || C` — shellcheck SC2015 flags that idiom because C also runs
   # when A is true but B fails, which is not the if-then-else it visually
   # reads as. Same short-circuit semantics, unambiguous now.
-  if [[ ! -f "${SWEEP_CONFIG_PATH:-}" ]] || ! command -v jq >/dev/null 2>&1; then
-    printf ''
-    return 0
+  local _v=''
+  if [[ -f "${SWEEP_CONFIG_PATH:-}" ]] && command -v jq >/dev/null 2>&1; then
+    _v="$(jq -r "$1 // empty" "$SWEEP_CONFIG_PATH" 2>/dev/null || printf '')"
   fi
-  jq -r "$1 // empty" "$SWEEP_CONFIG_PATH" 2>/dev/null || printf ''
+  # CTL-1214: Layer-2 fallback. catalyst.sweep.* had NO Layer-2 reader, so a
+  # slimmed Layer-1 config silently reverts every sweep knob to its code default
+  # — intervalHours 1 -> 2, HALVING the sweep cadence with no error anywhere.
+  # Layer-1 still wins when present; Layer-2 answers only when Layer-1 is silent.
+  if [[ -z "$_v" ]] && command -v catalyst_layer2_json >/dev/null 2>&1; then
+    _v="$(catalyst_layer2_json "$1")"
+  fi
+  printf '%s' "$_v"
+  return 0
 }
 
 _load_sweep_config() {

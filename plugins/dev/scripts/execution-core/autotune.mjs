@@ -525,12 +525,7 @@ export function autoTuneTick(state, seams) {
 
     const concurrency = readConcurrency();
     const current = concurrency.maxParallel ?? 3;
-    // CTL-750: pass Layer-1's committed target so decideMaxParallel can jump on recovery.
-    // Fail-safe: if the seam is absent (old callers), layer1Max stays null.
     const layer1 = readLayer1Concurrency?.();
-    const layer1Max = (Number.isInteger(layer1?.maxParallel) && layer1.maxParallel > 0)
-      ? layer1.maxParallel
-      : null;
 
     // CTL-770: resolve the seek-to setpoint with host-over-repo layering, then
     // core-bound it. Fail-safe: a missing/throwing Layer-2 seam → setpoint
@@ -543,6 +538,21 @@ export function autoTuneTick(state, seams) {
       layer2 = {};
     }
     const rawTarget = resolveTargetSetpoint(layer1 ?? {}, layer2 ?? {});
+
+    // CTL-750 → CTL-1214: RULE 7's recovery jump target. This used to read
+    // `layer1.maxParallel` directly, which went silently null the moment
+    // .catalyst/config.json was slimmed (CTL-1214) — measured 4 → null, taking
+    // recovery-to-layer1 with it.
+    //
+    // ⚠️ It is DELIBERATELY sourced from rawTarget rather than from a
+    // merged-Layer-2 read. layer2.maxParallel is the autotuner's OWN live mirror
+    // (writeLayer2MaxParallel below writes it every adjusted tick), so merging it
+    // in would make layer1Max identically equal to `current` on every tick and
+    // RULE 7's `current < layer1Max` could then never be true — a fix that turns
+    // a dead branch into an undetectably dead branch. rawTarget resolves
+    // layer2.targetParallel → layer1.maxParallel, neither of which the tuner ever
+    // writes, so the recovery target stays ratchet-free.
+    const layer1Max = (Number.isInteger(rawTarget) && rawTarget > 0) ? rawTarget : null;
     const coreCount = sample.coreCount;
     const setpoint =
       rawTarget == null

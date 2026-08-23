@@ -8,6 +8,25 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 DISPATCH="${REPO_ROOT}/plugins/dev/scripts/orchestrate-dispatch-next"
 
+# CTL-1214: HERMETIC LAYER-2. orchestrate-dispatch-next now falls back to the
+# merged Layer-2 view for dispatchMode (lib/catalyst-layer2-read.sh), which
+# resolves ~/.config/catalyst whenever CATALYST_LAYER2_CONFIG_FILE is unset —
+# i.e. the DEVELOPER'S LIVE config. Unpinned, this suite reads the host it runs
+# on: measured on a migrated host, 49 of 138 assertions flip (e.g. "defaults to
+# legacy oneshot when no dispatchMode" reads the real dispatchMode=phase-agents),
+# and the state that breaks it is precisely the one this ticket's own migration
+# creates. This is the bash-side twin of the injectable root config.mjs's
+# readLayer2MergedFrom already uses on the JS side ("a suite must not depend on
+# the host it runs on").
+#
+# The pin points at an EMPTY scratch dir, so catalyst_layer2_json finds no
+# config.json/node.json/cluster-secrets.json and every Layer-2 lookup is silent —
+# which is the baseline these assertions were written against. A test that wants
+# a Layer-2 value writes it into this dir explicitly.
+HERMETIC_LAYER2_DIR="$(mktemp -d)"
+export CATALYST_LAYER2_CONFIG_FILE="${HERMETIC_LAYER2_DIR}/config.json"
+trap 'rm -rf "${HERMETIC_LAYER2_DIR}"' EXIT
+
 FAILURES=0
 PASSES=0
 
@@ -902,6 +921,52 @@ DISPATCHED=$(echo "$OUT" | jq -r '.dispatched | join(",")')
 [ "$DISPATCHED" = "T-1" ] && pass "dispatched=[T-1] on success" || fail "dispatched=[T-1] on success" "got: $DISPATCHED"
 COUNT=$(grep -c "phase.dispatch.failed" "$STATE_LOG" || true)
 [ "$COUNT" = "0" ] && pass "no phase.dispatch.failed event on success" || fail "no phase.dispatch.failed event on success" "count=$COUNT log: $(cat "$STATE_LOG")"
+scratch_teardown
+
+# write_layer2_config DISPATCH_MODE — write a Layer-2 config.json into the
+# HERMETIC pin dir. Callers MUST clear it again (clear_layer2_config), since the
+# pin dir outlives a single scratch_setup/teardown pair.
+write_layer2_config() {
+	cat >"${HERMETIC_LAYER2_DIR}/config.json" <<EOF
+{"catalyst": {"orchestration": {"dispatchMode": "$1"}}}
+EOF
+}
+clear_layer2_config() { rm -f "${HERMETIC_LAYER2_DIR}/config.json"; }
+
+# ── CTL-1214: the POSITIVE CONTROL for the hermetic pin above ────────────────
+# Tests 46/47 are what keep "no host leak" from silently meaning "the Layer-2
+# reader stopped working". Every other assertion in this suite passes when the
+# pinned dir is empty, so an empty dir alone cannot distinguish a correctly
+# isolated suite from a fallback that never fires. These two assert the fallback
+# DOES fire out of the pinned dir, and that Layer-1 still outranks it.
+
+echo "test 46 (CTL-1214): no --config → dispatchMode falls back to the merged Layer-2 view"
+scratch_setup
+phase_agent_dispatch_setup
+write_layer2_config "phase-agents"
+write_state "demo" 4 '{"wave1Pending": ["T-1"]}'
+make_worktree "demo" "T-1"
+OUT=$("$DISPATCH" --orch-dir "$ORCH_DIR" 2>"${SCRATCH}/err")
+RC=$?
+[ "$RC" = "0" ] && pass "exit 0 with Layer-2 dispatchMode" || fail "exit 0 with Layer-2 dispatchMode" "rc=$RC stderr=$(cat "${SCRATCH}/err")"
+grep -q -- "--phase triage" "$PHASE_DISPATCH_LOG" && pass "Layer-2 dispatchMode=phase-agents reached the dispatcher" || fail "Layer-2 dispatchMode=phase-agents reached the dispatcher" "log: $(cat "$PHASE_DISPATCH_LOG")"
+grep -q "oneshot" "$CLAUDE_LOG" && fail "legacy oneshot NOT used when Layer-2 says phase-agents" "log: $(cat "$CLAUDE_LOG")" || pass "legacy oneshot NOT used when Layer-2 says phase-agents"
+clear_layer2_config
+scratch_teardown
+
+echo "test 47 (CTL-1214): Layer-1 dispatchMode WINS over Layer-2 (fallback, not override)"
+scratch_setup
+phase_agent_dispatch_setup
+write_layer2_config "phase-agents"
+CONFIG_PATH=$(write_config "oneshot-legacy")
+write_state "demo" 4 '{"wave1Pending": ["T-1"]}'
+make_worktree "demo" "T-1"
+OUT=$("$DISPATCH" --orch-dir "$ORCH_DIR" --config "$CONFIG_PATH" 2>"${SCRATCH}/err")
+RC=$?
+[ "$RC" = "0" ] && pass "exit 0 with Layer-1 over Layer-2" || fail "exit 0 with Layer-1 over Layer-2" "rc=$RC stderr=$(cat "${SCRATCH}/err")"
+grep -q "oneshot" "$CLAUDE_LOG" && pass "Layer-1 oneshot-legacy wins over Layer-2 phase-agents" || fail "Layer-1 oneshot-legacy wins over Layer-2 phase-agents" "log: $(cat "$CLAUDE_LOG")"
+[ ! -s "$PHASE_DISPATCH_LOG" ] && pass "phase-agent-dispatch NOT invoked when Layer-1 says legacy" || fail "phase-agent-dispatch NOT invoked when Layer-1 says legacy" "log: $(cat "$PHASE_DISPATCH_LOG")"
+clear_layer2_config
 scratch_teardown
 
 echo ""
