@@ -84,6 +84,28 @@ SCAN_EXCLUDES=(
   -g '!.trunk/**'
 )
 
+# ⛔ HARD PRECONDITION: rg MUST exist, and this must be checked BEFORE any case runs.
+#
+# Every scan below is `rg`. A missing rg does not error the way a missing file would — the command
+# substitution just yields an empty string, so each scan reads as "found nothing". That is
+# indistinguishable from a clean tree for the ABSENCE assertions (they pass) and fatal for the
+# planted positive controls (they fail). Measured on ubuntu-latest 2026-08-22, where rg is NOT
+# preinstalled: "5 passed, 5 failed", plus a ratchet claiming all 168 survivor files had
+# "shrank or vanished". Ten confusing lines for one missing binary.
+#
+# Fail here instead, with one sentence, so the next person reads "rg is missing" rather than
+# "the needs-human guard is broken". CI installs it explicitly — see the
+# "Install ripgrep" step in .github/workflows/execution-core-tests.yml.
+if ! command -v rg >/dev/null 2>&1; then
+  echo "  FATAL: \`rg\` (ripgrep) is not installed, and every scan in this suite is rg-based."
+  echo "         A missing rg returns NO MATCHES rather than an error, so this suite would report"
+  echo "         absence-assertions as PASSING and planted positive controls as FAILING — a"
+  echo "         misleading 5/5 split for one missing binary. Refusing to run."
+  echo "         CI: the 'Install ripgrep' step in .github/workflows/execution-core-tests.yml."
+  echo "         Local: brew install ripgrep  /  apt-get install ripgrep"
+  exit 1
+fi
+
 FAILURES=0
 PASSES=0
 

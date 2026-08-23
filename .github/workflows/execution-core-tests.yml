@@ -280,6 +280,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ⛔ ripgrep is NOT preinstalled on ubuntu-latest, and two suites here are built entirely on
+      # `rg --no-ignore --hidden`: the CTL-2162 deletion ratchet and
+      # linear-comment-post.test.sh. Without it every scan reads an EMPTY TREE, which does not
+      # error — it silently returns no matches. On 2026-08-22 that made the CTL-2162 guard report
+      # "5 passed, 5 failed": every assertion that must FIND something failed, every assertion
+      # that merely asserts ABSENCE passed, and the ratchet claimed 168 survivor files had
+      # "shrank or vanished". The guard had never once passed in CI.
+      #
+      # It was only visible because those suites plant positive controls. A guard that scans for
+      # the absence of a token, with no planted control, would have gone GREEN here while checking
+      # nothing at all — which is the failure this whole epic is about.
+      - name: Install ripgrep (required by the scan-based suites)
+        working-directory: .
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ripgrep
+          rg --version
+
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
