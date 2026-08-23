@@ -408,6 +408,61 @@ check "the script header documents codex-account" t_header_documents
 t_syntax() { bash -n "$STACK"; }
 check "catalyst-stack parses (bash -n)" t_syntax
 
+# ── 9. docs <-> dispatch parity (CTL-2072 phase 5) ───────────────────────────
+# Drift here is silent in both directions: a documented subcommand that does not
+# exist sends an operator down a dead end, and an undocumented one is invisible.
+# Both lists are derived, never hand-typed.
+DOCS_REF="${REPO_ROOT}/website/src/content/docs/reference/catalyst-stack.md"
+
+# The subcommands the dispatcher actually accepts, read out of cmd_codex_account's case.
+_cx_dispatch_subs() {
+  declare -f cmd_codex_account \
+    | sed -nE 's/^[[:space:]]*(status|switch|sync)\).*/\1/p' \
+    | sort -u
+}
+# The subcommands the reference table documents, read out of its `| \`sub ...\` |` rows.
+_cx_doc_subs() {
+  sed -n '/^## `codex-account`/,/^## /p' "$DOCS_REF" \
+    | sed -nE 's/^\|[[:space:]]*`(status|switch|sync)[^`]*`.*/\1/p' \
+    | sort -u
+}
+
+t_docs_dispatch_parity() {
+  local docs dispatch missing
+  docs="$(_cx_doc_subs)"
+  dispatch="$(_cx_dispatch_subs)"
+  # Positive control: neither list may be empty, or the comparison passes vacuously.
+  [[ -n "$docs" ]] || { echo "doc subcommand list is EMPTY"; return 1; }
+  [[ -n "$dispatch" ]] || { echo "dispatch subcommand list is EMPTY"; return 1; }
+  missing="$(comm -23 <(echo "$docs") <(echo "$dispatch"))"
+  [[ -z "$missing" ]] || { echo "documented but not dispatched: $missing"; return 1; }
+}
+check "every documented codex-account subcommand exists in the dispatch" t_docs_dispatch_parity
+
+t_dispatch_docs_parity() {
+  local docs dispatch missing
+  docs="$(_cx_doc_subs)"
+  dispatch="$(_cx_dispatch_subs)"
+  [[ -n "$docs" && -n "$dispatch" ]] || { echo "a derived list is EMPTY"; return 1; }
+  missing="$(comm -13 <(echo "$docs") <(echo "$dispatch"))"
+  [[ -z "$missing" ]] || { echo "dispatched but not documented: $missing"; return 1; }
+}
+check "every dispatch subcommand is documented" t_dispatch_docs_parity
+
+# The pin guard is the single most likely thing an operator will hit; the docs
+# must actually answer "why did my switch refuse?".
+t_docs_explain_pin() {
+  grep -q 'CATALYST_CODEX_HOME' "$DOCS_REF" \
+    && grep -qi 'refuse' "$DOCS_REF" \
+    && grep -q 'CATALYST_CODEX_HOME' "${REPO_ROOT}/website/src/content/docs/reference/configuration.md"
+}
+check "the docs explain the pin guard (why a switch refuses)" t_docs_explain_pin
+
+t_docs_state_no_restart() {
+  sed -n '/^## `codex-account`/,/^## Flags/p' "$DOCS_REF" | grep -qi 'no restart'
+}
+check "the docs state that a switch needs no restart" t_docs_state_no_restart
+
 echo ""
 echo "catalyst-stack-codex-account: $((PASSES))/$((PASSES + FAILURES)) passed, $FAILURES failed"
 [[ "$FAILURES" -eq 0 ]]
