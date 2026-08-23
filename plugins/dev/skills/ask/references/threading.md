@@ -48,9 +48,18 @@ direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" CTL-NNNN --as 
 ```
 
 ⛔ **Write the body to a file, then pass it with `--body-file` — never with `--body`.**
-`--body <path>` is REFUSED (exit 2): a path is never a comment body. This guard exists because
-the file-first habit produced 23 published comments whose entire body was a tmp path, across 16
-tickets, before CTL-2204.
+This guard exists because the file-first habit produced 23 published comments whose entire body
+was a tmp path, across 16 tickets, before CTL-2204.
+
+⚠️ **The guard is a backstop, not the guarantee — `--body-file` is.** `--body` refuses (exit 2)
+only a string that is *provably* the mistake: **absolute or `~/`-rooted**, **whitespace-free**,
+and **naming a file that exists** (an existence probe that cannot answer — EACCES, ELOOP — also
+refuses, since refusing a path-shaped string is recoverable and posting one is not). That
+narrowness is deliberate: it is what keeps a real one-word markdown body from ever tripping the
+guard, and every one of the 23 measured incidents had that shape. So a **relative** path
+(`tmp/reply.md`), a path that does **not exist**, or one **containing a space** is accepted as
+the literal body and published verbatim. Do not treat "`--body` would have caught it" as a
+reason to reach for `--body`; reach for `--body-file`.
 
 The helper posts through the cloud write proxy as the app actor and needs no client
 credentials of its own (CTL-1958); it requires `CATALYST_LINEAR_WRITE_PROXY=enforce` plus a
