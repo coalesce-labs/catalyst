@@ -1808,21 +1808,13 @@ export function mergeExecutionCoreConcurrency(layer1 = {}, layer2 = {}) {
   return validatePerProjectBudgets(merged);
 }
 
-// resolveTargetSetpoint — CTL-770: resolve the autotuner's seek-to TARGET with
-// host-over-repo layering. The HOST Layer-2 file may carry a NEW key
-// `catalyst.orchestration.executionCore.targetParallel` (distinct from
-// `maxParallel`, which the autotuner clobbers every tick as its live runtime
-// mirror — reusing it for the target would be overwritten). When the host key is
-// a positive integer it wins; otherwise fall back to Layer-1's committed
-// `maxParallel`. Returns `undefined` when neither is set → the caller's
-// convergence branches no-op (backward-compatible). Positive-int guard mirrors
-// mergeExecutionCoreConcurrency (:463-465) so a malformed host value never zeroes
-// the setpoint. The caller is responsible for core-bounding the result.
-export function resolveTargetSetpoint(layer1 = {}, layer2 = {}) {
-  const t = layer2?.targetParallel;
-  if (Number.isInteger(t) && t > 0) return t;
-  return layer1?.maxParallel;
-}
+// resolveTargetSetpoint — CTL-770's setpoint ladder, now defined in the
+// zero-import leaf `lib/autotune-setpoint.mjs` and RE-EXPORTED here so every
+// existing importer (autotune.mjs, scheduler.test.mjs, config-dump.mjs) is
+// unchanged. CTL-1214: `catalyst doctor` grades the setpoint's presence and runs
+// under bare Node, which cannot load this module (it reaches bun:sqlite) — the
+// extraction is what lets doctor read the SAME ladder instead of a second copy.
+export { resolveTargetSetpoint } from "../lib/autotune-setpoint.mjs";
 
 // validatePerProjectBudgets — clamps over-subscribed reserves so
 // sum(reserve) ≤ maxParallel, warns once per distinct config (CTL-706).

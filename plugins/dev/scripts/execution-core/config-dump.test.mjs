@@ -448,6 +448,13 @@ describe("registry drift guards", () => {
     "lib/deployment-mode.mjs",
     "lib/draft-pr.sh",
     "lib/secret-contract.mjs",
+    // CTL-1214: resolveTargetSetpoint (and with it the only mention of
+    // `targetParallel`) moved OUT of scheduler.mjs into this zero-import leaf, so
+    // that `catalyst doctor` — which runs under bare Node and cannot load
+    // scheduler.mjs's bun:sqlite graph — can grade the setpoint through the same
+    // ladder instead of a second copy. This guard caught the move, which is what
+    // it is for: the corpus has to follow the reader.
+    "lib/autotune-setpoint.mjs",
     "orchestrate-register-interests.sh",
   ]
     .map((p) => {

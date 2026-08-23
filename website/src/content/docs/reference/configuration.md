@@ -85,6 +85,21 @@ therefore writes it to `node.json` → `catalyst.orchestration.executionCore.tar
 that names exactly this and which the tuner never writes. An operator-declared `targetParallel`
 already present in Layer-2 always wins and is never overwritten.
 
+⚠️ **A repo that is ALREADY slim still gets a setpoint — seeded from the Layer-2 mirror.** The
+re-home above can only fire while Layer-1 still *carries* `maxParallel`. But this repo **commits** a
+slimmed Layer-1, so on every host that pulls it the migration finds nothing to relocate, reports
+"already migrated", and nothing writes `targetParallel` at all — `catalyst-config-migrate` is its
+only writer anywhere in the tree. Measured on `mini-2`: the resolved setpoint went **4 → null**,
+which silently no-ops the autotuner's convergence branches and (via the same resolved value) the
+`recovery-to-layer1` jump. Nothing errors; that silence *is* the failure. So when Layer-1 is already
+slim and no `targetParallel` resolves, the migration seeds it from the merged Layer-2 `maxParallel`.
+Its weakness is declared rather than hidden: `maxParallel` is the tuner's live mirror, so a host
+whose tuner is throttled at seed time seeds a lower setpoint than the operator originally committed.
+That is still strictly better than `null` (which disables the branch outright instead of aiming it
+low), it is a **one-time** snapshot — a seeded `targetParallel` is never re-seeded — and
+`catalyst doctor`'s advisory `autotune-setpoint-present` check reports both the absence and the
+resolved value, so it can never go silent again. Set `targetParallel` explicitly to override.
+
 ⚠️ **`catalyst.orchestration` as a whole is NOT machine-scoped.** Only the four subpaths above
 relocate. `executor`, `executorByPhase`, `codex`, `publishPreflight`, `fleetHealth`,
 `daemonWatchdog`, `orphanReaper.workerGc`, `draftPr`, `stalePrRescue`, `orphanPrSweep`,

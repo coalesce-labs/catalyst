@@ -48,6 +48,11 @@ import { spawnSync, execFileSync } from "node:child_process";
 // REJECTS). The alternative was a hand-maintained copy here, which would keep
 // reporting three uncovered names after CTC-691/CTC-667/CTC-704 close.
 import { resolveGithubFeedMode } from "../lib/github-feed-mode.mjs";
+// CTL-1214: the autotuner's setpoint ladder, from the zero-import leaf. ⛔ NOT from
+// execution-core/scheduler.mjs — that module reaches bun:sqlite and this file runs
+// under BARE NODE, so importing it there fails at load. Sharing the leaf is what
+// keeps checkAutotuneSetpoint grading the SAME rule the autotuner applies.
+import { resolveTargetSetpoint } from "../lib/autotune-setpoint.mjs";
 import {
   GITHUB_CONSUMED_NAMES,
   GITHUB_SUPPRESSIBLE_NAMES,
@@ -4333,6 +4338,17 @@ export function checkClusterSecretsPresent(deps = {}) {
 // Reports whether ~/.config/catalyst/node.json exists and has a non-empty host.name.
 // A missing node.json is fine (new install); a present-but-host-name-less one is the
 // unexpected state worth surfacing.
+//
+// CTL-1214: the host-name-less WARN got a SECOND, much more common cause once
+// `catalyst-config-migrate` began creating node.json. host.name is NOT a relocated
+// Layer-1 key (it does not appear in RELOCATED_LAYER1_KEYS) — it is written by
+// catalyst-join.sh, which only started targeting node.json in CTL-1210. So a
+// migration-created node.json legitimately has no host.name while the LEGACY
+// Layer-2 config.json still serves it, and telling that operator to "run
+// catalyst-join" implies their host identity is missing when it is not. The two
+// states are now reported distinctly. The GRADE is unchanged in both (WARN — the
+// per-node split really is incomplete either way), so no gate moves; only the
+// instruction becomes true.
 export function checkNodeConfigPresent(deps = {}) {
   const {
     nodePath = resolveNodeConfigPath(),
@@ -4344,6 +4360,12 @@ export function checkNodeConfigPresent(deps = {}) {
         return null;
       }
     },
+    // The merged Layer-2 view, used ONLY to tell "unset everywhere" from "still
+    // served by the legacy file". The try/catch lives at the CALL SITE below, not
+    // here, so an INJECTED reader is as fail-open as the default one — a doctor
+    // check that throws aborts the whole run, and putting the guard only in the
+    // default would make that reachable from any caller supplying its own seam.
+    readMerged = () => readLayer2Merged() ?? {},
   } = deps;
   const NAME = "node-config-present";
   if (!fileExists(nodePath)) {
@@ -4352,9 +4374,113 @@ export function checkNodeConfigPresent(deps = {}) {
   const obj = readJson(nodePath);
   const hostName = obj?.catalyst?.host?.name ?? obj?.catalyst?.["host.name"];
   if (!hostName) {
+    let merged = {};
+    try {
+      merged = readMerged() ?? {};
+    } catch {
+      // Fail-open to the ORIGINAL message: an unreadable merge is not evidence
+      // that the legacy file serves host.name, so it must not reach the
+      // reassuring branch.
+      merged = {};
+    }
+    const mergedHostName = merged?.catalyst?.host?.name ?? merged?.catalyst?.["host.name"];
+    if (mergedHostName) {
+      return [
+        mkCheck(
+          NAME,
+          STATUS.WARN,
+          `node.json present but carries no catalyst.host.name — host identity is still served by ` +
+            `the legacy Layer-2 config.json (host.name=${mergedHostName}), so nothing is broken. ` +
+            "Expected on a node.json created by catalyst-config-migrate, which never sees host.name " +
+            "(it is not a relocated Layer-1 key). Run catalyst-join to finish moving it into node.json.",
+        ),
+      ];
+    }
     return [mkCheck(NAME, STATUS.WARN, `node.json present but catalyst.host.name is unset — run catalyst-join or set it manually`)];
   }
   return [mkCheck(NAME, STATUS.PASS, `node.json present, host.name=${hostName}`)];
+}
+
+// checkAutotuneSetpoint — CTL-1214. ADVISORY ONLY (WARN, never FAIL).
+//
+// The knob this ticket nearly lost in silence. Slimming the committed Layer-1
+// removed `orchestration.executionCore.maxParallel`, which is what
+// resolveTargetSetpoint falls back to; with no `targetParallel` in the merged
+// Layer-2 view the setpoint resolves UNDEFINED, and an undefined setpoint does
+// not raise anything — it just makes CTL-770's convergence/seed branches and
+// CTL-750's RULE 7 recovery-to-layer1 jump no-op. Measured on mini-2 mid-ticket:
+// 4 → null, with no error anywhere. The migration now seeds the key
+// (lib/migrate-layer1-config.mjs step 2b), and this arm is the detector that
+// makes a future recurrence visible rather than silent.
+//
+// Grading — the discriminator is "is a setpoint RESOLVABLE", not "does the file
+// contain a key", so it reads the same ladder the autotuner does (the shared
+// zero-import leaf, imported directly because scheduler.mjs reaches bun:sqlite
+// and doctor is bare Node):
+//   PASS — a setpoint resolves (Layer-2 targetParallel, or Layer-1 maxParallel).
+//   WARN — executionCore declares a maxParallel but NO setpoint resolves. This is
+//          the exact post-slim state; the fix is one `catalyst-config-migrate` run.
+//   INFO — no executionCore concurrency is configured at all (nothing to grade),
+//          or the config is unreadable. Deliberately NOT a PASS: "I could not
+//          look" and "the setpoint is fine" must not share a grade.
+export function checkAutotuneSetpoint(deps = {}) {
+  const NAME = "autotune-setpoint-present";
+  const {
+    readLayer1 = () => {
+      try {
+        return JSON.parse(readFileSync(layer1Path(), "utf8"))?.catalyst?.orchestration?.executionCore ?? {};
+      } catch {
+        return null;
+      }
+    },
+    readLayer2 = () => {
+      try {
+        return readLayer2Merged()?.catalyst?.orchestration?.executionCore ?? {};
+      } catch {
+        return null;
+      }
+    },
+  } = deps;
+
+  const l1 = readLayer1();
+  const l2 = readLayer2();
+  if (l1 === null && l2 === null) {
+    return [mkCheck(NAME, STATUS.INFO, "could not read either config layer — autotune setpoint not graded")];
+  }
+  const layer1 = l1 ?? {};
+  const layer2 = l2 ?? {};
+
+  const setpoint = resolveTargetSetpoint(layer1, layer2);
+  if (Number.isInteger(setpoint) && setpoint > 0) {
+    const src =
+      Number.isInteger(layer2?.targetParallel) && layer2.targetParallel > 0
+        ? "Layer-2 targetParallel"
+        : "Layer-1 maxParallel";
+    return [mkCheck(NAME, STATUS.PASS, `autotune setpoint resolves to ${setpoint} (from ${src})`)];
+  }
+
+  const mirror = layer2?.maxParallel ?? layer1?.maxParallel;
+  if (Number.isInteger(mirror) && mirror > 0) {
+    return [
+      mkCheck(
+        NAME,
+        STATUS.WARN,
+        `executionCore resolves maxParallel=${mirror} but NO targetParallel setpoint — ` +
+          "resolveTargetSetpoint returns undefined, which silently no-ops the autotuner's " +
+          "convergence branches and RULE 7 recovery-to-layer1 (CTL-770/CTL-750). " +
+          "Run `catalyst-config-migrate` to seed catalyst.orchestration.executionCore.targetParallel " +
+          "in ~/.config/catalyst/node.json, or set it by hand.",
+      ),
+    ];
+  }
+
+  return [
+    mkCheck(
+      NAME,
+      STATUS.INFO,
+      "no executionCore concurrency configured on this host — no autotune setpoint to grade",
+    ),
+  ];
 }
 
 // checkConfigScopeLeak — CTL-1214. Flags a committed Layer-1 .catalyst/config.json
@@ -6893,6 +7019,7 @@ export function checksForClass(nc, opts = {}) {
       () => checkCloudSyncSkew(), // CTL-1659: is the RUNNING writer serving the lockfile's modules? (advisory)
       () => checkFleetTokenExport(), // CTL-1908: does a login shell spend the FLEET's Claude budget? (advisory)
       () => checkConfigScopeLeak(), // advisory
+      () => checkAutotuneSetpoint(), // CTL-1214: slimming Layer-1 can leave the autotune setpoint unresolvable — a silent no-op of the convergence + RULE 7 branches (advisory)
       () => checkWorkerLabels(), // CTL-1481: worker:<host> label is a best-effort visibility projection, never the claim arbiter — advisory only
       () => checkConfigProvenance(), // CTL-1793: daemon-vs-doctor Layer-1 split + per-host env overrides — advisory only (never FAIL)
       () => checkIndexServingRoot(), // CTL-1935: is this node's catalyst-index serving root the PINNED release? evaluateDepSkew cannot answer it (the indexer is an on-demand CLI with no boot record) — advisory only (never FAIL)
@@ -6977,6 +7104,7 @@ export function checksForClass(nc, opts = {}) {
     () => checkSdkExecutorAuth(), // CTL-1367 item 9: under executor=sdk, subscription auth must be correct (no api-key metering)
     () => checkSdkDaemonEnv(), // CTL-1396 item A: under executor=sdk, the RUNNING daemon's process env must carry CLAUDE_CODE_OAUTH_TOKEN (not just the operator shell) + surface recent silent sdk→bg degrades
     () => checkConfigScopeLeak(), // CTL-1214: committed Layer-1 .catalyst/config.json must not carry node/cluster scope (roster/orchestration/feedback/sweep/repoColors/hosts.json)
+    () => checkAutotuneSetpoint(), // CTL-1214: slimming Layer-1 can leave the autotune setpoint unresolvable — a silent no-op of the convergence + RULE 7 branches (advisory)
     () => checkRepoIconTokenScope(), // CTL-1375: monitor daemon's gh token can read configured private repos' contents (else favicons fall back to the org avatar) — advisory (never FAIL)
     () => checkRepoPushPermission({
       repoRoot,

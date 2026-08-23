@@ -14,6 +14,11 @@ import {
   applyLayer1Migration,
   RELOCATED_PATHS,
 } from "../lib/migrate-layer1-config.mjs";
+// CTL-1214: the REAL resolver the migration exists to keep answering, imported
+// from the zero-import leaf (not scheduler.mjs — same definition, re-exported
+// there). The end-to-end assertion below runs through it rather than restating
+// its ladder, so a change to the precedence rule fails this suite too.
+import { resolveTargetSetpoint } from "../lib/autotune-setpoint.mjs";
 
 let dirs = [];
 afterEach(() => {
@@ -145,6 +150,119 @@ describe("planLayer1Migration — the non-clobber rule (D1)", () => {
       const plan = withL2({ catalyst: {} });
       expect(plan.nodePatch.catalyst.orchestration.executionCore.minParallel).toBe(1);
       expect(plan.nodePatch.catalyst.orchestration.executionCore.maxParallelCeiling).toBe(40);
+    });
+  });
+
+  // ── CTL-1214 remediation round 2: seeding an ALREADY-SLIM Layer-1 ──────────
+  //
+  // The re-home above only fires while Layer-1 still CARRIES maxParallel. But
+  // this repo COMMITS a slimmed Layer-1, so on every host that pulls it the
+  // migration finds nothing to relocate and targetParallel is never written by
+  // anyone — migrate-layer1-config.mjs is its only writer in the tree. Measured
+  // on mini-2: resolveTargetSetpoint 4 → null, which no-ops CTL-770's
+  // convergence branches and (via rawTarget) nulls the layer1Max that RULE 7
+  // recovery-to-layer1 compares against. Nothing errors; that is the failure.
+  describe("targetParallel is seeded when Layer-1 is ALREADY SLIM", () => {
+    // The shape this repo actually commits after Phase 3: identity only.
+    const SLIM_LAYER1 = () => ({
+      catalyst: {
+        schemaVersion: 1,
+        projectKey: "catalyst-workspace",
+        project: { ticketPrefix: "CTL" },
+        linear: { teamKey: "CTL" },
+      },
+    });
+
+    it("seeds targetParallel from the merged Layer-2 maxParallel (the incident)", () => {
+      // mini-2's real state: node.json carries min/ceiling but no maxParallel;
+      // the legacy Layer-2 file carries the autotuner's mirror at 4.
+      const plan = planLayer1Migration({
+        layer1: SLIM_LAYER1(),
+        mergedLayer2: {
+          catalyst: {
+            orchestration: { executionCore: { maxParallel: 4, minParallel: 1, maxParallelCeiling: 40 } },
+          },
+        },
+      });
+      expect(plan.changed).toBe(true);
+      expect(plan.nodePatch.catalyst.orchestration.executionCore.targetParallel).toBe(4);
+      const move = plan.moves.find((m) => m.path === "orchestration.executionCore.targetParallel");
+      expect(move.value).toBe(4);
+      expect(move.scope).toBe("node");
+      // The provenance must say it came from the MERGED LAYER-2, not Layer-1 —
+      // the two seeds have different trustworthiness and the operator-facing CLI
+      // line is the only place that distinction is visible.
+      expect(move.from).toContain("<merged Layer-2>");
+    });
+
+    it("is IDEMPOTENT — a seeded targetParallel is never re-seeded", () => {
+      const mergedLayer2 = {
+        catalyst: { orchestration: { executionCore: { maxParallel: 4, targetParallel: 4 } } },
+      };
+      const plan = planLayer1Migration({ layer1: SLIM_LAYER1(), mergedLayer2 });
+      expect(movedPaths(plan)).not.toContain("orchestration.executionCore.targetParallel");
+      expect(plan.changed).toBe(false);
+    });
+
+    it("does NOT clobber an operator's declared targetParallel with the live mirror", () => {
+      const plan = planLayer1Migration({
+        layer1: SLIM_LAYER1(),
+        mergedLayer2: {
+          catalyst: { orchestration: { executionCore: { maxParallel: 2, targetParallel: 9 } } },
+        },
+      });
+      expect(plan.nodePatch.catalyst.orchestration?.executionCore?.targetParallel).toBeUndefined();
+    });
+
+    it("does NOT fire when Layer-1 still carries maxParallel — the committed target wins", () => {
+      // Both arms could produce a seed here; the step-2 re-home must win, because
+      // the committed operator target is better evidence than the tuner's mirror.
+      const plan = planLayer1Migration({
+        layer1: FULL_LAYER1(), // maxParallel: 4
+        mergedLayer2: { catalyst: { orchestration: { executionCore: { maxParallel: 1 } } } },
+      });
+      const seeds = plan.moves.filter((m) => m.path === "orchestration.executionCore.targetParallel");
+      expect(seeds).toHaveLength(1);
+      expect(seeds[0].value).toBe(4);
+      expect(seeds[0].from).toBe("orchestration.executionCore.maxParallel");
+    });
+
+    it("NEGATIVE CONTROL: no mirror anywhere → no seed, no write", () => {
+      const plan = planLayer1Migration({ layer1: SLIM_LAYER1(), mergedLayer2: { catalyst: {} } });
+      expect(plan.moves).toEqual([]);
+      expect(plan.changed).toBe(false);
+    });
+
+    it("refuses a mirror that is not a positive integer", () => {
+      // A seed that fails resolveTargetSetpoint's own Number.isInteger guard is a
+      // write that LOOKS like a repair and changes nothing downstream.
+      for (const maxParallel of [0, -1, null, "4", 2.5, true, {}]) {
+        const plan = planLayer1Migration({
+          layer1: SLIM_LAYER1(),
+          mergedLayer2: { catalyst: { orchestration: { executionCore: { maxParallel } } } },
+        });
+        expect(plan.moves).toEqual([]);
+      }
+    });
+
+    it("END TO END: the seed is what makes resolveTargetSetpoint stop returning undefined", () => {
+      // The assertion that ties this fix to the symptom. Without it, every test
+      // above could pass while the setpoint stayed null — they assert the PLAN,
+      // this one asserts the CONSEQUENCE, through the real resolver.
+      const layer1 = SLIM_LAYER1();
+      const mergedLayer2 = {
+        catalyst: { orchestration: { executionCore: { maxParallel: 4, minParallel: 1 } } },
+      };
+      const l1EC = layer1.catalyst.orchestration?.executionCore ?? {};
+
+      // BEFORE: node.json has no targetParallel (the state the finding measured).
+      expect(resolveTargetSetpoint(l1EC, {})).toBeUndefined();
+
+      const plan = planLayer1Migration({ layer1, mergedLayer2 });
+      const seededL2 = plan.nodePatch.catalyst.orchestration.executionCore;
+
+      // AFTER: 4, matching pre-slim main.
+      expect(resolveTargetSetpoint(l1EC, seededL2)).toBe(4);
     });
   });
 

@@ -1113,6 +1113,39 @@ jobs:
           bash __tests__/config-template-statemap.test.sh
           bash __tests__/config-docs-coverage.test.sh
 
+      - name: Config-consumer regression suites (CTL-1214 Phase 5)
+        # ⛔ PINNED IN THE SAME CHANGE THAT TOUCHED THESE SUITES. Verified before
+        # adding, with /usr/bin/grep (the agent shell's `grep` honours .gitignore
+        # and silently skips config*.json — a recursive zero over config is
+        # inconclusive until re-run with the real binary):
+        #   execution-core-config-drift -> 0 hits in .github/workflows/
+        #   orchestrate-dispatch-next   -> 0
+        #   check-project-setup.test.sh -> 0 (the 2 hits for `check-project-setup`
+        #                                     are path-filter triggers for the .sh,
+        #                                     not a run line for the suite)
+        # Positive controls, same instrument, same run: deployment-mode-parity -> 7,
+        # orphan-sweep.test.sh -> 5. So the zeros are real absences, not a broken grep.
+        #
+        # Why each one has to gate from here on:
+        #  • execution-core-config-drift — rewritten by this ticket to encode the
+        #    slimmed-config contract, and it EXITS 1 while ungated, so nothing
+        #    surfaced it.
+        #  • orchestrate-dispatch-next — this ticket gave the dispatcher a Layer-2
+        #    fallback for dispatchMode, which made the suite read the HOST it runs
+        #    on: 49 of 138 assertions flipped on any machine carrying a real
+        #    ~/.config/catalyst/node.json, i.e. the state this ticket's own
+        #    migration creates. The suite now pins CATALYST_LAYER2_CONFIG_FILE to a
+        #    scratch dir (tests 46/47 are the positive control that the pin did not
+        #    simply blind the reader) — registering it is what stops that
+        #    host-dependence from regressing invisibly again.
+        #  • check-project-setup — its drift assertions were re-anchored to the
+        #    post-relocation contract (a relocated key is no longer drift).
+        working-directory: plugins/dev/scripts
+        run: |
+          bash __tests__/execution-core-config-drift.test.sh
+          bash __tests__/orchestrate-dispatch-next.test.sh
+          bash __tests__/check-project-setup.test.sh
+
       - name: Broker tests (CTL-1529, CTL-1809)
         # CTL-1529 round 2: broker/worker-state-projection.test.mjs guards the
         # bounded event-log scan in broker/projection.mjs (replayWorkerStateProjection),

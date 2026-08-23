@@ -64,6 +64,7 @@ import {
   checkSelfEchoIdentityHistory,
   checkClusterSecretsPresent,
   checkNodeConfigPresent,
+  checkAutotuneSetpoint,
 } from "./doctor.mjs";
 import { resolveSecret as resolveSecretReal } from "../lib/secret-contract.mjs";
 import { TICKET_KEY_RE } from "./ticket-key.mjs";
@@ -6391,6 +6392,47 @@ describe("checkNodeConfigPresent (CTL-1210)", () => {
       nodePath: "/h/node.json",
       fileExists: () => true,
       readJson: () => ({ catalyst: {} }),
+      // CTL-1214: pinned EXPLICITLY rather than left to the default reader. The
+      // hermetic preload (test-setup.mjs) does isolate this today, but a check
+      // whose message depends on ambient host state must say which state it is
+      // asserting — the bash-side twin of this omission is what made
+      // orchestrate-dispatch-next.test.sh flip 49 assertions on a migrated host.
+      readMerged: () => ({ catalyst: {} }),
+    });
+    expect(c.status).toBe(STATUS.WARN);
+    expect(c.detail).toMatch(/host\.name is unset/i);
+  });
+
+  // CTL-1214: host.name is NOT a relocated Layer-1 key, so a node.json created
+  // by catalyst-config-migrate legitimately has none while the LEGACY Layer-2
+  // config.json still serves it. Same grade (the split really is incomplete),
+  // different instruction — "run catalyst-join or set it manually" reads as
+  // "your host identity is missing", which on that host is false.
+  it("WARN naming the legacy fallback when host.name is still served by config.json", () => {
+    const [c] = checkNodeConfigPresent({
+      nodePath: "/h/node.json",
+      fileExists: () => true,
+      readJson: () => ({ catalyst: {} }),
+      readMerged: () => ({ catalyst: { host: { name: "mini-2" } } }),
+    });
+    expect(c.status).toBe(STATUS.WARN); // grade UNCHANGED — no gate moves
+    expect(c.detail).toContain("mini-2");
+    expect(c.detail).toMatch(/legacy Layer-2 config\.json/i);
+    expect(c.detail).not.toMatch(/host\.name is unset/i);
+  });
+
+  it("fails OPEN to the original message when the merged read THROWS", () => {
+    // An unreadable merge is not evidence that the legacy file serves host.name,
+    // so it must not reach the reassuring branch — and a doctor check that
+    // throws aborts the whole run, so an INJECTED seam must be guarded too, not
+    // just the default one.
+    const [c] = checkNodeConfigPresent({
+      nodePath: "/h/node.json",
+      fileExists: () => true,
+      readJson: () => ({ catalyst: {} }),
+      readMerged: () => {
+        throw new Error("EACCES");
+      },
     });
     expect(c.status).toBe(STATUS.WARN);
     expect(c.detail).toMatch(/host\.name is unset/i);
@@ -6416,5 +6458,81 @@ describe("checkNodeConfigPresent (CTL-1210)", () => {
   it("is wired into both worker and developer suites", () => {
     const src = readFileSync(new URL("./doctor.mjs", import.meta.url), "utf8");
     expect(src.split("checkNodeConfigPresent()").length - 1, "registered in at least 2 class suites").toBeGreaterThanOrEqual(2);
+  });
+});
+
+// ─── checkAutotuneSetpoint (CTL-1214) ────────────────────────────────────────
+// The detector for the knob this ticket nearly lost in silence. Slimming Layer-1
+// removed the maxParallel that resolveTargetSetpoint falls back to; with no
+// targetParallel in the merged Layer-2 view the setpoint resolves UNDEFINED, and
+// an undefined setpoint raises nothing — it just no-ops CTL-770's convergence
+// branches and CTL-750's RULE 7 recovery jump. Measured on mini-2: 4 → null.
+describe("checkAutotuneSetpoint (CTL-1214)", () => {
+  const run = (layer1, layer2) => {
+    const checks = checkAutotuneSetpoint({ readLayer1: () => layer1, readLayer2: () => layer2 });
+    expect(checks).toHaveLength(1);
+    return checks[0];
+  };
+
+  it("PASS when the host declares targetParallel", () => {
+    const c = run({}, { targetParallel: 6, maxParallel: 3 });
+    expect(c.status).toBe(STATUS.PASS);
+    expect(c.detail).toContain("6");
+    expect(c.detail).toContain("Layer-2 targetParallel");
+  });
+
+  it("PASS via the Layer-1 committed maxParallel (an un-migrated repo)", () => {
+    const c = run({ maxParallel: 4 }, {});
+    expect(c.status).toBe(STATUS.PASS);
+    expect(c.detail).toContain("Layer-1 maxParallel");
+  });
+
+  it("WARN on the post-slim state: a mirror exists but NO setpoint resolves", () => {
+    // mini-2's measured state before the migration seed landed.
+    const c = run({}, { maxParallel: 4, minParallel: 1, maxParallelCeiling: 40 });
+    expect(c.status).toBe(STATUS.WARN);
+    expect(c.detail).toContain("maxParallel=4");
+    expect(c.detail).toMatch(/no targetParallel/i);
+    // The message must name the FIX, not just the symptom.
+    expect(c.detail).toContain("catalyst-config-migrate");
+  });
+
+  it("WARN when targetParallel is present but not a positive integer", () => {
+    // The ladder's own Number.isInteger guard rejects these, so the setpoint is
+    // still undefined — a check keyed on key PRESENCE would call this fine.
+    for (const targetParallel of [0, -1, 2.5, "6", null]) {
+      expect(run({}, { maxParallel: 4, targetParallel }).status).toBe(STATUS.WARN);
+    }
+  });
+
+  it("INFO — not PASS — when no executionCore concurrency is configured at all", () => {
+    // "Nothing to grade" and "the setpoint is fine" must not share a grade.
+    const c = run({}, {});
+    expect(c.status).toBe(STATUS.INFO);
+  });
+
+  it("INFO — not PASS — when neither config layer can be read", () => {
+    const c = run(null, null);
+    expect(c.status).toBe(STATUS.INFO);
+    expect(c.detail).toMatch(/could not read/i);
+  });
+
+  it("never FAILs (advisory) — exit-code-safe, so it can never fail-close the join gate", async () => {
+    const code = await runDoctor({
+      checks: [() => checkAutotuneSetpoint({ readLayer1: () => ({}), readLayer2: () => ({ maxParallel: 4 }) })],
+    });
+    expect(code).toBe(0);
+  });
+
+  it("grades through the SAME resolver the autotuner uses, not a restated ladder", () => {
+    // One definition. If doctor re-typed the precedence rule, this drift would be
+    // undetectable — the check would keep reporting on a rule nothing applies.
+    const src = readFileSync(new URL("./doctor.mjs", import.meta.url), "utf8");
+    expect(src).toContain('from "../lib/autotune-setpoint.mjs"');
+  });
+
+  it("is wired into both worker and developer suites", () => {
+    const src = readFileSync(new URL("./doctor.mjs", import.meta.url), "utf8");
+    expect(src.split("checkAutotuneSetpoint()").length - 1, "registered in at least 2 class suites").toBeGreaterThanOrEqual(2);
   });
 });

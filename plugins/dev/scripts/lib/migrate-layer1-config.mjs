@@ -250,6 +250,56 @@ export function planLayer1Migration({ layer1, mergedLayer2 } = {}) {
     }
   }
 
+  // 2b. SEED the setpoint for an ALREADY-SLIM Layer-1.
+  //
+  // Step 2's re-home only fires while Layer-1 still CARRIES maxParallel. But
+  // this repo COMMITS an already-slimmed Layer-1, so on every host that pulls it
+  // the migration finds nothing to relocate, reports "already migrated", and
+  // targetParallel is never written by anyone — this module is its only writer
+  // anywhere in the tree. Measured on mini-2: resolveTargetSetpoint went 4 → null,
+  // which no-ops CTL-770's convergence/seed branches AND (via rawTarget) nulls the
+  // layer1Max that RULE 7 recovery-to-layer1 compares against. The knob does not
+  // report an error when it reverts to a code default — that silence is the whole
+  // failure mode, so the migration has to close the window it opened.
+  //
+  // SOURCE — the merged Layer-2 maxParallel. It is the only surviving evidence of
+  // this host's capacity target once Layer-1 is slim, and it is where the
+  // migration's own non-clobber arm PARKED that value on hosts migrated before the
+  // re-home landed (kept, not moved, because the legacy Layer-2 file already
+  // declared it). ⚠️ Its weakness is declared, not hidden: maxParallel is the
+  // autotuner's live mirror, so a host whose tuner is throttled at seed time seeds
+  // a lower setpoint than the operator committed. That is strictly better than
+  // null (which disables the recovery branch outright rather than aiming it low),
+  // it is a ONE-TIME snapshot rather than a per-tick ratchet — the non-clobber
+  // guard below means a seeded targetParallel is never re-seeded — and the new
+  // doctor arm `autotune-setpoint-present` makes both the absence and the seeded
+  // value visible instead of silent.
+  //
+  // IDEMPOTENT + NON-CLOBBERING, on both arms:
+  //   • a targetParallel already in the merged Layer-2 view wins outright;
+  //   • a move planned by step 2 (Layer-1 still carried maxParallel) wins, since
+  //     the committed operator target is better evidence than the live mirror.
+  const setpointAlreadyPlanned = moves.some((m) => m.path === AUTOTUNER_SETPOINT_LEAF);
+  if (!setpointAlreadyPlanned && !definedInLayer2(mergedCatalyst, AUTOTUNER_SETPOINT_LEAF)) {
+    const mirror = getPath(mergedCatalyst, AUTOTUNER_MIRROR_LEAF);
+    // A positive integer only: `0`/`null`/a string would seed a setpoint that
+    // fails resolveTargetSetpoint's own Number.isInteger guard downstream, i.e. a
+    // write that looks like a repair and changes nothing.
+    if (Number.isInteger(mirror) && mirror > 0) {
+      moves.push({
+        path: AUTOTUNER_SETPOINT_LEAF,
+        value: mirror,
+        scope: "node",
+        from: `<merged Layer-2> ${AUTOTUNER_MIRROR_LEAF}`,
+        reason:
+          "Layer-1 is already slim, so the step-2 re-home cannot fire and nothing else " +
+          "writes targetParallel — seeding it from the merged Layer-2 maxParallel keeps " +
+          "resolveTargetSetpoint (and RULE 7's recovery target) from resolving null",
+      });
+      setPath(nodePatch.catalyst, AUTOTUNER_SETPOINT_LEAF, mirror);
+    }
+  }
+
   // 3. schemaVersion opts this config into the strict contract (D3). Never
   //    lower an existing higher version.
   const existingVersion = slimmed.catalyst.schemaVersion;
