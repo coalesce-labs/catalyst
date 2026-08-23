@@ -21,7 +21,15 @@ import { dirname, join } from "node:path";
 import { log } from "./config.mjs";
 import { DISPOSITIONS } from "./worker-disposition.mjs";
 import { YIELDED_STATUS } from "../lib/phase-yield.mjs"; // CTL-1854
-import { TERMINAL_LABEL_REASONS } from "./label-failure-class.mjs"; // COORD-236: one owner for the terminal set
+import {
+  TERMINAL_LABEL_REASONS, // COORD-236: one owner for the terminal set
+  isThrottledLabelReason, // CTL-2043 (P2-a): the two NARROW predicates — see the
+  isCloudReason, //          cool-down arm in labelOnce for why not the wide one
+} from "./label-failure-class.mjs";
+// CTL-2043 (P2-a): the shared time-boxed cool-down ledger. It lives in its own leaf
+// precisely so this file can read it — scheduler.mjs imports THIS file, so importing
+// the primitives from there would be a cycle (Decision C).
+import { inLabelCooldown, recordLabelCooldown, clearLabelCooldown } from "./label-cooldown.mjs";
 import { emitEscalationEvent } from "./escalation-event.mjs"; // CTL-2056
 import { publishEscalation } from "./escalation-publish.mjs"; // CTL-2159
 import { freshStallStatus, TERMINAL_STALL_STATUS } from "./stall-class.mjs"; // CTL-2159
@@ -42,10 +50,29 @@ import { freshStallStatus, TERMINAL_STALL_STATUS } from "./stall-class.mjs"; // 
 //              (create the label / clear the sibling) and deletes this marker to
 //              re-arm the apply.
 //
-// Transient failures (reason:"rate-limited", "transient", undefined) write no
-// marker so the next tick retries — CTL-558's recovery contract. CTL-638 pairs
-// this with the escalation cool-down below to break the per-tick storm even
-// when the transient-failure path keeps re-attempting the write.
+// Transient failures (reason:"transient", undefined) write no marker so the next
+// tick retries — CTL-558's recovery contract. CTL-638 pairs this with the
+// escalation cool-down below to break the per-tick storm even when the
+// transient-failure path keeps re-attempting the write.
+//
+// CTL-2043 (P2-a) adds a THIRD outcome between those two, because the pair above
+// was not exhaustive and the gap was measured: a THROTTLED or CLOUD-authored
+// refusal (`unauthorized`, `budget:*`, `rate-limited`, any `cloud:*`) got NO
+// marker at all, so the operator-escalation path re-issued the write every
+// tick and spent a host write unit each time for as long as the refusal lasted.
+//
+//   .applied         — success. Permanent.
+//   .skipped         — TERMINAL only. Permanent. Can never land this run.
+//   cool-down marker — THROTTLED ∪ CLOUD. TIME-BOXED (LABEL_COOLDOWN_MS), and
+//                      kept OUTSIDE workers/<T>/ so worker-dir GC does not
+//                      resurrect the storm.
+//   (nothing)        — genuinely transient. Retries on the very next tick.
+//
+// ⛔ The cool-down must NEVER be spelled `.skipped`. That marker lives under
+// workers/<T>/ and survives a restart, so it would outlive the credential
+// re-mint / budget roll that clears the refusal, and the escalation label the
+// operator page depends on would be abandoned for the daemon's life — strictly
+// worse than the storm it would be fixing (COORD-236).
 // labelMarkerBase — shared path prefix for the once-marker files used by
 // labelOnce and clearStalledLabel (single source of truth for the marker path).
 export function labelMarkerBase(orchDir, ticket, label) {
@@ -66,6 +93,15 @@ export function labelMarkerBase(orchDir, ticket, label) {
 // paged. The converger uses the WIDER `shouldCoolDownLabel` because its cool-down
 // is time-boxed and self-healing; this marker is not. There is a test pinning the
 // asymmetry.
+//
+// CTL-2043 (P2-a): labelOnce now ALSO arms that time-boxed cool-down — but it still
+// does not import `shouldCoolDownLabel`. It composes the two NARROW predicates
+// (`isThrottledLabelReason || isCloudReason`) instead, which is exactly
+// `shouldCoolDownLabel` MINUS the terminal class. That is not a stylistic choice:
+// the wide predicate INCLUDES terminal, and this file is the one place where the
+// terminal class means "write the permanent marker". Keeping the sets textually
+// distinct is what stops a future edit from routing a throttled reason into
+// `.skipped` — the wiring-guard test asserts the import is absent.
 const UNRECOVERABLE_LABEL_REASONS = TERMINAL_LABEL_REASONS;
 
 // CTL-936: labelOnce now accepts an optional `appendEvent` seam. When provided
@@ -80,15 +116,26 @@ const UNRECOVERABLE_LABEL_REASONS = TERMINAL_LABEL_REASONS;
 // terminal marker (.applied/.skipped) already exists → this call is a no-op;
 // `true` when this call performed the write attempt (the once-application).
 // Existing callers ignore the return value, so this is backward-compatible.
+// CTL-2043 (P2-a): `now` is the injectable clock for the time-boxed cool-down.
+// It DEFAULTS to Date.now — production supplies no seam, and a guard reading an
+// undefined clock would compute NaN, compare false, and never bite: a check that
+// cannot fail, which is the shape this repo keeps getting burned by.
 export function labelOnce(
   orchDir,
   ticket,
   label,
   writeStatus,
-  { appendEvent = null, env = process.env, onApplyResult = null } = {}
+  { appendEvent = null, env = process.env, onApplyResult = null, now = () => Date.now() } = {}
 ) {
   const base = labelMarkerBase(orchDir, ticket, label);
   if (existsSync(`${base}.applied`) || existsSync(`${base}.skipped`)) return false;
+  // CTL-2043 (P2-a): a live cool-down is a no-op of the SAME shape as the
+  // marker-guarded early return above — applyLabel is not called, so `onApplyResult`
+  // correctly does not fire and `false` is returned. The caller
+  // (labelNeedsHumanUnlessBeliefOwner) already gates its side effects on a CONFIRMED
+  // apply, so it needs no change: a cooled-down tick is indistinguishable from the
+  // already-handled "this call performed no once-application" case.
+  if (orchDir && inLabelCooldown(orchDir, ticket, label, now())) return false;
   try {
     const res = writeStatus.applyLabel({ ticket, label });
     // A fake that returns undefined (test stubs) is treated as success so
@@ -104,6 +151,12 @@ export function labelOnce(
     }
     if (applied) {
       writeFileSync(`${base}.applied`, "");
+      // CTL-2043: a success resets the ledger. The stale marker would be harmless to
+      // labelOnce itself (`.applied` early-returns forever after), but the SAME
+      // (ticket, label) ledger carries the attempt counter the converger's CTL-2052
+      // cap gate reads — leaving a spent count behind would bring that cap closer
+      // for a label that just landed.
+      if (orchDir) clearLabelCooldown(orchDir, ticket, label);
     } else if (UNRECOVERABLE_LABEL_REASONS.has(res?.reason)) {
       writeFileSync(`${base}.skipped`, "");
       const reason = res.reason;
@@ -131,6 +184,23 @@ export function labelOnce(
           );
         }
       }
+    } else if (orchDir && (isThrottledLabelReason(res?.reason) || isCloudReason(res?.reason))) {
+      // CTL-2043 (P2-a): arm the TIME-BOXED cool-down. Deliberately NOT `.skipped`
+      // (see the header) — a throttled/cloud refusal clears on its own, and a
+      // permanent marker would outlive the fix. Terminal reasons took the branch
+      // above and early-return on `.skipped` forever, so they never reach here: the
+      // set armed here is exactly `shouldCoolDownLabel` MINUS terminal.
+      //
+      // The AC3 retry CAP is deliberately not applied here (converger-only, CTL-2052):
+      // this path exists to page a human, and a cap that eventually stops re-issuing
+      // could silently abandon that page. The 60 s window alone is what CTL-2043 asks
+      // for; the ledger it writes is nonetheless the shared one, so the spend is
+      // counted once per (ticket, label) across both callers.
+      recordLabelCooldown(orchDir, ticket, label, now());
+      log.warn(
+        { ticket, label, reason: res.reason },
+        "ctl-2043: label apply refused (throttled / cloud) — backing off for the cool-down window; NOT marked skipped, so it retries once the window elapses"
+      );
     }
   } catch (err) {
     log.warn(

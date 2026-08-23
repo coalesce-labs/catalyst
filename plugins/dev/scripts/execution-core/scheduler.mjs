@@ -383,9 +383,20 @@ import {
   shouldCoolDownLabel,
   isThrottledLabelReason,
   isCloudLabelRejection,
+  isCloudReason, // CTL-2043: the whole cloud:* family (log discriminator's 4th class)
 } from "./label-failure-class.mjs";
 // CTL-2052 (AC3): the "stopped after N and said so" escalation emitter.
 import { emitLabelRetryExhaustedEvent } from "./label-retry-event.mjs";
+// CTL-2043 (Decision C): the time-boxed label cool-down ledger, now a shared leaf so
+// label-guard.mjs's labelOnce can arm the same window (see that file's header).
+import {
+  labelCooldownPath,
+  readLabelCooldownMarker,
+  clearLabelCooldown,
+  inLabelCooldown,
+  recordLabelCooldown,
+  labelRetryState,
+} from "./label-cooldown.mjs";
 // CTL-954: team estimation method — lazy-cached from Linear, used to expand
 // the allowed estimate point set beyond the hard-coded Fibonacci values.
 import {
@@ -2662,10 +2673,24 @@ function unmetBlockersFor(candidateId, edges, poolById, blockerStates) {
 // class → message mapping (the header above warns they must stay in step —
 // CTL-834/CTL-764). It only chooses the class name for the structured
 // `label_failure_class` field and the human message; the caller supplies its own
-// converger-specific message trio. Order matters: cloud-rejection is checked first
+// converger-specific message quartet. Order matters: cloud-rejection is checked first
 // because a `cloud:label-rejected` is neither throttled nor terminal.
-function classifyLabelCooldownLog(reason, { cloudMsg, throttledMsg, terminalMsg }) {
+//
+// CTL-2043 makes it FOUR-way by inserting the cloud FAMILY between the exact
+// cloud-rejection and throttled. Placement is load-bearing in both directions:
+//   • AFTER cloud-rejection, so the normalized `cloud:label-rejected` keeps its exact
+//     class — the family arm would otherwise swallow it (CTL-2052 AC2 regression).
+//   • BEFORE the terminal fallback, so a `cloud:exhausted` stops reading as
+//     "unrecoverable" and sending an operator to hunt a label that is not missing.
+// It is safe beside throttled in either order (no `cloud:*` is a `budget:*` or a
+// bare `rate-limited`/`unauthorized`), but it is written before it to keep the
+// cloud-authored reasons contiguous.
+//
+// Exported (CTL-2043) so the class→message mapping is assertable directly, without
+// having to infer it from a converger's emitted log line.
+export function classifyLabelCooldownLog(reason, { cloudMsg, cloudFamilyMsg, throttledMsg, terminalMsg }) {
   if (isCloudLabelRejection(reason)) return { cls: "cloud-rejection", message: cloudMsg };
+  if (isCloudReason(reason)) return { cls: "cloud", message: cloudFamilyMsg }; // CTL-2043
   if (isThrottledLabelReason(reason)) return { cls: "throttled", message: throttledMsg };
   return { cls: "terminal", message: terminalMsg };
 }
@@ -2847,6 +2872,8 @@ export function convergeHeldLabel(
       const { cls, message } = classifyLabelCooldownLog(res.reason, {
         cloudMsg:
           "ctl-2052: held-label apply refused by the cloud (deterministic) — backing off (cool-down); this write is not re-issued until the cool-down elapses",
+        cloudFamilyMsg:
+          "ctl-2043: held-label apply refused by the cloud (e.g. budget-exhausted) — backing off (cool-down); the cause is cloud-side, not a missing label and not this host's write budget",
         throttledMsg:
           "coord-236: held-label apply THROTTLED (host write budget / rate limit) — backing off; this write is not re-issued until the cool-down elapses",
         terminalMsg: "ctl-834: held-label apply unrecoverable — backing off (cool-down)",
@@ -2974,6 +3001,8 @@ export function convergeDispositionLabel(
       const { cls, message } = classifyLabelCooldownLog(res.reason, {
         cloudMsg:
           "ctl-2052: disposition-label apply refused by the cloud (deterministic) — backing off (cool-down); this write is not re-issued until the cool-down elapses",
+        cloudFamilyMsg:
+          "ctl-2043: disposition-label apply refused by the cloud (e.g. budget-exhausted) — backing off (cool-down); the cause is cloud-side, not a missing label and not this host's write budget",
         throttledMsg:
           "coord-236: disposition-label apply THROTTLED (host write budget / rate limit) — backing off; this write is not re-issued until the cool-down elapses",
         terminalMsg: "ctl-764: disposition-label apply unrecoverable — backing off (cool-down)",
@@ -3048,65 +3077,13 @@ export function convergeStartedHeldLabels(
   }
 }
 
-// CTL-834 held-label apply cool-down — the same time-boxed-marker shape as the
-// CTL-624 dispatch cool-down: a per-(ticket,label) JSON marker carrying failedAt,
-// kept OUTSIDE workers/<T>/ so it survives worker-dir GC (see dispatchCooldownPath
-// + memory project_scheduler_marker_under_workers_excludes_ticket). The window
-// self-heals so an exclusive conflict that later clears lets the label re-apply.
-export function labelCooldownPath(orchDir, ticket, label) {
-  return join(orchDir, ".label-cooldowns", `${ticket}-${label}.json`);
-}
-// CTL-2052 — read the cool-down marker (or null). Its own owner of the parse, so the
-// attempt-counter reader and the time gate below cannot disagree about the shape.
-function readLabelCooldownMarker(orchDir, ticket, label) {
-  try {
-    return JSON.parse(readFileSync(labelCooldownPath(orchDir, ticket, label), "utf8"));
-  } catch {
-    return null;
-  }
-}
-// CTL-2052 — clear the ledger (on a successful apply, or when spending the single
-// self-heal probe). ENOENT is the expected case. Best-effort; never throws.
-function clearLabelCooldown(orchDir, ticket, label) {
-  try {
-    unlinkSync(labelCooldownPath(orchDir, ticket, label));
-  } catch {
-    /* ENOENT — nothing to clear */
-  }
-}
-function inLabelCooldown(orchDir, ticket, label, now) {
-  const marker = readLabelCooldownMarker(orchDir, ticket, label);
-  return marker != null && typeof marker.failedAt === "number" && now - marker.failedAt < LABEL_COOLDOWN_MS;
-}
-// CTL-2052 — the marker carries a per-(ticket,label) attempt count so AC3 can bound
-// the storm. Read the prior count, increment, persist, and RETURN the new value so the
-// caller can edge-trigger the cap-crossing escalation. Backward-compatible: an old
-// marker without `attempts` reads as 0, so the first increment is 1.
-function recordLabelCooldown(orchDir, ticket, label, now) {
-  const p = labelCooldownPath(orchDir, ticket, label);
-  mkdirSync(dirname(p), { recursive: true });
-  const prior = readLabelCooldownMarker(orchDir, ticket, label);
-  const priorAttempts = prior && Number.isInteger(prior.attempts) ? prior.attempts : 0;
-  const attempts = priorAttempts + 1;
-  writeFileSync(p, JSON.stringify({ failedAt: now, attempts }));
-  return attempts;
-}
-
-// CTL-2052 (AC3) — the pure cap arithmetic, exported so it can be exercised without
-// disk. `blocked` short-circuits the apply (still inside the long back-off after the
-// cap); `exhaustedProbe` says the long window elapsed so the caller may allow ONE probe
-// (and reset the ledger, so the label can still land if the sibling was removed
-// meanwhile — it self-heals on a long timescale rather than never; COORD-236 "never
-// permanently abandon a label").
-export function labelRetryState(marker, now, { cap, exhaustedMs } = {}) {
-  const attempts = marker && Number.isInteger(marker.attempts) ? marker.attempts : 0;
-  const failedAt = marker && typeof marker.failedAt === "number" ? marker.failedAt : 0;
-  if (attempts >= cap) {
-    if (now - failedAt < exhaustedMs) return { blocked: true, attempts, exhaustedProbe: false };
-    return { blocked: false, attempts, exhaustedProbe: true };
-  }
-  return { blocked: false, attempts, exhaustedProbe: false };
-}
+// CTL-2043 (Decision C): the label cool-down primitives moved to the shared leaf
+// `label-cooldown.mjs` so `label-guard.mjs` can arm the same window without a
+// `label-guard → scheduler` import cycle. They are re-exported below for the
+// existing `from "./scheduler.mjs"` importers. The CONVERGER-ONLY cap gate
+// (`labelRetryCapBlocks` / `maybeEscalateRetryExhausted`, above) deliberately
+// stayed here — see the leaf's header for why it must not follow.
+export { labelCooldownPath, labelRetryState } from "./label-cooldown.mjs";
 
 // CTL-2083: the REMOVE-side twin of the apply arm at convergeHeldLabel's
 // scheduler.mjs:2816. removeLabel reports a budget/rate refusal as
@@ -3122,16 +3099,29 @@ function maybeArmRemoveCooldown(orchDir, ticket, label, res, now) {
   if (!orchDir || res == null) return;
   if (res.removed === false && shouldCoolDownLabel(res.reason)) {
     recordLabelCooldown(orchDir, ticket, label, now);
-    // COORD-236: the two failure classes get DIFFERENT sentences — an operator
+    // COORD-236: the failure classes get DIFFERENT sentences — an operator
     // reading "unrecoverable" for a budget refusal would go hunting for a label
     // that is not actually missing.
-    const throttled = isThrottledLabelReason(res.reason);
-    log.warn(
-      { ticket, label, reason: res.reason, label_failure_class: throttled ? "throttled" : "terminal" },
-      throttled
-        ? "coord-236/ctl-2083: held-label REMOVE THROTTLED (host write budget / rate limit) — backing off; this removal is not re-issued until the cool-down elapses"
-        : "ctl-2083: held-label remove unrecoverable — backing off (cool-down)"
-    );
+    //
+    // CTL-2043: routed through classifyLabelCooldownLog rather than re-deriving the
+    // split here. This helper used to be TWO-way (throttled | terminal), which was
+    // complete while only throttled reasons could reach it — but broadening
+    // shouldCoolDownLabel to the whole `cloud:*` family means a REMOVE refused with
+    // `cloud:exhausted` now arms this cool-down and fell into the terminal arm,
+    // reporting a temporary budget exhaustion as an unrecoverable missing label. That
+    // is the very mis-cue the comment above exists to prevent, re-introduced on the
+    // remove side by this ticket's own widening. The apply path already had the
+    // four-way; sharing it is what stops the two drifting again.
+    const { cls, message } = classifyLabelCooldownLog(res.reason, {
+      cloudMsg:
+        "ctl-2052/ctl-2083: held-label REMOVE rejected by the cloud (deterministic) — backing off (cool-down)",
+      cloudFamilyMsg:
+        "ctl-2043/ctl-2083: held-label REMOVE refused by the cloud (budget / exhausted — NOT missing) — backing off; retried once the cool-down elapses",
+      throttledMsg:
+        "coord-236/ctl-2083: held-label REMOVE THROTTLED (host write budget / rate limit) — backing off; this removal is not re-issued until the cool-down elapses",
+      terminalMsg: "ctl-2083: held-label remove unrecoverable — backing off (cool-down)",
+    });
+    log.warn({ ticket, label, reason: res.reason, label_failure_class: cls }, message);
   }
 }
 
@@ -9288,9 +9278,10 @@ const TICK_DEBOUNCE_MS = Number(process.env.SCHEDULER_DEBOUNCE_MS) || 2_000;
 // (ticket,phase) to one attempt per window. Time-based (not a permanent
 // .skipped marker like labelOnce) so it self-heals once the artifact appears.
 const DISPATCH_COOLDOWN_MS = Number(process.env.SCHEDULER_DISPATCH_COOLDOWN_MS) || 60_000;
-// CTL-834: held-label apply cool-down window (convergeHeldLabel). Same default as
-// the dispatch cool-down; overridable for tests / quieter quota budgets.
-const LABEL_COOLDOWN_MS = Number(process.env.SCHEDULER_LABEL_COOLDOWN_MS) || 60_000;
+// CTL-834's LABEL_COOLDOWN_MS moved to label-cooldown.mjs with the rest of the
+// ledger (CTL-2043 Decision C) — the window and the guards that read it stay in one
+// place, so a test override of SCHEDULER_LABEL_COOLDOWN_MS cannot apply to one and
+// not the other.
 // CTL-2052 (AC3): after this many cool-down CYCLES for one (ticket,label), the
 // converger STOPS re-issuing (long back-off) and escalates once — so a genuinely
 // stuck label does not retry ~once-per-window forever. The current behavior is
