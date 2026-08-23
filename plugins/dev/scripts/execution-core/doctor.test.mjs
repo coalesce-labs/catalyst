@@ -4049,16 +4049,33 @@ const MINIMAL_LAYER1 = JSON.stringify({
 });
 
 describe("checkConfigScopeLeak (CTL-1214)", () => {
-  it("WARNs (advisory, not FAIL) on a kitchen-sink Layer-1 still carrying node/cluster keys", () => {
-    // Back-compat window (CTL-1214): the leak is advisory (WARN), never FAIL, because
-    // runDoctor's exit code = FAIL count and catalyst-join.sh gates member activation
-    // on doctor exit 0. A FAIL here would fail-close every un-slimmed node's join.
+  it("FAILs on a kitchen-sink Layer-1 that DECLARES schemaVersion >= 1 and still carries node-scoped keys", () => {
+    // CTL-1214 Phase 5 replaced the blanket WARN pin with a self-gating promotion:
+    // a config that declares schemaVersion >= 1 says it is slimmed, so still carrying
+    // a node-scoped relocated key is a config contradicting its own declaration —
+    // the state that silently reverts knobs to code defaults. KITCHEN_SINK_LAYER1
+    // declares schemaVersion: 1, so it is FAIL-able.
     const checks = checkConfigScopeLeak({
       readLayer1: () => KITCHEN_SINK_LAYER1,
       hostsJsonExists: () => false,
     });
     expect(checks).toHaveLength(1);
     expect(checks[0].name).toBe("config-scope-leak");
+    expect(checks[0].status).toBe(STATUS.FAIL);
+  });
+
+  it("still WARNs (never FAILs) on an UN-SLIMMED Layer-1, so the join gate stays open", () => {
+    // The reason the check was pinned at WARN in the first place, kept as a live
+    // assertion: runDoctor's exit code = FAIL count and catalyst-join.sh's
+    // do_doctor_gate() activates a cluster member strictly on exit 0. A repo that
+    // has simply not migrated yet (no schemaVersion) must never fail-close its join.
+    const unslimmed = JSON.parse(KITCHEN_SINK_LAYER1);
+    delete unslimmed.catalyst.schemaVersion;
+    const checks = checkConfigScopeLeak({
+      readLayer1: () => JSON.stringify(unslimmed),
+      hostsJsonExists: () => false,
+    });
+    expect(checks).toHaveLength(1);
     expect(checks[0].status).toBe(STATUS.WARN);
   });
 
@@ -4084,8 +4101,10 @@ describe("checkConfigScopeLeak (CTL-1214)", () => {
     expect(detail).toContain("orchestration");
     expect(detail).toContain("feedback");
     expect(detail).toContain("sweep");
-    // and it points operators at the migration tooling / cluster destination
-    expect(detail).toContain("migrate-config-to-node.sh");
+    // and it points operators at the migration tooling / cluster destination.
+    // The script is `catalyst-config-migrate` (added by CTL-1214); the name this
+    // previously asserted, migrate-config-to-node.sh, has never existed in-tree.
+    expect(detail).toContain("catalyst-config-migrate");
     expect(detail).toContain("catalyst-cluster/cluster.json");
   });
 
