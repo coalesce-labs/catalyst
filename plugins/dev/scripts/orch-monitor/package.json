@@ -18,7 +18,7 @@
   },
   "dependencies": {
     "@catalyst-cloud/read-model": "^0.1.1",
-    "ink": "^5.2.1",
+    "ink": "^7.1.1",
     "react": "^19.2.8",
     "smee-client": "^5.0.0",
     "web-push": "^3.6.7"
