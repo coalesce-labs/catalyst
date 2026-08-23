@@ -87,8 +87,14 @@ describe("TypeScript toolchain contract (CTL-2179)", () => {
     const dev = ui.devDependencies ?? {};
     const declared = dev["typescript"];
     expect(typeof declared).toBe("string");
-    // Anchored: unanchored /\^?[0-4]\./ false-matches the "0." inside a valid "^6.0.2".
-    expect(declared).not.toMatch(/^\^?[0-4]\./);
+    // Assert the declared MAJOR, not a blocklist of rejected ones. A blocklist of
+    // 0.x-4.x still admitted "^5.8.3" -- the exact pre-split value -- and nothing
+    // else in this suite covers the declaration: the UI's `.bin/tsc` keeps
+    // resolving to the `@typescript/native` alias even with a nested typescript@5
+    // installed beside it, so test 2 does not stand in for this one.
+    const major = Number(/^\D*(\d+)/.exec(declared ?? "")?.[1]);
+    expect(Number.isInteger(major)).toBe(true); // fail closed: an unparseable range is a failure
+    expect(major).toBeGreaterThanOrEqual(6);
   });
 
   // ubuntu-latest (quality) and macos-latest (publish-desktop) both consume this lockfile.
