@@ -835,6 +835,36 @@ jobs:
         working-directory: plugins/dev/scripts/lib
         run: bun test codex-account-plane.test.mjs
 
+      - name: codex app-server client unit tests (bun, CTL-2072)
+        # The transport half, driven against an INJECTED spawn seam — no real
+        # `codex`, no network, no token spend. Same zero-import-leaf rationale
+        # and same by-name run requirement as the step above.
+        #
+        # Two of these tests pin protocol facts measured live rather than
+        # inferred from schema: the server interleaves an id-less
+        # `remoteControl/status/changed` notification between replies (so
+        # replies must be matched by JSON-RPC id, not arrival order), and it
+        # REALPATH-RESOLVES CODEX_HOME (so the echo-vs-request positive control
+        # must compare resolved paths — the fleet selector ~/catalyst/codex-home
+        # is itself a symlink, and a raw string compare would report a home
+        # mismatch on every healthy read).
+        #
+        # Measured 25 pass / 0 fail on this branch.
+        working-directory: plugins/dev/scripts/lib
+        run: bun test codex-account-client.test.mjs
+
+      - name: codex-accounts-usage CLI contract (CTL-2072)
+        # Output/exit-code contract + secrets hygiene, against a FAKE codex that
+        # speaks the measured app-server protocol. The hygiene checks plant a
+        # token-shaped string in the fixture's auth.json and carry their own
+        # POSITIVE CONTROLS (the secret really is in the fixture; the human
+        # table really is non-empty), so a refutation cannot pass on an empty
+        # haystack.
+        #
+        # Measured 23 pass / 0 fail on this branch.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/codex-accounts-usage.test.sh
+
       - name: deployment-mode Bash resolver unit test (CTL-1617)
         # The Bash mirror's own standalone suite (lib/catalyst-deployment-mode.sh) —
         # see the bun step above for why this suite was previously ungated.
