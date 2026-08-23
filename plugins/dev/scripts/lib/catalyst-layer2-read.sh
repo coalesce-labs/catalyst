@@ -9,6 +9,12 @@
 # by __tests__/layer2-read-parity.test.sh over a fixture matrix, with each side
 # additionally checked against a computed expected value.
 #
+# ⚠️ "config.json" above names the DEFAULT legacy file, not a fixed one: when
+# CATALYST_LAYER2_CONFIG_FILE pins a path, THAT file is the legacy layer and only
+# node.json / cluster-secrets.json are resolved from its directory — matching
+# readLayer2MergedFrom. The parity suite now pins a non-config.json name in its
+# own case, so this agreement claim is backed by a fixture that can fail.
+#
 # WHY this exists: CTL-1214 Phase 6 slims the committed .catalyst/config.json.
 # Four relocated categories (dispatchMode, worktreeRefresh, feedback, sweep) are
 # read from Layer-1 ONLY and every one of those readers is fail-open to a code
@@ -57,6 +63,33 @@ _catalyst_layer2_dir() {
   printf '%s' "${_home}/.config/catalyst"
 }
 
+# _catalyst_layer2_legacy_file — the LEGACY (lowest-precedence) Layer-2 file.
+#
+# ⚠️ CTL-1214 remediation. This used to be `$(_catalyst_layer2_dir)/config.json`
+# unconditionally, which is NOT what the JS twin does: readLayer2MergedFrom reads
+# the pinned PATH ITSELF as the legacy layer and resolves node.json /
+# cluster-secrets.json as its SIBLINGS (config.mjs:558-562). So with
+# CATALYST_LAYER2_CONFIG_FILE=<dir>/config-adva.json the two stacks read
+# DIFFERENT FILES — measured with distinct probe values, bash returned the
+# config.json value and JS the config-adva.json one — while this file's header
+# claimed the two "are held in agreement over a fixture matrix". They were not:
+# the parity suite pinned `${D}/config.json` at both of its call sites, so the
+# one axis the implementations actually differ on could never be observed.
+#
+# Latent rather than live (no production setter pins a non-config.json name), but
+# per-project Layer-2 files ARE named config-{projectKey}.json and several exist
+# on this host, so the shape is one call away. Taking the pinned filename makes
+# the two stacks agree BY CONSTRUCTION; when the pin is absent or already named
+# config.json — every real case today — the resolved path is byte-identical to
+# before, so this is a no-op in production.
+_catalyst_layer2_legacy_file() {
+  if [[ -n "${CATALYST_LAYER2_CONFIG_FILE:-}" ]]; then
+    printf '%s' "$CATALYST_LAYER2_CONFIG_FILE"
+    return 0
+  fi
+  printf '%s' "$(_catalyst_layer2_dir)/config.json"
+}
+
 # _catalyst_layer2_note_divergence — one stderr line + a breadcrumb when the
 # canonical chain would have resolved a different file than the legacy chain we
 # follow. Never changes the answer; makes the split observable.
@@ -90,13 +123,16 @@ catalyst_layer2_json() {
 
   local _dir; _dir="$(_catalyst_layer2_dir)"
   [[ -z "$_dir" ]] && { printf ''; return 0; }
+  local _legacy; _legacy="$(_catalyst_layer2_legacy_file)"
 
   # Build the argument list from the files that exist AND parse. A malformed file
   # must be layer-ABSENT rather than poisoning the whole merge, so each is
   # validated on its own before it joins the composition.
   local -a _files=()
   local _f
-  for _f in "${_dir}/config.json" "${_dir}/node.json" "${_dir}/cluster-secrets.json"; do
+  # Lowest precedence first: the legacy file (the PINNED path when one is set —
+  # see _catalyst_layer2_legacy_file), then its two siblings from _dir.
+  for _f in "$_legacy" "${_dir}/node.json" "${_dir}/cluster-secrets.json"; do
     [[ -f "$_f" ]] || continue
     jq -e 'type == "object"' "$_f" >/dev/null 2>&1 || continue
     _files+=("$_f")

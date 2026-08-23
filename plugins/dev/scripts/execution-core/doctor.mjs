@@ -4627,14 +4627,38 @@ export function checkConfigScopeLeak(deps = {}) {
   // validation failure can borrow this check's FAIL (and its join-gate exit code).
   const hard = errorDetails.some((e) => e.code === LAYER1_ERROR_CODES.NODE_SCOPE_LEAK);
 
+  // CTL-1214 remediation: the consequence clause is PER KNOB, not one blanket
+  // sentence. "leaving them here silently overrides the node config" is true only
+  // for the bash-read rows (dispatchMode / sweep / feedback, precedence
+  // "layer1-wins"); for the JS-read rows Layer-2 wins per field, so a leftover
+  // Layer-1 key is SHADOWED, not authoritative — the opposite failure, and the one
+  // an operator is most likely to mis-debug. Formatted from RELOCATED_LAYER1_KEYS'
+  // own `precedence` field so the message cannot drift from the readers.
+  const nodeLeaks = deprecatedKeys
+    .map((key) => RELOCATED_LAYER1_KEYS.find((e) => e.path === key))
+    .filter((e) => e && e.scope === "node");
+  const overriding = nodeLeaks.filter((e) => e.precedence === "layer1-wins").map((e) => `catalyst.${e.path}`);
+  const shadowed = nodeLeaks.filter((e) => e.precedence !== "layer1-wins").map((e) => `catalyst.${e.path}`);
+  const consequence =
+    [
+      overriding.length
+        ? `${overriding.join(", ")} ${overriding.length === 1 ? "is" : "are"} read Layer-1-first, so the value here OVERRIDES ~/.config/catalyst/node.json`
+        : "",
+      shadowed.length
+        ? `${shadowed.join(", ")} ${shadowed.length === 1 ? "is" : "are"} read Layer-2-first, so the value here is SHADOWED by node.json and the two can drift apart unnoticed`
+        : "",
+    ]
+      .filter(Boolean)
+      .join("; ") || "the effective value depends on which stack reads the knob";
+
   checks.push(
     mkCheck(
       "config-scope-leak",
       hard ? STATUS.FAIL : STATUS.WARN,
       hard
         ? `Layer-1 .catalyst/config.json declares schemaVersion >= 1 (slimmed) but still carries ` +
-          `node-scoped keys: ${leaks.join("; ")}. Those keys are read from Layer-1 only when present, ` +
-          `so leaving them here silently overrides the node config. Remediation: run ` +
+          `node-scoped keys: ${leaks.join("; ")}. Precedence differs by knob — ${consequence}. ` +
+          `Remediation: run ` +
           `\`plugins/dev/scripts/catalyst-config-migrate\` to move them into ` +
           `~/.config/catalyst/node.json.` +
           (hostsLeak || deprecatedKeys.includes("monitor.linear.teams")

@@ -105,15 +105,49 @@ relocate. `executor`, `executorByPhase`, `codex`, `publishPreflight`, `fleetHeal
 `daemonWatchdog`, `orphanReaper.workerGc`, `draftPr`, `stalePrRescue`, `orphanPrSweep`,
 `stalledPrSweep` and `phaseAgents` are genuinely Layer-1 and stay in the committed config.
 
-**Precedence.** Every relocated knob resolves **Layer-2 over Layer-1, per field**, with each site's
-existing env-var override still winning over both:
+**Precedence — read this per knob, not as one ladder.** Both stacks agree that an env-var override
+wins over everything and that a slimmed Layer-1 resolves from Layer-2. They deliberately differ on
+what happens when **both** layers carry a value, and the split follows which language reads the knob:
+
+| Relocated knob | Read by | When BOTH layers carry it |
+| --- | --- | --- |
+| `orchestration.executionCore` | JS | **Layer-2 wins, per field** |
+| `orchestration.worktreeRefresh` | JS | **Layer-2 wins, per field** |
+| `orchestration.reconcile` | JS | **Layer-2 wins, per field** |
+| `monitor.github.repoColors` | JS | **Layer-2 wins, per key** |
+| `orchestration.dispatchMode` | bash | **Layer-1 wins**; Layer-2 is a fallback |
+| `sweep.*` | bash | **Layer-1 wins**; Layer-2 is a fallback |
+| `feedback.*` | bash | **Layer-1 wins**; Layer-2 is a fallback |
 
 ```
-env var  >  cluster-secrets.json  >  node.json  >  ~/.config/catalyst/config.json  >  .catalyst/config.json  >  code default
+JS-read knobs:    env var  >  cluster-secrets.json  >  node.json  >  ~/.config/catalyst/config.json  >  .catalyst/config.json  >  code default
+bash-read knobs:  env var  >  .catalyst/config.json  >  cluster-secrets.json  >  node.json  >  ~/.config/catalyst/config.json  >  code default
 ```
+
+⚠️ **The bash arm is a fallback, not an override — a `node.json` value for `dispatchMode`,
+`sweep.*` or `feedback.*` does NOT take effect while Layer-1 still carries that key.** This is the
+deliberate direction, not an oversight: `node.json` is host-global and is seeded from **one** repo's
+Layer-1, so letting it outrank every repo's committed config would let one migration silently
+re-point unrelated repos. It also keeps the five bash sites consistent with `phase-agent-dispatch`'s
+pre-existing `config_value()` (Layer-1 → Layer-2 → default), which reads the same `dispatchMode`.
+The practical consequence is confined to **un-migrated** repos: to make a `node.json` override of a
+bash-read knob bite, remove the key from that repo's `.catalyst/config.json` (which is what
+`catalyst-config-migrate` does).
 
 So an un-migrated repo keeps working (Layer-1 supplies the value) and a slimmed one resolves from
-`node.json`. Nothing is required to move on any particular schedule.
+`node.json` — under **either** rule, because a slimmed Layer-1 is silent and the two rules only
+disagree while both layers are populated. Nothing is required to move on any particular schedule.
+
+**A brand-new project needs no migration — but its host needs a `dispatchMode`.**
+`catalyst-config-migrate` derives its moves from the Layer-1 content it finds, so on a repo
+scaffolded from the template there is nothing to relocate. `setup-catalyst.sh` seeds the default
+(`catalyst.orchestration.dispatchMode = "phase-agents"`) into `~/.config/catalyst/node.json`
+directly, non-clobbering — a host already pinned to `execution-core` or `oneshot-legacy` keeps its
+setting. The key deliberately does **not** ship in the template: it is node-scoped, the template
+declares `schemaVersion: 1`, and a slimmed config carrying a node-scoped key is the one
+`catalyst doctor` FAIL that fail-closes `catalyst-join.sh`. If you scaffold a project without
+running `setup-catalyst.sh`, set it by hand — with no value anywhere the code default is
+`oneshot-legacy`, which is the wrong orchestration model and fails silently.
 
 **Migrating a repo.**
 

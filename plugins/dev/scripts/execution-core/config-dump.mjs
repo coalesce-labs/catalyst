@@ -50,6 +50,10 @@ import {
   resolveBeliefsFlag,
   resolveModeSource,
 } from "./config.mjs";
+// CTL-1214 remediation: the DERIVED setpoint row delegates to the real resolver
+// rather than restating its rule, the same discipline resolveModeSource /
+// resolveBeliefsFlag already establish above.
+import { resolveTargetSetpoint } from "../lib/autotune-setpoint.mjs";
 
 export const DUMP_SCHEMA = "catalyst.config.dump/1";
 
@@ -241,9 +245,17 @@ export const CONFIG_KEYS = Object.freeze(
     // the NODE scope (~/.config/catalyst/node.json) and now declare a `layer2`
     // source; the rest (executor, executorByPhase, codex, draftPr, fleetHealth,
     // daemonWatchdog, orphanReaper.workerGc, …) are genuinely Layer-1 and stay.
+    // CTL-1214 remediation: `layer1-first`, not `value`. Every dispatchMode reader
+    // is bash (orchestrate-dispatch-next, orchestrate-register-interests.sh,
+    // check-project-setup.sh, and phase-agent-dispatch's pre-existing
+    // config_value()), and all four consult Layer-2 only when Layer-1 is silent.
+    // Under the "value" ladder this row named layer2 as the winner on an
+    // un-migrated repo where the dispatcher actually answers from layer1 — the
+    // dump pointing at the wrong FILE for the single knob that selects the
+    // orchestration model.
     {
       key: "catalyst.orchestration.dispatchMode",
-      kind: "value",
+      kind: "layer1-first",
       layer1: "catalyst.orchestration.dispatchMode",
       layer2: "catalyst.orchestration.dispatchMode",
       env: [],
@@ -310,6 +322,118 @@ export const CONFIG_KEYS = Object.freeze(
       env: [],
       fallback: null,
       reader: "resolveTargetSetpoint",
+    },
+    // CTL-1214 remediation: the RESOLVED setpoint, beside the raw key above.
+    // The raw row alone reads clean across the exact change the migration makes:
+    // measured on a live host with the same Layer-2, resolveTargetSetpoint goes
+    // 4 (fat Layer-1 maxParallel) -> undefined (slim Layer-1) while every raw row
+    // is byte-identical, so the plan's AC-2 before/after dump comparison reported
+    // 0 differences over a change that silently no-ops the autotuner's
+    // convergence and recovery-to-layer1 branches.
+    {
+      key: "catalyst.orchestration.executionCore.targetParallel.resolved",
+      kind: "derived",
+      layer1: null,
+      layer2: null,
+      env: [],
+      fallback: null,
+      reader: "resolveTargetSetpoint",
+      derive: ({ layer1, layer2 }) =>
+        resolveTargetSetpoint(
+          getPath(layer1, "catalyst.orchestration.executionCore") ?? {},
+          getPath(layer2, "catalyst.orchestration.executionCore") ?? {},
+        ),
+    },
+    // CTL-1214 remediation: reconcile.intervalSeconds — the sibling of
+    // reconcile.mode above. Relocated by the same registry row, read by the same
+    // readLinearReconcileConfig, and previously absent from the dump, so a
+    // migration that moved the interval was invisible to the AC-2 comparison.
+    {
+      key: "catalyst.orchestration.reconcile.intervalSeconds",
+      kind: "value",
+      layer1: "catalyst.orchestration.reconcile.intervalSeconds",
+      layer2: "catalyst.orchestration.reconcile.intervalSeconds",
+      // No env override exists for the interval — CATALYST_RECONCILE_MODE is the
+      // only one readLinearReconcileConfig honours, and it applies to `mode`.
+      env: [],
+      fallback: 600,
+      reader: "readLinearReconcileConfig",
+    },
+    // ── CTL-1214 remediation: the three relocated categories the dump could not
+    // see at all. config-dump is the plan's instrument for AC-2 ("identical
+    // effective values ... verified by a before/after config-dump comparison, not
+    // by inspection"), and it emitted NO row for catalyst.feedback.*,
+    // catalyst.sweep.* or monitor.github.repoColors — 3 of the 7 relocated
+    // categories. An instrument blind to what it is asked to prove reads as a
+    // clean pass over an unmeasured change.
+    //
+    // All of sweep.* and feedback.* are `layer1-first`: their readers are the
+    // bash sites (orphan-sweep's _cfg_str, feedback-consent.sh, file-feedback.sh),
+    // which consult Layer-2 only when Layer-1 is silent.
+    {
+      key: "catalyst.sweep.idleHours",
+      kind: "layer1-first",
+      layer1: "catalyst.sweep.idleHours",
+      layer2: "catalyst.sweep.idleHours",
+      env: [],
+      fallback: 48,
+      reader: "orphan-sweep.sh _cfg_str",
+    },
+    {
+      key: "catalyst.sweep.intervalHours",
+      kind: "layer1-first",
+      layer1: "catalyst.sweep.intervalHours",
+      layer2: "catalyst.sweep.intervalHours",
+      env: [],
+      fallback: 2,
+      reader: "orphan-sweep.sh _cfg_str",
+    },
+    {
+      key: "catalyst.sweep.salvagePush",
+      kind: "layer1-first",
+      layer1: "catalyst.sweep.salvagePush",
+      layer2: "catalyst.sweep.salvagePush",
+      env: [],
+      fallback: false,
+      reader: "orphan-sweep.sh _cfg_str",
+    },
+    {
+      key: "catalyst.sweep.maxRemovalsPerRun",
+      kind: "layer1-first",
+      layer1: "catalyst.sweep.maxRemovalsPerRun",
+      layer2: "catalyst.sweep.maxRemovalsPerRun",
+      env: [],
+      fallback: 20,
+      reader: "orphan-sweep.sh _cfg_str",
+    },
+    {
+      key: "catalyst.feedback.autoFile",
+      kind: "layer1-first",
+      layer1: "catalyst.feedback.autoFile",
+      layer2: "catalyst.feedback.autoFile",
+      env: [],
+      fallback: null,
+      reader: "feedback-consent.sh read_auto_file",
+    },
+    {
+      key: "catalyst.feedback.githubRepo",
+      kind: "layer1-first",
+      layer1: "catalyst.feedback.githubRepo",
+      layer2: "catalyst.feedback.githubRepo",
+      env: [],
+      fallback: null,
+      reader: "file-feedback.sh",
+    },
+    // repoColors is JS-read (loadMonitorConfig overlays Layer-2 + node.json ON TOP
+    // of the Layer-1 base, per key), so it takes the Layer-2-wins "value" ladder.
+    {
+      key: "catalyst.monitor.github.repoColors",
+      kind: "value",
+      layer1: "catalyst.monitor.github.repoColors",
+      layer2: "catalyst.monitor.github.repoColors",
+      env: [],
+      fallback: null,
+      reader: "loadMonitorConfig",
     },
     // CTL-1214: the eligibleQuery.status row is GONE. It reported a Layer-1 key
     // that no runtime reader dereferences — the effective eligibleQuery comes from
@@ -555,6 +679,36 @@ export function resolveRow(row, { env = {}, layer1 = null, layer2 = null } = {})
     if (Number.isInteger(l2) && l2 > 0) return { ...base, value: l2, provenance: PROVENANCE.CONFIG, layer: "layer2" };
     if (l1 !== undefined && l1 !== null) return { ...base, value: l1, provenance: PROVENANCE.CONFIG, layer: "layer1" };
     return { ...base, value: row.fallback, provenance: PROVENANCE.DEFAULT, layer: null };
+  }
+
+  if (row.kind === "layer1-first") {
+    // CTL-1214 remediation: the BASH readers (orchestrate-dispatch-next,
+    // orchestrate-register-interests.sh, check-project-setup.sh, orphan-sweep's
+    // _cfg_str, feedback-consent/file-feedback) treat Layer-2 as a FALLBACK
+    // consulted only when Layer-1 is silent — mirroring phase-agent-dispatch's
+    // pre-existing config_value(). Reporting these rows with the "value" ladder
+    // would name layer2 as the winner on an un-migrated repo where the bash
+    // reader actually answers from layer1: a provenance tool that sends the
+    // operator to the wrong FILE is the failure mode this module exists to end.
+    if (envValue !== undefined) return { ...base, value: envValue, provenance: PROVENANCE.ENV, layer: null };
+    if (l1 !== undefined && l1 !== null) return { ...base, value: l1, provenance: PROVENANCE.CONFIG, layer: "layer1" };
+    if (l2 !== undefined && l2 !== null) return { ...base, value: l2, provenance: PROVENANCE.CONFIG, layer: "layer2" };
+    return { ...base, value: row.fallback, provenance: PROVENANCE.DEFAULT, layer: null };
+  }
+
+  if (row.kind === "derived") {
+    // A row whose value no single key carries — computed by the SAME function the
+    // daemon calls, from both layers. `layer` is "merged" because neither file
+    // alone is the answer. AC-2's before/after comparison reads this row, which is
+    // the point: the raw targetParallel key can be unchanged across a migration
+    // while the RESOLVED setpoint goes 4 -> undefined.
+    const value = row.derive({ layer1, layer2 });
+    return {
+      ...base,
+      value: value === undefined ? row.fallback : value,
+      provenance: value === undefined ? PROVENANCE.DEFAULT : PROVENANCE.CONFIG,
+      layer: value === undefined ? null : "merged",
+    };
   }
 
   // "value": env > layer2 > layer1 > default. Layer-2 is node scope and wins over

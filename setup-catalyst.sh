@@ -3343,6 +3343,55 @@ init_session_database() {
 	echo ""
 }
 
+# CTL-1214 remediation: seed catalyst.orchestration.dispatchMode into node.json.
+#
+# Phase 4 removed the `catalyst.orchestration` stanza — including
+# `dispatchMode: "phase-agents"` — from the config template, and NOTHING replaced
+# it: a grep of this script, setup-execution-core-states.sh and catalyst-join.sh
+# finds no other dispatchMode writer (positive control: the same grep finds
+# dispatchMode in 5 reader scripts). catalyst-config-migrate cannot cover the gap
+# either — a brand-new project has no Layer-1 key to relocate. So a project
+# scaffolded from the template on a host with no node.json resolved dispatchMode
+# through orchestrate-dispatch-next's fallback to nothing and landed on the code
+# default `oneshot-legacy`: a SILENT flip of the documented default, and exactly
+# the failure the Layer-2 fallback was added to prevent.
+#
+# ⛔ The key cannot simply go back in the template. It is node-scoped in
+# RELOCATED_LAYER1_KEYS, the template declares `schemaVersion: 1`, and a slimmed
+# config carrying a node-scoped key is checkConfigScopeLeak's one FAIL — which
+# catalyst-join.sh turns into a fail-closed join gate for every new project.
+# node.json is where the registry says this value lives, so that is where setup
+# writes it.
+#
+# Non-clobbering, matching setup_sweep_config: an operator's existing value wins
+# and is never overwritten (the `//` below fills the key only when it is absent).
+setup_dispatch_mode_config() {
+	local layer2_file="${CATALYST_LAYER2_CONFIG_FILE:-${HOME}/.config/catalyst/config.json}"
+	local node_file
+	node_file="$(cd "$(dirname "$layer2_file")" 2>/dev/null && pwd)/node.json" || node_file=""
+	if [[ -z $node_file || $node_file == "/node.json" ]]; then
+		echo "setup: warning: could not resolve the Layer-2 config dir; skipping dispatchMode default" >&2
+		return 0
+	fi
+
+	local tmp
+	[[ -f $node_file ]] || printf '{}\n' >"$node_file"
+	tmp="${node_file}.tmp.$$"
+	# `// "phase-agents"` fills the key only when it is absent, so a host already
+	# pinned to execution-core or oneshot-legacy keeps its setting across re-runs.
+	if jq '.catalyst = (.catalyst // {})
+	       | .catalyst.orchestration = (.catalyst.orchestration // {})
+	       | .catalyst.orchestration.dispatchMode =
+	           (.catalyst.orchestration.dispatchMode // "phase-agents")' \
+		"$node_file" >"$tmp" && chmod 600 "$tmp" && mv "$tmp" "$node_file"; then
+		print_success "wrote catalyst.orchestration.dispatchMode default to ${node_file}" 2>/dev/null \
+			|| echo "setup: wrote catalyst.orchestration.dispatchMode default to ${node_file}"
+	else
+		rm -f "$tmp"
+		echo "setup: warning: could not write dispatchMode default to ${node_file}" >&2
+	fi
+}
+
 # Write catalyst.sweep defaults into .catalyst/config.json and, on macOS,
 # invoke the launchd installer (CTL-1030).
 setup_sweep_config() {
@@ -3581,6 +3630,7 @@ main() {
 	setup_execution_core_states
 	init_session_database
 	setup_sweep_config
+	setup_dispatch_mode_config
 	init_humanlayer_thoughts
 	sync_thoughts
 	# CTL-1918: perform the steps setup used to print. Runs last so every input it

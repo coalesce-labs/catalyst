@@ -71,6 +71,10 @@ claude-accounts.env
 website/node_modules/
 website/dist/
 website/.astro/
+# website/ is an npm workspace — website/package-lock.json is the committed
+# lockfile. A stray `bun install` here drops a bun.lock beside it; ignore it so
+# it can never be committed alongside a conflicting lockfile (CTL-1214).
+website/bun.lock
 
 # Plugin-local tooling (orch-monitor)
 plugins/dev/scripts/orch-monitor/node_modules/

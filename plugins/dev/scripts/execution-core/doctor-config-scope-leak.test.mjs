@@ -177,6 +177,60 @@ describe("checkConfigScopeLeak grading (CTL-1214 D3/D4)", () => {
     expect(control.status).toBe(STATUS.FAIL);
   });
 
+  // CTL-1214 remediation (verify regression_risk 5, medium): the FAIL detail used
+  // to assert one blanket cause — "leaving them here silently overrides the node
+  // config" — which is the WRONG direction for 4 of the 7 node-scoped rows. These
+  // three cases pin the per-knob wording in BOTH directions, so a regression to a
+  // single blanket sentence fails rather than merely reading plausibly.
+  test("FAIL detail says OVERRIDES for a bash-read (layer1-wins) leak", () => {
+    const c = one({ ...noHosts, readLayer1: () => cfg({ sweep: { idleHours: 48 } }) });
+    expect(c.status).toBe(STATUS.FAIL);
+    expect(c.detail).toContain("catalyst.sweep");
+    expect(c.detail).toContain("OVERRIDES");
+    // The opposite clause must be ABSENT — a message carrying both would be
+    // unfalsifiable and would "pass" this assertion for the wrong reason.
+    expect(c.detail).not.toContain("SHADOWED");
+  });
+
+  test("FAIL detail says SHADOWED for a JS-read (destination-wins) leak", () => {
+    const c = one({
+      ...noHosts,
+      readLayer1: () => cfg({ orchestration: { worktreeRefresh: { enabled: true } } }),
+    });
+    expect(c.status).toBe(STATUS.FAIL);
+    expect(c.detail).toContain("catalyst.orchestration.worktreeRefresh");
+    expect(c.detail).toContain("SHADOWED");
+    expect(c.detail).not.toContain("OVERRIDES");
+  });
+
+  test("a mixed leak names BOTH consequences, each against its own knob", () => {
+    const c = one({
+      ...noHosts,
+      readLayer1: () =>
+        cfg({
+          sweep: { idleHours: 48 },
+          orchestration: { worktreeRefresh: { enabled: true } },
+        }),
+    });
+    expect(c.status).toBe(STATUS.FAIL);
+    // Scope the assertions to the CONSEQUENCE clause. The leak enumeration ahead
+    // of it already names every leaked key, so a bare indexOf over the whole
+    // detail matches there and proves nothing about the per-knob attribution.
+    const marker = "Precedence differs by knob — ";
+    const at = c.detail.indexOf(marker);
+    expect(at).toBeGreaterThan(-1);
+    const clause = c.detail.slice(at + marker.length);
+    const overrides = clause.indexOf("OVERRIDES");
+    const shadowed = clause.indexOf("SHADOWED");
+    expect(overrides).toBeGreaterThan(-1);
+    expect(shadowed).toBeGreaterThan(-1);
+    // sweep is the layer1-wins row, so within the clause it sits on the
+    // OVERRIDES side; worktreeRefresh (destination-wins) sits on the SHADOWED side.
+    expect(clause.indexOf("catalyst.sweep")).toBeLessThan(overrides);
+    expect(clause.indexOf("catalyst.orchestration.worktreeRefresh")).toBeGreaterThan(overrides);
+    expect(clause.indexOf("catalyst.orchestration.worktreeRefresh")).toBeLessThan(shadowed);
+  });
+
   test("and it is WARN about the roster only (CTL-1885 is the remaining work)", () => {
     const layer1Path = join(import.meta.dir, "..", "..", "..", "..", ".catalyst", "config.json");
     const c = one({ ...noHosts, readLayer1: () => readFileSync(layer1Path, "utf8") });

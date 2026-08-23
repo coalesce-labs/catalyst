@@ -41,48 +41,79 @@
  * the fleet. This repo's committed config carries only the four, so the
  * "no orchestration stanza after migration" outcome is unchanged.
  *
- * @type {ReadonlyArray<{path: string, scope: "cluster"|"node", destination: string}>}
+ * ⚠️ CTL-1214 remediation — `precedence` records which layer WINS when BOTH still
+ * carry the key, because the two stacks genuinely differ and the difference is
+ * what an operator needs at the moment doctor reports a leak:
+ *   - `"destination-wins"` — the JS readers (readLayer2MergedFrom consumers) and
+ *     the cluster roster overlay Layer-2/cluster ON TOP of Layer-1 per field, so a
+ *     leftover Layer-1 key is SHADOWED (silently divergent, not authoritative).
+ *   - `"layer1-wins"` — the bash readers treat Layer-2 as a FALLBACK consulted
+ *     only when Layer-1 is silent (mirroring phase-agent-dispatch's pre-existing
+ *     `config_value()`), so a leftover Layer-1 key OVERRIDES node.json.
+ * `readBy` names the stack that establishes it. Both are documented per knob in
+ * website/src/content/docs/reference/configuration.md → "Precedence"; this array
+ * is the single source of truth the doctor message formats from, so the two
+ * cannot drift into the "one blanket ladder" claim that was wrong for 4 of 7 rows.
+ *
+ * @type {ReadonlyArray<{path: string, scope: "cluster"|"node", destination: string,
+ *   precedence: "destination-wins"|"layer1-wins", readBy: "js"|"bash"}>}
  */
 export const RELOCATED_LAYER1_KEYS = Object.freeze([
   {
     path: "monitor.linear.teams",
     scope: "cluster",
     destination: "catalyst-cluster/cluster.json → projects[]",
+    precedence: "destination-wins",
+    readBy: "js",
   },
   {
     path: "monitor.github.repoColors",
     scope: "node",
     destination: "~/.config/catalyst/node.json → catalyst.monitor.github.repoColors",
+    precedence: "destination-wins",
+    readBy: "js",
   },
   {
     path: "orchestration.dispatchMode",
     scope: "node",
     destination: "~/.config/catalyst/node.json → catalyst.orchestration.dispatchMode",
+    precedence: "layer1-wins",
+    readBy: "bash",
   },
   {
     path: "orchestration.executionCore",
     scope: "node",
     destination: "~/.config/catalyst/node.json → catalyst.orchestration.executionCore.*",
+    precedence: "destination-wins",
+    readBy: "js",
   },
   {
     path: "orchestration.worktreeRefresh",
     scope: "node",
     destination: "~/.config/catalyst/node.json → catalyst.orchestration.worktreeRefresh.*",
+    precedence: "destination-wins",
+    readBy: "js",
   },
   {
     path: "orchestration.reconcile",
     scope: "node",
     destination: "~/.config/catalyst/node.json → catalyst.orchestration.reconcile.*",
+    precedence: "destination-wins",
+    readBy: "js",
   },
   {
     path: "feedback",
     scope: "node",
     destination: "~/.config/catalyst/node.json → catalyst.feedback.*",
+    precedence: "layer1-wins",
+    readBy: "bash",
   },
   {
     path: "sweep",
     scope: "node",
     destination: "~/.config/catalyst/node.json → catalyst.sweep.*",
+    precedence: "layer1-wins",
+    readBy: "bash",
   },
 ]);
 
@@ -157,7 +188,8 @@ function getPath(obj, dottedPath) {
  * The only other hard requirement is a top-level `catalyst` object.
  *
  * @param {unknown} obj - the parsed config object, expected shape `{ catalyst: {...} }`.
- * @returns {{ valid: boolean, deprecatedKeys: string[], errors: string[], recommendations: string[] }}
+ * @returns {{ valid: boolean, deprecatedKeys: string[], errors: string[],
+ *   errorDetails: Array<{code: string, message: string}>, recommendations: string[] }}
  *   - `valid`: true when there are no hard errors (deprecated keys / missing schemaVersion do not affect this);
  *   - `deprecatedKeys`: dotted paths (relative to `catalyst.`) that have relocated;
  *   - `errors`: human-readable hard-validation failures;

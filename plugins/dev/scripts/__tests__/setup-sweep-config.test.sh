@@ -168,6 +168,63 @@ CATALYST_LAYER2_CONFIG_FILE="${S5C_L2}/config.json" setup_sweep_config >/dev/nul
 run "S5h: a legacy Layer-1 catalyst.sweep is NOT deleted" \
   bash -c "jq -e '.catalyst.sweep.idleHours == 72' '${S5C_DIR}/.catalyst/config.json'"
 
+# ─── S7 (CTL-1214 remediation): setup_dispatch_mode_config seeds node.json ────
+#
+# Phase 4 removed `orchestration.dispatchMode` from the config template and left
+# NO writer behind, so a project scaffolded on a fresh host silently resolved to
+# the `oneshot-legacy` code default. The key is node-scoped and the template
+# declares schemaVersion 1, so it cannot go back in the template without turning
+# checkConfigScopeLeak's FAIL — and catalyst-join.sh's gate — against every new
+# project. These cases pin the seeder that replaces it.
+S7_L2="${SCRATCH}/s7-layer2"
+mkdir -p "$S7_L2"
+printf '{}\n' > "${S7_L2}/config.json"
+CATALYST_LAYER2_CONFIG_FILE="${S7_L2}/config.json" setup_dispatch_mode_config >/dev/null 2>&1 || true
+
+run "S7a: dispatchMode default is seeded into node.json" \
+  bash -c "jq -e '.catalyst.orchestration.dispatchMode == \"phase-agents\"' '${S7_L2}/node.json'"
+
+# Positive control for S7a: the default is NOT what a bare `{}` node.json would
+# already answer, so the assertion above is evidence the seeder ran.
+S7CTRL="${SCRATCH}/s7-control.json"
+printf '{}\n' > "$S7CTRL"
+run "S7b: control — an unseeded node.json has no dispatchMode" \
+  bash -c "jq -e '.catalyst.orchestration.dispatchMode == null' '${S7CTRL}'"
+
+# Idempotent + non-clobbering: a host pinned to execution-core keeps its pin.
+S7B_L2="${SCRATCH}/s7b-layer2"
+mkdir -p "$S7B_L2"
+printf '{}\n' > "${S7B_L2}/config.json"
+printf '{"catalyst":{"orchestration":{"dispatchMode":"execution-core","executor":"sdk"},"host":{"name":"mini-2"}}}\n' \
+  > "${S7B_L2}/node.json"
+CATALYST_LAYER2_CONFIG_FILE="${S7B_L2}/config.json" setup_dispatch_mode_config >/dev/null 2>&1 || true
+
+run "S7c: an operator's existing dispatchMode is NOT overwritten" \
+  bash -c "jq -e '.catalyst.orchestration.dispatchMode == \"execution-core\"' '${S7B_L2}/node.json'"
+run "S7d: sibling orchestration keys survive (merge, not replace)" \
+  bash -c "jq -e '.catalyst.orchestration.executor == \"sdk\"' '${S7B_L2}/node.json'"
+run "S7e: unrelated node.json keys survive" \
+  bash -c "jq -e '.catalyst.host.name == \"mini-2\"' '${S7B_L2}/node.json'"
+
+# Re-running is a no-op on an already-seeded file (setup re-runs are routine).
+_S7_BEFORE="$(cat "${S7_L2}/node.json")"
+CATALYST_LAYER2_CONFIG_FILE="${S7_L2}/config.json" setup_dispatch_mode_config >/dev/null 2>&1 || true
+if [[ "$_S7_BEFORE" == "$(cat "${S7_L2}/node.json")" ]]; then
+  PASSES=$((PASSES+1)); echo "  PASS: S7f: a second run leaves node.json byte-identical"
+else
+  FAILURES=$((FAILURES+1)); echo "  FAIL: S7f: a second run rewrote node.json"
+fi
+
+# The seeder must NEVER write the committed Layer-1 config (that is the whole
+# point of the relocation, and a schemaVersion-1 config carrying it FAILs doctor).
+S7C_DIR="${SCRATCH}/s7c-proj"
+mkdir -p "${S7C_DIR}/.catalyst"
+printf '{"catalyst":{"schemaVersion":1,"projectKey":"TEST"}}\n' > "${S7C_DIR}/.catalyst/config.json"
+PROJECT_DIR="$S7C_DIR"
+CATALYST_LAYER2_CONFIG_FILE="${S7_L2}/config.json" setup_dispatch_mode_config >/dev/null 2>&1 || true
+run "S7g: the committed Layer-1 config gains NO orchestration stanza" \
+  bash -c "jq -e '.catalyst.orchestration == null' '${S7C_DIR}/.catalyst/config.json'"
+
 # ─── S6 (CTL-1214): the suite never touched the REAL host config ─────────────
 # A guard on the guard. Without it this file silently created the developer's
 # ~/.config/catalyst/node.json while it was being written.

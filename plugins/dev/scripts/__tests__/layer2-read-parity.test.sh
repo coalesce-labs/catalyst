@@ -70,11 +70,18 @@ KEYS=(
 # jq program written from the SPEC (deep-merge the well-formed layers in order;
 # a null or unindexable path is an absence). It never consults either
 # implementation under test.
+# compute_expected <dir> <key> [legacy_file]
+#
+# CTL-1214 remediation: the legacy (lowest-precedence) file is a PARAMETER, not a
+# hardcoded "${dir}/config.json". Both implementations take the pinned
+# CATALYST_LAYER2_CONFIG_FILE path itself as that layer, so an oracle that always
+# composed config.json could not express the pinned-name case at all — which is
+# precisely why the divergence it exists to catch went unobserved.
 compute_expected() {
-  local dir="$1" key="$2"
+  local dir="$1" key="$2" legacy="${3:-${1}/config.json}"
   local -a good=()
   local f
-  for f in "${dir}/config.json" "${dir}/node.json" "${dir}/cluster-secrets.json"; do
+  for f in "$legacy" "${dir}/node.json" "${dir}/cluster-secrets.json"; do
     [[ -f "$f" ]] || continue
     jq -e 'type == "object"' "$f" >/dev/null 2>&1 || continue
     good+=("$f")
@@ -163,6 +170,67 @@ for fixture in "${FIXTURES[@]}"; do
     fi
   done
 done
+
+# ─── The pinned-name axis (CTL-1214 remediation) ───────────────────────────
+# ⚠️ THE CASE THE MATRIX COULD NOT EXPRESS. Every cell above pins
+# `${D}/config.json`, so the one axis the two implementations actually differed
+# on — WHICH file the pin names as the legacy layer — was unobservable, while
+# catalyst-layer2-read.sh's header claimed agreement "over a fixture matrix".
+#
+# The fixture puts a DIFFERENT value in config.json than in the pinned
+# config-adva.json, so a stack that ignores the pin and reads config.json returns
+# a distinguishable wrong answer instead of accidentally agreeing.
+D="$(mktemp -d "${TMP_DIR}/pinXXXXXX")"
+printf '%s' '{"catalyst":{"probe":"FROM-config.json"}}'      > "${D}/config.json"
+printf '%s' '{"catalyst":{"probe":"FROM-config-adva.json"}}' > "${D}/config-adva.json"
+PINNED="${D}/config-adva.json"
+
+pin_expected="$(compute_expected "$D" ".catalyst.probe" "$PINNED")"
+if [[ "$pin_expected" == "FROM-config-adva.json" ]]; then
+  ok
+else
+  fail "pinned-name oracle composes the PINNED file as the legacy layer" \
+       "expected 'FROM-config-adva.json' got '${pin_expected}'"
+fi
+
+pin_bash="$(CATALYST_LAYER2_CONFIG_FILE="$PINNED" \
+            /bin/bash -c 'source "$1"; catalyst_layer2_json "$2"' _ "$LIB" ".catalyst.probe" 2>/dev/null)"
+pin_js="$(CATALYST_LAYER2_CONFIG_FILE="$PINNED" "$JS_RUN" "$JS_DRIVER" ".catalyst.probe" 2>/dev/null)"
+
+if [[ "$pin_bash" == "$pin_expected" ]]; then ok; else
+  fail "pinned non-config.json name: bash != expected" "expected '${pin_expected}' got '${pin_bash}'"
+fi
+if [[ "$pin_js" == "$pin_expected" ]]; then ok; else
+  fail "pinned non-config.json name: js != expected" "expected '${pin_expected}' got '${pin_js}'"
+fi
+if [[ "$pin_bash" == "$pin_js" ]]; then ok; else
+  fail "pinned non-config.json name: bash != js" "bash '${pin_bash}' vs js '${pin_js}'"
+fi
+
+# Negative control for the case above: the fixture CAN produce the wrong answer,
+# so the three assertions are evidence about the readers rather than about a
+# fixture in which both files happen to say the same thing.
+if [[ "$pin_bash" != "FROM-config.json" ]]; then ok; else
+  fail "pinned-name case: bash fell back to config.json" "got '${pin_bash}'"
+fi
+
+# And the siblings must STILL resolve off the pinned file's directory — the pin
+# changes which file is the legacy layer, never where node.json is looked up.
+printf '%s' '{"catalyst":{"probe":"FROM-node.json"}}' > "${D}/node.json"
+pin2_expected="$(compute_expected "$D" ".catalyst.probe" "$PINNED")"
+pin2_bash="$(CATALYST_LAYER2_CONFIG_FILE="$PINNED" \
+             /bin/bash -c 'source "$1"; catalyst_layer2_json "$2"' _ "$LIB" ".catalyst.probe" 2>/dev/null)"
+pin2_js="$(CATALYST_LAYER2_CONFIG_FILE="$PINNED" "$JS_RUN" "$JS_DRIVER" ".catalyst.probe" 2>/dev/null)"
+if [[ "$pin2_expected" == "FROM-node.json" ]]; then ok; else
+  fail "pinned-name + sibling: oracle lets node.json outrank the pinned legacy file" \
+       "expected 'FROM-node.json' got '${pin2_expected}'"
+fi
+if [[ "$pin2_bash" == "$pin2_expected" ]]; then ok; else
+  fail "pinned-name + sibling: bash != expected" "expected '${pin2_expected}' got '${pin2_bash}'"
+fi
+if [[ "$pin2_js" == "$pin2_expected" ]]; then ok; else
+  fail "pinned-name + sibling: js != expected" "expected '${pin2_expected}' got '${pin2_js}'"
+fi
 
 # ─── Positive control ──────────────────────────────────────────────────────
 # The matrix above must actually be able to FAIL. Feed the oracle a fixture whose
