@@ -302,6 +302,29 @@ export function detectSessionRateLimitHit(
 // sweep), deliberately NOT a death trigger — the turn-zero gate keys on the
 // transcript + fresh agents-snapshot state instead.
 export function defaultStatJob(bgJobId) {
+  // CTL-2110 — a bg-less signal must read as "job gone", not blow up the tick.
+  //
+  // `join()` rejects a non-string segment, and `typeof null === "object"`, so
+  // `join(jobsRoot, null, "state.json")` threw
+  //   The "paths[1]" property must be of type string, got object
+  // OUTSIDE the try below. That throw propagated out of jobLifecycle →
+  // reclaimDeadWorkIfPossible → the scheduler's per-worker reclaim step, whose
+  // CTL-702 isolation caught it, logged "per-worker step failed — skipping
+  // signal", and moved on. The consequence is the opposite of a no-op: a signal
+  // with `bg_job_id: null` could NEVER be reclaimed, so it held its dispatch slot
+  // forever. Measured on mini 2026-08-22 21:20 CT — FIVE such signals (CTC-235
+  // teardown, CTC-254 remediate, CTL-1550 monitor-merge, CTL-2011 + CTL-2094
+  // monitor-deploy), all `dispatched` with no live process for ~20 h, pinned
+  // inFlightCount at 5 of maxParallel 6 while `ps` showed ZERO claude processes.
+  // mini-2 held a sixth (CTL-1216 remediate, ~16 h).
+  //
+  // Returning null is the classification the rest of the module already expects
+  // for this case: jobLifecycle maps null → "dead-gone", and classifyWorker's own
+  // header documents a bg-less `dispatched` signal ("an orphan `dispatched`
+  // signal written before claude --bg was spawned") as a state the reclaim path
+  // is meant to handle. The empty string is rejected for the same reason — it
+  // would resolve `join()` to the jobs root itself.
+  if (typeof bgJobId !== "string" || bgJobId === "") return null;
   const file = join(getJobsRoot(), bgJobId, "state.json");
   let st;
   try {

@@ -384,6 +384,33 @@ describe("defaultStatJob", () => {
     expect(res?.exists).toBe(true);
     expect(res?.state).toBeNull();
   });
+
+  // CTL-2110 — a bg-less signal must classify as "gone", never throw. `join()`
+  // rejects a non-string segment and `typeof null === "object"`, so the pre-fix
+  // code threw `The "paths[1]" property must be of type string, got object`
+  // before reaching the try/catch. The scheduler's CTL-702 per-worker isolation
+  // swallowed it, so a `bg_job_id: null` signal could never be reclaimed and held
+  // its dispatch slot forever (six such signals across the fleet on 2026-08-22,
+  // pinning mini at inFlightCount 5 of 6 with ZERO live claude processes).
+  //
+  // NEGATIVE CONTROL: a string id still stats the filesystem — the guard must
+  // reject only the non-string cases, not short-circuit every call to null.
+  test("CTL-2110: a null/undefined/empty bg_job_id returns null instead of throwing", () => {
+    for (const bad of [null, undefined, "", 0, {}, []]) {
+      expect(() => defaultStatJob(bad)).not.toThrow();
+      expect(defaultStatJob(bad)).toBeNull();
+    }
+    const dir = join(jobsRoot, "job-still-read");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "state.json"), JSON.stringify({ state: "running" }));
+    expect(defaultStatJob("job-still-read")?.state).toBe("running");
+  });
+
+  // The classification the reclaim path actually consumes: null → "dead-gone",
+  // which is what lets the scheduler free the slot.
+  test("CTL-2110: jobLifecycle(null) is dead-gone, so the slot can be reclaimed", () => {
+    expect(jobLifecycle(null)).toBe("dead-gone");
+  });
 });
 
 // --- recoverStartup — composition (Phase 3) -------------------------------
