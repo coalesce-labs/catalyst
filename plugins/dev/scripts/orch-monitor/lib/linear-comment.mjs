@@ -2,7 +2,7 @@
 // (CTL-1569 §4). This is the module the whole feature lives or dies on.
 //
 // ── why this is the sharpest edge in the ticket ───────────────────────────────
-// CTL-1567 made a human comment on a parked ticket clear `needs-human`
+// CTL-1567 made a human comment on a parked ticket clear the escalation hold
 // unconditionally and first. That is what makes "reply from the inbox" a real
 // resolution mechanism rather than a UI gesture. But that gate requires a
 // POSITIVELY-IDENTIFIED HUMAN author, and it deliberately IGNORES app-actor
@@ -354,7 +354,7 @@ async function createComment({ token, ticket, body, identity, fetchImpl, resolve
  *
  *   { status: "posted", commentId, author }   → the comment is live and
  *                                               human-authored; CTL-1567 will
- *                                               clear `needs-human` within seconds.
+ *                                               clear the escalation hold within seconds.
  *   { status: "no_token" }                    → no Linear credential anywhere.
  *   { status: "bot_identity", author }        → REFUSED before posting: every
  *                                               configured token is an app actor,
@@ -427,9 +427,9 @@ export async function postOperatorComment(
         candidates.length > 1
           ? `refused: all ${candidates.length} configured Linear tokens resolve to an app ` +
             "actor, and CTL-1567 ignores app-actor comments — the reply would not have " +
-            "cleared needs-human."
+            "cleared the escalation hold."
           : "refused: this monitor's Linear token is an app actor, and CTL-1567 ignores " +
-            "app-actor comments — the reply would not have cleared needs-human.",
+            "app-actor comments — the reply would not have cleared the escalation hold.",
     };
   }
   // No candidate ever resolved to a bot — every one errored (network/auth/etc).

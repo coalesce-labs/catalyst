@@ -29,9 +29,9 @@ import {
 const emptyCanonical = () => PHASE_ORDER.map(() => null);
 
 // A recovery-pass escalation signal as recovery-emit writes it: status
-// needs-human + a rich structured explanation.
+// stalled + a rich structured explanation (CTL-2159 normalised the status).
 const recoveryPassSig = {
-  status: "needs-human",
+  status: "stalled",
   needsHumanSince: "2026-06-17T10:00:00.000Z",
   updatedAt: "2026-06-17T10:00:00.000Z",
   explanation: {
@@ -46,7 +46,7 @@ const recoveryPassSig = {
 };
 
 const remediateSig = {
-  status: "needs-human",
+  status: "stalled",
   updatedAt: "2026-06-17T09:00:00.000Z",
   explanation: {
     escalation_type: "authorization",

@@ -176,11 +176,11 @@ run_s11() {
   local emit="${fpr}/scripts/phase-agent-emit-complete"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$emit"; chmod +x "$emit"
 
-  # CTL-1552: stub label-needs-human.mjs — the guard CLI the helper now delegates
+  # CTL-1552: stub publish-escalation-cli.mjs — the guard CLI the helper now delegates
   # to instead of raw `linearis --labels needs-human` + a hand-written marker.
   # Records its argv and creates the once-marker (simulating labelOnce), so the
   # marker assertion (11b) still holds AND we can prove delegation (11g).
-  cat > "${fpr}/scripts/execution-core/label-needs-human.mjs" <<'CLISTUB'
+  cat > "${fpr}/scripts/execution-core/publish-escalation-cli.mjs" <<'CLISTUB'
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 const a = process.argv.slice(2);
@@ -305,7 +305,7 @@ assert_eq "failed" "$S11F_STATUS" "11f: signal still set to failed even when lin
 rm -rf "$S11F_SCRATCH"
 
 # 11g: CTL-1552 — needs-human is applied THROUGH the guard CLI, not raw linearis.
-echo "11g: CTL-1552 — delegates to label-needs-human.mjs, no raw 'linearis --labels needs-human'"
+echo "11g: CTL-1552 — delegates to publish-escalation-cli.mjs, no raw label write"
 S11G_SCRATCH="$(run_s11 0 0 true true)"
 # the guard CLI was invoked with the ticket + orch dir
 CLI_ARGS_FILE="${S11G_SCRATCH}/orch_dir/cli-invoked.args"

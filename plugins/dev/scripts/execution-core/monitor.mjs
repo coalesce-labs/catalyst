@@ -1098,6 +1098,13 @@ function dispatchTriage(
     labelNeedsHuman = (dir, t) =>
       labelNeedsHumanUnlessBeliefOwner(dir, t, { applyLabel }, {
         site: "triage-redispatch-cap",
+        // ⛔ CTL-2159: forward the reason. With none the classifier returns HELD
+        // ("I could not look" is not "nothing is wrong"), so a cap streak — a
+        // SYSTEM condition that should retry with backoff — would be held for a
+        // person instead. CTL-2061's refinement (classify on the underlying
+        // phase-triage failureReason) went with the infra-class cluster CTL-2141
+        // deleted, so the literal cap reason is what remains, and it classifies.
+        reason: "triage-redispatch-cap",
         explanation: {
           problem: `${t} hit the triage re-dispatch cap (${TRIAGE_DISPATCH_CAP})`,
           call_to_action: `triage ${t} manually or re-scope it`,

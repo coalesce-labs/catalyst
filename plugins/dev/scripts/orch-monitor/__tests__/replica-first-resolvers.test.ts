@@ -87,7 +87,7 @@ function fakeReplica({
 const DETAIL = {
   title: "Replica-served title",
   description: "## From SQLite",
-  labels: [{ name: "needs-human", color: "#ff0000" }],
+  labels: [{ name: "catalyst-ask", color: "#ff0000" }],
   relations: {
     blockedBy: [
       { identifier: "CTL-99", title: "Blocker", state: { name: "Done", type: "completed" }, priority: 1, project: "P" },
@@ -277,7 +277,7 @@ describe("CTL-1806 AC2: title/description (and the DETAIL route + relation targe
       expect(e.priority).toBe(2);
       expect(e.estimate).toBe(5);
       expect(e.project).toBe("Fleet Hardening");
-      expect(e.labels).toEqual([{ name: "needs-human", color: "#ff0000" }]);
+      expect(e.labels).toEqual([{ name: "catalyst-ask", color: "#ff0000" }]);
       // The relation TARGETS — the half of AC2 that had no replica tier at all.
       expect(e.relations?.blockedBy?.[0]?.identifier).toBe("CTL-99");
       expect(e.relations?.blockedBy?.[0]?.state).toEqual({ name: "Done", type: "completed" });

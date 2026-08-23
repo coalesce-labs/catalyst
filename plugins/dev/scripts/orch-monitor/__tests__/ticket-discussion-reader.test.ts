@@ -91,7 +91,7 @@ function seed(): void {
   ]);
   db.run("INSERT INTO labels (id, name, color, removed_at) VALUES (?, ?, ?, NULL)", [
     "label-1",
-    "needs-human",
+    "catalyst-ask",
     "#e36b6b",
   ]);
   // Oldest-first by updated_at — the order buildIssueDetail returns.
@@ -170,7 +170,7 @@ describe("readTicketDiscussion", () => {
     expect(out.activity[1]).toMatchObject({ from_state: "Backlog", to_state: "Implement" });
     // Label ids resolve to {id,name,color}; the untouched side stays [].
     expect(out.activity[2].added_labels).toEqual([
-      { id: "label-1", name: "needs-human", color: "#e36b6b" },
+      { id: "label-1", name: "catalyst-ask", color: "#e36b6b" },
     ]);
     expect(out.activity[2].removed_labels).toEqual([]);
   });

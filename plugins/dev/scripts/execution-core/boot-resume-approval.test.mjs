@@ -333,7 +333,11 @@ describe("boot-resume approval surfacing (CTL-1443)", () => {
 describe("boot-resume approval lifetime (CTL-1443 Codex R2)", () => {
   test("classifyStalledTicket skips gate-expired parks (no unstuck re-ask loop)", async () => {
     const { classifyStalledTicket } = await import("./unstuck-sweep.mjs");
-    expect(classifyStalledTicket({ reason: "boot-resume-gate-expired" })).toEqual({
+    // CTL-2158: the verdict now names WHY it is quiet ("already-escalated") and is
+    // derived by stall-class.mjs rather than a hand-typed STALL_CATEGORY_MAP row —
+    // see stall-class-wiring.test.mjs for the mutation proof. The guarded property
+    // (a gate-expired park never re-enters the unstuck escalate path) is unchanged.
+    expect(classifyStalledTicket({ reason: "boot-resume-gate-expired" })).toMatchObject({
       category: "skip",
       action: "skip",
     });

@@ -1,6 +1,6 @@
 // home-inbox-attention.test.ts — units for the CTL-729 "Needs you" inbox section
 // (operator-approved 2026-06-11). The single needs-attention bucket (waiting-on-you
-// + needs-human escalations) surfaces at the HEAD of the inbox as a "Needs you"
+// + ask escalations) surfaces at the HEAD of the inbox as a "Needs you"
 // section, verb "Respond", folded into the NEEDS_YOU absorption so counts.needsYou,
 // the all-clear gate, and the calm header sentence all account for it automatically.
 //
@@ -67,11 +67,11 @@ describe("classifyTicket — attention is the new top needs-you case (CTL-729)",
   it("an attention=waiting-on-you ticket lands in 'attention'", () => {
     expect(classifyTicket(mkTicket("CTL-729", { attention: "waiting-on-you" }))).toBe("attention");
   });
-  it("an attention=needs-human ticket lands in 'attention'", () => {
-    expect(classifyTicket(mkTicket("CTL-729", { attention: "needs-human" }))).toBe("attention");
+  it("an attention=ask ticket lands in 'attention'", () => {
+    expect(classifyTicket(mkTicket("CTL-729", { attention: "ask" }))).toBe("attention");
   });
   it("attention beats a held blocked/waiting label (operator action outranks admission gate)", () => {
-    expect(classifyTicket(mkTicket("CTL-729", { attention: "needs-human", held: "blocked" }))).toBe(
+    expect(classifyTicket(mkTicket("CTL-729", { attention: "ask", held: "blocked" }))).toBe(
       "attention",
     );
     expect(classifyTicket(mkTicket("CTL-730", { attention: "waiting-on-you", held: "waiting" }))).toBe(
@@ -80,7 +80,7 @@ describe("classifyTicket — attention is the new top needs-you case (CTL-729)",
   });
   it("done STILL wins over attention (a finished ticket needs nothing, even with a stale flag)", () => {
     expect(
-      classifyTicket(mkTicket("CTL-729", { status: "done", attention: "needs-human" })),
+      classifyTicket(mkTicket("CTL-729", { status: "done", attention: "ask" })),
     ).toBe("done");
     expect(
       classifyTicket(mkTicket("CTL-730", { linearState: "Done", attention: "waiting-on-you" })),
@@ -99,7 +99,7 @@ describe("deriveInbox — the 'Needs you' attention section at the HEAD (CTL-729
     mkTicket("CTL-729", { attention: "waiting-on-you" }), // needs you (attention)
     mkTicket("CTL-880", { status: "done", linearState: "Done" }), // done
     mkTicket("CTL-642", { held: "waiting" }), // waiting
-    mkTicket("CTL-731", { attention: "needs-human" }), // needs you (attention)
+    mkTicket("CTL-731", { attention: "ask" }), // needs you (attention)
   ];
   const model = deriveInbox(mkPayload(tickets));
 
@@ -123,7 +123,7 @@ describe("deriveInbox — the 'Needs you' attention section at the HEAD (CTL-729
     const waiting = model.order.find((r) => r.id === "CTL-729")!;
     const escalated = model.order.find((r) => r.id === "CTL-731")!;
     expect(waiting.subLabel).toBe("waiting on your answer");
-    expect(escalated.subLabel).toBe("escalated — needs human");
+    expect(escalated.subLabel).toBe("an answer is needed");
   });
 
   it("attention rows lead the flat walk order (most-urgent first)", () => {
@@ -148,7 +148,7 @@ describe("deriveInbox — the 'Needs you' attention section at the HEAD (CTL-729
 
 describe("isAllClear — attention breaks the all-clear gate (CTL-729)", () => {
   it("an attention item alone keeps the inbox NOT all-clear", () => {
-    const m = deriveInbox(mkPayload([mkTicket("CTL-729", { attention: "needs-human" })]));
+    const m = deriveInbox(mkPayload([mkTicket("CTL-729", { attention: "ask" })]));
     expect(isAllClear(m.counts)).toBe(false);
   });
   it("only running/done (no attention/held) is all-clear", () => {
@@ -168,7 +168,7 @@ describe("calmHeaderSentence — attention folds into the 'need you' clause (CTL
       mkPayload([
         mkTicket("CTL-900", { held: null }),
         mkTicket("CTL-901", { held: null }),
-        mkTicket("CTL-729", { attention: "needs-human" }),
+        mkTicket("CTL-729", { attention: "ask" }),
       ]),
     );
     const s = calmHeaderSentence(m.counts);
@@ -194,11 +194,11 @@ describe("rowDurationAnchor — attention rows anchor to attentionSince ?? heldS
     expect(rowDurationAnchor(row)).toBe("2026-06-11T08:00:00Z");
   });
   it("falls back to heldSince when attentionSince is absent", () => {
-    const row = mkRow({ attention: "needs-human", attentionSince: null, heldSince: "2026-06-11T07:00:00Z" });
+    const row = mkRow({ attention: "ask", attentionSince: null, heldSince: "2026-06-11T07:00:00Z" });
     expect(rowDurationAnchor(row)).toBe("2026-06-11T07:00:00Z");
   });
   it("is honest null when neither anchor exists", () => {
-    const row = mkRow({ attention: "needs-human", attentionSince: null, heldSince: null });
+    const row = mkRow({ attention: "ask", attentionSince: null, heldSince: null });
     expect(rowDurationAnchor(row)).toBeNull();
   });
 });
@@ -206,9 +206,9 @@ describe("rowDurationAnchor — attention rows anchor to attentionSince ?? heldS
 // ── CTL-1065: humanQuestion surfaces as attention sub-label ───────────────────
 
 describe("CTL-1065: attentionSubLabel uses humanQuestion when present", () => {
-  it("needs-human row uses humanQuestion as sub-label when present", () => {
+  it("ask row uses humanQuestion as sub-label when present", () => {
     const t = mkTicket("CTL-1065", {
-      attention: "needs-human",
+      attention: "ask",
       humanQuestion: "restart CTL-1065 implement, or extend the threshold?",
     });
     const model = deriveInbox(mkPayload([t]));
@@ -216,18 +216,18 @@ describe("CTL-1065: attentionSubLabel uses humanQuestion when present", () => {
     expect(row.subLabel).toBe("restart CTL-1065 implement, or extend the threshold?");
   });
 
-  it("falls back to 'escalated — needs human' when humanQuestion absent", () => {
-    const t = mkTicket("CTL-1065", { attention: "needs-human" });
+  it("falls back to 'an answer is needed' when humanQuestion absent", () => {
+    const t = mkTicket("CTL-1065", { attention: "ask" });
     const model = deriveInbox(mkPayload([t]));
     const row = model.order.find((r) => r.id === "CTL-1065")!;
-    expect(row.subLabel).toBe("escalated — needs human");
+    expect(row.subLabel).toBe("an answer is needed");
   });
 
   it("falls back when humanQuestion is empty string", () => {
-    const t = mkTicket("CTL-1065", { attention: "needs-human", humanQuestion: "" });
+    const t = mkTicket("CTL-1065", { attention: "ask", humanQuestion: "" });
     const model = deriveInbox(mkPayload([t]));
     const row = model.order.find((r) => r.id === "CTL-1065")!;
-    expect(row.subLabel).toBe("escalated — needs human");
+    expect(row.subLabel).toBe("an answer is needed");
   });
 
   it("waiting-on-you still uses 'waiting on your answer' regardless of humanQuestion", () => {
@@ -241,10 +241,10 @@ describe("CTL-1065: attentionSubLabel uses humanQuestion when present", () => {
   });
 
   // CTL-1158: PR-stuck tickets route to the "Needs you" section
-  it("CTL-1158: stuck-PR ticket (attention needs-human + prStuckReason) → 'attention' section, PR sub-label", () => {
+  it("CTL-1158: stuck-PR ticket (attention ask + prStuckReason) → 'attention' section, PR sub-label", () => {
     const prReason = "PR #1158 has a merge conflict the pipeline couldn't auto-resolve — decide which change wins";
     const t = mkTicket("CTL-1158", {
-      attention: "needs-human",
+      attention: "ask",
       mergeStateStatus: "DIRTY",
       prStuckReason: prReason,
       humanQuestion: prReason,
@@ -260,7 +260,7 @@ describe("CTL-1065: attentionSubLabel uses humanQuestion when present", () => {
   it("CTL-1158: BLOCKED PR-stuck ticket → 'attention' with required-check sub-label", () => {
     const prReason = "PR #999 is blocked by a failing required check or branch-protection rule";
     const t = mkTicket("CTL-999", {
-      attention: "needs-human",
+      attention: "ask",
       mergeStateStatus: "BLOCKED",
       prStuckReason: prReason,
       humanQuestion: prReason,

@@ -328,7 +328,7 @@
                 },
                 "turnCaps": {
                   "type": "object",
-                  "description": "Maps phase names to maximum turn counts. A phase that reaches its turn cap emits status 'turn-cap-exhausted' and stops. The daemon may revive it or escalate to needs-human.",
+                  "description": "Maps phase names to maximum turn counts. A phase that reaches its turn cap emits status 'turn-cap-exhausted' and stops. The daemon may revive it or publish an escalation (CTL-2159).",
                   "additionalProperties": {
                     "type": "integer",
                     "minimum": 1

@@ -88,10 +88,10 @@ describe("deriveStatusCounts (CTL-764 Phase 7)", () => {
     };
   }
 
-  it("a needs-human label/attention → needsHuman bucket", () => {
-    const t = ticket("CTL-1", { attention: "needs-human" });
+  it("a ask label/attention → ask bucket", () => {
+    const t = ticket("CTL-1", { attention: "ask" });
     const r = deriveStatusCounts([t], new Set());
-    expect(r.needsHuman).toBe(1);
+    expect(r.ask).toBe(1);
     expect(r.queued).toBe(0);
   });
 
@@ -122,10 +122,10 @@ describe("deriveStatusCounts (CTL-764 Phase 7)", () => {
     expect(r.queued).toBe(0);
   });
 
-  it("needs-human wins over blocked when both present (precedence)", () => {
-    const t = ticket("CTL-6", { labels: ["blocked"], attention: "needs-human" });
+  it("ask wins over blocked when both present (precedence)", () => {
+    const t = ticket("CTL-6", { labels: ["blocked"], attention: "ask" });
     const r = deriveStatusCounts([t], new Set());
-    expect(r.needsHuman).toBe(1);
+    expect(r.ask).toBe(1);
     expect(r.blocked).toBe(0);
   });
 
@@ -137,27 +137,27 @@ describe("deriveStatusCounts (CTL-764 Phase 7)", () => {
 
   it("empty tickets → all buckets zero", () => {
     const r = deriveStatusCounts([], new Set());
-    expect(r).toEqual({ queued: 0, blocked: 0, needsInput: 0, needsHuman: 0 });
+    expect(r).toEqual({ queued: 0, blocked: 0, needsInput: 0, ask: 0 });
   });
 
   // CTL764-VER-3: deriveAttention folds the needs-input label into
-  // attention:'needs-human', so a needs-input ticket must be split back out by its
-  // label BEFORE the needs-human short-circuit — else it is miscounted as needsHuman.
-  it("a needs-input label (folded to attention='needs-human') counts as needsInput, not needsHuman", () => {
+  // attention:'ask', so a needs-input ticket must be split back out by its
+  // label BEFORE the ask short-circuit — else it is miscounted as ask.
+  it("a needs-input label (folded to attention='ask') counts as needsInput, not ask", () => {
     // Mirrors what deriveAttention produces for a needs-input queued card.
-    const t = ticket("CTL-8", { labels: ["needs-input"], attention: "needs-human" });
+    const t = ticket("CTL-8", { labels: ["needs-input"], attention: "ask" });
     const r = deriveStatusCounts([t], new Set());
     expect(r.needsInput).toBe(1);
-    expect(r.needsHuman).toBe(0);
+    expect(r.ask).toBe(0);
   });
 
-  it("needs-human wins over needs-input when BOTH labels present (precedence)", () => {
+  it("ask wins over needs-input when BOTH labels present (precedence)", () => {
     const t = ticket("CTL-9", {
-      labels: ["needs-input", "needs-human"],
-      attention: "needs-human",
+      labels: ["needs-input", "catalyst-ask"],
+      attention: "ask",
     });
     const r = deriveStatusCounts([t], new Set());
-    expect(r.needsHuman).toBe(1);
+    expect(r.ask).toBe(1);
     expect(r.needsInput).toBe(0);
   });
 });
@@ -188,11 +188,11 @@ describe("deriveStatusCounts over the real synthesizeQueuedTicket deck (CTL764-V
     expect(r.blocked).toBe(0);
   });
 
-  it("a needs-input queued card lands in needsInput, not needsHuman", () => {
+  it("a needs-input queued card lands in needsInput, not ask", () => {
     const deck = [synth("CTL-102", ["needs-input"])];
     const r = deriveStatusCounts(deck, new Set());
     expect(r.needsInput).toBe(1);
-    expect(r.needsHuman).toBe(0);
+    expect(r.ask).toBe(0);
   });
 
   it("a mixed deck tallies each disposition (the Phase-8 capacity badges)", () => {
@@ -203,17 +203,17 @@ describe("deriveStatusCounts over the real synthesizeQueuedTicket deck (CTL764-V
       synth("CTL-203", ["needs-input"]),
     ];
     const r = deriveStatusCounts(deck, new Set());
-    expect(r).toEqual({ queued: 1, blocked: 2, needsInput: 1, needsHuman: 0 });
+    expect(r).toEqual({ queued: 1, blocked: 2, needsInput: 1, ask: 0 });
   });
 });
 
 // ── Codex finding 4: orphan-PR cards excluded from deriveStatusCounts ──────────
 // synthesizeOrphanTickets documents its cards as having "no capacity/queue impact"
-// (board-data.mjs ~2234), but they carry attention:"needs-human" like a real
+// (board-data.mjs ~2234), but they carry attention:"ask" like a real
 // escalation, so deriveStatusCounts must skip type:"orphan-pr" explicitly or they
-// inflate the needsHuman count the deck/badges derive from.
+// inflate the ask count the deck/badges derive from.
 describe("deriveStatusCounts — orphan-PR cards excluded (Codex finding 4)", () => {
-  it("a synthesized orphan-PR card does NOT inflate needsHuman", () => {
+  it("a synthesized orphan-PR card does NOT inflate ask", () => {
     const orphanState = {
       "catalyst#123": {
         repo: "catalyst",
@@ -227,14 +227,14 @@ describe("deriveStatusCounts — orphan-PR cards excluded (Codex finding 4)", ()
     const orphanTickets = synthesizeOrphanTickets(orphanState, Date.now());
     expect(orphanTickets).toHaveLength(1);
     expect(orphanTickets[0].type).toBe("orphan-pr");
-    expect(orphanTickets[0].attention).toBe("needs-human");
+    expect(orphanTickets[0].attention).toBe("ask");
 
     const r = deriveStatusCounts(orphanTickets, new Set());
-    expect(r.needsHuman).toBe(0);
+    expect(r.ask).toBe(0);
   });
 
-  it("a real needs-human ticket alongside an orphan-PR card: only the real one counts", () => {
-    const realTicket = { id: "CTL-300", labels: [], attention: "needs-human", workerStatus: null };
+  it("a real ask ticket alongside an orphan-PR card: only the real one counts", () => {
+    const realTicket = { id: "CTL-300", labels: [], attention: "ask", workerStatus: null };
     const orphanState = {
       "catalyst#124": {
         repo: "catalyst",
@@ -245,6 +245,6 @@ describe("deriveStatusCounts — orphan-PR cards excluded (Codex finding 4)", ()
     };
     const orphanTickets = synthesizeOrphanTickets(orphanState, Date.now());
     const r = deriveStatusCounts([realTicket, ...orphanTickets], new Set());
-    expect(r.needsHuman).toBe(1);
+    expect(r.ask).toBe(1);
   });
 });

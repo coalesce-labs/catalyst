@@ -379,7 +379,8 @@ if [[ -n $CONFIG_PATH ]]; then
 
 			case "$ws_status" in
 			found)
-				for _ws_exp in queued blocked needs-input needs-human; do
+				# CTL-2159: `needs-human` deliberately removed — see check-setup.sh.
+				for _ws_exp in queued blocked needs-input; do
 					if ! echo "$ws_members" | jq -e --arg n "$_ws_exp" \
 						'map(. == $n) | any' >/dev/null 2>&1; then
 						warnings+=("worker-status label '${_ws_exp}' missing from Linear workspace — run plugins/dev/scripts/setup-execution-core-states.sh")
