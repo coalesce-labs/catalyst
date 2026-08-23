@@ -141,6 +141,33 @@ function driveAppServer({ codexHome, bin, spawnFn, timeoutMs }) {
       return;
     }
 
+    // ⛔ A FAILED STDIN WRITE IS AN UNCAUGHT 'error' EVENT, NOT A CATCHABLE THROW.
+    // `send()` wraps write() in try/catch, but a stream reports EPIPE
+    // ASYNCHRONOUSLY by emitting 'error' — and an 'error' event with no listener
+    // is rethrown by Node as an uncaughtException that kills the whole process.
+    // Reproduced deterministically (5/5) against an app-server that answers
+    // `initialize` and then exits — a protocol/version rejection, a crash, or a
+    // failed auth handshake all take that shape, and the follow-up writes this
+    // handler issues from the stdout callback then land on a closed pipe. It
+    // crashed `catalyst-stack codex-account status`, aborted
+    // codex-accounts-usage.mjs's per-account sweep BEFORE the remaining accounts
+    // were read, and — because the process died outside finish() — ORPHANED the
+    // app-server child that finish()'s SIGKILL exists to reap. That contradicts
+    // both of this module's stated contracts ("Never throws and never leaves a
+    // child running"). Routing it into finish() turns it back into the ordinary
+    // error verdict the `close` handler already produces, and immediately: a lost
+    // request can never be answered, so waiting out the 15s timeout buys nothing.
+    child.stdin?.on?.("error", () =>
+      finish("could not write to the codex app-server's stdin (it closed the pipe)"),
+    );
+    // Drain stderr. `stdio` asks for a pipe, so an app-server that writes more
+    // than the ~64 KiB pipe buffer would BLOCK on that write and answer nothing
+    // until the timeout — turning a merely noisy host into a uniform 15s-per-
+    // account error read that looks like a codex outage. Attaching a 'data'
+    // listener puts the stream in flowing mode; the bytes are deliberately
+    // discarded, never logged, since this pipe may carry auth diagnostics.
+    child.stderr?.on?.("data", () => {});
+
     timer = setTimeout(
       () => finish(`timed out after ${timeoutMs}ms waiting for the codex app-server`),
       timeoutMs,

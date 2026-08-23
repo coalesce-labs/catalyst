@@ -95,6 +95,10 @@ function okBehaviour(home, { rateLimits = LIVE_RATE_LIMITS, account = LIVE_ACCOU
   };
 }
 
+// Scratch dirs shared by both describes (the real-spawn tests above and the
+// discovery tests below); swept by the afterEach further down.
+const scratches = [];
+
 describe("readAccountPlane", () => {
   test("sends initialize before any account RPC", async () => {
     const { spawnFn, record } = makeFakeSpawn(okBehaviour("/h/a"));
@@ -267,10 +271,89 @@ describe("readAccountPlane", () => {
     const v = await readAccountPlane({ codexHome: "/h/a", spawnFn: garbage, timeoutMs: 50 });
     expect(v.status).toBe("error");
   });
+
+  // ── The stdin pipe (CTL-2072 review) ──────────────────────────────────────
+  // A write that fails reports EPIPE by EMITTING 'error' on the stream, not by
+  // throwing where send()'s try/catch can see it — and an 'error' event with no
+  // listener is rethrown by Node as an uncaughtException. Before the listener
+  // existed this killed the whole process: `catalyst-stack codex-account status`
+  // died with a stack trace, codex-accounts-usage.mjs's per-account sweep aborted
+  // before the remaining accounts were read, and the child was orphaned because
+  // the process died outside finish().
+  test("a stdin error is an error verdict, not an uncaught exception", async () => {
+    const spawnFn = () => {
+      const child = new EventEmitter();
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.stdin = new EventEmitter();
+      child.stdin.write = () => {
+        // EPIPE surfaces asynchronously, exactly as a real stream reports it.
+        queueMicrotask(() => child.stdin.emit("error", new Error("write EPIPE")));
+        return true;
+      };
+      child.stdin.end = () => {};
+      child.kill = () => true;
+      return child;
+    };
+    const v = await readAccountPlane({ codexHome: "/h/a", spawnFn, timeoutMs: 5000 });
+    expect(v.status).toBe("error");
+    expect(v.reason).toMatch(/stdin/);
+  });
+
+  // The production repro, through the REAL spawn — no injected seam, so this
+  // pins the actual uncaught-exception path rather than a model of it. An
+  // app-server that answers `initialize` and then exits is what a protocol/
+  // version rejection, a crash, or a failed auth handshake all look like; the
+  // follow-up writes then land on a closed pipe. Reproduced 5/5 before the fix.
+  test("a real child that answers initialize then exits yields an error, not a crash", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "codex-epipe-"));
+    scratches.push(dir);
+    const fake = join(dir, "fake-codex");
+    writeFileSync(
+      fake,
+      '#!/bin/sh\nhead -n 1 >/dev/null\nprintf \'{"jsonrpc":"2.0","id":1,"result":{"codexHome":"/h/a"}}\\n\'\nexit 0\n',
+      { mode: 0o755 },
+    );
+    const v = await readAccountPlane({ codexHome: "/h/a", bin: fake, timeoutMs: 5000 });
+    expect(v.status).toBe("error");
+  });
+
+  // stdio asks for a stderr PIPE, so an undrained stderr past the ~64 KiB pipe
+  // buffer BLOCKS the child mid-write: it answers nothing and every account on
+  // that host reads as a timeout error, which looks like a codex outage. The
+  // assertion is that the read COMPLETES (and well inside the timeout) while the
+  // child writes ~74 KiB to stderr first.
+  test("a child that floods stderr is still read, not blocked", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "codex-noisy-"));
+    scratches.push(dir);
+    const fake = join(dir, "fake-codex");
+    writeFileSync(
+      fake,
+      [
+        "#!/bin/sh",
+        "head -n 1 >/dev/null",
+        "i=0",
+        "while [ $i -lt 400 ]; do",
+        "  awk 'BEGIN{ s=\"\"; while (length(s) < 180) s = s \"a\"; print s }' >&2",
+        "  i=$((i+1))",
+        "done",
+        `printf '{"jsonrpc":"2.0","id":1,"result":{"codexHome":"/h/a"}}\\n'`,
+        "head -n 3 >/dev/null",
+        `printf '{"jsonrpc":"2.0","id":2,"result":{"account":null}}\\n'`,
+        `printf '{"jsonrpc":"2.0","id":3,"result":{"rateLimits":null}}\\n'`,
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    const startedAt = Date.now();
+    const v = await readAccountPlane({ codexHome: "/h/a", bin: fake, timeoutMs: 10000 });
+    // A blocked child would only ever come back AT the timeout with `error`.
+    expect(Date.now() - startedAt).toBeLessThan(9000);
+    expect(v.status).toBe("unauthenticated");
+  });
 });
 
 // ── discoverCodexHomes ──────────────────────────────────────────────────────
-const scratches = [];
 afterEach(() => {
   while (scratches.length) {
     try {
