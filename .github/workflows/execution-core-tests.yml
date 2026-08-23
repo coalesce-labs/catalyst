@@ -865,6 +865,30 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/codex-accounts-usage.test.sh
 
+      - name: catalyst-stack codex-account contract (CTL-2072)
+        # The operator surface: handle validation, selector parsing, the sops
+        # sed flip, the local symlink apply, the pin guard, and probe/verify.
+        # Hermetic — no real sops, cluster repo, network, or `codex` binary.
+        #
+        # Two checks here are behavioural rather than textual and pin bugs that
+        # were found by running them, not by reading the code:
+        #   * the selector replace must not DEREFERENCE the old symlink. On macOS
+        #     a plain `mv -f newlink selector` follows the link and buries the new
+        #     link inside the OLD account's home while returning 0 — a silent
+        #     no-op reporting success. BSD needs `mv -h`, GNU needs `mv -T`, and
+        #     neither accepts the other, so BOTH are required: this job runs on
+        #     ubuntu-latest while the fleet runs macOS.
+        #   * the pin guard must REFUSE when CATALYST_CODEX_HOME or Layer-1
+        #     codexHome is set, because those outrank the symlink in
+        #     codexConfig()'s ladder and the switch would otherwise report a
+        #     change that never took effect. It carries positive controls so it
+        #     cannot pass by always refusing.
+        #
+        # Measured 48 pass / 0 fail on this branch; the sibling
+        # catalyst-stack-claude-account.test.sh stays 55/55 (unchanged block).
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-stack-codex-account.test.sh
+
       - name: deployment-mode Bash resolver unit test (CTL-1617)
         # The Bash mirror's own standalone suite (lib/catalyst-deployment-mode.sh) —
         # see the bun step above for why this suite was previously ungated.
