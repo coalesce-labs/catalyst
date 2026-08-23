@@ -1641,6 +1641,32 @@ outage can never quarantine a healthy, resolvable, in-flight ticket.
 `SCHEDULER_CIRCUIT_BREAKER_THRESHOLD` is the Linear-independent backstop; the runaway knobs are
 observability only.
 
+### Preemption lap budget (CTL-2192)
+
+The scheduler's preemption sweep clears its in-memory hysteresis key after each successful
+preemption, so the same (preemptor, victim) pair restarts a fresh 30 s clock forever — a *correct*
+preempt→resume pair, repeated without end at roughly a two-minute cadence. That in-memory key is
+also module state, so a daemon bounce erases even the within-lap memory. The lap budget is the
+durable cross-lap bound. Both knobs are env vars on the `catalyst-execution-core` process:
+
+- `SCHEDULER_PREEMPT_MAX_LAPS` (default `3`) — how many times one victim may be preempted inside the
+  window before it becomes temporarily non-preemptable. **Chosen, not derived**: research measured
+  10 claims in ~30 min for one ticket and 8 in ~17 min for another, so 3 sits well below the
+  observed pathology while leaving genuine priority preemption room.
+- `SCHEDULER_PREEMPT_BUDGET_WINDOW_MS` (default `1800000`, 30 min) — the window the count is scoped
+  to. Expiry is what makes this **damping rather than a permanent exemption**: past the window the
+  victim is preemptable again.
+
+The ledger lives at `workers/<ticket>/.preempt-budget.json`, so it is GC'd with the ticket (the same
+placement as `.triage-dispatch-counts/` and `.runaway-alerts/`). Skipping a victim emits one
+`phase.scheduler.preempt-budget-exhausted.<TICKET>` per window — the `scheduler` phase slot is an
+allowed namespace exception and the action is not in the terminal set, so it is pure audit with no
+wake side effect.
+
+⚠️ **Fail direction is toward today's behaviour.** This is a damper on a working mechanism, not a
+safety interlock: an unreadable or unwritable ledger still allows the preemption, because failing
+closed would let one corrupt file freeze genuine priority preemption for a ticket indefinitely.
+
 ### Label-write retry cap (CTL-2052)
 
 The disposition/held-label convergers cool down a failed `applyLabel` (CTL-834/COORD-236). A
