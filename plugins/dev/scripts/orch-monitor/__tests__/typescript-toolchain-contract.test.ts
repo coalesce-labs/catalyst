@@ -101,4 +101,26 @@ describe("TypeScript toolchain contract (CTL-2179)", () => {
     // e.g. "^6.0.2" itself (it matches the "0." inside ".0.2").
     expect(declared).not.toMatch(/^\^?[0-4]\./);
   });
+
+  // Cross-runner pin (Phase 4): ubuntu-latest (quality) and macos-latest
+  // (publish-desktop) both consume this lockfile, so the optional platform
+  // binaries for each must be present.
+  test("the lockfile carries TS 7 binaries for every CI runner platform", () => {
+    const gitRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      encoding: "utf8",
+      cwd: ROOT,
+    }).trim();
+    expect(gitRoot.length).toBeGreaterThan(0); // fail closed: empty root is a failure
+    const lockPath = join(gitRoot, "bun.lock");
+    expect(existsSync(lockPath)).toBe(true); // fail closed: absent lockfile is a failure
+    const lock = readFileSync(lockPath, "utf8");
+    expect(lock.length).toBeGreaterThan(0); // fail closed: a zero-length read must fail
+    for (const platform of [
+      "@typescript/typescript-linux-x64",
+      "@typescript/typescript-darwin-arm64",
+      "@typescript/typescript-darwin-x64",
+    ]) {
+      expect(lock).toContain(`${platform}@7.0.2`);
+    }
+  });
 });
