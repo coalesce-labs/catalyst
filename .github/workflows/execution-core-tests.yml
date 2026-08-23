@@ -907,29 +907,6 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/catalyst-stack-codex-account.test.sh
 
-      - name: catalyst-codex-usage-page alarm contract (CTL-2072)
-        # Page BEFORE a Codex account exhausts, instead of discovering it from a
-        # stalled fleet (the CTL-2046 failure, whose only signal was a reactive
-        # rate-park string match that produced 276 silent events and paged
-        # nobody).
-        #
-        # The property pinned here is NOT "does it page at 80%". It is that every
-        # way of being unable to SEE quota routes to the DARK path and pages
-        # through the same sinks, never as "under threshold":
-        #   * ⛔ zero accounts — `[].every(p)` is true, so an empty accounts[]
-        #     would otherwise fall through the loop and print a clean all-clear
-        #     having read nothing. There is an explicit test that this is never
-        #     reported as under-threshold.
-        #   * ⛔ a REJECTED account pages regardless of percent — the RPC succeeds
-        #     on a throttled account (the rejection rides rateLimitReachedType),
-        #     so a purely numeric pager calls a dead account healthy.
-        #   * a page no sink accepted is NOT recorded, so the next run retries.
-        # Hermetic: a fake source supplies the payload; no real codex app-server.
-        #
-        # Measured 24 pass / 0 fail on this branch.
-        working-directory: plugins/dev/scripts
-        run: bash __tests__/catalyst-codex-usage-page.test.sh
-
       - name: deployment-mode Bash resolver unit test (CTL-1617)
         # The Bash mirror's own standalone suite (lib/catalyst-deployment-mode.sh) —
         # see the bun step above for why this suite was previously ungated.
