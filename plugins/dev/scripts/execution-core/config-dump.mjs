@@ -473,7 +473,7 @@ export const CONFIG_KEYS = Object.freeze(
 // _deepMergeLayer2: recurse into plain objects, replace anything else. Kept local
 // because this module is deliberately import-light (it is the tool an operator
 // runs when the daemon will not start).
-export function deepMergeLayer2(target, source) {
+function deepMergeLayer2(target, source) {
   const isPlain = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
   const out = isPlain(target) ? { ...target } : {};
   for (const key of Object.keys(isPlain(source) ? source : {})) {
