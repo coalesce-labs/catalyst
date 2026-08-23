@@ -127,10 +127,10 @@ function defaultSpawnChild(bin, args, opts) {
 // signal to a terminal status AND emit the canonical terminal phase event, exactly
 // like the sdk path's defaultEmitBackstop. Best-effort; never throws.
 function defaultMarkLaunchFailed(
-  { phase, ticket, status = "failed", reason, orchDir, signalFile },
+  { phase, ticket, status = "failed", reason, orchDir, signalFile, retrySafe = false },
   { spawn = spawnSync } = {},
 ) {
-  defaultEmitBackstop({ phase, ticket, status, reason, orchDir, signalFile }, { spawn });
+  defaultEmitBackstop({ phase, ticket, status, reason, orchDir, signalFile, retrySafe }, { spawn });
 }
 
 // ── Auth guard ──────────────────────────────────────────────────────────────
@@ -1764,8 +1764,13 @@ export async function codexRunPhaseAgent(
         // which is the TRANSIENT behavior rate-park intends. Classification stays
         // "rate-park" for any caller that inspects it.
         if (!_staleGeneration) {
+          // CTL-1647: same defect as the sdk overloaded-exhausted backstop — the
+          // comment above always claimed this was the TRANSIENT path, but the
+          // terminal it writes lands on stalled and the terminal sweep parks the
+          // ticket for a human. `retrySafe` is what actually makes it transient:
+          // recovery's bounded retry_safe_redispatch owns it from here.
           markLaunchFailed(
-            { phase, ticket, status: "failed", reason: "codex-rate-park-exhausted", orchDir, signalFile },
+            { phase, ticket, status: "failed", reason: "codex-rate-park-exhausted", orchDir, signalFile, retrySafe: true },
             { spawn },
           );
         }

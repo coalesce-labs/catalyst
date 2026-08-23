@@ -91,6 +91,7 @@ const LINEAR_COMMENT_POST_BIN = fileURLToPath(
   new URL("../lib/linear-comment-post.sh", import.meta.url),
 );
 import { postLinearCommentAsSpawnResult } from "./linear-comment-write.mjs"; // CTL-1889 inc 2
+import { isTransientInfraReason } from "./escalation-explanation.mjs"; // CTL-1647 (pure leaf — no cycle)
 
 // phase-agent-emit-complete — the canonical wake/synthetic-complete emitter, used
 // by the CTL-1186 phase-pr re-dispatch to nudge the scheduler after re-arming.
@@ -1075,7 +1076,16 @@ export function defaultClassifyTicket(evidence, opts = {}) {
   // unrecognized coverage gap. An unrecognized UNSAFE failure (no retrySafe) skips
   // this rule entirely and falls through to Rule 3's immediate escalate (unchanged).
   if (evidence.retrySafe === true) {
-    const reason = effectiveFailureReason ?? "unrecognized-retry-safe";
+    // CTL-1647: the SDK/codex overload backstop records its cause as
+    // `attentionReason` (a `failureReason` trips revive Loop 2's escalate branch),
+    // so read it as a LAST fallback here — otherwise every transient-capacity
+    // redispatch is logged as the anonymous "unrecognized-retry-safe". Naming only:
+    // the routing below is unchanged.
+    const reason =
+      effectiveFailureReason ??
+      signal?.attentionReason ??
+      evidence.attentionReason ??
+      "unrecognized-retry-safe";
     const phase = signal?.phase;
     const budget = retrySafeBudgetDecision(ticket, { readIntentAttempts });
     if (budget.retry) {
@@ -1086,6 +1096,31 @@ export function defaultClassifyTicket(evidence, opts = {}) {
           reason: `retry-safe failure "${reason}" (attempt ${budget.attempts + 1}/${RECOVERY_MAX_ATTEMPTS}); re-dispatching`,
           seam_id: "fence-stale-redispatch",
           ...(phase !== undefined ? { phase } : {}),
+        },
+      };
+    }
+    // CTL-1647 ROUTE A / A': a TRANSIENT provider-capacity cause must never reach
+    // this escalate. Two independent ways it did:
+    //   A  — RECOVERY_MAX_ATTEMPTS defaults to 2 and the redispatch fires on the
+    //        next tick with NO delay, so a real 429/529 storm burned both attempts
+    //        inside ~3 minutes and parked the ticket while the provider was still
+    //        down. The whole 41-ticket scenario reproduced, just 3 minutes later.
+    //   A' — `attempts` is the ticket's GENERIC recovery-intent counter, bumped by
+    //        every unrelated prior fix (bounded-llm, orphan_stale, …). A ticket
+    //        already at attempts>=2 got ZERO retries: the FIRST overload classified
+    //        straight to escalate → needs-human.
+    // The bounded back-off + re-arm for this cause is owned by the scheduler's
+    // terminal sweep (maybeRearmTransientSignal), which is wall-clock spaced,
+    // cause-scoped, and — unlike this pass — not behind the recovery-pass
+    // feature flag. Defer (cooldown-only, NO escalated latch, no needs-human).
+    if (isTransientInfraReason(reason)) {
+      return {
+        decision: "defer",
+        fix_class: "board-health",
+        details: {
+          reason:
+            `transient provider-capacity failure "${reason}" — a system-level condition, not a ` +
+            `per-ticket human decision; the terminal sweep owns its bounded back-off (CTL-1647)`,
         },
       };
     }
@@ -2088,6 +2123,12 @@ export function defaultInvokeSeam(ticket, seamId, brief = {}, deps = {}) {
       sig.status = "pending";
       delete sig.failureReason;
       delete sig.retrySafe;
+      // CTL-1647 (Codex R2/R3): ALSO clear attentionReason. It is the third key
+      // resolveSignalReason reads, and it is where the overload backstop stores its
+      // cause — a later writer that stamps `status:"stalled"` without its own reason
+      // would let this stale "sdk-overloaded-exhausted" resolve on a FRESH updatedAt
+      // and buy an unrelated failure another transient back-off window.
+      delete sig.attentionReason;
       const tmp = `${signalPath}.tmp.${process.pid}`;
       writeFileSync(tmp, JSON.stringify(sig, null, 2));
       renameSync(tmp, signalPath);

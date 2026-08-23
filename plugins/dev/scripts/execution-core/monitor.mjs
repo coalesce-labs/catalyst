@@ -113,6 +113,7 @@ import {
   removeLabel, // CTL-1481: worker:<host> swap (remove-before-add)
 } from "./linear-write.mjs";
 import { routeStuckTicketToDelegate } from "./delegate-first.mjs"; // CTL-1609
+import { classifyTransientSignal } from "./escalation-explanation.mjs"; // CTL-1647 (pure leaf)
 import { appendDelegateEvent as defaultAppendDelegateEvent } from "./delegate-event.mjs"; // CTL-1774
 import { appendTriageTransitionEvent as defaultAppendEvent } from "./triage-transition-event.mjs";
 import { countBackgroundAgents, resetLivenessCache } from "./claude-agents.mjs";
@@ -1216,6 +1217,25 @@ function dispatchTriage(
       noteTriageSkip(identifier, "triage-worker-in-flight"); // CTL-879
       return false;
     }
+    // CTL-1647 ROUTE C: repeated provider 429/529 overloads during triage burn the
+    // dispatch counter, and this site then parks the ticket with reason
+    // "triage-redispatch-cap" — a per-ticket human block for a fleet-level
+    // condition (45 live escalations in Aug 2026). While the triage signal is a
+    // FRESH, retry-safe transient park, defer instead. Bounded by the same
+    // TRANSIENT_ESCALATION_BACKOFF_MS window as the terminal sweep: once it
+    // expires (or the phase re-arms and fails for a real reason) the cap parks
+    // exactly as before.
+    const triageTransient = classifyTransientSignal(readTriageSignalRaw(orchDir, identifier));
+    if (triageTransient.transient && triageTransient.withinBackoff) {
+      log.warn(
+        { identifier, reason: triageTransient.reason, ageMs: triageTransient.ageMs },
+        "ctl-1647: triage cap reached on a TRANSIENT provider-capacity park — deferring the needs-human park"
+      );
+      noteTriageSkip(identifier, "triage-transient-provider-capacity", {
+        reason: triageTransient.reason,
+      });
+      return false;
+    }
     try {
       labelNeedsHuman(orchDir, identifier);
     } catch (err) {
@@ -1596,6 +1616,19 @@ function hasTriageArtifact(orchDir, ticket) {
 //       dying on a bad repoRoot). Re-arm by deleting
 //       workers/<t>/.triage-redispatch-capped + .triage-dispatch-count.json.
 export const TRIAGE_DISPATCH_CAP = Number(process.env.CATALYST_TRIAGE_DISPATCH_CAP) || 3;
+
+// CTL-1647: the RAW triage signal (not just its status) so the cap-park gate can
+// see a transient provider-capacity park. Absent/malformed → null (fail-open).
+export function readTriageSignalRaw(orchDir, ticket) {
+  try {
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", ticket, "phase-triage.json"), "utf8")
+    );
+    return sig && typeof sig === "object" ? sig : null;
+  } catch {
+    return null;
+  }
+}
 
 export function readTriageSignalStatus(orchDir, ticket) {
   try {

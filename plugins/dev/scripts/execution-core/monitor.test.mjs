@@ -2024,6 +2024,66 @@ describe("triage re-dispatch guard (CTL-1441)", () => {
     expect(JSON.parse(readFileSync(join(realOrchDir, ".triage-dispatch-counts", "ENG-9.json"), "utf8")).cappedAt).toBeTruthy();
   });
 
+  // CTL-1647 ROUTE C: repeated provider 429/529 overloads during triage burn the
+  // dispatch counter, and this site then parked the ticket with reason
+  // "triage-redispatch-cap" — a per-ticket human block for a fleet-level
+  // condition (45 live escalations in Aug 2026, none of them a human decision).
+  const capWithTriageSignal = (realOrchDir, sig) => {
+    const dir = join(realOrchDir, "workers", "ENG-9");
+    mkdirSync(dir, { recursive: true });
+    mkdirSync(join(realOrchDir, ".triage-dispatch-counts"), { recursive: true });
+    writeFileSync(join(realOrchDir, ".triage-dispatch-counts", "ENG-9.json"), JSON.stringify({ count: 3 }));
+    writeFileSync(join(dir, "phase-triage.json"), JSON.stringify(sig));
+    reconcileAll({ exec: execReturning({ ENG: [node("ENG-9")] }) });
+  };
+
+  test("CTL-1647: a capped ticket parked on a TRANSIENT provider overload is NOT labelled needs-human", () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    capWithTriageSignal(realOrchDir, {
+      status: "stalled",
+      attentionReason: "sdk-overloaded-exhausted",
+      retrySafe: true,
+      updatedAt: new Date().toISOString(),
+    });
+    const dispatch = mock(() => ({ code: 0 }));
+    const labelNeedsHuman = mock(() => {});
+    sweepMissingTriage(sweepOpts(realOrchDir, dispatch, labelNeedsHuman));
+    expect(labelNeedsHuman).not.toHaveBeenCalled();
+    expect(readFileSync(join(realOrchDir, ".triage-dispatch-counts", "ENG-9.json"), "utf8")).not.toContain("cappedAt");
+  });
+
+  // POSITIVE CONTROL 1 — a GENUINE settled failure at the cap still parks.
+  test("CTL-1647 POSITIVE CONTROL: a genuine failure at the cap STILL parks", () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    capWithTriageSignal(realOrchDir, {
+      status: "failed",
+      failureReason: "ended-without-declaration",
+      updatedAt: new Date().toISOString(),
+    });
+    const dispatch = mock(() => ({ code: 0 }));
+    const labelNeedsHuman = mock(() => {});
+    sweepMissingTriage(sweepOpts(realOrchDir, dispatch, labelNeedsHuman));
+    expect(labelNeedsHuman).toHaveBeenCalledTimes(1);
+  });
+
+  // POSITIVE CONTROL 2 — the deferral is BOUNDED: an aged transient park still parks.
+  test("CTL-1647 POSITIVE CONTROL: an AGED transient park at the cap parks normally", () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    capWithTriageSignal(realOrchDir, {
+      status: "stalled",
+      attentionReason: "sdk-overloaded-exhausted",
+      retrySafe: true,
+      updatedAt: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+    });
+    const dispatch = mock(() => ({ code: 0 }));
+    const labelNeedsHuman = mock(() => {});
+    sweepMissingTriage(sweepOpts(realOrchDir, dispatch, labelNeedsHuman));
+    expect(labelNeedsHuman).toHaveBeenCalledTimes(1);
+  });
+
   test("(R4) a SATURATED fleet still parks a capped ticket (park is capacity-independent)", () => {
     enroll("ENG", { status: "Ready" });
     const realOrchDir = join(catalystDir, "execution-core");
