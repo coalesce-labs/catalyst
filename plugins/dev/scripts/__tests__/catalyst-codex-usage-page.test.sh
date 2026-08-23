@@ -204,6 +204,64 @@ else
 	fail "no readable window pages dark" "rc=$RC" "$OUT"
 fi
 
+# ⛔ EVERY account, not merely one. The case above passes even under a `some()`
+# reading of the contract, because with a SINGLE account "any readable" and "all
+# readable" agree — which is exactly why the gap survived. It only opens at two
+# accounts: one healthy and observable, one reported `ok` with no usable window.
+# Under `READABLE -gt 0` the dark flag clears, the threshold loop finds nothing to
+# say about the second account, and the run prints a clean all-clear while that
+# account's quota is entirely unobserved. Found by Codex review on #3931; this case
+# fails against `-gt 0` and passes against `-eq ACCOUNT_COUNT`.
+reset_state
+PAYLOAD='{"selector":{"kind":"symlink","activeHandle":"acct1"},
+ "accounts":[
+   {"label":"acct1","isActive":true,"email":"a@b.c","planType":"pro","accountType":"chatgpt",
+    "status":"ok","reason":null,
+    "binding":{"limitId":"codex","label":"weekly","usedPercent":10,"resetsAt":1788049009},
+    "buckets":[{"limitId":"codex","limitName":null,"windows":[{"label":"weekly","usedPercent":10,"resetsAt":1788049009}]}]},
+   {"label":"acct2","isActive":false,"email":"d@e.f","planType":"pro","accountType":"chatgpt",
+    "status":"ok","reason":null,"binding":null,"buckets":[]}
+ ]}'
+OUT="$(run --threshold 80)"
+RC=$?
+if [ "$RC" -eq 3 ] && grep -qi 'DARK' "$CHANNELS/demo.md"; then
+	pass "one readable + one window-less account pages DARK (every, not any)"
+else
+	fail "partial readability pages dark" "rc=$RC" "$OUT" "chan=$(cat "$CHANNELS/demo.md")"
+fi
+
+# ...and it must never be announced as under-threshold, the fail-open direction.
+reset_state
+OUT="$(run --threshold 80)"
+if grep -qi 'no window at or above' <<<"$OUT"; then
+	fail "a partially-unreadable payload is never reported as under-threshold" "$OUT"
+else
+	pass "a partially-unreadable payload is never reported as under-threshold"
+fi
+
+# Positive control for the tightened check: when EVERY account is readable the
+# dark flag must still clear, or the pager would go permanently dark on any
+# multi-account host and page nothing ever again.
+reset_state
+PAYLOAD='{"selector":{"kind":"symlink","activeHandle":"acct1"},
+ "accounts":[
+   {"label":"acct1","isActive":true,"email":"a@b.c","planType":"pro","accountType":"chatgpt",
+    "status":"ok","reason":null,
+    "binding":{"limitId":"codex","label":"weekly","usedPercent":10,"resetsAt":1788049009},
+    "buckets":[{"limitId":"codex","limitName":null,"windows":[{"label":"weekly","usedPercent":10,"resetsAt":1788049009}]}]},
+   {"label":"acct2","isActive":false,"email":"d@e.f","planType":"pro","accountType":"chatgpt",
+    "status":"ok","reason":null,
+    "binding":{"limitId":"codex","label":"weekly","usedPercent":20,"resetsAt":1788049009},
+    "buckets":[{"limitId":"codex","limitName":null,"windows":[{"label":"weekly","usedPercent":20,"resetsAt":1788049009}]}]}
+ ]}'
+OUT="$(run --threshold 80)"
+RC=$?
+if [ "$RC" -ne 3 ] && ! grep -qi 'DARK' "$CHANNELS/demo.md"; then
+	pass "positive control: two fully readable accounts do NOT page DARK"
+else
+	fail "two readable accounts must not page dark" "rc=$RC" "$OUT" "chan=$(cat "$CHANNELS/demo.md")"
+fi
+
 # The dark flag must CLEAR when the source returns, so a later outage pages afresh.
 reset_state
 SRC_OVERRIDE="$SCRATCH/no-such-source.mjs"; run --threshold 80 >/dev/null; unset SRC_OVERRIDE

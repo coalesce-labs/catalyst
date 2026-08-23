@@ -171,7 +171,14 @@ READABLE="$(printf '%s' "$PAYLOAD" | jq -r '
               or ((.status // "") != "ok") )
   ] | length' 2>/dev/null)"
 case "$READABLE" in '' | *[!0-9]*) READABLE=0 ;; esac
-[ "$READABLE" -gt 0 ] || _unobservable "no account reported a usable quota window or a status — the plane answered, but with nothing to judge"
+# ⛔ EVERY account, not merely one. `READABLE -gt 0` is the `some()` reading of a
+# contract written as `every()` — the same fail-open shape as the `[].every(p)`
+# trap guarded above, one rung further in. With two accounts where one is healthy
+# and the other comes back `ok` with no usable window, `-gt 0` clears the dark flag
+# and the threshold loop below finds nothing to page for that account, so the run
+# prints a clean all-clear while that account's quota is entirely unobserved.
+# Comparing against ACCOUNT_COUNT is what makes the stated contract the asserted one.
+[ "$READABLE" -eq "$ACCOUNT_COUNT" ] || _unobservable "only ${READABLE} of ${ACCOUNT_COUNT} accounts reported a usable quota window or a non-ok status — the rest answered with nothing to judge, so their quota is UNWATCHED"
 
 # The source is readable again — clear the dark flag so a future outage pages afresh.
 [ "$(_state_get unobservable)" = "1" ] && [ "$DRY_RUN" -eq 0 ] && _state_set unobservable 0

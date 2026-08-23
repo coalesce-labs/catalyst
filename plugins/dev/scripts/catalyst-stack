@@ -4672,18 +4672,59 @@ _cx_confirm() {
   [[ "$ans" =~ ^[Yy]$ ]]
 }
 
+_cx_daemon_env_file() { echo "${CATALYST_EXECUTION_CORE_ENV:-${HOME}/.config/catalyst/execution-core.env}"; }
+
+# _cx_source_daemon_env_for_read — mirrors _vn_source_daemon_env_for_read (CTL-1678)
+# and catalyst-execution-core's helper of the same name. Fail-open: an absent file
+# is a no-op success, never a non-zero return. Callers invoke it inside a SUBSHELL
+# so the sourced vars never leak into catalyst-stack itself.
+_cx_source_daemon_env_for_read() {
+  local _daemon_env; _daemon_env="$(_cx_daemon_env_file)"
+  # shellcheck disable=SC1090
+  [[ -f "$_daemon_env" ]] && source "$_daemon_env"
+  return 0
+}
+
+# _cx_effective_pins — echo "<codexHome>\t<configFile>" AS THE DAEMON WOULD SEE THEM.
+#
+# ⛔ Reading only this shell's env is the wrong instrument. catalyst-execution-core
+# sources ~/.config/catalyst/execution-core.env before starting the daemon, and per
+# its own precedence note that file OUTRANKS the ambient inherited value. So a pin
+# set only in that file is invisible to a plain `${CATALYST_CODEX_HOME:-}` read here
+# while the running daemon honours it — the guard would pass, the switch would push
+# and "verify" a symlink the daemon never reads, and the command would report exactly
+# the false success it exists to prevent. Sourcing AFTER the ambient env reproduces
+# the daemon's precedence (file wins). CATALYST_CONFIG_FILE gets the same treatment:
+# it selects WHICH config.json the Layer-1 rung below reads.
+_cx_effective_pins() {
+  (
+    _cx_source_daemon_env_for_read
+    printf '%s\t%s\n' "${CATALYST_CODEX_HOME:-}" "${CATALYST_CONFIG_FILE:-}"
+  )
+}
+
 # ⛔ _cx_assert_selector_unpinned — refuse when a pin OUTRANKS the symlink.
 # codexConfig() reads CATALYST_CODEX_HOME, then Layer-1
 # catalyst.orchestration.codex.codexHome, and only THEN the symlink. With either
 # set, repointing the symlink is a silent no-op and a switch that reported success
-# would be lying. Names which pin wins and what to unset.
+# would be lying. Names which pin wins, WHERE it is set, and what to unset.
 _cx_assert_selector_unpinned() {
-  if [[ -n "${CATALYST_CODEX_HOME:-}" ]]; then
-    warn "CATALYST_CODEX_HOME is set (${CATALYST_CODEX_HOME}) — it OVERRIDES the codex-home selector symlink, so a switch would not take effect. Unset it, then retry."
+  local eff env_home cfg pinned where
+  eff="$(_cx_effective_pins)"
+  env_home="${eff%%$'\t'*}"
+  cfg="${eff#*$'\t'}"
+
+  if [[ -n "$env_home" ]]; then
+    # Distinguish the two sources: the remedy differs (unset a var vs edit a file).
+    if [[ -n "${CATALYST_CODEX_HOME:-}" ]]; then
+      where="in this environment — unset it"
+    else
+      where="in $(_cx_daemon_env_file), which the daemon sources and which OUTRANKS the ambient env — remove that line"
+    fi
+    warn "CATALYST_CODEX_HOME is set (${env_home}) ${where}. It OVERRIDES the codex-home selector symlink, so a switch would not take effect. Then retry."
     return 1
   fi
-  local cfg pinned
-  cfg="${CATALYST_CONFIG_FILE:-}"
+
   if [[ -z "$cfg" ]]; then
     cfg="${CATALYST_DIR:-$HOME/catalyst}/.catalyst/config.json"
     [[ -f "$cfg" ]] || cfg="$(pwd)/.catalyst/config.json"

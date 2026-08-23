@@ -21,6 +21,13 @@ STACK="${REPO_ROOT}/plugins/dev/scripts/catalyst-stack"
 FAILURES=0
 PASSES=0
 SCRATCH="$(mktemp -d)"
+# HERMETIC: _cx_assert_selector_unpinned now reads the daemon's env file (the pin
+# can live only there — see the daemon-env cases below). Point it at a path that
+# does not exist so the suite never sources the OPERATOR's real
+# ~/.config/catalyst/execution-core.env; a host that happens to pin codex there
+# would otherwise fail the unpinned positive control for reasons unrelated to the
+# code under test. The daemon-env cases set their own fixture path.
+export CATALYST_EXECUTION_CORE_ENV="${SCRATCH}/no-such-execution-core.env"
 trap 'rm -rf "$SCRATCH"' EXIT
 
 ok() {
@@ -272,6 +279,78 @@ t_null_layer1_not_pin() {
   ( unset CATALYST_CODEX_HOME; CATALYST_CONFIG_FILE="$cfgdir/config.json" _cx_assert_selector_unpinned )
 }
 check "a null Layer-1 codexHome is not a pin" t_null_layer1_not_pin
+
+# ⛔ THE PIN CAN LIVE IN THE DAEMON'S ENV FILE, WHICH THIS SHELL DOES NOT SOURCE.
+# catalyst-execution-core sources ~/.config/catalyst/execution-core.env before
+# starting the daemon, and per its own precedence note that file OUTRANKS the
+# ambient inherited value. Reading only `${CATALYST_CODEX_HOME:-}` here therefore
+# sees nothing in a supported configuration while the running daemon stays pinned
+# — the guard passes, the switch pushes fleet state and "verifies" a symlink the
+# daemon never reads, and the command reports the exact false success it exists to
+# prevent. Found by Codex review on #3931; these two cases fail against the
+# ambient-only guard and pass against the effective-env one.
+t_refuse_daemon_env_pin() {
+  local d="${SCRATCH}/denv" out
+  mkdir -p "$d"
+  printf 'CATALYST_CODEX_HOME=/pinned/by/daemon/env\n' >"$d/execution-core.env"
+  printf '{}\n' >"$d/config.json"
+  out="$( unset CATALYST_CODEX_HOME
+          CATALYST_EXECUTION_CORE_ENV="$d/execution-core.env" \
+          CATALYST_CONFIG_FILE="$d/config.json" \
+          _cx_assert_selector_unpinned 2>&1 )" && return 1
+  # It must name the pin AND the file, so the operator edits the right thing.
+  grep -qi 'CATALYST_CODEX_HOME' <<<"$out" \
+    && grep -q '/pinned/by/daemon/env' <<<"$out" \
+    && grep -q 'execution-core.env' <<<"$out"
+}
+check "fails when CATALYST_CODEX_HOME is pinned ONLY in the daemon env file" t_refuse_daemon_env_pin
+
+# The same file can redirect CATALYST_CONFIG_FILE, which selects WHICH config.json
+# the Layer-1 rung reads — so a Layer-1 pin reachable only through that redirect
+# must also be caught.
+t_refuse_daemon_env_config_redirect() {
+  local d="${SCRATCH}/denv2" out
+  mkdir -p "$d"
+  printf '{"catalyst":{"orchestration":{"codex":{"codexHome":"/pinned/via/redirect"}}}}\n' >"$d/pinned.json"
+  printf '{}\n' >"$d/clean.json"
+  printf 'CATALYST_CONFIG_FILE=%s\n' "$d/pinned.json" >"$d/execution-core.env"
+  out="$( unset CATALYST_CODEX_HOME
+          CATALYST_EXECUTION_CORE_ENV="$d/execution-core.env" \
+          CATALYST_CONFIG_FILE="$d/clean.json" \
+          _cx_assert_selector_unpinned 2>&1 )" && return 1
+  grep -q '/pinned/via/redirect' <<<"$out"
+}
+check "fails when the daemon env file redirects CATALYST_CONFIG_FILE at a pinned config" t_refuse_daemon_env_config_redirect
+
+# Positive control for the new read path: an execution-core.env that exists but
+# pins nothing must NOT be read as a pin. Without this, a guard that simply always
+# refused once the file existed would pass the two cases above and be useless.
+t_daemon_env_without_pin_passes() {
+  local d="${SCRATCH}/denv3"
+  mkdir -p "$d"
+  printf 'SOME_OTHER_KEY=1\nCATALYST_LOG_LEVEL=debug\n' >"$d/execution-core.env"
+  printf '{}\n' >"$d/config.json"
+  ( unset CATALYST_CODEX_HOME
+    CATALYST_EXECUTION_CORE_ENV="$d/execution-core.env" \
+    CATALYST_CONFIG_FILE="$d/config.json" \
+    _cx_assert_selector_unpinned )
+}
+check "positive control: a daemon env file that pins nothing is not a pin" t_daemon_env_without_pin_passes
+
+# Sourcing must not leak into catalyst-stack's own shell — the helper runs in a
+# subshell precisely so a stray key in the operator's file cannot rewrite state here.
+t_daemon_env_does_not_leak() {
+  local d="${SCRATCH}/denv4"
+  mkdir -p "$d"
+  printf 'CATALYST_CODEX_HOME=/leaky\n' >"$d/execution-core.env"
+  printf '{}\n' >"$d/config.json"
+  ( unset CATALYST_CODEX_HOME
+    CATALYST_EXECUTION_CORE_ENV="$d/execution-core.env" \
+    CATALYST_CONFIG_FILE="$d/config.json" \
+    _cx_assert_selector_unpinned >/dev/null 2>&1
+    [[ -z "${CATALYST_CODEX_HOME:-}" ]] )
+}
+check "the daemon env is read in a subshell and does not leak into this shell" t_daemon_env_does_not_leak
 
 # ── 6. preconditions ported from claude-account ──────────────────────────────
 t_requires_age_key() {
