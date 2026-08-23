@@ -52,7 +52,6 @@ import {
   CLUSTER_SYNC_INTERVAL_MS, // CTL-1274: cluster-repo auto-pull cadence
   isHostNamePinnedFromConfig, // CTL-1093
   getCatalystRepoDir, // CTL-1093 sticky dir
-  readDelegateRunnerConfig, // CTL-1331: async board-health delegate runner kill-switch
   readCloudFeedConfig, // CTL-1847: cloud-feed dispatch-source mode
   readGithubFeedConfig, // CTL-1929: github-feed dispatch-source mode (SEPARATE knob)
   resolveGithubFeedLayer2Mode, // CTL-2011 Phase 3: broker/orch-monitor view for the reader-split alarm
@@ -116,10 +115,6 @@ import { startWorktreeRefreshTimer, readWorktreeRefreshConfig } from "./worktree
 import { startCloudFeedTimer } from "./cloud-feed-timer.mjs"; // CTL-1847
 import { startGithubFeedTimer } from "./github-feed-timer.mjs"; // CTL-1929
 import { createCaptureSink, defaultCapturePath } from "./cloud-feed-capture.mjs"; // CTL-1847
-// CTL-1331: the async board-health delegate runner timer (kicks the DETACHED
-// drainer that does the heavy worktree-provision + `claude --bg` off the daemon
-// event loop). Gated by readDelegateRunnerConfig; Phase A ships it inert.
-import { startDelegateRunnerTimer } from "./delegate-runner.mjs";
 import { startStalePrRescueTimer, readStalePrRescueConfig } from "./stale-pr-rescue-timer.mjs";
 import { startStalledPrTimer as realStartStalledPrTimer, readStalledPrSweepConfig, DEFAULTS as STALLED_DEFAULTS } from "./stalled-pr-timer.mjs";
 import { startGithubQuotaTimer as realStartGithubQuotaTimer, readGithubQuotaSweepConfig, DEFAULTS as GITHUB_QUOTA_TIMER_DEFAULTS } from "./github-quota-timer.mjs";
@@ -147,7 +142,6 @@ import {
 } from "./scheduler.mjs";
 import * as linearWrite from "./linear-write.mjs"; // CTL-1067: writeStatus for defaultClearStall
 import { labelMarkerBase, clearStalledLabel } from "./label-guard.mjs"; // CTL-1567: canonical once-marker path (single source of truth); CTL-1552: clear needs-human LABEL + once-marker together (leaf module → no cycle)
-import { defaultForgetIntent } from "./recovery-reasoning.mjs"; // CTL-1567: re-arm recovery when a human responds
 import { forgetDurableEscalation } from "./durable-escalation.mjs"; // CTL-1643: clear durable record on operator clear
 import { appendWorkerTransitionEvent as defaultAppendWorkerTransitionEvent } from "./worker-transition-event.mjs"; // CTL-764 finding 11: needs-input→cleared on comment wake
 import {
@@ -248,8 +242,6 @@ let _reaper = null;
 let _orphanTimer = null;
 // CTL-707: periodic background worktree refresh timer.
 let _refreshTimer = null;
-// CTL-1331: async board-health delegate runner timer (gated CATALYST_DELEGATE_RUNNER).
-let _delegateRunnerTimer = null;
 // CTL-782: periodic stale/conflicting-PR rescue timer.
 let _stalePrRescueTimer = null;
 // CTL-1175: periodic orphan-PR detect+notify sweep timer.
@@ -651,13 +643,6 @@ export async function handleCommentWake(
     // workspace comment. Defaults to the real registry check (no wiring required,
     // so an unwired production path is still SAFE, not silently permissive).
     isManagedTicket = defaultIsManagedTicket,
-    // CTL-1567 (Codex P1): a human response must RE-ARM recovery, not just unpark.
-    // Clearing the label alone leaves `.recovery-intents/<TICKET>.json` latched
-    // `escalated:true` for up to 7 days, so the terminal sweep re-applies
-    // needs-human while the latch suppresses any fresh attempt — the ticket
-    // silently returns to the inbox and cannot be retried. A human answering IS
-    // the signal that another attempt is warranted.
-    forgetIntent = defaultForgetIntent,
     // CTL-2157: ticket → the WORK tickets it blocks, when it is an ask. Defaults
     // to the REAL replica-backed resolver, deliberately: a fan-out that only fires
     // when some launcher remembers to wire it is a fan-out that ships INERT (the
@@ -724,7 +709,6 @@ export async function handleCommentWake(
     appendWorkerTransitionEvent,
     clearDispositionEmit,
     isManagedTicket,
-    forgetIntent,
     humanProvenance,
   };
   // The commented ticket keeps its exact legacy treatment; the ask's blocked work
@@ -778,7 +762,6 @@ async function wakeParkedTicket(
     appendWorkerTransitionEvent = defaultAppendWorkerTransitionEvent,
     clearDispositionEmit = defaultClearDispositionEmit,
     isManagedTicket = defaultIsManagedTicket,
-    forgetIntent = defaultForgetIntent,
     humanProvenance = false,
     viaAsk = null,
   }
@@ -875,16 +858,6 @@ async function wakeParkedTicket(
     } catch {
       /* fail-open — same reasoning as above */
     }
-    // Re-arm recovery: without this the latch survives and suppresses the retry
-    // this response was meant to authorize (see the forgetIntent option above).
-    try {
-      forgetIntent(ticket, { orchDir });
-    } catch (err) {
-      log.warn(
-        { ticket, err: err?.message },
-        "handleCommentWake: recovery-intent re-arm failed — a retry may stay suppressed"
-      );
-    }
   }
   // ⛔ CTL-2157 — RE-KEYED, and this is not cosmetics. This block used to be gated
   // on `clearedNeedsHuman`, i.e. on the RESULT of `removeLabel(ticket,
@@ -902,8 +875,7 @@ async function wakeParkedTicket(
   // So it is keyed on the same AUTHORIZATION the clear runs under: a human
   // answered (positive provenance) on a ticket we manage. That is the fact the
   // local state actually depends on. The `.skipped` marker goes with it: a human
-  // response is precisely the signal that re-arming labelOnce is warranted — the
-  // same reasoning `forgetIntent` above is built on.
+  // response is precisely the signal that re-arming labelOnce is warranted.
   // The Linear-write-gated half (the worker.transition emission) keeps its own,
   // narrower gate below — only the host that actually WROTE should emit.
   if (parkClearAuthorized) {
@@ -1137,7 +1109,7 @@ async function wakeParkedTicket(
     }
 
     // Guarded like every other step in this function (removeLabel, clearStall,
-    // clearStalledLabel, forgetIntent all are). This was the ONE unwrapped call, so a
+    // clearStalledLabel all are). This was the ONE unwrapped call, so a
     // throwing executor aborted the remaining phase signals for this ticket as well as
     // every later ticket in the fan-out. Logged at error — a wake that did not
     // dispatch is a ticket still parked, which nobody must have to infer from silence.
@@ -2751,21 +2723,6 @@ function startReaperAndTimer({
     });
   }
 
-  // CTL-1331: start the async board-health delegate runner timer. Gated by
-  // CATALYST_DELEGATE_RUNNER — readDelegateRunnerConfig().mode resolves "off"
-  // unless board-health is enforce, so Phase A is inert: startDelegateRunnerTimer
-  // returns a no-op { stop } handle and nothing drains. When "on" (Phase B), the
-  // timer kicks a DETACHED child each interval that does the heavy
-  // worktree-provision + `claude --bg` off the daemon event loop. (Phase B also
-  // wires CATALYST_EXECUTION_CORE_DIR onto the child spawn so the entry resolves
-  // orchDir; until then a forced-on child fails safe — "no orchDir" → exit 0.)
-  const delegateRunnerCfg = readDelegateRunnerConfig();
-  _delegateRunnerTimer = startDelegateRunnerTimer({
-    enabled: delegateRunnerCfg.mode === "on",
-    intervalMs: delegateRunnerCfg.intervalMs,
-    orchDir,
-  });
-
   // CTL-782: start the periodic stale/conflicting-PR rescue timer.
   // No orchId / linearWrite threading needed: the timer derives the per-ticket
   // orchestrator id from the phase signal's `.orchestrator` (orchId === ticket
@@ -3001,15 +2958,6 @@ export function stopDaemon() {
     setCloudFeedGate(null);
   } catch {
     /* monitor module not loaded */
-  }
-  // CTL-1331: stop the delegate runner timer (no-op handle when gated off).
-  if (_delegateRunnerTimer) {
-    try {
-      _delegateRunnerTimer.stop();
-    } catch {
-      /* timer already stopped */
-    }
-    _delegateRunnerTimer = null;
   }
   if (_stalePrRescueTimer) {
     try {

@@ -7,12 +7,13 @@
 // ⛔ WHY THIS SUITE IS SHAPED AROUND `applyLabel` CALLS AND NOT AROUND A GREP.
 // The plan's producer inventory was built from a regex over `labelOnce(` /
 // `labelNeedsHumanUnlessBeliefOwner(` / `applyStalledLabel(` / `status:
-// "needs-human"`. SIX real producers match none of those tokens — they route
-// through `routeStuckTicketToDelegate` → delegate-first.mjs:70, including
-// scheduler.mjs:9294, the highest-volume one. An agent that sweeps by that regex
-// passes its own grep and leaves the volume producer running. So every test here
-// drives the REAL call path with a spy `applyLabel` and asserts the spy was
-// never called with "needs-human" — a property the regex cannot fake.
+// "needs-human"`. SIX real producers matched none of those tokens — they routed
+// through `routeStuckTicketToDelegate`, including scheduler.mjs's terminal sweep,
+// the highest-volume one. An agent that sweeps by that regex passes its own grep
+// and leaves the volume producer running. CTL-2141 has since deleted that seam
+// and reverted all six to the chokepoint directly, but the lesson stands: every
+// test here drives the REAL call path with a spy `applyLabel` and asserts the spy
+// was never called with "needs-human" — a property the regex cannot fake.
 //
 // Run: bun test plugins/dev/scripts/execution-core/escalation-publish.test.mjs
 import { describe, test, expect } from "bun:test";
@@ -28,7 +29,6 @@ import {
   ESCALATION_MARKER_LABEL,
 } from "./escalation-publish.mjs";
 import { labelNeedsHumanUnlessBeliefOwner, labelMarkerBase } from "./label-guard.mjs";
-import { routeStuckTicketToDelegate } from "./delegate-first.mjs";
 import { surfaceStalePendingApprovals, bootResumePendingPath } from "./boot-resume.mjs";
 import { executeEscalations } from "./beliefs/escalate.mjs";
 import { STALL_CLASS, ESCALATION_PUBLISHED_FIELD } from "./stall-class.mjs";
@@ -310,52 +310,57 @@ describe("the publication table", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3. THE SIX INVISIBLE PRODUCERS — the ones the plan's regex could not see.
+// 3. THE SIX FORMERLY-INVISIBLE PRODUCERS — the ones the plan's regex could not see.
 // ─────────────────────────────────────────────────────────────────────────────
-describe("⛔ the routeStuckTicketToDelegate producers (audit Gap 1)", () => {
-  // These six sites — scheduler.mjs:3330 / :7477 / :8548 / :9294 (the volume
-  // producer), monitor.mjs:1101, stale-pr-rescue-timer.mjs:488 — all reach the
-  // label ONLY through this seam. Proving the seam is label-free proves all six.
-  test("with delegate-first OFF the seam still publishes, and writes NO label", () => {
+describe("⛔ the six ex-delegate producers (audit Gap 1)", () => {
+  // These six sites — scheduler.mjs's dispatch-failures / dependency-cycle /
+  // ctl-925-cycle / terminal-sweep (the volume producer), monitor.mjs's
+  // triage-redispatch-cap, stale-pr-rescue-timer.mjs — reached the label ONLY
+  // through the delegate seam. CTL-2141 deleted that seam and reverted all six to
+  // this chokepoint, so the seam's contract is now the chokepoint's contract:
+  // publish without a label, and carry the CLASS out beside the boolean.
+  test("the chokepoint publishes and writes NO label", () => {
     const orchDir = scratch();
     workerDir(orchDir, "CTL-20");
     const spy = labelSpy();
-    const r = routeStuckTicketToDelegate(orchDir, "CTL-20", {
+    let outcome = null;
+    const published = labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-20", spy.writeStatus, {
       site: "terminal-sweep",
       reason: "orphan-sweep-stale",
-      applyLabel: spy.writeStatus,
-      env: { ...QUIET_ENV }, // delegate-first unset ⇒ mode "off" ⇒ the direct path
+      env: { ...QUIET_ENV },
       log: { info: () => {}, warn: () => {} },
+      onOutcome: (o) => {
+        outcome = o;
+      },
     });
     expect(spy.needsHumanCalls()).toEqual([]);
     expect(spy.calls).toEqual([]);
-    // ⛔ The delegate RE-DISPATCH and the publish are two arms of one branch.
-    // `labelled` staying true is what keeps stale-pr-rescue's escalatedAt latching
-    // and monitor's markTriageCapped firing.
-    // ⛔ AND the CLASS rides out with it. `labelled` alone is a RETRY contract —
-    // publishEscalation returns true for a provider outage too — so four scheduler
-    // sites that emit a durable `worker.transition {toDisposition:"needs-human"}`
-    // read `stallClass` to tell "a person owns this" from "the fleet is degraded".
-    // If the seam ever stops forwarding `reason`, this reads "held", not "system".
-    expect(r).toEqual({ routed: false, labelled: true, stallClass: "system" });
+    // ⛔ `published` staying true is what keeps stale-pr-rescue's escalatedAt
+    // latching and monitor's markTriageCapped firing — it is a RETRY contract.
+    // ⛔ AND the CLASS rides out beside it, because `published` alone is true for
+    // a provider outage too. Four scheduler sites that emit a durable
+    // `worker.transition {toDisposition:"needs-human"}` read the class to tell
+    // "a person owns this" from "the fleet is degraded". If a site ever stops
+    // forwarding `reason`, this reads "held", not "system".
+    expect(published).toBe(true);
+    expect(outcome?.stallClass).toBe("system");
     rmSync(orchDir, { recursive: true, force: true });
   });
 
   // ⛔ THE MUTATION THIS SUITE COULD NOT CATCH BEFORE. Verification found that
-  // deleting `reason,` from delegate-first's labelDirect — the change its own
-  // author called "the highest-value thing I found, and it would have shipped
-  // inert" — broke NO test: every delegate assertion checked only `labelled` and
-  // an empty label spy, both of which are identical for SYSTEM and HELD. The
-  // observable difference is the CLASS, and the class is only correct when the
-  // reason survives the seam. This test fails if it does not.
-  test("⛔ the seam FORWARDS the reason — a SYSTEM token must not classify HELD", () => {
+  // deleting `reason,` from the seam — the change its own author called "the
+  // highest-value thing I found, and it would have shipped inert" — broke NO
+  // test: every assertion checked only the boolean and an empty label spy, both
+  // of which are identical for SYSTEM and HELD. The observable difference is the
+  // CLASS, and the class is only correct when the reason reaches the classifier.
+  // This test fails if it does not.
+  test("⛔ the reason REACHES the classifier — a SYSTEM token must not classify HELD", () => {
     const orchDir = scratch();
     workerDir(orchDir, "CTL-21");
     const seen = [];
-    routeStuckTicketToDelegate(orchDir, "CTL-21", {
+    labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-21", labelSpy().writeStatus, {
       site: "dispatch-failures",
       reason: "dispatch-circuit-breaker:7",
-      applyLabel: labelSpy().writeStatus,
       env: { ...QUIET_ENV },
       log: { info: () => {}, warn: (o) => seen.push(o) },
     });
@@ -369,14 +374,13 @@ describe("⛔ the routeStuckTicketToDelegate producers (audit Gap 1)", () => {
     rmSync(orchDir, { recursive: true, force: true });
   });
 
-  test("POSITIVE CONTROL: a seam call with NO reason classifies HELD and WARNS", () => {
+  test("POSITIVE CONTROL: a call with NO reason classifies HELD and WARNS", () => {
     const orchDir = scratch();
     workerDir(orchDir, "CTL-22");
     const seen = [];
-    routeStuckTicketToDelegate(orchDir, "CTL-22", {
+    labelNeedsHumanUnlessBeliefOwner(orchDir, "CTL-22", labelSpy().writeStatus, {
       site: "dispatch-failures",
       // reason deliberately omitted — this is the defect shape, asserted directly
-      applyLabel: labelSpy().writeStatus,
       env: { ...QUIET_ENV },
       log: { info: () => {}, warn: (o) => seen.push(o) },
     });
@@ -391,7 +395,7 @@ describe("⛔ the routeStuckTicketToDelegate producers (audit Gap 1)", () => {
     rmSync(orchDir, { recursive: true, force: true });
   });
 
-  test("POSITIVE CONTROL: the seam's label spy fires for a NON-needs-human label", () => {
+  test("POSITIVE CONTROL: the label spy fires for a NON-needs-human label", () => {
     const spy = labelSpy();
     spy.writeStatus.applyLabel({ ticket: "CTL-20", label: "blocked" });
     expect(spy.calls).toHaveLength(1);

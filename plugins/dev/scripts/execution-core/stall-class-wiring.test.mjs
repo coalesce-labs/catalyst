@@ -7,11 +7,11 @@
 //
 // Run: bun test plugins/dev/scripts/execution-core/stall-class-wiring.test.mjs
 import { describe, test, expect } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { classifyStalledTicket, STALL_CATEGORY_MAP } from "./unstuck-sweep.mjs";
-import { defaultWriteEscalationSignal } from "./recovery-reasoning.mjs";
+import { publishEscalation } from "./escalation-publish.mjs";
 import { ESCALATION_PUBLISHED_FIELD, STALL_CLASS } from "./stall-class.mjs";
 
 const SKIP = { category: "skip", action: "skip", reason: "already-escalated" };
@@ -122,8 +122,10 @@ describe("⛔ the sweep's quiet-gate is DERIVED, not duplicated (audit Gap 2)", 
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// The producer output re-target. recovery-reasoning.mjs (3,676 lines) is NOT
-// rewritten — only what it writes.
+// The producer output re-target. CTL-2141 deleted the recovery-reasoning producer
+// this half was first written against; the SURVIVING producer is the shared
+// chokepoint, and the property is the same one — a producer stamps on disk
+// exactly what the sweep's gate reads back.
 // ─────────────────────────────────────────────────────────────────────────────
 describe("escalation producers stamp the class and the publication", () => {
   const withOrchDir = (fn) => {
@@ -135,64 +137,72 @@ describe("escalation producers stamp the class and the publication", () => {
     }
   };
 
-  const readSignal = (dir, ticket) =>
-    JSON.parse(readFileSync(join(dir, "workers", ticket, "phase-recovery-pass.json"), "utf8"));
+  const signalPath = (dir, ticket) =>
+    join(dir, "workers", ticket, "phase-recovery-pass.json");
+  const readSignal = (dir, ticket) => JSON.parse(readFileSync(signalPath(dir, ticket), "utf8"));
 
-  test("recovery-reasoning's escalation signal carries stallClass + the publication stamp", () => {
+  // Drives the SURVIVING producer core with the ask transport stubbed, and lets it
+  // write the real on-disk signal — the same file the sweep's gate reads back.
+  const publish = (dir, ticket, opts = {}) => {
+    mkdirSync(join(dir, "workers", ticket), { recursive: true });
+    return publishEscalation(dir, ticket, {
+      env: {},
+      site: "terminal-sweep",
+      markerBase: join(dir, "workers", ticket, ".escalation"),
+      fileAsk: () => ({ ok: true, ticket: "CTL-ASK-1" }),
+      writeSignal: ({ fields }) =>
+        writeFileSync(signalPath(dir, ticket), JSON.stringify({ ticket, ...fields })),
+      ...opts,
+    });
+  };
+
+  const ASKABLE = {
+    problem: "the implement phase died with no artifact",
+    call_to_action: "decide whether to retry",
+    why_asking: "only a person can decide whether this work is still wanted",
+    recommendation: "retry once, then close if it dies the same way",
+    options: [
+      { label: "retry", tradeoff: "burns another attempt" },
+      { label: "close", tradeoff: "drops the work" },
+    ],
+  };
+
+  test("an ASK publish stamps the class AND the publication", () => {
     withOrchDir((dir) => {
-      const ok = defaultWriteEscalationSignal(
-        "CTL-1",
-        {
-          escalation_type: "decision",
-          problem: "the implement phase died with no artifact",
-          call_to_action: "decide whether to retry",
-          observed: { reason: "orphan-sweep-stale" },
-        },
-        { orchDir: dir },
+      expect(publish(dir, "CTL-1", { reason: "design-signoff-gate", explanation: ASKABLE })).toBe(
+        true,
       );
-      expect(ok).toBe(true);
       const sig = readSignal(dir, "CTL-1");
-      // CTL-1552's representation is UNCHANGED — the re-target is additive.
-      expect(sig.status).toBe("stalled");
-      expect(sig.stalledReason).toBe("needs_human");
-      // …and the class is now durable on disk.
-      expect(sig.stallClass).toBe(STALL_CLASS.SYSTEM);
-      expect(sig.stallClassRule).toBe("exact:orphan-sweep-stale");
+      expect(sig.stallClass).toBe(STALL_CLASS.ASK);
       expect(sig[ESCALATION_PUBLISHED_FIELD]).toBe(true);
     });
   });
 
   test("an escalation with nothing to classify is HELD on disk, not guessed", () => {
     withOrchDir((dir) => {
-      defaultWriteEscalationSignal(
-        "CTL-2",
-        { escalation_type: "decision", problem: "unexplained failure", degraded: true },
-        { orchDir: dir },
-      );
+      publish(dir, "CTL-2", { explanation: { problem: "unexplained failure", degraded: true } });
       const sig = readSignal(dir, "CTL-2");
       expect(sig.stallClass).toBe(STALL_CLASS.HELD);
       // named as manufactured, so the board can say "this ask was generated"
       expect(sig.stallClassManufactured).toBe(true);
-      expect(sig[ESCALATION_PUBLISHED_FIELD]).toBe(true);
+      // ⛔ and it is NOT stamped published: HELD is "nobody looked yet", so the
+      // sweep must keep watching it. Only a filed ask latches the quiet-gate.
+      expect(sig[ESCALATION_PUBLISHED_FIELD]).toBeUndefined();
     });
   });
 
   test("END TO END — the signal a producer wrote makes the sweep quiet", () => {
     withOrchDir((dir) => {
-      defaultWriteEscalationSignal(
-        "CTL-3",
-        { escalation_type: "decision", problem: "unexplained failure", degraded: true },
-        { orchDir: dir },
-      );
-      const sig = readSignal(dir, "CTL-3");
+      publish(dir, "CTL-3", { reason: "design-signoff-gate", explanation: ASKABLE });
+      const sig = { ...readSignal(dir, "CTL-3"), stalledReason: "needs_human" };
       expect(classifyStalledTicket({ reason: sig.stalledReason, signal: sig })).toEqual(SKIP);
 
       // ⛔ THE POINT OF THE WHOLE EXERCISE: strip the `needs_human` token exactly
-      // as CTL-2159 will, and the gate STILL holds — because it never depended on it.
+      // as CTL-2159 did, and the gate STILL holds — because it never depended on it.
       const detokenized = { ...sig, stalledReason: "some-future-token" };
-      expect(classifyStalledTicket({ reason: detokenized.stalledReason, signal: detokenized })).toEqual(
-        SKIP,
-      );
+      expect(
+        classifyStalledTicket({ reason: detokenized.stalledReason, signal: detokenized }),
+      ).toEqual(SKIP);
 
       // NEGATIVE CONTROL: strip the STAMP too and the gate correctly reopens —
       // so the two assertions above are measuring the stamp, not a gate that

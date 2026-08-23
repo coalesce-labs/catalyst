@@ -303,25 +303,31 @@ fi
 # (phase-signal.schema.json:58-67 is dispatched/running/done/failed/stalled/
 # skipped/turn-cap-exhausted/awaiting-work) — the plan's Case 4 passes VACUOUSLY,
 # before any work, which is exactly what Case 2 exists to prevent. So this case
-# scans the three RUNTIME WRITERS that actually stamped the value onto a
-# phase-signal, and gets its own planted control.
+# scans the RUNTIME WRITERS that actually stamped the value onto a phase-signal,
+# and gets its own planted control.
+#
+# ⛔ The list shrank from three to two: CTL-2141 deleted recovery-emit.mjs and
+# recovery-reasoning.mjs with the rest of the judgment layer. A deleted writer is
+# not a pass — it is a scan target that no longer exists, which is why the
+# existence guard below is here at all. Re-point the list at what SURVIVES;
+# never leave a dead path in it, and never let the list reach zero.
 WRITERS=(
   "${REPO_ROOT}/plugins/dev/scripts/execution-core/label-guard.mjs"
-  "${REPO_ROOT}/plugins/dev/scripts/execution-core/recovery-emit.mjs"
-  "${REPO_ROOT}/plugins/dev/scripts/execution-core/recovery-reasoning.mjs"
+  "${REPO_ROOT}/plugins/dev/scripts/execution-core/recovery.mjs"
 )
 # `\bstatus` and not `status` so `writeStatus` / `LIVE_..._STATUSES` cannot match.
 STATUS_WRITE_RE='\bstatus[[:space:]]*[:=][[:space:]]*["'"'"'](needs-human|needs_human)'
 
 MISSING_WRITER=0
+(( ${#WRITERS[@]} > 0 )) || MISSING_WRITER=1
 for w in "${WRITERS[@]}"; do
   [[ -f "${w}" ]] || { MISSING_WRITER=1; info "writer not found: ${w#"${REPO_ROOT}/"}"; }
 done
 if (( MISSING_WRITER )); then
-  fail "runtime writers: all three escalation writers exist" \
-       "a renamed/deleted writer would make this case scan nothing and pass vacuously"
+  fail "runtime writers: every listed escalation writer exists" \
+       "a renamed/deleted writer (or an emptied list) would make this case scan nothing and pass vacuously"
 else
-  ok "runtime writers: all three escalation writers exist (scan target is real)"
+  ok "runtime writers: all ${#WRITERS[@]} escalation writers exist (scan target is real)"
 fi
 
 CASE4_HITS="$(scan_live "${STATUS_WRITE_RE}" "${WRITERS[@]}")"

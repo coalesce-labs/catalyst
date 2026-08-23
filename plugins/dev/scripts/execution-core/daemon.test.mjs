@@ -2116,26 +2116,6 @@ describe("handleCommentWake (CTL-549)", () => {
     expect(removed).toContain("needs-input");
   });
 
-  test("re-arms recovery so the response is not suppressed by the escalated latch", async () => {
-    const orch = tmpOrcDir();
-    const forgotten = [];
-    await handleCommentWake(
-      { ticket: "PROJ-REARM", body: "authorized, try again", authorId: "human-1" },
-      {
-        orchDir: orch,
-        botUserId: "bot-uuid",
-        dispatch: () => ({ code: 0 }),
-        removeLabel: async () => ({ removed: true }),
-        isManagedTicket: () => true,
-        forgetIntent: (t) => { forgotten.push(t); return true; },
-      }
-    );
-    // Without this the .recovery-intents latch survives up to 7 days, the terminal
-    // sweep re-applies needs-human, and the retry the human just authorized is
-    // suppressed — the ticket silently returns to the inbox.
-    expect(forgotten).toEqual(["PROJ-REARM"]);
-  });
-
   // Both new gates FAIL CLOSED — "not sure" must mean "don't mutate Linear".
   test("does NOT clear when the ticket is not managed by this installation", async () => {
     const orch = tmpOrcDir(); // no worker dir, and no registry entry for FOREIGN

@@ -462,31 +462,11 @@ describe("⚠️ expiry EXECUTES — not merely appears in the right place", () 
 });
 
 describe("⚠️ round 12: the ancillary-yield shape, three more places", () => {
-  test("delegate dedup short-circuits a yield BEFORE the liveness probe", async () => {
-    // Adding the status to an allow-list that then asks a question it must fail is
-    // not the same as handling it: a yielded worker has EXITED, so its retained
-    // bg_job_id necessarily fails isBgJobAlive, and the probe reported "not live".
-    //
-    // Scoped to the ENCLOSING FUNCTION: delegate-queue.mjs probes isBgJobAlive in
-    // an earlier, unrelated function, so a file-wide index comparison compares
-    // across functions and answers a different question than the one asked.
-    for (const f of ["delegate-queue.mjs", "delegate-runner-entry.mjs"]) {
-      const src = await Bun.file(new URL(`./${f}`, import.meta.url)).text();
-      const sc = src.indexOf("if (sig.status === YIELDED_STATUS) return true;");
-      expect({ f, hasShortCircuit: sc > -1 }).toEqual({ f, hasShortCircuit: true });
-      // Body = from the short-circuit to the end of its function.
-      const bodyEnd = src.indexOf("\n}", sc);
-      expect(bodyEnd).toBeGreaterThan(sc);
-      const before = src.slice(0, sc);
-      const fnStart = Math.max(before.lastIndexOf("\nfunction "), before.lastIndexOf("\nexport function "));
-      expect(fnStart).toBeGreaterThan(-1);
-      const fnBody = src.slice(fnStart, bodyEnd);
-      const scInFn = fnBody.indexOf("if (sig.status === YIELDED_STATUS) return true;");
-      const probeInFn = fnBody.indexOf("isBgJobAlive(bgJobId)");
-      expect({ f, probeFound: probeInFn > -1 }).toEqual({ f, probeFound: true });
-      expect({ f, shortCircuitFirst: scInFn < probeInFn }).toEqual({ f, shortCircuitFirst: true });
-    }
-  });
+  // CTL-2141 removed the "delegate dedup short-circuits a yield BEFORE the
+  // liveness probe" test that lived here: it was a source-text scan asserting a
+  // YIELDED_STATUS short-circuit ordering inside delegate-queue.mjs and
+  // delegate-runner-entry.mjs, both deleted in Phase 2 along with the rest of
+  // the delegate cluster — there is no delegate dedup left to short-circuit.
 
   test("boot-resume charges an ANCILLARY yield against capacity (executed)", async () => {
     // Replaces a source-text assertion that broke on a rename — the exact weakness

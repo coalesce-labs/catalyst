@@ -105,13 +105,8 @@ const INLINE_EVENT_NAMES = [
   "fence.claimed.CTL-1",              // CTL-863 fence-event.mjs (exec-core-owned, projected-not-re-emitted)
   "fence.released.CTL-1",             // CTL-863 fence-event.mjs
   "escalation.explanation-absent",    // CTL-1609 label-guard.mjs (warn when explanation omitted)
-  "delegate.would-route",             // CTL-1609 delegate-first.mjs (shadow mode — would enqueue)
-  "delegate.routed",                  // CTL-1609 delegate-first.mjs (enforce mode — enqueued ok)
-  "delegate.route-fallback",          // CTL-1609 delegate-first.mjs (enforce mode — queue full / failed)
   "catalyst.replica.writer_idle",     // CAT-21 cloud-sync.mjs (tokenless writer provisioning gap)
   "cloud-feed.would-dispatch",        // CTL-1847 cloud-feed-timer.mjs (shadow mode — would dispatch from the feed)
-  "recovery.escalation.correlated",   // CAT-170 recovery-reasoning.mjs (enforced member pointer)
-  "recovery.escalation.would-correlate", // CAT-170 recovery-reasoning.mjs (shadow group)
 ];
 
 // Build the flat list of all static exec-core event names.
@@ -186,26 +181,12 @@ describe("exec-core static event names", () => {
   });
 });
 
-describe("CAT-170 recovery escalation correlation event names", () => {
-  const CORRELATION_EVENT_NAMES = [
-    "recovery.escalation.correlated",
-    "recovery.escalation.would-correlate",
-  ];
-
-  test("both names are registered and outside protected namespaces", () => {
-    expect(
-      INLINE_EVENT_NAMES.filter((name) => CORRELATION_EVENT_NAMES.includes(name))
-    ).toEqual(CORRELATION_EVENT_NAMES);
-
-    for (const name of CORRELATION_EVENT_NAMES) {
-      expect(name.startsWith("filter.")).toBe(false);
-      expect(name.startsWith("broker.daemon")).toBe(false);
-      expect(name).not.toBe("session.heartbeat");
-      expect(isBrokerProtectedName(name)).toBe(false);
-      expect(phaseSlotOf(name)).toBeNull();
-    }
-  });
-});
+// CTL-2141: the CAT-170 "recovery escalation correlation event names" describe
+// block (asserting recovery.escalation.correlated / .would-correlate) was
+// removed here. Their sole producer, escalation-correlation.mjs (called from
+// recovery-reasoning.mjs's escalateExhaustedIntents), was deleted along with
+// the rest of the recovery-pass judgment layer — see docs/architecture.md's
+// CAT-170 section removal for the deletion rationale.
 
 // ── Dynamic phase-slot producers: recovery.mjs ───────────────────────────────
 // recovery.mjs builds names as `phase.${phase}.${action}.${ticket}`.
