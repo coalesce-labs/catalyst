@@ -808,6 +808,33 @@ jobs:
         working-directory: plugins/dev/scripts/lib
         run: bun test event-name.test.mjs
 
+      - name: codex account-plane core unit tests (bun, CTL-2072)
+        # lib/codex-account-plane.mjs is the pure core behind `catalyst-stack
+        # codex-account` — window derivation, bucket normalization, and the
+        # four-valued account verdict. Its own step (not the "Run stable unit
+        # tests" allowlist below) because that step's working-directory is
+        # execution-core/ and this is a deliberately ZERO-IMPORT leaf outside
+        # that tree — the same rationale the deployment-mode, entitlement, and
+        # event-name steps above carry.
+        #
+        # Registered in the SAME change that adds the suite, because CI runs an
+        # ENUMERATED list and an unpinned suite is an inert suite. This is not
+        # hypothetical here: the model this command is patterned on is itself
+        # CI-dark — `grep -c 'catalyst-stack-claude-account'` over this file
+        # returns 0, while the positive control
+        # `grep -c 'catalyst-account-usage-page.test.sh'` returns 1.
+        #
+        # ⚠️ Run it BY NAME, never via a bare `bun test` in that directory:
+        # agent-liveness.test.mjs calls process.exit(), which terminates bun's
+        # runner before the `Ran N tests` summary and returns rc=0 even when
+        # another file failed (measured 2026-08-22 — it masked a real
+        # fsm-descriptor.test.mjs failure exactly that way).
+        #
+        # Measured 40 pass / 0 fail on this branch; the file does not exist at
+        # the merge base, so there is no pre-existing red to import.
+        working-directory: plugins/dev/scripts/lib
+        run: bun test codex-account-plane.test.mjs
+
       - name: deployment-mode Bash resolver unit test (CTL-1617)
         # The Bash mirror's own standalone suite (lib/catalyst-deployment-mode.sh) —
         # see the bun step above for why this suite was previously ungated.
