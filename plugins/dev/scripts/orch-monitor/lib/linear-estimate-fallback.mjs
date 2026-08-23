@@ -33,9 +33,12 @@
 //
 // Dependencies: none beyond node built-ins + Bun's global `fetch`.
 
-// CTL-1616 PR3: fold this file's inline LINEAR_API_TOKEN/LINEAR_API_KEY ladder
-// onto the shared secret-contract engine (design §8 PR3 table).
-import { resolveSecret } from "../../lib/secret-contract.mjs";
+// CTL-1616 PR3 folded this file's inline LINEAR_API_TOKEN/LINEAR_API_KEY ladder
+// onto the shared secret-contract engine (design §8 PR3 table). CTL-2187 moves
+// that resolution one step further out, into the shared degraded-read credential
+// resolver — which adds the SCOPED app-actor tier the monitor process actually
+// has. Read the CTL-1612 note in that module before changing the tier order.
+import { resolveDegradedLinearAuth } from "./linear-degraded-auth.mjs";
 // CTL-1806: the replica tier (read #1) + the degraded-path anomaly (D3).
 import { readReplicaEstimates } from "./linear-cache-reader.mjs";
 import { noteDegradedLinearRead } from "./linear-degraded-read.mjs";
@@ -59,6 +62,16 @@ import {
 // null means we fetched and Linear returned no estimate; absent means uncached.
 const ESTIMATE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const _estimateCache = new Map(); // ticketId → { estimate: number|null, ts: number }
+
+// ── Team-method failure backoff (CTL-2187) ───────────────────────────────────
+// Keyed by team key ("CTL"). Value: epoch ms of the last FAILED resolution.
+// Deliberately short — a credential arriving mid-run (the reminter re-populating
+// CATALYST_MONITOR_APP_ACTOR_TOKEN, an operator exporting a personal key) must
+// take effect within a couple of board refreshes, not after the 7-day positive
+// TTL. See the note at the read site in getEstimationMethodAsync for why the
+// negative half exists at all.
+const METHOD_FAILURE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const _methodFailureCache = new Map(); // teamId → epoch ms of last failure
 
 // ── Linear GraphQL helpers ────────────────────────────────────────────────────
 const LINEAR_GRAPHQL_ENDPOINT = "https://api.linear.app/graphql";
@@ -104,10 +117,10 @@ const ESTIMATE_QUERY_FOR_TEAM = `query FallbackEstimates($teamKey: String!, $num
   }
 }`;
 
+// CTL-2187: the credential ladder now lives in linear-degraded-auth.mjs so both
+// degraded resolvers agree on it and the CTL-1612 reasoning is stated once.
 function linearAuthHeader() {
-  const token = resolveSecret("linear-api-token").value ?? ""; // CTL-1616 PR3
-  if (!token) return null;
-  return /^lin_oauth/i.test(token) ? `Bearer ${token}` : token;
+  return resolveDegradedLinearAuth()?.header ?? null;
 }
 
 // graphql — one async GraphQL call via Bun's native fetch.  Returns the parsed
@@ -162,6 +175,19 @@ export async function getEstimationMethodAsync(teamId) {
   const cached = readTeamEstimationCache(teamId);
   if (cached) return cached;
 
+  // 2b. CTL-2187 — the NEGATIVE half of the cache. A SUCCESSFUL fetch is cached
+  // for 7 days by the positive tiers above; a FAILED one was cached nowhere, so
+  // a team whose method cannot be resolved was re-attempted on every board
+  // render. That is the shape of the runaway: ~2 attempts/second, constant
+  // rather than decaying, because the thing that would have stopped it is the
+  // very write that never happened. This is NOT the fix for the credential gap
+  // (that is the scoped tier in linear-degraded-auth.mjs, and with a credential
+  // present the POSITIVE cache is what suppresses the repeat) — it is the bound
+  // for a host that genuinely has no credential of any tier, so such a host
+  // still says so, at one attempt per team per window instead of per render.
+  const failedAt = _methodFailureCache.get(teamId);
+  if (failedAt !== undefined && Date.now() - failedAt < METHOD_FAILURE_TTL_MS) return null;
+
   // 3. Live fetch — the labelled DEGRADED path (D1). The replica has no teams
   // table and carries no issueEstimation, so unlike the estimate read below there
   // is no local tier to consult first; source is "linearis", not "linearis_miss".
@@ -175,9 +201,16 @@ export async function getEstimationMethodAsync(teamId) {
     { source: "linearis", op: "team_method", entity: teamId }
   );
   const method = data?.teams?.nodes?.[0]?.issueEstimation;
-  if (!method || typeof method.type !== "string") return null;
+  if (!method || typeof method.type !== "string") {
+    // CTL-2187: remember the failure so the next render does not re-attempt.
+    // Covers both reachable failure modes — no credential resolved (graphql
+    // returned null before fetch) and a dispatched call that came back empty.
+    _methodFailureCache.set(teamId, Date.now());
+    return null;
+  }
 
   const normalized = { type: method.type, allowZero: !!method.allowZero, extended: !!method.extended };
+  _methodFailureCache.delete(teamId); // a success clears any prior backoff
   writeTeamEstimationCache(teamId, normalized); // shared atomic write + memo seed
   return normalized;
 }
@@ -297,6 +330,7 @@ export function _clearEstimateCache() {
 // this delegates rather than clearing a second map that no longer exists.
 export function _clearMethodCache() {
   _resetMemoForTests();
+  _methodFailureCache.clear(); // CTL-2187: the negative half lives here
 }
 export function _getEstimateCacheSize() {
   return _estimateCache.size;

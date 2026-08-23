@@ -477,44 +477,43 @@ cmd_start() {
   # (linear-comment.mjs, inbox-conversation*.mjs, estimate/title fallbacks) are
   # untouched — they never look at this variable.
   #
-  # CTL-1612 round 3 (Codex P2 follow-up): the scoped token's ONLY consumer is
-  # the anchor peer-heartbeat read (server.ts pollAnchorHeartbeats → readAnchor
-  # → readPeerHeartbeatsSync). orch-monitor/lib/peer-liveness.mjs readPeerRecords
-  # NEVER calls readAnchor when CATALYST_LIVENESS_READ_SOURCE is exactly "loki"
-  # (case-insensitive) — that is the one mode with a hard early-return before
-  # the anchor tier. Every other value — unset, "auto", "linear", or anything
-  # else — either uses the anchor exclusively ("linear") or as the AUTO
-  # fallback when Loki has no URL/reader or returns empty, so minting stays the
-  # default there. Skip the (real network) mint in loki-only mode: it would
-  # authenticate a credential that structurally can never be read.
+  # CTL-1612 rounds 3 and 5 made this mint CONDITIONAL, on a premise stated in
+  # round 3 as "the scoped token's ONLY consumer is the anchor peer-heartbeat
+  # read": readAnchor is structurally unreachable both when
+  # CATALYST_LIVENESS_READ_SOURCE is exactly "loki" (peer-liveness.mjs
+  # readPeerRecords early-returns before the anchor tier) and when NO liveness
+  # anchor resolves at all (its `!anchorIssue` early return, any source). In
+  # both cases the mint was skipped so a host would not spend curl's 30s
+  # ceiling authenticating a credential nothing could ever read.
   #
-  # CTL-1612 round 5 (Codex P2 follow-up): readAnchor ALSO can never fire when
-  # NO liveness anchor is configured at all — readPeerRecords's `!anchorIssue`
-  # early return — regardless of source (AUTO or explicit "linear" included).
-  # A fleet running single-host, or one that hasn't set up cross-host liveness
-  # yet, would otherwise mint on every start and wait out curl's 30s ceiling
-  # for a credential nothing can ever read. Skip that case too.
+  # ⛔ CTL-2187 RETIRES THAT PREMISE — do not restore the skip. The monitor's
+  # DEGRADED Linear reads (orch-monitor/lib/linear-degraded-auth.mjs, consumed
+  # by linear-estimate-fallback.mjs and linear-title-description-fallback.mjs)
+  # are now a second consumer of this scoped token, and unlike the anchor read
+  # they run on EVERY board render regardless of liveness source or anchor
+  # configuration — board-data.mjs calls the estimate, team-method and title
+  # fallbacks for every replica miss. Skipping the mint in those two modes
+  # would leave exactly those hosts with no resolvable Linear credential, which
+  # is the CTL-2187 defect itself (a read that returns before `fetch` and emits
+  # catalyst.linear.read result=failed). The mint is therefore unconditional
+  # now; the two conditions survive only as a diagnostic line saying the ANCHOR
+  # read in particular will not use it.
   #
-  # CTL-1612 round 5 (Codex P1 follow-up): BOTH skip branches below now call
-  # linear_app_actor_clear_inherited — the round-4 inherited-alias clear lived
-  # entirely inside linear_app_actor_auth, so a skip branch that never calls
-  # that function never ran it either. A broker stack-reload's `catalyst-monitor
-  # restart` in loki-only (or no-anchor) mode would otherwise still carry the
-  # broker's bot-valued LINEAR_API_TOKEN/LINEAR_API_KEY straight through to
-  # linear-comment.mjs — the same P1 as round 4's fix, just reachable via a
-  # path that used to return before ever sourcing the lib.
+  # The CTL-1612 guarantees are untouched by this. The clear still happens in
+  # every path — linear_app_actor_auth's scoped branch calls
+  # linear_app_actor_clear_inherited itself (round 4/5's P1 fix), so a broker
+  # stack-reload's inherited bot-valued LINEAR_API_TOKEN/LINEAR_API_KEY is still
+  # removed before linear-comment.mjs can resolve it — and the mint still lands
+  # in the SCOPED variable only, never under either alias.
   source "$SCRIPT_DIR/lib/linear-app-actor.sh"
   _liveness_source="$(printf '%s' "${CATALYST_LIVENESS_READ_SOURCE:-}" | tr '[:upper:]' '[:lower:]' | xargs 2>/dev/null || true)"
   _liveness_anchor_issue="$(resolve_liveness_anchor_issue)"
   if [[ "$_liveness_source" == "loki" ]]; then
-    echo "catalyst-monitor: CATALYST_LIVENESS_READ_SOURCE=loki — skipping app-actor mint (peer-heartbeat anchor read is unused in loki-only mode)" >&2
-    linear_app_actor_clear_inherited "catalyst-monitor"
+    echo "catalyst-monitor: CATALYST_LIVENESS_READ_SOURCE=loki — peer-heartbeat anchor read is unused in loki-only mode; minting the app-actor token anyway for the degraded Linear reads (CTL-2187)" >&2
   elif [[ -z "$_liveness_anchor_issue" ]]; then
-    echo "catalyst-monitor: no liveness anchor configured (CATALYST_LIVENESS_ANCHOR_ISSUE / catalyst.cluster.livenessAnchorIssue) — skipping app-actor mint (peer-heartbeat anchor read has nothing to attach to)" >&2
-    linear_app_actor_clear_inherited "catalyst-monitor"
-  else
-    linear_app_actor_auth "catalyst-monitor" CATALYST_MONITOR_APP_ACTOR_TOKEN
+    echo "catalyst-monitor: no liveness anchor configured (CATALYST_LIVENESS_ANCHOR_ISSUE / catalyst.cluster.livenessAnchorIssue) — peer-heartbeat anchor read has nothing to attach to; minting the app-actor token anyway for the degraded Linear reads (CTL-2187)" >&2
   fi
+  linear_app_actor_auth "catalyst-monitor" CATALYST_MONITOR_APP_ACTOR_TOKEN
 
   # CATALYST_CONFIG_FILE pins the Layer-1 config path explicitly so the spawned
   # server's config resolution (orch-monitor/lib/config-path.ts) never falls back
