@@ -143,7 +143,7 @@ export function useRespond(
 
   // CTL-1569: apply the optimistic mark for a resolution that happened through a
   // DIFFERENT write than `respond` — specifically the inbox's inline reply, which
-  // posts a real Linear comment (the comment itself is what clears `needs-human`,
+  // posts a real Linear comment (the comment itself is what clears the escalation hold,
   // per CTL-1567). The reply client owns that fetch, so the hook must be able to
   // arm the mark + grace window without firing a respond call of its own.
   //

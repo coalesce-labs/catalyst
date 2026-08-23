@@ -3,7 +3,7 @@ import { describe, it, expect } from "bun:test";
 import { buildCapacityBadges } from "./capacity-badges";
 
 describe("buildCapacityBadges (CTL-764 Phase 8)", () => {
-  it("returns triage/queued/blocked/needs-input/needs-human in that fixed order", () => {
+  it("returns triage/queued/blocked/needs-input/ask in that fixed order", () => {
     const config = {
       maxParallel: 4,
       inFlight: 2,
@@ -15,11 +15,11 @@ describe("buildCapacityBadges (CTL-764 Phase 8)", () => {
       queued: 3,
       blocked: 2,
       needsInput: 1,
-      needsHuman: 2,
+      ask: 2,
     };
     const badges = buildCapacityBadges(config);
     const labels = badges.map((b) => b.label);
-    expect(labels).toEqual(["triage", "queued", "blocked", "needs-input", "needs-human"]);
+    expect(labels).toEqual(["triage", "queued", "blocked", "needs-input", "ask"]);
   });
 
   it("omits badges with zero count", () => {
@@ -34,7 +34,7 @@ describe("buildCapacityBadges (CTL-764 Phase 8)", () => {
       queued: 1,
       blocked: 0,
       needsInput: 0,
-      needsHuman: 0,
+      ask: 0,
     };
     const badges = buildCapacityBadges(config);
     expect(badges).toHaveLength(1);
@@ -54,7 +54,7 @@ describe("buildCapacityBadges (CTL-764 Phase 8)", () => {
       queued: 0,
       blocked: 0,
       needsInput: 0,
-      needsHuman: 0,
+      ask: 0,
     };
     const badges = buildCapacityBadges(config);
     const triage = badges.find((b) => b.label === "triage");
@@ -64,7 +64,7 @@ describe("buildCapacityBadges (CTL-764 Phase 8)", () => {
 
   it("missing optional fields default to 0 and are omitted (back-compat with older payloads)", () => {
     // An older board payload predates the CTL-764 count fields entirely — none of
-    // triage/queued/blocked/needsInput/needsHuman are present. buildCapacityBadges
+    // triage/queued/blocked/needsInput/ask are present. buildCapacityBadges
     // reads only those fields, so every count defaults to 0 and no badge renders.
     // (An empty object is assignable to the all-optional MinimalBoardConfig; the
     // former literal carried only non-config keys → TS2559 weak-type mismatch.)
@@ -84,7 +84,7 @@ describe("buildCapacityBadges (CTL-764 Phase 8)", () => {
       queued: 0,
       blocked: 0,
       needsInput: 0,
-      needsHuman: 0,
+      ask: 0,
     };
     const badges = buildCapacityBadges(config);
     expect(badges).toHaveLength(0);

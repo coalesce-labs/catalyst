@@ -1,4 +1,4 @@
-// CTL-1180: nav-signal anomaly dot lights when a ticket has attention:"needs-human"
+// CTL-1180: nav-signal anomaly dot lights when a ticket has attention:"ask"
 // even when there is no held-blocked hold and no stuck worker. Previously only
 // `held:"blocked"` and `stuck > 0` lit the dot.
 
@@ -58,23 +58,23 @@ function board(overrides: Partial<BoardPayload> = {}): BoardPayload {
   };
 }
 
-describe("nav-signal anomaly — needs-human tickets (CTL-1180)", () => {
-  it("a needs-human ticket with no hold and no stuck worker → anomaly:true", () => {
+describe("nav-signal anomaly — ask tickets (CTL-1180)", () => {
+  it("a ask ticket with no hold and no stuck worker → anomaly:true", () => {
     const sig = deriveNavSignal(
-      board({ tickets: [ticket("CTL-1180", { attention: "needs-human", held: null })] }),
+      board({ tickets: [ticket("CTL-1180", { attention: "ask", held: null })] }),
     );
     expect(sig.anomaly).toBe(true);
   });
 
-  it("a needs-human ticket lights the dot regardless of held status", () => {
+  it("a ask ticket lights the dot regardless of held status", () => {
     // Even a ticket not blocked should light the dot if it needs a human
     const sig = deriveNavSignal(
-      board({ tickets: [ticket("CTL-1", { attention: "needs-human", held: null })] }),
+      board({ tickets: [ticket("CTL-1", { attention: "ask", held: null })] }),
     );
     expect(sig.anomaly).toBe(true);
   });
 
-  it("no needs-human + no blocked + stuck:0 → anomaly:false (no false positive)", () => {
+  it("no ask + no blocked + stuck:0 → anomaly:false (no false positive)", () => {
     const sig = deriveNavSignal(
       board({
         tickets: [ticket("CTL-1", { attention: null, held: null })],
@@ -84,7 +84,7 @@ describe("nav-signal anomaly — needs-human tickets (CTL-1180)", () => {
     expect(sig.anomaly).toBe(false);
   });
 
-  it("attention:waiting-on-you does NOT light the anomaly dot (only needs-human does)", () => {
+  it("attention:waiting-on-you does NOT light the anomaly dot (only ask does)", () => {
     const sig = deriveNavSignal(
       board({
         tickets: [ticket("CTL-1", { attention: "waiting-on-you", held: null })],

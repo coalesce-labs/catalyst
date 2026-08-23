@@ -54,13 +54,14 @@
     },
     "status": {
       "type": "string",
-      "description": "Current lifecycle status of this phase, written by the daemon on dispatch and updated by the phase-agent as work progresses. NOTE: this enum is known to be INCOMPLETE \u2014 the runtime also writes at least `needs-input`, `preempted` and `aborted`, which are absent here (tracked separately). A schema that rejects valid production signals is worse than none, so treat a failure against this enum as a schema gap until proven otherwise.",
+      "description": "Current lifecycle status of this phase, written by the daemon on dispatch and updated by the phase-agent as work progresses. `stalled` is TERMINAL (isTicketInFlight vetoes on it, the terminal sweep escalates on it); `stalled-retryable` is the SAME stall record with the opposite dispatch verdict \u2014 a SYSTEM-class stall that must keep retrying with backoff while one fleet alert names the condition. Splitting them is load-bearing: one value for both silently truncated every retry budget to the escalation threshold. See plugins/dev/scripts/execution-core/stall-class.mjs. NOTE: this enum is known to be INCOMPLETE \u2014 the runtime also writes at least `needs-input`, `preempted` and `aborted`, which are absent here (tracked separately). A schema that rejects valid production signals is worse than none, so treat a failure against this enum as a schema gap until proven otherwise.",
       "enum": [
         "dispatched",
         "running",
         "done",
         "failed",
         "stalled",
+        "stalled-retryable",
         "skipped",
         "turn-cap-exhausted",
         "awaiting-work"
@@ -132,12 +133,38 @@
         "tests_failed"
       ]
     },
+    "stallClass": {
+      "type": "string",
+      "enum": ["system", "ask", "moot", "held"],
+      "description": "CTL-2158. The stall's ONE class, written by the escalation producers via stall-class.mjs::classifyStall. \"system\" = provider overload, rate/account limits, connectivity, executor death, retry/cycle caps, an untidy working copy, orphan-sweep staleness \u2014 retry with backoff, and if persistent ONE fleet alert, never a per-ticket artifact. \"ask\" = a scope/priority/approval/credential decision only a person can take \u2014 one ask ticket carrying `blocks`. \"moot\" = already done, superseded, no actionable plan \u2014 close. \"held\" = the classifier could not prove any of the three (or the evidence pointed two ways): HELD FOR REVIEW, never dropped, never auto-retried forever, never auto-cleared. Additive \u2014 `status` and `stalledReason` keep their CTL-1552 values.",
+      "examples": ["system", "held"]
+    },
+    "stallClassRule": {
+      "type": "string",
+      "description": "CTL-2158. WHICH rule produced stallClass, so a verdict can be audited rather than trusted: `exact:<reason>`, `prefix:<prefix>`, `family:<class>`, `signal:stallClass`, `ambiguous:<a>+<b>`, `manufactured-escalation`, `no-reason`, or `unclassified`.",
+      "examples": ["exact:orphan-sweep-stale", "unclassified", "ambiguous:system+ask"]
+    },
+    "stallClassManufactured": {
+      "type": "boolean",
+      "description": "CTL-2158. True when the escalation's explanation came from escalation-explanation.mjs::coerceExplanation's degrade branch (`degraded:true`) \u2014 i.e. the human-facing prose is a template (\"priority call the agent cannot make unilaterally\"), not a real question. Present so a board can say the ask was generated. A manufactured explanation NEVER promotes a stall to `ask`.",
+      "examples": [true]
+    },
+    "escalationPublished": {
+      "type": "boolean",
+      "description": "CTL-2158/CTL-2159. Set by the producers that publish a COMPLETE per-ticket human escalation: recovery-emit, recovery-reasoning, recovery.mjs::markEscalationCapTerminal, boot-resume's expired approval gate, and (CTL-2159) escalation-publish.mjs when it files an ASK ticket. unstuck-sweep's quiet-gate keys on this instead of on `stalledReason === \"needs_human\"`, so a ticket a human is already holding never receives a second authored comment once that token is deleted. \u26d4 It is deliberately NOT inferred from the presence of `explanation`: scheduler.mjs's generic stall writer attaches a coerced explanation to EVERY stall it records, so inferring it would silence the sweep's repair actions wholesale. \u26d4 CTL-2159: it is set for ASK **only**. SYSTEM / MOOT / HELD publish ZERO per-ticket artifacts, so there is nothing for a later actor to duplicate \u2014 and stamping SYSTEM would silence the sweep's repair of `remediate-cycle-cap-exhausted` and `prior-artifact-retry-exhausted`, which is the same wholesale-silencing regression one level down.",
+      "examples": [true]
+    },
+    "askTicket": {
+      "type": "string",
+      "description": "CTL-2159. The identifier of the ask ticket filed for this stall, when the class was ASK and `ask.mjs create` proved the `blocks` relation landed. Absent for every other class \u2014 SYSTEM, MOOT and HELD publish no per-ticket artifact.",
+      "examples": ["CTL-2200"]
+    },
     "attentionReason": {
       "type": [
         "string",
         "null"
       ],
-      "description": "Human-readable explanation written when the daemon escalates the ticket to needs-human status. null during normal operation.",
+      "description": "Human-readable explanation written when the daemon escalates the ticket. null during normal operation.",
       "examples": [
         "revive-budget-exhausted",
         "turn-cap-exhausted after 3 revivals"

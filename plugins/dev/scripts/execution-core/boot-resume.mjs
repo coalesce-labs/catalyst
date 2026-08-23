@@ -43,6 +43,12 @@ import {
 import { join } from "node:path";
 import { emitBootResumePending as defaultEmitBootResumePending } from "./dispatch-alert.mjs"; // CTL-1443
 import { labelNeedsHumanUnlessBeliefOwner } from "./label-guard.mjs"; // CTL-1443 (Codex P1)
+// CTL-2158: classify the stall and stamp "an escalation was published".
+import {
+  classifyStall,
+  stallClassSignalFields,
+  ESCALATION_PUBLISHED_FIELD,
+} from "./stall-class.mjs";
 import { applyLabel as defaultApplyLabel } from "./linear-write.mjs"; // CTL-1443 (Codex P1)
 import {
   readWorkerSignals,
@@ -192,7 +198,19 @@ export function surfaceStalePendingApprovals({
   // not on a bare status flip. Route through the same label-guard path the
   // P0b exhaustion sweep uses (labelOnce markers = idempotence).
   labelNeedsHuman = (dir, t) =>
-    labelNeedsHumanUnlessBeliefOwner(dir, t, { applyLabel: defaultApplyLabel }, { site: "boot-resume-gate" }),
+    labelNeedsHumanUnlessBeliefOwner(
+      dir,
+      t,
+      { applyLabel: defaultApplyLabel },
+      {
+        site: "boot-resume-gate",
+        // ⛔ CTL-2159: forward the reason. `boot-resume-gate` is one of only eight
+        // exact ASK rows in the classifier table — a stale approval gate IS a
+        // person's decision — and without the token this classified HELD, leaving
+        // the ask path dark for the single site most likely to need it.
+        reason: "boot-resume-gate",
+      },
+    ),
 } = {}) {
   const surfaced = [];
   for (const gate of listPendingApprovals(orchDir, { now })) {
@@ -235,6 +253,22 @@ export function surfaceStalePendingApprovals({
         observed: { gate_age_hours: ageHours, phase },
         attempts: [],
       };
+      // CTL-2158 — OUTPUT RE-TARGET. The comment above says "mapped to skip in
+      // the unstuck sweep"; that mapping was a hand-typed reason row and is now
+      // derived from this stamp, so it survives the token's deletion. An expired
+      // approval gate is a genuine ASK: only an operator can approve the resume.
+      Object.assign(
+        sig,
+        stallClassSignalFields(
+          classifyStall({
+            reason: "boot-resume-gate-expired",
+            signal: sig,
+            explanation: sig.explanation,
+            site: "boot-resume-gate",
+          }),
+        ),
+      );
+      sig[ESCALATION_PUBLISHED_FIELD] = true;
       const tmp = `${sigPath}.tmp.${process.pid}`;
       writeFileSync(tmp, JSON.stringify(sig, null, 2));
       renameSync(tmp, sigPath);

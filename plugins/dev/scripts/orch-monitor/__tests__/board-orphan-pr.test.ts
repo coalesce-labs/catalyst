@@ -32,10 +32,10 @@ const notified = (over: Record<string, unknown> = {}) => ({
 });
 
 describe("synthesizeOrphanTickets", () => {
-  it("emits one needs-human card per NOTIFIED orphan", () => {
+  it("emits one ask card per NOTIFIED orphan", () => {
     const cards = synthesizeOrphanTickets(notified(), 600_000);
     expect(cards).toHaveLength(1);
-    expect(cards[0].attention).toBe("needs-human");
+    expect(cards[0].attention).toBe("ask");
     expect(cards[0].pr).toBe(2061);
     expect(cards[0].mergeStateStatus).toBe("BLOCKED");
     expect(cards[0].attentionSince).toBe(new Date(0).toISOString()); // firstSeenAt anchor

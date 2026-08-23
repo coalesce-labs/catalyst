@@ -13,12 +13,12 @@ interface MinimalBoardConfig {
   queued?: number;
   blocked?: number;
   needsInput?: number;
-  needsHuman?: number;
+  ask?: number;
 }
 
 /**
  * Build the capacity badge array for the slot-deck header.
- * Fixed order: triage · queued · blocked · needs-input · needs-human.
+ * Fixed order: triage · queued · blocked · needs-input · ask.
  * Zero-count badges are omitted. The triage badge carries a legend.
  */
 export function buildCapacityBadges(config: MinimalBoardConfig): CapacityBadge[] {
@@ -31,7 +31,7 @@ export function buildCapacityBadges(config: MinimalBoardConfig): CapacityBadge[]
     { key: "queued", label: "queued" },
     { key: "blocked", label: "blocked" },
     { key: "needsInput", label: "needs-input" },
-    { key: "needsHuman", label: "needs-human" },
+    { key: "ask", label: "ask" },
   ];
   const badges: CapacityBadge[] = [];
   for (const s of SLOTS) {

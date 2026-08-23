@@ -1830,14 +1830,58 @@ daemon. These knobs are env vars on the `catalyst-broker` process:
   `catalyst.ingestion.stale` (currently `catalyst.monitor` — a dead monitor). It rides that
   already-debounced recency edge, so it has no thresholds of its own; raised on stale, cleared on
   recovered.
-- The **`needs_human_pileup`** alert is a level signal: how many **active, non-terminal** tickets
-  carry a `needs-human`/`needs-input` label in the broker's `filter-state.db` (Done/Canceled and
-  removed tickets are excluded so a stale cached label can't pin the count). Knobs:
-  - `FILTER_PILEUP_THRESHOLD` (default `3`) — minimum labelled-ticket count to alert.
-  - `FILTER_PILEUP_PERSISTENCE_MS` (default `300000`) — the count must stay at/above the threshold
-    this long before one alert fires (spike guard).
-  - `FILTER_PILEUP_COOLDOWN_MS` (default `3600000`) — minimum gap after a clear before it can
-    re-fire (flap guard).
+- The three **system-trouble** alerts (CTL-2156) are level signals over *distinct affected things*
+  inside a trailing window. They are fleet-scoped and auto-clearing by design: a provider outage
+  touching forty tickets raises **one** alert and writes **zero** per-ticket artifacts, and the
+  alert clears itself when the condition ends — either because a producer retracts (capacity
+  restored, account no longer rejected) or because every affected key ages out of the window.
+  They replace the retired `needs_human_pileup` alert and its `FILTER_PILEUP_*` knobs, which
+  counted `needs-human` labels — the per-ticket escalation artifact — rather than the condition.
+
+  | kind | level = distinct… | fed by |
+  | --- | --- | --- |
+  | `provider_degraded` | tickets hit by a 429/529 | `execution-core.sdk.overloaded` |
+  | `rate_limit_exhausted` | spent budgets (accounts, Linear) | `account.status.changed`, `account.ratelimit.{sampled,unsampled}`, `linear.write.proxy.budget-exhausted`, `linear.label.retry-exhausted` (only `reason` = `rate-limited` / `budget:day-exhausted`) |
+  | `capacity_unavailable` | nodes with no execution slots | `node.capacity.changed` (`new_maxParallel <= 0`) — see the reachability note below |
+
+  Each kind has four knobs, `FILTER_<KIND>_{THRESHOLD,WINDOW_MS,PERSISTENCE_MS,COOLDOWN_MS}`,
+  where `<KIND>` is `PROVIDER_DEGRADED`, `RATE_LIMIT` or `CAPACITY`:
+  - `…_THRESHOLD` — how many distinct affected things before one alert fires. Defaults: `2` for
+    `provider_degraded` (one unlucky ticket is not an outage), `1` for the other two (one exhausted
+    account or one slotless node *is* the fact).
+  - `…_WINDOW_MS` — how long one observation keeps its key "in trouble" with no further news, and
+    therefore the auto-clear backstop for producers that only ever report trouble. Defaults:
+    `600000` (provider), `1800000` (rate limit), `3600000` (capacity).
+  - `…_PERSISTENCE_MS` — how long the level must hold before raising. Defaults: `0` for provider
+    and rate limit (the window is already the debounce), `120000` for capacity, so a node that is
+    momentarily slotless while autotune re-settles does not page anyone.
+  - `…_COOLDOWN_MS` (default `1800000` for all three) — minimum gap after a clear before a re-raise
+    (flap guard).
+- `FILTER_ACCOUNT_EXHAUSTED_PCT` (default `100`) — the 5-hour usage percentage at or above which an
+  `account.ratelimit.sampled` reading counts as an exhausted budget. Below it the observation
+  *retracts*, clearing the alert on the edge rather than waiting out the window.
+
+  :::caution[`capacity_unavailable` cannot fire while `minParallel >= 1`]
+  Every autotune result is passed through `clampToBounds`, which **raises** it to
+  `executionCore.minParallel`. With the shipped `minParallel: 1`, `new_maxParallel` is floored at 1
+  and the `<= 0` test is unreachable — measured 2026-08-21, all 22 `node.capacity.changed` events
+  that month carried `1`, `4` or `6`, never `0`. The bounds "bite only when present" (CTL-665), so
+  the rule *is* reachable on a host that leaves `minParallel` unset, and it is kept at `<= 0`
+  because that is the honest statement of "no slots". Treat this kind as **armed but unproven** on a
+  `minParallel >= 1` fleet rather than as capacity coverage, and do not relax the test to
+  `<= minParallel`: a node clamped to 1 under memory pressure is still running work, and paging on
+  it would have fired 11 times that month for the system behaving correctly.
+  :::
+
+  :::caution[Not every `linear.label.retry-exhausted` is a quota]
+  That producer fires whenever a label write gives up, and most give-ups are **not** a rate limit:
+  all 75 occurrences in the month of 2026-08 carried `reason` `budget:ticket-cap` (47, this host's
+  own per-ticket write guard) or `cloud:label-rejected` (28, a deterministic cloud rejection) —
+  none carried a quota reason. Since `FILTER_RATE_LIMIT_THRESHOLD` is `1` and its persistence is
+  `0`, an ungated rule raised a fleet-wide alert on the next tick for a per-ticket guard doing its
+  job. The rule is therefore gated on `reason ∈ {rate-limited, budget:day-exhausted}`; any other
+  reason is *no opinion* — it neither raises nor retracts.
+  :::
 
 ### Broker-degraded detector (CTL-1523)
 

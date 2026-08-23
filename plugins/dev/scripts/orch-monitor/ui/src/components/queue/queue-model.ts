@@ -63,7 +63,7 @@ export function ordinal(n: number): string {
 }
 
 /** CTL-1588: split the eligible queue into genuinely dispatchable rows and
- *  human-held rows (needs-human/needs-input park). Held rows must never enter
+ *  human-held rows (ask / needs-input park). Held rows must never enter
  *  the rank/tint math — presenting a parked ticket as "dispatching next" is a
  *  lie the admission gate will not honor. Order is preserved within each half. */
 export function partitionHumanHeld<T extends { humanHold?: string | null }>(
@@ -126,14 +126,20 @@ export function slotLabel(slot: number): string {
 
 // ── holding buckets ("why work isn't moving") ──────────────────────────────────
 
-// CTL-764 Phase 8: "waiting" renamed to "queued"; needsInput/needsHuman added.
+/** CTL-2161: the ask labels — mirrors board-data.mjs ATTENTION_LABELS_ASK. The UI
+ *  bundle cannot import board-data.mjs (bun:sqlite in its graph), so this is the
+ *  same deliberate local mirror linear-cache-reader keeps, pinned by its test. */
+export const ASK_LABELS = ["catalyst-ask", "ask/decision"];
+
+// CTL-764 Phase 8: "waiting" renamed to "queued"; needsInput/ask added.
+// CTL-2161: the "needs-human" bucket kind became "ask".
 export type HoldingBucketKind =
   | "needs-you"
   | "stalled"
   | "blocked"
   | "queued"
   | "needs-input"
-  | "needs-human";
+  | "ask";
 
 export interface HoldingBucketWorkerItem {
   kind: "worker";
@@ -164,8 +170,9 @@ export interface HoldingBuckets {
   queued: HoldingBucket;
   /** CTL-764 Phase 8: tickets paused for worker input (needs-input disposition). */
   needsInput: HoldingBucket;
-  /** CTL-764 Phase 8: tickets escalated to needs-human disposition (separate from needs-you). */
-  needsHuman: HoldingBucket;
+  /** CTL-764 Phase 8 / CTL-2161: tickets whose worker-status disposition is `ask`
+   *  (separate from needs-you). */
+  ask: HoldingBucket;
   /** True when all buckets are empty (render the "nothing blocked" line). */
   allEmpty: boolean;
 }
@@ -175,19 +182,19 @@ const itemTicketId = (i: HoldingBucketItem): string =>
 
 /**
  * Build the "why work isn't moving" holding buckets. CTL-764 Phase 8 adds
- * queued/needsInput/needsHuman driven by workerStatus with held back-compat.
+ * queued/needsInput/ask driven by workerStatus with held back-compat.
  *
  *  - needs-you:   live workers parked on a human prompt (waitingOnUser) PLUS
- *                 not-in-flight tickets with attention=needs-human (CTL-1180).
+ *                 not-in-flight tickets with attention=ask (CTL-1180/CTL-2161).
  *  - stalled:     tickets with status=stalled (circuit breaker, CTL-1066).
  *  - blocked:     tickets with held/workerStatus=blocked, not in flight.
  *  - queued:      tickets with workerStatus=queued (or legacy held=waiting), not in flight.
  *  - needsInput:  tickets with workerStatus=needs-input, OR (CTL-764 Phase 8 fix)
  *                 the needs-input label on a parked ticket whose attention was
- *                 hardcoded to needs-human by board-data — not in flight.
- *  - needsHuman:  tickets with workerStatus=needs-human (separate from needs-you; disposition axis).
+ *                 hardcoded to `ask` by board-data — not in flight.
+ *  - ask:         tickets with workerStatus=ask (separate from needs-you; disposition axis).
  *
- * Single-valued precedence: needs-human > needs-input > blocked > queued.
+ * Single-valued precedence: ask > needs-input > blocked > queued.
  * The CTL-729 needs-you (operator-prompt / permission-pause) bucket stays a separate axis.
  */
 export function groupHoldingBuckets(
@@ -221,22 +228,22 @@ export function groupHoldingBuckets(
   const blocked: HoldingBucketItem[] = [];
   const queued: HoldingBucketItem[] = [];
   const needsInput: HoldingBucketItem[] = [];
-  const needsHuman: HoldingBucketItem[] = [];
+  const ask: HoldingBucketItem[] = [];
   for (const t of tickets) {
     if (inFlightTicketIds.has(t.id)) continue;
     // CTL-764 Phase 8: a parked/queued ticket's needs-input disposition survives
-    // ONLY in `labels` — board-data hardcodes attention:"needs-human" for these
-    // inbox cards (synthesizeParkedNeedsHumanTickets / the live-ticket assembler),
-    // so the label must be checked BEFORE the needs-human short-circuit below or
-    // every needs-input card collapses into "Needs you" (mirrors the label-first
+    // ONLY in `labels` — board-data hardcodes attention:"ask" for these inbox
+    // cards (synthesizeParkedAttentionTickets / the live-ticket assembler), so the
+    // label must be checked BEFORE the `ask` short-circuit below or every
+    // needs-input card collapses into "Needs you" (mirrors the label-first
     // precedence in board-data.mjs's deriveStatusCounts).
     const labels = t.labels ?? [];
-    if (labels.includes("needs-input") && !labels.includes("needs-human")) {
+    if (labels.includes("needs-input") && !labels.some((l) => ASK_LABELS.includes(l))) {
       needsInput.push({ kind: "ticket", ticket: t });
       continue;
     }
-    // CTL-1180: not-in-flight needs-human attention → needs-you (operator-prompt axis).
-    if (t.attention === "needs-human") {
+    // CTL-1180: not-in-flight `ask` attention → needs-you (operator-prompt axis).
+    if (t.attention === "ask") {
       needsYou.push({ kind: "ticket", ticket: t });
       continue;
     }
@@ -247,8 +254,8 @@ export function groupHoldingBuckets(
     // CTL-764 Phase 8: single-valued precedence on workerStatus; fall back to held for back-compat.
     const ws = t.workerStatus ?? null;
     const h = t.held ?? null;
-    if (ws === "needs-human") {
-      needsHuman.push({ kind: "ticket", ticket: t });
+    if (ws === "ask") {
+      ask.push({ kind: "ticket", ticket: t });
       continue;
     }
     if (ws === "needs-input") {
@@ -270,14 +277,14 @@ export function groupHoldingBuckets(
     blocked.length === 0 &&
     queued.length === 0 &&
     needsInput.length === 0 &&
-    needsHuman.length === 0;
+    ask.length === 0;
   return {
     needsYou: { kind: "needs-you", items: needsYou },
     stalled: { kind: "stalled", items: stalled },
     blocked: { kind: "blocked", items: blocked },
     queued: { kind: "queued", items: queued },
     needsInput: { kind: "needs-input", items: needsInput },
-    needsHuman: { kind: "needs-human", items: needsHuman },
+    ask: { kind: "ask", items: ask },
     allEmpty,
   };
 }
@@ -290,7 +297,7 @@ export function holdingTicketIds(b: HoldingBuckets): string[] {
     ...b.blocked.items,
     ...b.queued.items,
     ...b.needsInput.items,
-    ...b.needsHuman.items,
+    ...b.ask.items,
   ].map(itemTicketId);
 }
 

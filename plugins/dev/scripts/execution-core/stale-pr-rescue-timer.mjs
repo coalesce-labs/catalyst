@@ -553,6 +553,9 @@ export function defaultEscalate(
         env,
         site: "stale-pr-rescue",
         log,
+        // ⛔ CTL-2159: forward the reason — without it every stale-PR escalation
+        // classifies HELD and the SYSTEM retry path never fires.
+        reason: detail?.reason ?? "unresolvable-conflict",
         explanation: {
           problem: `stale PR for ${ticket} could not be rescued: ${detail?.reason ?? "unresolvable conflict"}`,
           call_to_action: `resolve the PR conflict for ${ticket} or close the PR`,

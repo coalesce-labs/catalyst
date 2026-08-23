@@ -13,6 +13,7 @@ import {
   buildAskBody,
   isEntryPoint,
   missingBlocksFrom,
+  blocksRelationIdentifiers,
   parseAskOptions,
   resolveTeamLabelIds,
   teamPrefixMismatch,
@@ -25,6 +26,26 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ASK_MJS = join(dirname(fileURLToPath(import.meta.url)), "..", "ask.mjs");
+
+// The MINIMUM argv a `create` now accepts (CTL-2157): two options, a default, and the
+// work the ask blocks. Shared so a change to the contract updates every call site here.
+const CREATE_MIN = [
+  "create",
+  "--team",
+  "CTL",
+  "--title",
+  "t",
+  "--why",
+  "w",
+  "--option",
+  "a",
+  "--option",
+  "b",
+  "--default",
+  "a",
+  "--blocks",
+  "CTL-1",
+];
 
 describe("buildAskBody renders the shape the trigger parses", () => {
   test("a full ask round-trips through the parser", () => {
@@ -151,23 +172,89 @@ describe("⛔ Codex #3509 P1 — the ask must be on the team we asked for", () =
 });
 
 describe("⛔ Codex #3509 P2 — every requested blocking relation is verified", () => {
+  // ⛔ THE FIXTURE IS THE POINT. These read-backs are Linear's REAL shape
+  // (`relations.nodes[].relatedIssue.identifier`), not a hand-shaped convenience. The
+  // previous version of this suite asserted against `{"relations":["CTL-1"]}` — a body
+  // Linear never returns — and passed while the production check was inert.
+  const readBack = (blocks, { description = "**Why:** w\n\nBlocks: CTL-1, CTL-2" } = {}) =>
+    JSON.stringify({
+      identifier: "CTL-9000",
+      description,
+      relations: {
+        nodes: blocks.map((b) => ({ type: "blocks", relatedIssue: { identifier: b } })),
+      },
+      inverseRelations: { nodes: [] },
+    });
+
   test("relations present in the read-back are not reported missing", () => {
-    expect(missingBlocksFrom(["CTL-1", "CTL-2"], '{"relations":["CTL-1","CTL-2"]}')).toEqual([]);
+    expect(missingBlocksFrom(["CTL-1", "CTL-2"], readBack(["CTL-1", "CTL-2"]))).toEqual([]);
   });
 
   test("the dropped-all-but-last shape is caught and NAMED", () => {
     // linearis keeps only the LAST --blocks on some versions, so the command would exit 0
     // while CTL-1 remained formally unblocked.
-    expect(missingBlocksFrom(["CTL-1", "CTL-2"], '{"relations":["CTL-2"]}')).toEqual(["CTL-1"]);
+    expect(missingBlocksFrom(["CTL-1", "CTL-2"], readBack(["CTL-2"]))).toEqual(["CTL-1"]);
+  });
+
+  test("⛔ THE PRODUCTION SHAPE: the body's `Blocks:` line does NOT count as a relation", () => {
+    // Linear stores the description VERBATIM, and buildAskBody always writes a
+    // `Blocks: <every requested id>` line. A substring check over the read-back JSON
+    // therefore always found the id, `missingBlocks` was always [], and the exit-2
+    // gate could never fire. This is that exact read-back: full body, zero relations.
+    const body = buildAskBody({
+      why: "w",
+      options: ["a", "b"],
+      defaultIfSilent: "a",
+      blocks: ["CTL-1", "CTL-2"],
+    });
+    expect(body).toContain("Blocks: CTL-1, CTL-2"); // the trap is present in the fixture
+    const stored = JSON.stringify({
+      identifier: "CTL-9000",
+      description: body,
+      relations: { nodes: [] },
+    });
+    expect(missingBlocksFrom(["CTL-1", "CTL-2"], stored)).toEqual(["CTL-1", "CTL-2"]);
+  });
+
+  test("an inverse `blocked_by` edge counts — the same fact, recorded from the other side", () => {
+    const stored = JSON.stringify({
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [{ type: "blocked_by", issue: { identifier: "CTL-1" } }] },
+    });
+    expect(missingBlocksFrom(["CTL-1"], stored)).toEqual([]);
+  });
+
+  test("a NON-blocks relation to the same ticket does not satisfy --blocks", () => {
+    const stored = JSON.stringify({
+      relations: { nodes: [{ type: "related", relatedIssue: { identifier: "CTL-1" } }] },
+    });
+    expect(missingBlocksFrom(["CTL-1"], stored)).toEqual(["CTL-1"]);
   });
 
   test("no blocks requested is not a failure", () => {
     expect(missingBlocksFrom([], "{}")).toEqual([]);
   });
 
-  test("an unreadable read-back reports them all missing rather than none", () => {
-    // Fail toward "say something is wrong", not toward a silent all-clear.
-    expect(missingBlocksFrom(["CTL-1"], null)).toEqual(["CTL-1"]);
+  test("⛔ 'could not look' is `null`, distinct from 'nothing missing'", () => {
+    // A read-back with NO relation field cannot answer the question. Reporting []
+    // (the old bug) is a false all-clear; reporting the ids is a false accusation.
+    expect(missingBlocksFrom(["CTL-1"], '{"identifier":"CTL-9000"}')).toBeNull();
+    expect(missingBlocksFrom(["CTL-1"], null)).toBeNull();
+    expect(missingBlocksFrom(["CTL-1"], "not json")).toBeNull();
+    // POSITIVE CONTROL through the same instrument: a present-but-EMPTY relation set
+    // is an answer, and it names them all.
+    expect(missingBlocksFrom(["CTL-1"], '{"relations":{"nodes":[]}}')).toEqual(["CTL-1"]);
+  });
+
+  test("blocksRelationIdentifiers reads edges only, never the description", () => {
+    expect(blocksRelationIdentifiers('{"description":"Blocks: CTL-1","relations":{"nodes":[]}}')).
+      toEqual(new Set());
+    expect(
+      blocksRelationIdentifiers(
+        '{"relations":{"nodes":[{"type":"blocks","relatedIssue":{"identifier":"CTL-1"}}]}}'
+      )
+    ).toEqual(new Set(["CTL-1"]));
+    expect(blocksRelationIdentifiers('{"description":"Blocks: CTL-1"}')).toBeNull();
   });
 });
 
@@ -215,7 +302,9 @@ describe("trap (a) — the documented path must not silently no-op", () => {
     );
     chmodSync(stub, 0o755);
 
-    const r = spawnSync("node", [link, "create", "--team", "CTL", "--title", "t", "--why", "w", "--dry-run"], {
+    // CTL-2157: --option x2 / --default / --blocks are now REQUIRED — the create
+    // refuses before it ever resolves labels without them.
+    const r = spawnSync("node", [link, ...CREATE_MIN, "--dry-run"], {
       encoding: "utf8",
       env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
     });
@@ -239,7 +328,7 @@ describe("trap (a) — the documented path must not silently no-op", () => {
     // spawnSync fails with ENOENT and returns status null — the test would then "pass"
     // on a process that never ran. That is the failure mode this whole ticket is about,
     // reproduced inside its own test, so the assertion below pins status to 1.
-    const r = spawnSync(process.execPath, [link, "create", "--team", "CTL", "--title", "t", "--why", "w", "--dry-run"], {
+    const r = spawnSync(process.execPath, [link, ...CREATE_MIN, "--dry-run"], {
       encoding: "utf8",
       env: { ...process.env, PATH: emptyBin },
     });
@@ -320,5 +409,172 @@ describe("trap (b) — the label set follows the TARGET TEAM", () => {
       .toBe("label-list-unparseable");
     expect(resolveTeamLabelIds("CTC", { runFn: () => ({ code: 0, stdout: "{}", stderr: "" }) }).reason)
       .toBe("label-list-unparseable");
+  });
+});
+
+// ── CTL-2157 ────────────────────────────────────────────────────────────────────
+// An ask that nothing can answer, or that wakes nobody when answered, is the
+// `needs-human` pile-up with a nicer name. An audit of this file found that a
+// machine could file one with zero options, no default and no blocking relation
+// and get EXIT 0 — the guarantee the ask SOP assumed simply did not exist.
+//
+// Every test here drives the REAL CLI through spawnSync (the argv contract is the
+// thing under test), hermetically: a stubbed `linearis` on PATH, so no credential
+// and no Linear call.
+
+const linearisStub = (script) => {
+  const bin = mkdtempSync(join(tmpdir(), "ask-stub-"));
+  const stub = join(bin, "linearis");
+  writeFileSync(stub, script);
+  chmodSync(stub, 0o755);
+  return bin;
+};
+
+const LABELS_JSON =
+  '{"nodes":[{"name":"catalyst-ask","id":"L1"},{"name":"ask/decision","id":"L2"}]}';
+
+const runCreate = (args, { bin } = {}) =>
+  spawnSync(process.execPath, [ASK_MJS, "create", ...args], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      PATH: `${bin ?? linearisStub(`#!/bin/sh\nprintf '%s\\n' '${LABELS_JSON}'\n`)}:${process.env.PATH ?? ""}`,
+    },
+  });
+
+describe("CTL-2157 — a machine-filed ask must be decidable", () => {
+  const base = ["--team", "CTL", "--title", "t", "--why", "w", "--dry-run"];
+
+  test("ZERO options is REFUSED (it was exit 0 before — verifyAskBody calls it ok)", () => {
+    const r = runCreate([...base, "--default", "d", "--blocks", "CTL-1"]);
+    expect(r.status).toBe(1);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toContain("at least TWO --option");
+  });
+
+  test("ONE option is REFUSED — a single choice is a rubber stamp, not a decision", () => {
+    const r = runCreate([...base, "--option", "a", "--default", "d", "--blocks", "CTL-1"]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("at least TWO --option");
+  });
+
+  test("no --default is REFUSED — silence must mean something", () => {
+    const r = runCreate([...base, "--option", "a", "--option", "b", "--blocks", "CTL-1"]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("--default is required");
+  });
+
+  test("no --blocks is REFUSED — an answer must have someone to wake", () => {
+    const r = runCreate([...base, "--option", "a", "--option", "b", "--default", "a"]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("--blocks");
+    expect(r.stderr).toContain("wakes nobody");
+  });
+
+  // ⛔ POSITIVE CONTROL for all four refusals above: the same command WITH the
+  // required flags reaches the dry run and exits 0. Without this, every assertion
+  // above would also pass on a CLI that refuses everything.
+  test("POSITIVE CONTROL: a complete ask reaches the dry run and exits 0", () => {
+    const r = runCreate([
+      ...base,
+      "--option",
+      "a",
+      "--option",
+      "b",
+      "--default",
+      "a",
+      "--blocks",
+      "CTL-1",
+    ]);
+    expect(r.status).toBe(0);
+    const out = JSON.parse(r.stdout);
+    expect(out.action).toBe("dry-run");
+    expect(out.parsedOptions).toEqual(["a", "b"]);
+    expect(out.body).toContain("Blocks: CTL-1");
+  });
+});
+
+describe("CTL-2157 — a dropped --blocks relation FAILS the create, it does not warn", () => {
+  // The stub is the whole `linearis` surface cmdCreate touches: the team's labels,
+  // the create, and the read-back. `issues read` names only CTL-1, reproducing the
+  // linearis behaviour ask.mjs documents — "keeps only the LAST --blocks flag".
+  //
+  // ⚠️ `printf '%s\n'`, never `echo`: /bin/sh's echo expands the `\n` escapes INSIDE
+  // the JSON string, so the payload arrives as unparseable JSON carrying real
+  // newlines — the read-back then fails for a reason that has nothing to do with the
+  // property under test. `%s` passes its argument through untouched.
+  //
+  // ⛔ THE READ-BACK IS LINEAR'S REAL SHAPE. Its `description` ALWAYS names every
+  // requested id (that is what buildAskBody writes and what Linear stores verbatim),
+  // while `relations.nodes` carries only what actually landed. A fixture that let the
+  // description stand in for the relation is what made the old check pass while the
+  // production gate was unreachable.
+  const relNodes = (ids) =>
+    ids.map((b) => `{"type":"blocks","relatedIssue":{"identifier":"${b}"}}`).join(",");
+  const stubScript = (recordedBlocks, { omitRelations = false } = {}) =>
+    `#!/bin/sh
+case "$1 $2" in
+  "labels list") printf '%s\\n' '${LABELS_JSON}' ;;
+  "issues create") printf '%s\\n' '{"identifier":"CTL-9000"}' ;;
+  "issues read") printf '%s\\n' '{"identifier":"CTL-9000","description":"**Why:** w\\n\\n**Options:**\\n- a\\n- b\\n\\n**Default if silent:** a\\n\\nBlocks: CTL-1, CTL-2"${omitRelations ? "" : `,"relations":{"nodes":[${relNodes(recordedBlocks)}]}`}}' ;;
+esac
+`;
+  const args = [
+    "--team",
+    "CTL",
+    "--title",
+    "t",
+    "--why",
+    "w",
+    "--option",
+    "a",
+    "--option",
+    "b",
+    "--default",
+    "a",
+    "--blocks",
+    "CTL-1",
+    "--blocks",
+    "CTL-2",
+  ];
+
+  test("a relation Linear never recorded is exit 2 and NAMED", () => {
+    const r = runCreate(args, { bin: linearisStub(stubScript(["CTL-1"])) });
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("CTL-2");
+    expect(r.stderr).toContain("NOT on it");
+    // …and it is attributable to the RELATION, not to an unreadable body: the
+    // round trip on the same run reports the ask as decidable.
+    const out = JSON.parse(r.stdout);
+    expect(out.decidable).toBe(true);
+    expect(out.missingBlocks).toEqual(["CTL-2"]);
+  });
+
+  test("POSITIVE CONTROL: both relations present ⇒ exit 0", () => {
+    const r = runCreate(args, { bin: linearisStub(stubScript(["CTL-1", "CTL-2"])) });
+    expect(r.status).toBe(0);
+    const out = JSON.parse(r.stdout);
+    expect(out.missingBlocks).toEqual([]);
+    expect(out.blocksVerified).toBe(true);
+  });
+
+  test("⛔ ZERO relations recorded is exit 2 — the body's Blocks: line proves nothing", () => {
+    // The read-back's description names CTL-1 AND CTL-2 (ask.mjs wrote it); only the
+    // relation edges are empty. The old substring check exited 0 here.
+    const r = runCreate(args, { bin: linearisStub(stubScript([])) });
+    expect(r.status).toBe(2);
+    const out = JSON.parse(r.stdout);
+    expect(out.missingBlocks).toEqual(["CTL-1", "CTL-2"]);
+    expect(out.blocksVerified).toBe(true); // it WAS answerable — the answer was "none"
+    expect(r.stderr).toContain("NOT on it");
+  });
+
+  test("⛔ a read-back with NO relation field FAILS CLOSED, and says which it is", () => {
+    const r = runCreate(args, { bin: linearisStub(stubScript([], { omitRelations: true })) });
+    expect(r.status).toBe(2);
+    const out = JSON.parse(r.stdout);
+    expect(out.blocksVerified).toBe(false);
+    expect(out.missingBlocks).toEqual([]); // NOT accused — unproven is not absent
+    expect(r.stderr).toContain("NO relation field");
   });
 });

@@ -156,16 +156,87 @@ export function teamPrefixMismatch(team, identifier) {
 }
 
 /**
- * missingBlocksFrom — which requested `--blocks` relations are not on the created ticket.
+ * blocksRelationIdentifiers — the tickets a read-back says this issue BLOCKS.
+ *
+ * ⛔ THE BUG THIS REPLACES, and it is the whole reason this function exists. The
+ * check used to be `readBackText.includes(id)` over the WHOLE read-back JSON. That
+ * JSON contains the `description` `ask.mjs` had just written, and `buildAskBody`
+ * ALWAYS emits a `Blocks: <ids>` line naming every requested id — so the id was
+ * present in the text whether or not Linear recorded the relation, `missingBlocks`
+ * was always `[]`, and the exit-2 gate was UNREACHABLE. Proven by running the real
+ * CLI against a `linearis` stub that returned the body verbatim with NO relations at
+ * all: `missingBlocks: []`, exit 0. The unit test passed only because its fixture
+ * fabricated a read-back Linear would never store.
+ *
+ * So this reads RELATION EDGES ONLY and never touches the description. Linear's own
+ * shape (the same one `lib/dependency-graph.mjs` normalizes):
+ *   relations.nodes[]        — edges this issue owns. `blocks` → relatedIssue.
+ *   inverseRelations.nodes[] — edges pointing at it. `blocked_by` → issue.
+ *
+ * ⛔ THREE-VALUED. `null` means "this read-back carries no relation field at all" —
+ * I COULD NOT LOOK — which must never be reported as "no relations recorded". A
+ * projection that omits a field is not the field being empty (measured on the
+ * replica's own narrower read shape, which drops `relations` entirely).
+ *
+ * @returns {Set<string>|null}
+ */
+export function blocksRelationIdentifiers(readBack) {
+  let doc = readBack;
+  if (typeof doc === "string") {
+    try {
+      doc = JSON.parse(doc);
+    } catch {
+      return null; // unparseable → could not look
+    }
+  }
+  if (doc === null || typeof doc !== "object") return null;
+  const nodesOf = (v) => (Array.isArray(v?.nodes) ? v.nodes : Array.isArray(v) ? v : null);
+  const rel = nodesOf(doc.relations);
+  const inv = nodesOf(doc.inverseRelations);
+  if (rel === null && inv === null) return null; // neither field present → could not look
+
+  const out = new Set();
+  const idOf = (n, ...keys) => {
+    for (const k of keys) {
+      const v = n?.[k];
+      if (typeof v === "string" && v !== "") return v;
+      if (typeof v?.identifier === "string" && v.identifier !== "") return v.identifier;
+    }
+    return null;
+  };
+  for (const n of rel ?? []) {
+    if (n?.type !== "blocks") continue;
+    const id = idOf(n, "relatedIssue", "issue", "identifier");
+    if (id) out.add(id);
+  }
+  for (const n of inv ?? []) {
+    // an inverse `blocked_by` edge means SELF blocks the peer (dependency-graph.mjs)
+    if (n?.type !== "blocked_by") continue;
+    const id = idOf(n, "issue", "relatedIssue", "identifier");
+    if (id) out.add(id);
+  }
+  return out;
+}
+
+/**
+ * missingBlocksFrom — which requested `--blocks` relations Linear did NOT record.
  *
  * "A `--relates-to` / `--blocks` list keeps only the LAST flag in some linearis versions"
  * (the ask skill's own gotcha). Without this the command exits 0 while every earlier work
  * ticket remains formally unblocked.
+ *
+ * THREE-VALUED, inheriting `blocksRelationIdentifiers`: `[]` = every requested relation
+ * is on the ticket; `[ids]` = these are absent; `null` = the read-back could not be
+ * asked. The caller must not conflate the last two — one is "repair these relations",
+ * the other is "I cannot prove anything about them".
+ *
+ * @returns {string[]|null}
  */
-export function missingBlocksFrom(blocks, readBackText) {
+export function missingBlocksFrom(blocks, readBack) {
   if (!Array.isArray(blocks) || blocks.length === 0) return [];
-  const text = typeof readBackText === "string" ? readBackText : "";
-  return blocks.filter((b) => !text.includes(b));
+  const recorded = blocksRelationIdentifiers(readBack);
+  if (recorded === null) return null;
+  return blocks.filter((b) => !recorded.has(b));
 }
 
 /**
@@ -258,13 +329,22 @@ function readTicketViaReplica(id) {
 
 function usage() {
   console.error(`Usage:
-  ask.mjs create --team <TEAM> --title <t> --why <text> [--option <label> ...]
-                 [--default <text>] [--blocks <ISSUE>] [--priority <1-4>] [--dry-run]
+  ask.mjs create --team <TEAM> --title <t> --why <text>
+                 --option <label> --option <label> [--option ...]   (at least TWO)
+                 --default <text> --blocks <ISSUE> [--blocks <ISSUE> ...]
+                 [--priority <1-4>] [--dry-run]
   ask.mjs accept <ISSUE> --as <AGENT> --body <markdown|-> [--dry-run]
 
 create files a correctly-shaped ask ticket, then READS IT BACK and proves the decision
-trigger can parse its options. accept replies in-thread as the app actor and moves the
-ticket to Done — refusing if the ticket is not an ask.`);
+trigger can parse its options AND that every requested blocking relation landed. accept
+replies in-thread as the app actor and moves the ticket to Done — refusing if the ticket
+is not an ask.
+
+⛔ --option (>=2), --default and --blocks are REQUIRED (CTL-2157). An ask with nothing to
+choose between, no meaning for silence, or no work attached is the pile-up asks exist to
+replace: the answer wakes the agents parked on the tickets the ask BLOCKS.
+Exit: 0 filed and provably answerable · 1 nothing was filed · 2 filed but DEFECTIVE
+(undecidable body, or a --blocks relation Linear did not record).`);
 }
 
 function argOf(argv, name, { many = false } = {}) {
@@ -287,6 +367,52 @@ function cmdCreate(argv) {
 
   if (!team || !title || !why) {
     console.error("ask create: --team, --title and --why are required");
+    return 1;
+  }
+
+  // ⛔ CTL-2157 — AN ASK MUST BE ANSWERABLE, AND MUST WAKE SOMETHING.
+  //
+  // These three were documented in the skill from day one and enforced NOWHERE: an
+  // audit of this file found a machine could file an ask with zero options, no
+  // default and no blocking relation and get exit 0. Each hole is a way for an ask
+  // to become the content-free bin the `needs-human` label was:
+  //
+  //   • FEWER THAN TWO OPTIONS — there is nothing to decide. verifyAskBody
+  //     explicitly returns ok:true for an option-less ask ("nothing to verify"),
+  //     so the round-trip validator cannot catch this; the check has to be here.
+  //     One option is worse than none: it reads as a decision and is a rubber stamp.
+  //   • NO DEFAULT — silence has no meaning, so the ask can only ever be resolved
+  //     by a human doing something, which is precisely the pile-up we are deleting.
+  //   • NO --blocks — nothing to wake. The daemon's comment-wake fans an answered
+  //     ask out to the work it blocks (execution-core/ask-wake.mjs); an ask that
+  //     blocks nothing answers into the void and its agent waits forever
+  //     (ADV-1374/1376 sat for DAYS on exactly that).
+  //
+  // No escape-hatch flag, deliberately: a flag that turns these off is a flag every
+  // caller in a hurry will pass. A genuinely open question still enumerates its
+  // options — "something else — tell me" is an option.
+  if (options.length < 2) {
+    console.error(
+      `ask create: REFUSING — an ask needs at least TWO --option values (got ${options.length}). ` +
+        "An ask with one option or none is not a decision; it is a status update wearing an ask's " +
+        "label, and nothing can be answered by tapping."
+    );
+    return 1;
+  }
+  if (!nonEmpty(dflt)) {
+    console.error(
+      "ask create: REFUSING — --default is required. Without a stated default, SILENCE HAS NO " +
+        "MEANING and the ask can only ever be cleared by a human acting, which is the pile-up " +
+        "asks exist to avoid."
+    );
+    return 1;
+  }
+  if (blocks.length === 0) {
+    console.error(
+      "ask create: REFUSING — --blocks <ISSUE> is required (repeat it for several). The answer " +
+        "wakes the agents parked on the tickets this ask BLOCKS; an ask that blocks nothing wakes " +
+        "nobody, and the work it was raised for waits forever."
+    );
     return 1;
   }
   const body = buildAskBody({ why, options, defaultIfSilent: dflt, blocks });
@@ -395,7 +521,14 @@ function cmdCreate(argv) {
   // linearis versions" — the ask skill's own gotcha. The round trip validated the body and
   // said nothing about relations, so this could exit 0 while every earlier work ticket
   // remained formally unblocked. Read them back and NAME the missing ones.
-  const missingBlocks = missingBlocksFrom(blocks, readBack.stdout);
+  const missingBlocksOrNull = missingBlocksFrom(blocks, readBack.stdout);
+  // ⛔ `null` is "the read-back carried no relation field" — NOT "no relations are
+  // missing". Reporting it as `[]` is precisely the inert check this replaced, and
+  // reporting it as "all missing" would be a lie about what Linear stored. It is its
+  // own outcome, and it FAILS CLOSED: an automated caller must not record "filed and
+  // wakeable" for an ask whose wake path was never proven.
+  const blocksVerified = missingBlocksOrNull !== null;
+  const missingBlocks = missingBlocksOrNull ?? [];
 
   console.log(
     JSON.stringify({
@@ -404,21 +537,37 @@ function cmdCreate(argv) {
       decidable: post.ok,
       reason: post.reason,
       parsedOptions: post.parsed,
+      blocksVerified,
       missingBlocks,
     })
   );
+  // ⛔ CTL-2157 — THIS IS A FAILURE, NOT A WARNING. It used to print a ⚠️ and then
+  // `return 0`, so an automated caller — which reads the exit code, not stderr —
+  // recorded "ask filed" for an ask whose relation to the work was never created.
+  // That relation is load-bearing twice over: the comment-wake fans an answered ask
+  // out along it (execution-core/ask-wake.mjs), and the triage ranking measures an
+  // ask's blast radius by the work it blocks. Exit 2 (the ticket EXISTS but is
+  // defective) rather than 1 (nothing was filed) — the caller must repair, not refile.
   if (missingBlocks.length > 0) {
     console.error(
-      `ask create: ⚠️ ${id} filed, but these --blocks relations are NOT on it: ${missingBlocks.join(", ")} — ` +
-        "add them by hand (linearis keeps only the last --blocks on some versions)."
+      `ask create: ⛔ ${id} filed, but these --blocks relations are NOT on it: ${missingBlocks.join(", ")} — ` +
+        "add them by hand (linearis keeps only the last --blocks on some versions). Until you do, " +
+        "an answer on this ask will not wake the agents parked on them."
+    );
+  }
+  if (!blocksVerified) {
+    console.error(
+      `ask create: ⛔ ${id} filed, but the read-back carried NO relation field — cannot prove the ` +
+        `--blocks relations (${blocks.join(", ")}) landed. Verify by hand; until then an answer on ` +
+        "this ask is not proven to wake anything."
     );
   }
   if (!post.ok) {
     console.error(
       `ask create: ⛔ ${id} exists but is NOT decidable (${post.reason}: ${post.note}) — fix the body before relying on it`
     );
-    return 2;
   }
+  if (missingBlocks.length > 0 || !blocksVerified || !post.ok) return 2;
   return 0;
 }
 

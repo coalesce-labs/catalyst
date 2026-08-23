@@ -168,6 +168,17 @@ on:
       - "package.json"
       - "bun.lock"
       - "turbo.json"
+      # CTL-2162: THE TRIGGER MUST MATCH THE SCAN (same doctrine as the
+      # plugins/dev/scripts/** and plugins/*/skills/** entries above, on the docs
+      # axis). needs-human-deleted.test.sh scans the WHOLE repo for the deleted
+      # label; 11 of its 168 pinned survivor files live under docs/ and website/.
+      # Without these two globs a PR that reintroduces `needs-human` in a doc —
+      # including references/event-schema.md's off-machine event contract, which
+      # consumers outside this repo read — skips this job entirely and the guard
+      # never fires. Widening a required check only ever costs CI minutes;
+      # narrowing it costs correctness.
+      - "docs/**"
+      - "website/**"
 
 jobs:
   # Always runs (see the PR-TRIGGER NOTE above) so `execution-core-unit-tests`'s
@@ -236,6 +247,11 @@ jobs:
               # CTL-56: mirror the push-path entry above — the repo-wide guard scans the legacy
               # orchestrate skill, so a change confined to it must mark the PR relevant.
               - "plugins/legacy/skills/orchestrate/**"
+              # CTL-2162: mirror the two globs from on.push.paths — see the note
+              # there. needs-human-deleted.test.sh scans the whole repo, so a
+              # docs-only PR that reintroduces the label must mark the PR relevant.
+              - "docs/**"
+              - "website/**"
 
   execution-core-unit-tests:
     needs: detect-changes
@@ -261,6 +277,24 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      # ⛔ ripgrep is NOT preinstalled on ubuntu-latest, and two suites here are built entirely on
+      # `rg --no-ignore --hidden`: the CTL-2162 deletion ratchet and
+      # linear-comment-post.test.sh. Without it every scan reads an EMPTY TREE, which does not
+      # error — it silently returns no matches. On 2026-08-22 that made the CTL-2162 guard report
+      # "5 passed, 5 failed": every assertion that must FIND something failed, every assertion
+      # that merely asserts ABSENCE passed, and the ratchet claimed 168 survivor files had
+      # "shrank or vanished". The guard had never once passed in CI.
+      #
+      # It was only visible because those suites plant positive controls. A guard that scans for
+      # the absence of a token, with no planted control, would have gone GREEN here while checking
+      # nothing at all — which is the failure this whole epic is about.
+      - name: Install ripgrep (required by the scan-based suites)
+        working-directory: .
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ripgrep
+          rg --version
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -948,7 +982,16 @@ jobs:
         # step documents). Measured green on origin/main (9 pass) and this branch
         # (10 pass), so it imports no pre-existing red like fence-held-fold would.
         working-directory: plugins/dev/scripts/broker
-        run: bun test worker-state-projection.test.mjs tailer-torn.test.mjs event-name-fold.test.mjs namespace-parity.test.mjs event-leak-guard.test.mjs
+        # CTL-2159: system-trouble.test.mjs joins the same hand-enumerated list. It
+        # now gates the `system_stall` rule — the ONLY alert path for the ~30 SYSTEM
+        # reason tokens that have no telemetry producer (spent retry budgets,
+        # watchdog kills, wedged workers). Those tokens stopped writing a per-ticket
+        # artifact in CTL-2159; if this rule regresses they produce NO artifact and
+        # NO alert, which is silent and strictly worse than the bin the epic deletes.
+        # `grep -rn system-trouble .github/workflows/` returned NOTHING before this;
+        # positive control: the same grep for `worker-state-projection` returned the
+        # `run:` line below. Measured 39 pass / 0 fail on this branch.
+        run: bun test worker-state-projection.test.mjs tailer-torn.test.mjs event-name-fold.test.mjs namespace-parity.test.mjs event-leak-guard.test.mjs system-trouble.test.mjs
 
       - name: plugin-refresh + lock-resolution-audit tests (CTL-1831)
         # `grep plugin-refresh .github/workflows/` returned only two COMMENTS
@@ -1142,6 +1185,26 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/merge-delete-branch-worktree-guard.test.sh
 
+      - name: needs-human deletion guard (CTL-2162)
+        # CTL-2162: the label `needs-human` is deleted (CTL-2156…CTL-2161). This is the
+        # guard that stops it coming back — a ratchet over a frozen survivor manifest
+        # plus four hard-zero properties (no setup script creates the label; no runtime
+        # writer stamps it as a phase-signal status; the orch-monitor attention taxonomy
+        # excludes it; the retired broker reconcile event name has no producer).
+        #
+        # Every zero in it is paired with a PLANTED-OCCURRENCE control, because the
+        # plan's own version of the runtime-writer case scanned the schema enums —
+        # where the value had never appeared — and so passed vacuously before any work
+        # was done. Read the header of the test before changing it.
+        #
+        # CTL-2076 applies: this workflow allowlists shell suites by name rather than
+        # globbing __tests__/, so a new suite runs in required CI only once registered
+        # here. The matching trigger widening (docs/**, website/**) is in on.push.paths
+        # and detect-changes — THE TRIGGER MUST MATCH THE SCAN, or the label comes back
+        # in a tree this job never runs for.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/needs-human-deleted.test.sh
+
       - name: Run stable unit tests
         # CTL-1789 round-1 P2 (Codex): assertion-evidence.test.mjs and
         # assertion-evidence-parity.test.mjs are added below. The parity
@@ -1197,6 +1260,82 @@ jobs:
         #   file in the list below — it drives readNewEvents directly and calls
         #   stopMonitor() before every append, so it arms no timer and no watcher
         #   (measured max 1.6 s per case locally, vs bun's 5 000 ms default).
+        #
+        #   CTL-2157 NOTE, the same shape one rung out: because daemon.test.mjs
+        #   is excluded, a handleCommentWake case added THERE would never run
+        #   here. The ask→work wake is the hard prerequisite of the needs-human
+        #   deletion (an ask nothing consumes piles up as the label did), so
+        #   its cases live in ask-wake-daemon.test.mjs, listed below. Like
+        #   monitor-torn it arms no timer and no watcher: it calls
+        #   handleCommentWake directly against tmp worker dirs with every seam
+        #   injected — no replica read, no Linear call (13 pass, 228 ms).
+        #   ask-wake.test.mjs is the pure resolver plus the ASK_LABEL_NAMES
+        #   parity pin against scripts/ask.mjs (26 pass, 51 ms).
+        #   Registered in the SAME change that adds both suites — the
+        #   four-times-burned allowlist lesson the ask-verb / event-name /
+        #   replica-path steps each document. Instrument (a `run:`-anchored grep
+        #   is invalid for this multi-line block — see the event-name step):
+        #   `grep -n ask-wake .github/workflows/` returned NOTHING before this
+        #   edit, against a positive control of `assertion-evidence-parity`,
+        #   which returns its list line.
+        #
+        #   CTL-2158 NOTE: stall-class.test.mjs (the pure S/A/M/HELD classifier)
+        #   and stall-class-wiring.test.mjs (the unstuck-sweep quiet-gate + the
+        #   escalation producers' output re-target) are listed for the same
+        #   reason, and registered in the SAME change that adds them. What they
+        #   guard is a gate whose failure is INVISIBLE in both directions: lose
+        #   it one way and every sweep interval posts another authored Linear
+        #   comment on a ticket a human is already holding (CTL-638); lose it the
+        #   other way and an unclassifiable stall goes silent — no label, no ask,
+        #   no alert, no retry. Both suites are pure + tmpdir only: no timer, no
+        #   watcher, no Linear call (60 pass, ~60 ms combined). Instrument (a
+        #   `run:`-anchored grep is invalid for this multi-line block — see the
+        #   event-name step): `grep -rn stall-class .github/workflows/` returned
+        #   NOTHING before this edit, against the same positive control of
+        #   `assertion-evidence-parity`, which returns its list line.
+        #
+        #   CTL-2160 NOTE: needs-human-migration-sweep.test.mjs is REGISTERED here
+        #   deliberately. Its most important case is that an UNAVAILABLE `blocks`
+        #   relation source ABORTS the sweep instead of passing — the audit found
+        #   that rule, as originally specified, could not run on the data source it
+        #   named and would have silently auto-cleared the tickets it exists to
+        #   protect. A safety rule that only runs when someone remembers to run its
+        #   test is not a safety rule.
+        #   CTL-2159 NOTE: escalation-publish.test.mjs is the PRODUCER SWEEP's
+        #   proof — per producer, that its own trigger no longer writes the Linear
+        #   `needs-human` label and that the correct replacement fired. It is
+        #   registered in the SAME change that adds it because this repo has now
+        #   shipped an unlisted (therefore inert) suite five times, and this one
+        #   guards a property no grep can: six of the producers reach the label
+        #   only through routeStuckTicketToDelegate and match none of the tokens a
+        #   producer sweep would grep for, so a regression there passes every
+        #   textual check. Pure + tmpdir only; no timer, no Linear call (24 pass,
+        #   ~130 ms). Instrument (a `run:`-anchored grep is invalid for this
+        #   multi-line block — see the event-name step):
+        #   `grep -rn escalation-publish .github/workflows/` returned NOTHING
+        #   before this edit, against the same positive control of
+        #   `assertion-evidence-parity`, which returns its list line.
+        #
+        #   CTL-2159 ROUND 2: delegate-first.test.mjs and durable-escalation.test.mjs
+        #   join for the same reason. delegate-first is the seam SIX producers reach
+        #   the escalation through — including the volume producer — and it now
+        #   carries the stall CLASS out to four scheduler sites that gate a durable
+        #   per-ticket `worker.transition {toDisposition:"needs-human"}` on it;
+        #   durable-escalation is the SECOND per-ticket artifact store (the board
+        #   renders every record as a needs-human card) and now carries the class
+        #   that keeps SYSTEM stalls off it. `grep -rn 'delegate-first.test\|durable
+        #   -escalation.test' .github/workflows/` returned NOTHING before this edit;
+        #   positive control: the same grep for `label-guard.test.mjs` returns its
+        #   list line. Measured 24 + 17 pass / 0 fail on this branch.
+        #
+        #   ⛔ DELIBERATELY NOT ADDED: delegate-emit-wiring.test.mjs and
+        #   delegate-shadow-e2e.test.mjs. Both are RED on origin/main and on this
+        #   branch alike (4 failures, all in stale-pr-rescue's defaultEscalate
+        #   emitting an EXTRA delegate event — verified pre-existing by checking out
+        #   HEAD~1 and re-running: same 4 by name). Registering a red suite makes the
+        #   gate red on arrival and teaches the next author to skip it. They belong
+        #   in CI the moment that defect is fixed; it is out of this change's scope
+        #   and is stated here rather than left as a silent omission.
         run: |
           bun test \
             beliefs/advance-rules.test.mjs \
@@ -1222,6 +1361,14 @@ jobs:
             abort-worker.test.mjs \
             assertion-evidence.test.mjs \
             assertion-evidence-parity.test.mjs \
+            ask-wake.test.mjs \
+            ask-wake-daemon.test.mjs \
+            stall-class.test.mjs \
+            stall-class-wiring.test.mjs \
+            escalation-publish.test.mjs \
+            needs-human-migration-sweep.test.mjs \
+            delegate-first.test.mjs \
+            durable-escalation.test.mjs \
             cli-header-backtick-guard.test.mjs \
             agent-session-narrator.test.mjs \
             linear-comment-write.test.mjs \

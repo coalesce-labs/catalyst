@@ -473,7 +473,11 @@ else
 
 	case "$ws_cs_status" in
 	found)
-		for _ws_cs_exp in queued blocked needs-input needs-human; do
+		# CTL-2159: `needs-human` deliberately removed from the expected set.
+		# setup-execution-core-states.sh no longer creates it; a loop that still
+		# WARNed on its absence would make every host complain about the label it
+		# was just taught not to create (audit Gap 7).
+		for _ws_cs_exp in queued blocked needs-input; do
 			if echo "$ws_cs_members" | jq -e --arg n "$_ws_cs_exp" \
 				'map(. == $n) | any' >/dev/null 2>&1; then
 				pass "worker-status label: ${_ws_cs_exp}"

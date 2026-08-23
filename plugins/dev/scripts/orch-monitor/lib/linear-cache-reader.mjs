@@ -137,24 +137,42 @@ async function readTicketStateById(dbPath) {
   }
 }
 
-// ── parked needs-human tickets (off-board attention) ─────────────────────────
+// ── parked attention tickets (off-board attention) ───────────────────────────
 // The board's ticket set is built from LIVE worker dirs (liveTickets +
-// betweenPhases + recentDone + queued + orphan-PR synthetics). A needs-human /
+// betweenPhases + recentDone + queued + orphan-PR synthetics). An ask /
 // needs-input ticket whose worker dir was torn down (the PARKED case — most
 // parked tickets) is in NONE of those sets, so it never enters payload.tickets
 // and never reaches the inbox — even though deriveAttention already supports the
-// label. This reader is the cache source for that missing set: it mirrors
-// router.mjs::countNeedsHumanTickets EXACTLY — SAME accessor
-// (getAllTicketDescriptors → filter-state.db) and SAME predicate (non-removed,
-// non-terminal, carries a needs-human/needs-input label) — so the inbox surfaces
-// precisely the set the broker's pile-up signal counts.
+// label. This reader is the cache source for that missing set: the SAME accessor
+// (getAllTicketDescriptors → filter-state.db) and the predicate "non-removed,
+// non-terminal, carries an ask / needs-input label".
 //
-// Labels + the Linear terminal set are mirrored LOCALLY (from
-// broker/alert-emit.mjs NEEDS_HUMAN_LABELS + execution-core/terminal-state.mjs)
-// so this cache reader pulls in nothing from the broker beyond the descriptor
-// accessor — keeping the vite config graph free of bun:sqlite (see the long note
-// in readTicketStateById).
-const NEEDS_HUMAN_LABELS = ["needs-human", "needs-input"];
+// CTL-2156/CTL-2161 — WHY THIS IS THE LAST COPY, AND WHY IT IS PINNED. The broker
+// used to hold a second copy of this taxonomy (broker/alert-emit.mjs
+// NEEDS_HUMAN_LABELS) feeding the `needs_human_pileup` alert, and
+// router.mjs::countNeedsHumanTickets mirrored this predicate exactly. Both are
+// RETIRED: counting `needs-human` labels measured the per-ticket escalation
+// artifact rather than the underlying condition, so one provider outage read as N
+// human asks. System trouble now raises ONE fleet-scoped alert
+// (broker/system-trouble.mjs).
+//
+// ⛔ CTL-2161: `needs-human` is GONE from this set. The parked inbox is the ASK
+// inbox — an ask ticket (`catalyst-ask` / `ask/decision`, CTL-2157) or the
+// needs-input worker-paused label. Keeping `needs-human` here after the label
+// stops being written would not be harmless: the pile of ~69 already-labelled
+// tickets would go on rendering as parked attention rows forever, which is the
+// bin this epic deletes.
+//
+// This copy is deliberately mirrored LOCALLY (rather than imported from
+// board-data.mjs) to keep the vite config graph free of bun:sqlite and to avoid a
+// board-data ⇄ linear-cache-reader import cycle — see the long note in
+// readTicketStateById. It is pinned by its own parity test against board-data's
+// canonical ATTENTION_LABEL* exports (linear-cache-reader.test.mjs), which is what
+// stops a taxonomy rename (CTL-995) from silently emptying the parked inbox.
+// Exported for that test — not part of the module's functional API.
+export const ATTENTION_LABELS = ["catalyst-ask", "ask/decision", "needs-input"];
+/** The ask half of ATTENTION_LABELS — the labels that mean "a person owes an answer". */
+export const ASK_LABELS = ["catalyst-ask", "ask/decision"];
 const TERMINAL_LINEAR_STATES = new Set(["Done", "Canceled"]);
 
 // readAllTicketDescriptors — the SAME bulk descriptor accessor readTicketStateById
@@ -167,14 +185,14 @@ async function readAllTicketDescriptors(dbPath) {
   return getAllTicketDescriptors();
 }
 
-// readParkedNeedsHumanTickets — the cache-sourced parked needs-human set. Returns
+// readParkedAttentionTickets — the cache-sourced parked attention set. Returns
 // minimal descriptors { ticket, labels, linearState, priority, updatedAt } for
-// every non-removed, non-terminal ticket carrying a needs-human/needs-input label.
+// every non-removed, non-terminal ticket carrying an ask / needs-input label.
 // Fail-OPEN: any read error degrades to [] — the inbox keeps its current
 // worker-dir-sourced behavior and never throws out of the assemble (CTL-883
-// posture, consistent with countNeedsHumanTickets returning 0 on a db error).
+// posture: a cache read failure must never blank the board with an exception).
 // `descriptorReader` is injectable so unit tests drive the predicate without a DB.
-export async function readParkedNeedsHumanTickets({
+export async function readParkedAttentionTickets({
   dbPath = DEFAULT_DB_PATH,
   descriptorReader = readAllTicketDescriptors,
 } = {}) {
@@ -191,7 +209,7 @@ export async function readParkedNeedsHumanTickets({
     if (d.removed) continue; // tombstoned (getAllTicketDescriptors excludes these by default)
     if (d.state && TERMINAL_LINEAR_STATES.has(d.state)) continue; // Done/Canceled
     const labels = Array.isArray(d.labels) ? d.labels.filter(Boolean) : [];
-    if (!labels.some((l) => NEEDS_HUMAN_LABELS.includes(l))) continue;
+    if (!labels.some((l) => ATTENTION_LABELS.includes(l))) continue;
     out.push({
       ticket: d.ticket,
       labels,
@@ -396,17 +414,16 @@ export async function readReplicaTicketDetails({
   }
 }
 
-// readReplicaHumanHolds — replica-backed needs-human/needs-input holds for a
-// bounded id set (the CTL-1588 queue annotation's SECOND source). The parked
-// descriptor set (filter-state.db) is webhook-fed, and the webhook receiver is
-// single-homed — a label applied while this node's broker missed the delivery
-// leaves a durable gap (live: mini-2 missing CRM-1/2/5/6's needs-human), so the
-// queue kept ranking held tickets as imminent. The CTC replica is the SDK's
-// live Linear mirror and carries every label; one bounded read per assemble
-// (queue ids only — a handful) closes the gap. Same gating + fail-open contract
-// as readReplicaTitles above: file-presence gate, {} on ANY failure, and the
-// reader is closed either way. needs-human outranks needs-input (house
-// precedence).
+// readReplicaHumanHolds — replica-backed ask / needs-input holds for a bounded id
+// set (the CTL-1588 queue annotation's SECOND source). The parked descriptor set
+// (filter-state.db) is webhook-fed, and the webhook receiver is single-homed — a
+// label applied while this node's broker missed the delivery leaves a durable gap
+// (live: mini-2 missing CRM-1/2/5/6's hold labels), so the queue kept ranking held
+// tickets as imminent. The CTC replica is the SDK's live Linear mirror and carries
+// every label; one bounded read per assemble (queue ids only — a handful) closes
+// the gap. Same gating + fail-open contract as readReplicaTitles above:
+// file-presence gate, {} on ANY failure, and the reader is closed either way.
+// CTL-2161: an ask outranks needs-input (house precedence).
 export async function readReplicaHumanHolds({
   ids = [],
   dbPath = process.env.CATALYST_REPLICA_DB || defaultReplicaDbPath(),
@@ -438,7 +455,7 @@ export async function readReplicaHumanHolds({
       if (byId && typeof byId === "object") {
         for (const [id, names] of Object.entries(byId)) {
           if (!Array.isArray(names)) continue;
-          if (names.includes("needs-human")) out[id] = "needs-human";
+          if (names.some((n) => ASK_LABELS.includes(n))) out[id] = "ask";
           else if (names.includes("needs-input")) out[id] = "needs-input";
         }
       }
@@ -453,7 +470,7 @@ export async function readReplicaHumanHolds({
       }
       if (!Array.isArray(nodes)) continue;
       const names = nodes.map((n) => n?.name).filter(Boolean);
-      if (names.includes("needs-human")) out[id] = "needs-human";
+      if (names.some((n) => ASK_LABELS.includes(n))) out[id] = "ask";
       else if (names.includes("needs-input")) out[id] = "needs-input";
     }
     return out;
