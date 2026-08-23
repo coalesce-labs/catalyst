@@ -12,6 +12,7 @@ import { log } from "../logger.ts";
 import { buildCanonicalEnvelope } from "../canonical.ts";
 import { recordDrop, type DropReason } from "../drop-surface.ts";
 import { createSparseWarnGate } from "../sparse-warn.ts";
+import { classifyForwardFailure } from "../failure-class.ts";
 
 const destLog = log.child({ destination: "otlp" });
 
@@ -357,8 +358,18 @@ export class OtlpSender {
   }
 
   private emitFailure(batch: CanonicalEvent[], err: unknown): void {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    // CTL-2084: classify the cause into a bounded category (+ HTTP status when known) so it
+    // survives OFF-MACHINE as a queryable attribute — the raw err lived only in body.payload,
+    // which buildOtlpPayload strips before OTLP export, leaving Loki with only host/severity.
+    const { category, httpStatus } = classifyForwardFailure(err);
     destLog.error(
-      { batchSize: batch.length, err: err instanceof Error ? err.message : String(err) },
+      {
+        batchSize: batch.length,
+        err: errMsg,
+        failureCategory: category,
+        ...(httpStatus != null ? { httpStatus } : {}),
+      },
       "flush failed, wrote events to DLQ"
     );
     if (this.opts.eventLogPath && !isSelfBatch(batch)) {
@@ -366,9 +377,16 @@ export class OtlpSender {
         "catalyst.observability.forward_failed",
         {
           batchSize: batch.length,
-          err: err instanceof Error ? err.message : String(err),
+          err: errMsg, // payload unchanged (backward-compat)
         },
-        {},
+        {
+          // CTL-2084: promote the cause to attributes (mirror emitDrop's drop_reason) so it
+          // survives off-machine. Group/alert on the low-cardinality failure_category; the raw
+          // forward_err carries the concrete message for reading.
+          "catalyst.observability.failure_category": category,
+          "catalyst.observability.forward_err": errMsg,
+          ...(httpStatus != null ? { "catalyst.observability.http_status": httpStatus } : {}),
+        },
         // CTL-1506 (Codex P2): failure events keep ERROR/17 so documented error-only
         // queries (severityText == "ERROR") still surface exhausted-retry delivery
         // failures; drop counters intentionally stay WARN/13.
