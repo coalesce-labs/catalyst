@@ -1112,6 +1112,12 @@ describe("resolveGithubBootAuth re-arms before probing", () => {
 // at module load, see the "rearm hook registration" describe block below) actually fires.
 // The needle strings below track that rename; the ordering invariants themselves are
 // unchanged.
+//
+// CTL-2192: the processApprovedResumes needle is deliberately OPEN-ENDED (no trailing
+// `})`). It is an ORDERING probe, not an argument-list assertion, and pinning the exact
+// closing brace made every added dep silently turn `lineOf` into -1 — which these tests
+// do catch (`toBeGreaterThan(-1)`), but as a confusing failure in an unrelated file
+// rather than as the ordering statement they are making.
 describe("daemon boot ordering", () => {
   const daemonSrc = readFileSync(new URL("./daemon.mjs", import.meta.url), "utf8").split("\n");
   const lineOf = (needle) => daemonSrc.findIndex((l) => l.includes(needle));
@@ -1136,7 +1142,7 @@ describe("daemon boot ordering", () => {
   test("the credential RE-ARM runs BEFORE anything dispatches a worker", () => {
     const rearm = lineOf(REARM_CALL);
     const bootResume = lineOf("const bootResume = reconcileBoot(");
-    const approved = lineOf("processApprovedResumes({ orchDir, dispatch: dispatchFn })");
+    const approved = lineOf("processApprovedResumes({ orchDir, dispatch: dispatchFn");
     expect(bootResume).toBeGreaterThan(-1);
     expect(approved).toBeGreaterThan(-1);
     expect(rearm).toBeLessThan(bootResume);
@@ -1146,7 +1152,7 @@ describe("daemon boot ordering", () => {
   test("the `gh` PROBE runs AFTER the dispatches (never delays crash recovery)", () => {
     const probe = lineOf("githubAuthPreflight({ env: process.env, log })");
     const bootResume = lineOf("const bootResume = reconcileBoot(");
-    const approved = lineOf("processApprovedResumes({ orchDir, dispatch: dispatchFn })");
+    const approved = lineOf("processApprovedResumes({ orchDir, dispatch: dispatchFn");
     expect(probe).toBeGreaterThan(bootResume);
     expect(probe).toBeGreaterThan(approved);
   });

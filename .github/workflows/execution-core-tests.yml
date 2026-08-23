@@ -1485,6 +1485,7 @@ jobs:
             clear-stall-advance-reentry.test.mjs \
             boot-resume-approval.test.mjs \
             boot-resume.test.mjs \
+            ctl-2192-claim-ladder.test.mjs \
             claim.test.mjs \
             claude-agents.test.mjs \
             claude-ids.test.mjs \
@@ -1622,6 +1623,7 @@ jobs:
             reconcile-health-event.test.mjs \
             recovery.test.mjs \
             pid-file-identity.test.mjs \
+            preempt-budget.test.mjs \
             registry.test.mjs \
             replica-read.test.mjs \
             replica-comment-read.test.mjs \
@@ -1631,6 +1633,7 @@ jobs:
             scheduler-perproject.test.mjs \
             scheduler-rank.test.mjs \
             scheduler-replica-freshness.test.mjs \
+            sdk-child-discovery.test.mjs \
             sdk-run-phase-agent.test.mjs \
             sdk-slot-gate.test.mjs \
             sdk-worker-registry.test.mjs \

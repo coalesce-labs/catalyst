@@ -1641,6 +1641,65 @@ outage can never quarantine a healthy, resolvable, in-flight ticket.
 `SCHEDULER_CIRCUIT_BREAKER_THRESHOLD` is the Linear-independent backstop; the runaway knobs are
 observability only.
 
+### Preemption lap budget (CTL-2192)
+
+The scheduler's preemption sweep clears its in-memory hysteresis key after each successful
+preemption, so the same (preemptor, victim) pair restarts a fresh 30 s clock forever — a *correct*
+preempt→resume pair, repeated without end at roughly a two-minute cadence. That in-memory key is
+also module state, so a daemon bounce erases even the within-lap memory. The lap budget is the
+durable cross-lap bound. Both knobs are env vars on the `catalyst-execution-core` process:
+
+- `SCHEDULER_PREEMPT_MAX_LAPS` (default `3`) — how many times one victim may be preempted inside the
+  window before it becomes temporarily non-preemptable. **Chosen, not derived**: research measured
+  10 claims in ~30 min for one ticket and 8 in ~17 min for another, so 3 sits well below the
+  observed pathology while leaving genuine priority preemption room.
+- `SCHEDULER_PREEMPT_BUDGET_WINDOW_MS` (default `1800000`, 30 min) — the window the count is scoped
+  to. Expiry is what makes this **damping rather than a permanent exemption**: past the window the
+  victim is preemptable again.
+
+The victim ledger lives at `workers/<ticket>/.preempt-budget.json`, so it is GC'd with the ticket
+(the same placement as `.triage-dispatch-counts/` and `.runaway-alerts/`).
+
+**The victim budget alone bounds one victim, not the storm.** The sweep scans in-flight tickets
+worst-ranked-first and only stops when the queued ticket no longer out-ranks the candidate, so an
+exhausted victim hands the preemption to the next, *better*-ranked in-flight worker. Under the
+preempt-never-launch shape this fleet has hit repeatedly (CTC-829, CTL-1550, CTL-1681) a preemptor
+that wins the ranking but can never dispatch would burn victim A's laps, then B's, then C's —
+evicting progressively more valuable work. So there is a second, symmetric bound:
+
+- `SCHEDULER_PREEMPTOR_MAX_LAPS` (default: whatever `SCHEDULER_PREEMPT_MAX_LAPS` resolves to) — how
+  many preemptions **one preemptor** may win inside the window before it stops preempting at all.
+  Together with the victim cap this turns the bound from `maxLaps x |victims|` into `maxLaps`. It is
+  a good proxy for "won the eviction and still never took the slot": a preemptor that actually
+  launched acquires a `workers/<ticket>/` dir and stops being a queued candidate, so it stops
+  accruing laps. One that keeps accruing is, by construction, one that keeps evicting without ever
+  running.
+
+The preemptor ledger canNOT live under `workers/<ticket>/` — a preemptor is by definition a ticket
+with **no** worker dir, and creating one would make the dispatcher read it as in-flight. It lives at
+`<orchDir>/.preempt-budget/<TICKET>.json` and **self-prunes** on write (entries older than twice the
+window), since it has no worker dir to be GC'd with.
+
+Exhausting either budget emits one `phase.scheduler.preempt-budget-exhausted.<TICKET>` per window —
+the `scheduler` phase slot is an allowed namespace exception and the action is not in the terminal
+set, so it is pure audit with no wake side effect. Both sides share that one event name, so
+`body.payload.scope` (`"victim"` | `"preemptor"`) is what says which side it is about.
+
+⚠️ **Window boundary — a documented cost, not an oversight.** The window is anchored at the *first*
+lap and never slides, so laps clustered at the end of one window plus laps at the start of the next
+can reach up to **2x `maxLaps`** within minutes (e.g. L1 at t0, L2 at t0+29m, L3 at t0+29m30s
+exhausts the window; L4 at t0+30m01s opens a fresh one and L5/L6 follow at the 30 s hysteresis
+interval). A *sliding* window would be reset by every lap and so could never expire under a
+sustained lap — which is exactly when the bound has to be reachable. If the boundary matters for
+your fleet, shorten `SCHEDULER_PREEMPT_BUDGET_WINDOW_MS` rather than expecting a hard per-hour cap.
+
+⚠️ **Fail direction is toward today's behaviour.** This is a damper on a working mechanism, not a
+safety interlock: an unreadable or unwritable ledger still allows the preemption, because failing
+closed would let one corrupt file freeze genuine priority preemption for a ticket indefinitely. A
+non-durable write is **announced** rather than swallowed — the scheduler logs one edge-triggered
+warning per ticket (`preemption lap NOT persisted`) and a matching `info` when the ledger becomes
+writable again, because a silently-disarmed damper is indistinguishable from one that is working.
+
 ### Label-write retry cap (CTL-2052)
 
 The disposition/held-label convergers cool down a failed `applyLabel` (CTL-834/COORD-236). A

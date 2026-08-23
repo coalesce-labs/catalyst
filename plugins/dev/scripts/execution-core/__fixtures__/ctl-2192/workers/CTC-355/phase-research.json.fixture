@@ -1,0 +1,25 @@
+{
+  "ticket": "CTC-355",
+  "phase": "research",
+  "orchestrator": "CTC-355",
+  "model": "opus",
+  "executor": "sdk",
+  "turnCap": 500,
+  "status": "done",
+  "bg_job_id": null,
+  "worktreePath": "%WT%/catalyst-cloud/CTC-355",
+  "generation": 8,
+  "attempt": 1,
+  "startedAt": "2026-08-22T01:07:34Z",
+  "updatedAt": "2026-08-22T01:09:41Z",
+  "host": {
+    "name": "mini-2",
+    "id": "100aaff3cc33d9f7"
+  },
+  "parkedFrom": "research",
+  "attentionReason": "preempted-by-priority",
+  "artifact": "thoughts/shared/research/2026-08-22-ctc-355.md",
+  "completedAt": "2026-08-22T01:09:41Z",
+  "assertedBy": "phase-agent-emit-complete",
+  "failureReason": null
+}

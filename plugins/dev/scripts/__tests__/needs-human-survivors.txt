@@ -39,6 +39,11 @@
 1	plugins/dev/scripts/broker/system-trouble.test.mjs
 1	plugins/dev/scripts/check-project-setup.sh
 1	plugins/dev/scripts/check-setup.sh
+3	plugins/dev/scripts/execution-core/__fixtures__/ctl-2192/CHECKSUMS.txt
+2	plugins/dev/scripts/execution-core/__fixtures__/ctl-2192/PROVENANCE.md
+1	plugins/dev/scripts/execution-core/__fixtures__/ctl-2192/workers/CTC-166/phase-recovery-pass.json.fixture
+2	plugins/dev/scripts/execution-core/__fixtures__/ctl-2192/workers/CTC-355/phase-recovery-pass.json.fixture
+1	plugins/dev/scripts/execution-core/__fixtures__/ctl-2192/workers/CTL-2192/phase-recovery-pass.json.fixture
 3	plugins/dev/scripts/execution-core/__tests__/stale-pr-rescue-escalate-router.test.mjs
 2	plugins/dev/scripts/execution-core/artifact-contradiction.mjs
 2	plugins/dev/scripts/execution-core/artifact-contradiction.test.mjs
@@ -52,7 +57,7 @@
 28	plugins/dev/scripts/execution-core/board-health.test.mjs
 2	plugins/dev/scripts/execution-core/boot-resume-approval.test.mjs
 14	plugins/dev/scripts/execution-core/boot-resume.mjs
-5	plugins/dev/scripts/execution-core/boot-resume.test.mjs
+7	plugins/dev/scripts/execution-core/boot-resume.test.mjs
 1	plugins/dev/scripts/execution-core/checkout-sync.mjs
 1	plugins/dev/scripts/execution-core/checkout-sync.test.mjs
 3	plugins/dev/scripts/execution-core/clear-stall-empty-dir.test.mjs
@@ -63,6 +68,7 @@
 3	plugins/dev/scripts/execution-core/config.mjs
 2	plugins/dev/scripts/execution-core/cost-cap.mjs
 2	plugins/dev/scripts/execution-core/cost-cap.test.mjs
+1	plugins/dev/scripts/execution-core/ctl-2192-claim-ladder.test.mjs
 30	plugins/dev/scripts/execution-core/daemon.mjs
 51	plugins/dev/scripts/execution-core/daemon.test.mjs
 2	plugins/dev/scripts/execution-core/delegate-emit-wiring.test.mjs

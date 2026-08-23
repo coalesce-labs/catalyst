@@ -81,6 +81,230 @@ describe("processApprovedResumes (CTL-644)", () => {
     expect(existsSync(bootResumeApprovedPath(orchDir, "CTL-50"))).toBe(false);
   });
 
+  // ── CTL-2192 remediation: the ADJACENT DOOR ──────────────────────────────
+  //
+  // reconcileBoot excludes tickets whose boot-time orphan reap could not be
+  // confirmed. processApprovedResumes runs eight lines later in startDaemon and
+  // used to dispatch on the two sentinels ALONE, so a ticket the line above had
+  // just refused walked straight through here — "never dispatch beside an
+  // unconfirmed orphan" held only on the path that was tested.
+  test("⛔ an approved ticket whose orphan reap is UNCONFIRMED is NOT dispatched", () => {
+    writePendingMarker(orchDir, "CTL-60", "implement", "/wt/CTL-60");
+    writeApprovedMarker(orchDir, "CTL-60");
+
+    const reviveDispatch = makeReviveDispatch(0);
+    const res = processApprovedResumes({
+      orchDir,
+      reviveDispatch,
+      dispatch: () => {},
+      appendEvent: () => true,
+      reapFailedTickets: new Set(["CTL-60"]),
+    });
+
+    expect(reviveDispatch.calls.length).toBe(0);
+    expect(res.dispatched).toBe(0);
+    expect(res.reapBlocked).toBe(1);
+    // BOTH sentinels retained: the approval is still valid, it is just not
+    // actionable on this boot. Clearing them would silently DROP the resume.
+    expect(existsSync(bootResumePendingPath(orchDir, "CTL-60"))).toBe(true);
+    expect(existsSync(bootResumeApprovedPath(orchDir, "CTL-60"))).toBe(true);
+  });
+
+  test("⛔ the block survives an UNREADABLE pending marker (checked before the read)", () => {
+    // An unreadable marker must not mask the guard — otherwise a corrupt file
+    // downgrades a safety refusal into an unrelated "skipping" warn.
+    writePendingMarker(orchDir, "CTL-61", "implement", "/wt/CTL-61");
+    writeFileSync(bootResumePendingPath(orchDir, "CTL-61"), "{not json");
+    writeApprovedMarker(orchDir, "CTL-61");
+
+    const reviveDispatch = makeReviveDispatch(0);
+    const res = processApprovedResumes({
+      orchDir,
+      reviveDispatch,
+      dispatch: () => {},
+      appendEvent: () => true,
+      reapFailedTickets: new Set(["CTL-61"]),
+    });
+
+    expect(reviveDispatch.calls.length).toBe(0);
+    expect(res.reapBlocked).toBe(1);
+  });
+
+  // ⛔ POSITIVE CONTROL. Without this the test above would pass just as well if
+  // the guard had disabled approved-resume dispatch outright.
+  test("positive control — a ticket NOT in the reap-failed set still dispatches", () => {
+    writePendingMarker(orchDir, "CTL-62", "implement", "/wt/CTL-62");
+    writeApprovedMarker(orchDir, "CTL-62");
+
+    const reviveDispatch = makeReviveDispatch(0);
+    const res = processApprovedResumes({
+      orchDir,
+      reviveDispatch,
+      dispatch: () => {},
+      appendEvent: () => true,
+      reapFailedTickets: new Set(["CTL-999"]), // a DIFFERENT ticket
+    });
+
+    expect(reviveDispatch.calls.map((c) => c[0].ticket)).toContain("CTL-62");
+    expect(res.reapBlocked).toBe(0);
+  });
+
+  // ── CTL-2192 (Codex #3955 round 2 P1): the PER-TICK door ─────────────────
+  //
+  // The reapFailedTickets guard above only fires when a caller supplies the boot
+  // verdict. The scheduler's per-tick call supplies nothing — and `startScheduler`
+  // runs `runTick()` immediately as its "authoritative initial pass", so that
+  // unguarded call happens on the SAME boot whose reap just failed. The boot pass
+  // retains the approval; the first tick, moments later, dispatched it anyway.
+  // The per-tick path therefore re-derives liveness itself.
+  test("⛔ a LIVE sdk worker blocks the approval even with NO reapFailedTickets (the per-tick call)", () => {
+    writePendingMarker(orchDir, "CTL-70", "implement", "/wt/CTL-70");
+    writeApprovedMarker(orchDir, "CTL-70");
+
+    const reviveDispatch = makeReviveDispatch(0);
+    const res = processApprovedResumes({
+      orchDir,
+      reviveDispatch,
+      dispatch: () => {},
+      appendEvent: () => true,
+      // Exactly what scheduler.mjs passes: no boot verdict at all.
+      sdkLiveness: () => ({ state: "live", reason: "orphan-child-alive", childPid: 4242 }),
+    });
+
+    expect(reviveDispatch.calls.length).toBe(0);
+    expect(res.dispatched).toBe(0);
+    expect(res.reapBlocked).toBe(1);
+    // Deferred, not dropped — the approval stays valid for a later tick.
+    expect(existsSync(bootResumePendingPath(orchDir, "CTL-70"))).toBe(true);
+    expect(existsSync(bootResumeApprovedPath(orchDir, "CTL-70"))).toBe(true);
+  });
+
+  // ⛔ POSITIVE CONTROL for the three cases below: without it they would pass
+  // just as well if the oracle blocked unconditionally.
+  test("positive control — a DEAD verdict dispatches (the orphan really is gone)", () => {
+    writePendingMarker(orchDir, "CTL-71", "implement", "/wt/CTL-71");
+    writeApprovedMarker(orchDir, "CTL-71");
+
+    const reviveDispatch = makeReviveDispatch(0);
+    const res = processApprovedResumes({
+      orchDir,
+      reviveDispatch,
+      dispatch: () => {},
+      appendEvent: () => true,
+      sdkLiveness: () => ({ state: "dead", reason: "orphan-child-dead", childPid: 4242 }),
+    });
+
+    expect(reviveDispatch.calls.map((c) => c[0].ticket)).toContain("CTL-71");
+    expect(res.reapBlocked).toBe(0);
+  });
+
+  test("UNKNOWN does not block — a legacy projection must never strand an approval", () => {
+    // The fail direction, and it matters more here than elsewhere: this is an
+    // OPERATOR's approval. Blocking on `unknown` would hold every one of them on
+    // a host whose projections predate child-pid discovery.
+    writePendingMarker(orchDir, "CTL-72", "implement", "/wt/CTL-72");
+    writeApprovedMarker(orchDir, "CTL-72");
+
+    const reviveDispatch = makeReviveDispatch(0);
+    const res = processApprovedResumes({
+      orchDir,
+      reviveDispatch,
+      dispatch: () => {},
+      appendEvent: () => true,
+      sdkLiveness: () => ({ state: "unknown", reason: "legacy-projection-no-child-record", childPid: null }),
+    });
+
+    expect(reviveDispatch.calls.map((c) => c[0].ticket)).toContain("CTL-72");
+    expect(res.reapBlocked).toBe(0);
+  });
+
+  test("a THROWING oracle is unknown, not a block — it cannot wedge every approval", () => {
+    writePendingMarker(orchDir, "CTL-73", "implement", "/wt/CTL-73");
+    writeApprovedMarker(orchDir, "CTL-73");
+
+    const reviveDispatch = makeReviveDispatch(0);
+    const res = processApprovedResumes({
+      orchDir,
+      reviveDispatch,
+      dispatch: () => {},
+      appendEvent: () => true,
+      sdkLiveness: () => { throw new Error("ps exploded"); },
+    });
+
+    expect(reviveDispatch.calls.map((c) => c[0].ticket)).toContain("CTL-73");
+    expect(res.reapBlocked).toBe(0);
+  });
+
+  // ⛔ WIRED, NOT MERELY DEFAULTED. Every case above injects the oracle, so all
+  // of them would pass with the production default left unwired. This one injects
+  // NOTHING and drives the real classifySdkWorkerLiveness off a projection on
+  // disk — a dead daemon pid plus a childPid that is genuinely alive (our own),
+  // which is precisely the `orphan-child-alive` shape a reapFailed orphan leaves.
+  test("the real oracle is wired: an orphan-child-alive projection blocks the per-tick call", () => {
+    writePendingMarker(orchDir, "CTL-74", "implement", "/wt/CTL-74");
+    writeApprovedMarker(orchDir, "CTL-74");
+    mkdirSync(join(orchDir, ".sdk-workers"), { recursive: true });
+    writeFileSync(
+      join(orchDir, ".sdk-workers", "CTL-74.json"),
+      JSON.stringify({
+        ticket: "CTL-74",
+        phase: "implement",
+        worktreePath: "/wt/CTL-74",
+        generation: 1,
+        pid: 999999, // a daemon pid that is not running
+        childPid: process.pid, // unambiguously alive
+        childPidResolved: true,
+        updatedAt: "2026-08-23T00:00:00Z",
+      })
+    );
+
+    const reviveDispatch = makeReviveDispatch(0);
+    const res = processApprovedResumes({
+      orchDir,
+      reviveDispatch,
+      dispatch: () => {},
+      appendEvent: () => true,
+    });
+
+    expect(reviveDispatch.calls.length).toBe(0);
+    expect(res.reapBlocked).toBe(1);
+    expect(existsSync(bootResumeApprovedPath(orchDir, "CTL-74"))).toBe(true);
+  });
+
+  // ⛔ …and its control: the SAME real-oracle path, same projection shape, with
+  // only the childPid changed to one that is not running. Without this, the test
+  // above would pass just as well if the block came from the projection merely
+  // EXISTING rather than from the child being alive.
+  test("real-oracle control: the same projection with a DEAD childPid dispatches", () => {
+    writePendingMarker(orchDir, "CTL-75", "implement", "/wt/CTL-75");
+    writeApprovedMarker(orchDir, "CTL-75");
+    mkdirSync(join(orchDir, ".sdk-workers"), { recursive: true });
+    writeFileSync(
+      join(orchDir, ".sdk-workers", "CTL-75.json"),
+      JSON.stringify({
+        ticket: "CTL-75",
+        phase: "implement",
+        worktreePath: "/wt/CTL-75",
+        generation: 1,
+        pid: 999999,
+        childPid: 999998, // not running either → orphan-child-dead
+        childPidResolved: true,
+        updatedAt: "2026-08-23T00:00:00Z",
+      })
+    );
+
+    const reviveDispatch = makeReviveDispatch(0);
+    const res = processApprovedResumes({
+      orchDir,
+      reviveDispatch,
+      dispatch: () => {},
+      appendEvent: () => true,
+    });
+
+    expect(reviveDispatch.calls.map((c) => c[0].ticket)).toContain("CTL-75");
+    expect(res.reapBlocked).toBe(0);
+  });
+
   test("pending marker present but no approval sentinel — no dispatch, marker retained", () => {
     writePendingMarker(orchDir, "CTL-51", "review", "/wt/CTL-51");
     // No approved sentinel written

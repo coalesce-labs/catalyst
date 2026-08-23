@@ -1,0 +1,23 @@
+{
+  "ticket": "CTC-355",
+  "phase": "plan",
+  "orchestrator": "CTC-355",
+  "model": "opus",
+  "executor": "sdk",
+  "turnCap": 500,
+  "status": "done",
+  "bg_job_id": null,
+  "worktreePath": "%WT%/catalyst-cloud/CTC-355",
+  "generation": 7,
+  "attempt": 1,
+  "startedAt": "2026-08-22T01:20:13Z",
+  "updatedAt": "2026-08-22T01:20:38Z",
+  "host": {
+    "name": "mini-2",
+    "id": "100aaff3cc33d9f7"
+  },
+  "completedAt": "2026-08-22T01:20:38Z",
+  "assertedBy": "phase-agent-emit-complete",
+  "failureReason": null,
+  "artifact": "thoughts/shared/plans/2026-08-22-ctc-355.md"
+}

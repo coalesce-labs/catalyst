@@ -1,0 +1,14 @@
+{
+  "ticket": "CTC-166",
+  "status": "stalled-retryable",
+  "stalledReason": "escalated",
+  "stallClass": "system",
+  "stallClassRule": "family:system",
+  "needsHumanSince": "2026-08-23T04:53:12.357Z",
+  "updatedAt": "2026-08-23T04:53:12.357Z",
+  "phase": "recovery-pass",
+  "explanation": {
+    "problem": "CTC-166 has a stalled phase signal (sdk-overloaded-exhausted) and is not terminal",
+    "call_to_action": "decide whether to retry CTC-166 or close it"
+  }
+}

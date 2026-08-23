@@ -68,7 +68,17 @@ import { getEventLogPath } from "./config.mjs";
 import { classifyEventStream } from "../lib/event-stream-class.mjs"; // CTL-1488: stamp stream class on the direct terminal-fallback writer
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 import { nodeClass } from "./lib/node-class.mjs";
-import { registerSdkWorker as defaultRegisterSdkWorker } from "./sdk-worker-registry.mjs";
+import {
+  registerSdkWorker as defaultRegisterSdkWorker,
+  isPreemptionAbort, // CTL-2192: distinguish the scheduler's preemption abort from a genuine failure
+} from "./sdk-worker-registry.mjs";
+// CTL-2192 (Phase 2): the worker's OWN child pid — the only liveness fact that
+// survives a daemon bounce (the projection's `pid` is the daemon's).
+import {
+  listChildPids as defaultListChildPids,
+  cwdOfPid as defaultCwdOfPid,
+  discoverSdkChildPid,
+} from "./sdk-child-discovery.mjs";
 import { YIELDED_STATUS, shouldFlipOnUndeclaredExit } from "../lib/phase-yield.mjs";
 import { ASSERTED_BY } from "./assertion-evidence.mjs"; // CTL-1789: terminal-writer attribution
 
@@ -579,8 +589,9 @@ export function flipSignalAbandonedOnUndeclaredExit(signalFile, generation, opts
       return;
     }
     // CTL-736 generation fence (adversarial-review catch, CTL-1410 Phase A): an
-    // in-process query cannot be killed (preemption's killBgJob(null) is a no-op,
-    // the per-attempt AbortController is not externally wired), so a preempt→
+    // in-process query could not be killed before CTL-2192 (preemption's
+    // killBgJob(null) is a no-op; the per-attempt AbortController is NOW externally
+    // wired via cancelSdkRun, but an unregistered run still leaks), so a preempt→
     // re-dispatch or revive leaves a stale gen-N query floating while gen-N+1 owns
     // the SAME signal path. That stale worker's skill correctly bows out at the
     // wrapper's fence — this flip must not override that refusal by flipping the
@@ -1167,6 +1178,9 @@ export async function sdkRunPhaseAgent(
     maxRetries = 5, // bound the 429/529 backoff
     backoff = {}, // { baseMs, capMs } overrides for tests
     registerWorker = defaultRegisterSdkWorker, // CTL-1410 Phase B: the in-process worker registry
+    // CTL-2192 (Phase 2): process-table probes, injectable so tests never shell out.
+    listChildPids = defaultListChildPids,
+    cwdOfPid = defaultCwdOfPid,
   } = {},
 ) {
   // ── AUTH GUARD: refuse BEFORE any side effect (no claim, no signal) ───────
@@ -1265,9 +1279,58 @@ export async function sdkRunPhaseAgent(
   // announced on the unified event log (worker.session.started|resumed) so the
   // fleet view / orphan lookback can be built centrally (Loki ships the same log).
   let sessionId = null;
+  // CTL-2192 (Phase 2): snapshot the daemon's children BEFORE any query launches,
+  // so the child this run spawns is the one that shows up in the diff. Taken
+  // after sem.acquire() to keep the window tight. Whole thing is fail-open — a
+  // liveness nicety must never take down a dispatch.
+  // ⛔ `null`, not `[]`, is the failure value: listChildPids returns null to mean
+  // "I could not look", and discoverSdkChildPid turns that into an INCONCLUSIVE
+  // `before-unavailable`. Seeding `[]` would assert the daemon had no children,
+  // which promotes every pre-existing sibling into the `fresh` set.
+  let childPidsBefore = null;
+  try {
+    childPidsBefore = listChildPids(process.pid);
+  } catch {
+    /* best-effort — an unusable process table just means no discovery */
+  }
+  // ONE-SHOT per ATTEMPT (not per streamed message): `lsof` is not a per-message
+  // cost, and the projection field is durable. Re-armed on every 429/529 retry —
+  // see the re-arm block at the top of the loop.
+  let childPidResolved = false;
   try {
     let lastOverload = null;
     for (let i = 0; i <= maxRetries; i++) {
+      // CTL-2192 (Codex #3955 P1): a 429/529 retry spawns a REPLACEMENT SDK
+      // subprocess, so everything the previous attempt discovered is now stale.
+      // Without this re-arm the run-wide latch kept discovery from running again
+      // and the projection retained attempt N-1's EXITED pid; a daemon bounce
+      // during attempt N then read `orphan-child-dead` (branch 5) for a ticket
+      // whose child is alive, and boot reconciliation dispatched a new generation
+      // beside a surviving orphan — the concurrent-worker failure this ticket
+      // exists to close, reintroduced by the retry path.
+      //
+      // Order matters: CLEAR first, snapshot second. The clear returns the record
+      // to `unknown` (never `dead` — see clearChildPid), so the window between the
+      // stale pid and the replacement's discovery is honestly inconclusive rather
+      // than confidently wrong.
+      if (i > 0) {
+        childPidResolved = false;
+        try {
+          reg.clearChildPid?.(); // optional-chained: Phase B test fakes lack it
+        } catch {
+          /* best-effort — a projection write failure must not abort the retry */
+        }
+        // Re-snapshot BEFORE the replacement launches, so the diff attributes this
+        // attempt's child and not the previous one. The prior child is either still
+        // present (→ lands in `before`, excluded from `fresh`) or already gone (→
+        // never in `after`); either way it cannot be mistaken for the replacement.
+        // ⛔ `null` on failure, never `[]` — same contract as the initial snapshot.
+        try {
+          childPidsBefore = listChildPids(process.pid);
+        } catch {
+          childPidsBefore = null;
+        }
+      }
       const ac = new AbortController();
       // Phase B: expose the per-attempt controller so cancel/abort (preemption,
       // watchdog) can reach the live query; a pending abort fires immediately.
@@ -1278,6 +1341,42 @@ export async function sdkRunPhaseAgent(
         const q = runQuery({ prompt: spec.prompt, options: { ...options, abortController: ac } });
         for await (const m of q) {
           reg.touch(); // registry heartbeat (internally throttled to disk)
+          // CTL-2192 (Phase 2): the first streamed message is the earliest point
+          // at which the child certainly exists. Stamp the projection with what
+          // we found — INCLUDING a null, which records that we LOOKED. Without
+          // that record a childless projection is indistinguishable from a
+          // legacy one, and the liveness oracle must answer `unknown` for both.
+          if (!childPidResolved) {
+            childPidResolved = true;
+            try {
+              const found = discoverSdkChildPid({
+                before: childPidsBefore,
+                after: listChildPids(process.pid),
+                cwdOf: cwdOfPid,
+                worktreePath: spec.worktreePath ?? worktreePath,
+              });
+              // ⛔ Stamp ONLY on a conclusive verdict. `setChildPid(null)` records
+              // "we looked and there is no child", which the oracle later reads as
+              // DEAD — so stamping an INCONCLUSIVE scan (no usable ps/lsof, or two
+              // generations sharing the worktree) would mark a running worker
+              // reapable. Leaving it unstamped keeps the verdict `unknown`, which
+              // is the honest answer and today's behaviour.
+              if (found?.conclusive) {
+                reg.setChildPid?.(found.pid); // optional-chained: Phase B test fakes lack it
+              } else {
+                // `log` is not imported in this module (see defaultEmitEvent's
+                // dependency-free stderr line) — ride the same seam so the
+                // inconclusive population is measurable rather than invisible.
+                emitEvent("execution-core.sdk.child-pid-inconclusive", {
+                  ticket,
+                  phase,
+                  reason: found?.reason ?? "unknown",
+                });
+              }
+            } catch {
+              /* discovery is best-effort; the run continues either way */
+            }
+          }
           if (typeof m?.session_id === "string" && m.session_id && m.session_id !== sessionId) {
             // A 429-retry starts a NEW session: close the old id first so the
             // log never carries a dangling started (the "interrupted" shape is
@@ -1298,6 +1397,36 @@ export async function sdkRunPhaseAgent(
         }
       } catch (err) {
         thrown = err;
+      }
+
+      // ⛔ CTL-2192: the scheduler PREEMPTED us — resolve cleanly, write nothing.
+      //
+      // cancelSdkRun aborts this very controller with the PREEMPTION_ABORT_REASON
+      // sentinel and then, in the SAME synchronous scheduler block, parks the signal
+      // as status:"preempted". This rejection is delivered on a later turn, so
+      // WITHOUT this branch it falls to `thrown && !result` → emitBackstop(failed)
+      // → defaultWriteSignalStalled, whose clobber guard only covers
+      // SIGNAL_TERMINAL_STATUSES — "preempted" is NOT in that set. The park is
+      // overwritten with "stalled" and a phase.<phase>.failed.<TICKET> terminal is
+      // emitted: the resume sweep (which gates on PREEMPTED_STATUS) never resumes the
+      // victim, and the terminal sweep escalates it instead. Preemption would
+      // DESTROY the work it exists to defer.
+      //
+      // Mirrors the codex runner's `if (res.aborted) return {...}` early return —
+      // no signal write, no terminal event, the canceller owns the signal. The
+      // resolution is CLEAN, so dispatch's backstopOnRejection (rejection-only) is a
+      // no-op too, and the `finally` below still closes the session + deregisters.
+      if (ac.signal.aborted && (isPreemptionAbort(ac.signal.reason) || isPreemptionAbort(thrown))) {
+        emitEvent("execution-core.sdk.preempted", {
+          ticket, phase, generation: spec.generation ?? null, attempt: i,
+        });
+        return {
+          code: 1,
+          stdout: "",
+          stderr: "sdk: preempted by the scheduler (CTL-705/CTL-2192)",
+          signal: "SIGTERM",
+          aborted: true,
+        };
       }
 
       // 429/529 → bounded backoff + retry. Check BOTH a thrown error AND a captured

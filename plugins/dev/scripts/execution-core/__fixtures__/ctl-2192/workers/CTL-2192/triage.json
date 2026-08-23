@@ -1,0 +1,28 @@
+{
+  "ticket": "CTL-2192",
+  "classification": "bug",
+  "estimated_scope": "large",
+  "estimate": 5,
+  "estimateMethod": "fibonacci",
+  "acronyms_expanded": [
+    {
+      "acronym": "JSON",
+      "expansion": "JavaScript Object Notation"
+    },
+    {
+      "acronym": "PID",
+      "expansion": "Process Identifier"
+    },
+    {
+      "acronym": "CPU",
+      "expansion": "Central Processing Unit"
+    },
+    {
+      "acronym": "AC",
+      "expansion": "Acceptance Criterion"
+    }
+  ],
+  "dependencies": [],
+  "summary": "A phase signal in status \"running\" with a live worker is re-claimed roughly every two minutes (10 claims in ~30 min for CTL-2128 phase-plan on mini, 2026-08-22), and each re-claim leaves the prior generation as an orphan (ppid 1) that outlives its generation by up to ~14 minutes. The re-dispatcher is UNIDENTIFIED — the ticket eliminates three candidates with traces (daemon restarts, the CTL-2110 reclaim crash, duplicate-dispatch storm) and directs the search at the resume sweep and the claim path (whatever writes <phase>.claim.N). Four ACs: stop re-claiming a live running worker (AC1), keep recovering a genuinely dead one (AC2 — the negative control and the hard half), reap the prior generation instead of letting it age out (AC3), and prove it against a captured live signal rather than an authored fixture (AC4).",
+  "generated_at": "2026-08-23T03:58:28Z"
+}

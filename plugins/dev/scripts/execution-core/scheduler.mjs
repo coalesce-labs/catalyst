@@ -135,7 +135,25 @@ import {
 import {
   isSdkWorkerLive as registrySdkWorkerLive,
   isSdkWorkerLiveOnDisk,
+  // CTL-2192: the generation-fenced preemption cancel. It has existed since
+  // CTL-705 Phase D, already carries PREEMPTION_ABORT_REASON, and had ZERO
+  // production callers — which is why preempting an SDK worker freed nothing.
+  cancelSdkRun as defaultCancelSdkRun,
 } from "./sdk-worker-registry.mjs";
+// CTL-2192: the durable cross-lap preemption bound (see preempt-budget.mjs).
+import {
+  isPreemptBudgetExhausted,
+  recordPreemption,
+  budgetExhaustionAnnounced,
+  recordBudgetExhaustionAnnounced,
+  // CTL-2192 (remediation): the PREEMPTOR-side bound. The victim budget alone
+  // redirects the storm to a better-ranked victim rather than stopping it.
+  isPreemptorBudgetExhausted,
+  recordPreemptorLap,
+  preemptorExhaustionAnnounced,
+  recordPreemptorExhaustionAnnounced,
+  prunePreemptorBudgets,
+} from "./preempt-budget.mjs";
 // CTL-933: shadow belief-store fact collector (opt-in CATALYST_BELIEFS_SHADOW=1).
 // CTL-937: getBeliefsDb exposes the module-level db handle for the diagnostician.
 // CTL-1241: getEscalateHumanBelief reads the latest escalate_human belief for the
@@ -236,6 +254,7 @@ import {
   defaultAppendYieldFileSkipEvent,
   defaultKillBgJob,
   defaultAppendPreemptedEvent,
+  defaultAppendPreemptBudgetExhaustedEvent,
   defaultAppendResumedAfterPreemptionEvent,
   defaultAppendHeldStoppedEvent,
   defaultAppendCooldownGcEvent,
@@ -992,6 +1011,31 @@ export const PREEMPTED_STATUS = "preempted";
 // hysteresis tracks the specific preemptor→victim relationship.
 // Cleared on stopScheduler/__resetForTests (see daemon module state section).
 const rankedAboveSince = new Map();
+
+// CTL-2192 (remediation): edge-triggered announcement of a NON-DURABLE preemption
+// ledger write. Both recordPreemption and recordPreemptorLap return {written} and
+// swallow the underlying error — the module fails toward today's behaviour on
+// purpose, since a damper that fails closed would freeze genuine priority
+// preemption on one corrupt file. But an unpersisted lap means the count reads
+// zero forever and the unbounded lap resumes with NO signal, which is precisely
+// the "undurable ledger, silently disarmed" shape CTL-1659 exists to announce.
+// Count exactly, warn sparsely: one line per key per state change, not one per
+// ~2-minute lap. Cleared with the rest of the module state on reset.
+const ledgerWriteFailed = new Set();
+function noteLedgerWrite(key, written, fields) {
+  if (!written) {
+    if (ledgerWriteFailed.has(key)) return;
+    ledgerWriteFailed.add(key);
+    log.warn(
+      { ...fields, key },
+      "scheduler: preemption lap NOT persisted — the cross-lap damper is disarmed for this ticket until the write succeeds (CTL-2192)"
+    );
+    return;
+  }
+  if (ledgerWriteFailed.delete(key)) {
+    log.info({ ...fields, key }, "scheduler: preemption lap ledger writable again — damper re-armed (CTL-2192)");
+  }
+}
 
 // readCurrentRunPrNumber — return the current run's PR number from phase-pr.json,
 // or null if the file is absent or malformed (CTL-1667).
@@ -5108,6 +5152,12 @@ export function schedulerTick(
     killBgJob = defaultKillBgJob,
     appendPreemptedEvent = defaultAppendPreemptedEvent,
     appendResumedAfterPreemptionEvent = defaultAppendResumedAfterPreemptionEvent,
+    // CTL-2192: the SDK-native half of the preemption stop. killBgJob returns
+    // immediately on a falsy id, so for an SDK victim (bg_job_id: null) it frees
+    // NOTHING — the parked worker keeps running and the resume sweep
+    // re-dispatches beside it. Injectable for tests.
+    cancelSdkRun = defaultCancelSdkRun,
+    appendPreemptBudgetExhaustedEvent = defaultAppendPreemptBudgetExhaustedEvent,
     // CTL-768 held-worker stop seams.
     // livenessForHeld — idle/busy/absent on a needs-input bg process; the
     //   mid-turn guard. Default injects the warm getAgentsCached snapshot so the
@@ -7563,7 +7613,57 @@ export function schedulerTick(
       const inFlightRanked = ranking.filter((d) => d.inFlight);
       // Scan from lowest-ranked in-flight (last in sorted array) toward highest.
       const nowMs = now();
-      for (let i = inFlightRanked.length - 1; i >= 0; i--) {
+
+      // ── CTL-2192 (remediation): the PREEMPTOR-side bound ───────────────
+      //
+      // The per-victim budget below bounds ONE victim, not the storm. This loop
+      // scans worst-ranked-first and only `break`s when topQueued stops
+      // out-ranking the candidate, so an exhausted victim hands the preemption
+      // to the next, BETTER-ranked in-flight worker: a preemptor that wins the
+      // ranking but can never dispatch burns A's laps, then B's, then C's —
+      // evicting progressively more valuable work (the CTC-829 / CTL-1550 /
+      // CTL-1681 shape). Bounding the preemptor turns maxLaps x |victims| into
+      // maxLaps.
+      //
+      // There is exactly one topQueued, so an exhausted preemptor means NO
+      // preemption is warranted this tick — skip the loop entirely rather than
+      // `continue`ing through victims that can only be evicted by it.
+      let preemptorBlocked = false;
+      if (topQueued) {
+        const pBudget = isPreemptorBudgetExhausted(orchDir, topQueued.identifier, { now: () => nowMs });
+        if (pBudget.exhausted) {
+          preemptorBlocked = true;
+          if (!preemptorExhaustionAnnounced(orchDir, topQueued.identifier, pBudget.windowStartedAt)) {
+            recordPreemptorExhaustionAnnounced(orchDir, topQueued.identifier, pBudget.windowStartedAt);
+            safeEmit(
+              appendPreemptBudgetExhaustedEvent,
+              {
+                orchId: topQueued.identifier,
+                ticket: topQueued.identifier,
+                phase: null,
+                count: pBudget.count,
+                windowStartedAt: pBudget.windowStartedAt,
+                // The preemptor IS the subject here — `scope` is what tells a
+                // reader which side of the pair this event is about, since both
+                // sides share one event name.
+                scope: "preemptor",
+              },
+              { ticket: topQueued.identifier, phase: "preempt" }
+            );
+          }
+        }
+        // Self-pruning: the preemptor ledger has no worker dir to be GC'd with.
+        try {
+          prunePreemptorBudgets(orchDir, { now: () => nowMs });
+        } catch {
+          /* best-effort — a failed prune must never abort the sweep */
+        }
+      }
+
+      // -1 skips the scan entirely: with one topQueued, an exhausted preemptor
+      // means no victim in this list can legitimately be evicted this tick.
+      const victimScanStart = preemptorBlocked ? -1 : inFlightRanked.length - 1;
+      for (let i = victimScanStart; i >= 0; i--) {
         if (!topQueued) break; // no queued ticket wants a slot
         const candidate = inFlightRanked[i];
         // Only preempt if topQueued strictly out-ranks this candidate.
@@ -7622,9 +7722,67 @@ export function schedulerTick(
         }
         if (nowMs - rankedAboveSince.get(hysteresisKey) < PREEMPT_HYSTERESIS_MS) continue;
 
+        // ── CTL-2192: the cross-lap budget ─────────────────────────────
+        // Guard: this victim's durable lap budget. The hysteresis key above is
+        // deleted after every successful preemption (and lives in module state,
+        // so a bounce erases it anyway), which is why a correct preempt→resume
+        // pair can otherwise repeat forever at the ~2-minute cadence this ticket
+        // names. The budget is a FILE for exactly that reason.
+        const budget = isPreemptBudgetExhausted(orchDir, candidate.identifier, { now: () => nowMs });
+        if (budget.exhausted) {
+          // Once per window — the verdict is re-derived on every tick while the
+          // window is live, so an ungated emit would re-create the per-tick
+          // event burn this ticket exists to stop.
+          if (!budgetExhaustionAnnounced(orchDir, candidate.identifier, budget.windowStartedAt)) {
+            recordBudgetExhaustionAnnounced(orchDir, candidate.identifier, budget.windowStartedAt);
+            safeEmit(
+              appendPreemptBudgetExhaustedEvent,
+              {
+                orchId: candidate.identifier,
+                ticket: candidate.identifier,
+                phase: activePhase,
+                count: budget.count,
+                windowStartedAt: budget.windowStartedAt,
+                preemptedBy: topQueued.identifier,
+                scope: "victim",
+              },
+              { ticket: candidate.identifier, phase: activePhase }
+            );
+          }
+          continue; // skip THIS victim; a different candidate may still be preemptable
+        }
+
         // All guards passed — preempt this candidate.
         const bgJobId = signalRaw.bg_job_id;
         killBgJob({ bgJobId });
+
+        // CTL-2192: an SDK victim carries bg_job_id: null, so the killBgJob above
+        // freed nothing. cancelSdkRun is the SDK-native stop — generation-fenced,
+        // so a stale scheduler decision can never abort a NEWER dispatch.
+        if (!bgJobId) {
+          let cancelRes = null;
+          try {
+            cancelRes = cancelSdkRun({ ticket: candidate.identifier, generation: signalRaw.generation });
+          } catch (err) {
+            // Fail-open: a broken registry must not wedge the preemption sweep.
+            log.warn(
+              { ticket: candidate.identifier, phase: activePhase, err: err.message },
+              "scheduler: cancelSdkRun threw — continuing with the park (CTL-2192)"
+            );
+          }
+          // `stale` means the registry holds a NEWER generation than the signal
+          // we read: we are behind. Parking here would clobber the signal of a
+          // worker we just proved we do not own. `found: false` is NOT a gate —
+          // the cancel is best-effort and a worker already gone still deserves
+          // its signal parked.
+          if (cancelRes?.stale) {
+            log.warn(
+              { ticket: candidate.identifier, phase: activePhase, generation: signalRaw.generation },
+              "scheduler: preemption aborted — registry holds a newer generation (CTL-2192)"
+            );
+            continue;
+          }
+        }
 
         // Atomically park the signal: status → "preempted", add parkedFrom + attentionReason.
         const signalPath = join(
@@ -7663,6 +7821,31 @@ export function schedulerTick(
           },
           { ticket: candidate.identifier, phase: activePhase }
         );
+
+        // CTL-2192: spend one lap of the durable budget — on BOTH sides of the
+        // pair. Deliberately AFTER the successful park, so an aborted (stale) or
+        // failed-write preemption costs neither party a lap.
+        //
+        // ⛔ An UNPERSISTED lap is the whole damper silently disarmed: an
+        // unwritable worker dir (disk full, dir GC'd mid-tick, read-only mount)
+        // means isPreemptBudgetExhausted reads count:0 forever and the unbounded
+        // lap resumes with no signal at all. The module fails toward today's
+        // behaviour on purpose (a damper is not a safety interlock), but a
+        // silently-disarmed damper is exactly the CTL-1659 shape — announce it.
+        // Edge-triggered per ticket, so a persistently unwritable dir logs once,
+        // not once per ~2-minute lap.
+        const victimLedger = recordPreemption(orchDir, candidate.identifier, { now: () => nowMs });
+        noteLedgerWrite(`victim:${candidate.identifier}`, victimLedger.written, {
+          ticket: candidate.identifier,
+          phase: activePhase,
+          scope: "victim",
+        });
+        const preemptorLedger = recordPreemptorLap(orchDir, topQueued.identifier, { now: () => nowMs });
+        noteLedgerWrite(`preemptor:${topQueued.identifier}`, preemptorLedger.written, {
+          ticket: topQueued.identifier,
+          phase: null,
+          scope: "preemptor",
+        });
 
         rankedAboveSince.delete(hysteresisKey); // clear after successful preemption
         break; // one preemption per tick
@@ -10344,6 +10527,7 @@ export function stopScheduler() {
   watcher = null;
   runningOpts = null;
   rankedAboveSince.clear(); // CTL-705: reset hysteresis state on daemon stop
+  ledgerWriteFailed.clear(); // CTL-2192: re-announce a still-broken ledger after a bounce
   // CTL-1330: tear down the event-loop monitor + liveness sink so a restart
   // re-arms cleanly (and tests don't leak the pino sink across cases).
   if (_eventLoopMonitor) {

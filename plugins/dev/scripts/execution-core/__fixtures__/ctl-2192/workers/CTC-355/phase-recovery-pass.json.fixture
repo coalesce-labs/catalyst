@@ -1,0 +1,24 @@
+{
+  "ticket": "CTC-355",
+  "status": "needs-human",
+  "needsHumanSince": "2026-08-22T01:27:29.887Z",
+  "updatedAt": "2026-08-22T01:27:29.887Z",
+  "phase": "recovery-pass",
+  "explanation": {
+    "escalation_type": "decision",
+    "problem": "CTC-355 has a stalled phase signal (rebase_refused_dirty_tree) and is not terminal",
+    "call_to_action": "decide whether to retry CTC-355 or close it",
+    "options": [
+      {
+        "label": "retry",
+        "tradeoff": "may hit the same failure again"
+      },
+      {
+        "label": "cancel / re-scope",
+        "tradeoff": "loses partial progress"
+      }
+    ],
+    "why_you": "priority call the agent cannot make unilaterally for CTC-355",
+    "degraded": true
+  }
+}
