@@ -191,7 +191,14 @@ import { reconcileSdkRegistryOnBoot } from "./sdk-worker-registry.mjs"; // CTL-1
 import { resolveNodeClass as _resolveNodeClass } from "./lib/node-class.mjs"; // CTL-1654: node-class heartbeat/actuation guard
 // CTL-1786: lease-authority node entitlement, refreshed on the cluster-sync cadence so a
 // not_entitled claim refusal is a rare self-healing edge rather than the steady state.
-import { createLeaseAuthorityClient, ensureEntitled as ensureLeaseEntitled } from "./lease-authority.mjs";
+import {
+  createLeaseAuthorityClient,
+  ensureEntitled as ensureLeaseEntitled,
+  renewActiveLeases, // CTC-921: progress-asserted renewal of this host's live leases
+} from "./lease-authority.mjs";
+import { defaultProgressMark } from "./work-done-probes.mjs"; // CTC-921
+import { teamOf as leaseTeamOf } from "./dispatch.mjs"; // CTC-921: ticket → team → repoRoot
+import { getProjectConfig as leaseProjectConfig } from "./registry.mjs"; // CTC-921
 
 // CTL-1623: register the github-token row's rearm hook at module load — BEFORE either
 // call site below (both live inside startDaemon(), invoked only later) can fire. Makes
@@ -307,6 +314,54 @@ function refreshLeaseEntitlement() {
     log.warn({ err: err?.message }, "cluster-sync timer: lease entitlement refresh threw (continuing)");
   }
 }
+// CTC-921: the progress-asserted renewal loop. `_lastRenewedMark` remembers, per
+// "<ticket>:<phase>", the progress mark this daemon last SUCCESSFULLY renewed on — the state
+// that makes "has this holder actually moved since last time" answerable. In-memory by design:
+// a restart costs at most one redundant or one skipped renewal, both harmless.
+const _lastRenewedMark = new Map();
+
+// refreshActiveLeaseRenewals — keep any genuinely-progressing (ticket, phase) THIS host
+// dispatched alive past its work TTL (45 min > the server's 30-min lease TTL, so without this a
+// long phase silently lost tenure mid-run). A stalled holder is deliberately skipped rather than
+// renewed with a repeated assertion: under invariant I2 (ADR-0027) a renewal is earned by
+// progress, not by being alive, and the store cannot tell a re-POSTed assertion from a fresh one.
+//
+// Same gate, same cadence, and the same FAIL-OPEN contract as refreshLeaseEntitlement — a strict
+// no-op under the default `off` mode, so this is inert until an operator opts a host in.
+function refreshActiveLeaseRenewals({ orchDir } = {}) {
+  let mode;
+  try {
+    mode = resolveLeaseAuthorityMode(process.env);
+  } catch {
+    return;
+  }
+  if (mode !== "shadow" && mode !== "enforce") return;
+  try {
+    if (!_leaseClient) _leaseClient = createLeaseAuthorityClient({ env: process.env });
+    const summary = renewActiveLeases({
+      client: _leaseClient,
+      hostName: getHostName(),
+      orchDir,
+      lastRenewedMarks: _lastRenewedMark,
+      readSignals: readAllPhaseSignals,
+      progressMark: defaultProgressMark,
+      // Resolved exactly like the scheduler's hung-worker probe (scheduler.mjs, CTL-729):
+      // ticket → team → the registry's repoRoot. Without it defaultProgressMark returns 0 for
+      // every code phase and the loop would ship inert.
+      resolveRepoRoot: (ticket) => {
+        const team = leaseTeamOf(ticket);
+        return team ? (leaseProjectConfig(team)?.repoRoot ?? null) : null;
+      },
+      log,
+    });
+    if (summary.renewed > 0 || summary.refused > 0 || summary.errors > 0) {
+      log.info(summary, "cluster-sync timer: lease renewal sweep");
+    }
+  } catch (err) {
+    log.warn({ err: err?.message }, "cluster-sync timer: lease renewal sweep threw (continuing)");
+  }
+}
+
 // CTL-684: auto-tuner stop handle.
 let _stopAutoTuner = null;
 let _eventWatcher = null;
@@ -2372,6 +2427,10 @@ export function startDaemon({
         // claim's not_entitled refusal is a rare self-healing edge, not the steady state. Cached
         // + fail-open (see refreshLeaseEntitlement); a strict no-op when the gate is off.
         refreshLeaseEntitlement();
+        // CTC-921: on the same tick, renew the leases of phases this host is actively running
+        // and that have made progress since the last sweep. Cached + fail-open (see
+        // refreshActiveLeaseRenewals); a strict no-op when the gate is off.
+        refreshActiveLeaseRenewals({ orchDir });
       }, clusterSyncIntervalMs);
       _clusterSyncTimer.unref?.();
     }

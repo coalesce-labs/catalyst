@@ -45,8 +45,8 @@
 // path may NEVER return a silent `won:true` it did not earn — an ambiguous 2xx throws.
 
 import { randomBytes } from "node:crypto";
-import { appendFileSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import {
   defaultHttpFn,
   parseProxyBody,
@@ -464,6 +464,153 @@ export function ensureEntitled({
   const res = client.entitle({ node, ttlMs, workTtlMs, budgetUsd });
   const expiresAtMs = typeof res?.entitlement?.expiresAtMs === "number" ? res.entitlement.expiresAtMs : null;
   return { entitled: res?.ok === true, refreshed: true, expiresAtMs, entitlement: res?.entitlement ?? null };
+}
+
+// ─── Progress-asserted renewal (CTC-921) ─────────────────────────────────────
+//
+// `renewLease` has been complete and wired in catalyst-cloud since CTC-410; until now nothing
+// called it, so a phase whose work TTL (45 min) outran the server lease TTL (30 min) silently
+// lost tenure mid-phase. These two functions are the caller.
+//
+// ⛔ WHY THE GATE LIVES HERE AND NOT IN THE STORE. The server rejects only an EMPTY assertion
+// (invariant I2, `renewLease`'s MissingAssertionError). It cannot tell a fresh assertion from
+// the same string re-POSTed every tick — so a client that stringified whatever number it had
+// and called on every tick would satisfy the store while shipping exactly the mechanical
+// keep-alive I2 exists to forbid. The client therefore refuses FIRST: no observed progress, no
+// call at all, and the lease lapses on its own deadline. That is also what makes the ticket's
+// "assertion values are pairwise DISTINCT" acceptance check true by construction.
+
+/**
+ * decideRenewal — the pure progress gate. `{shouldRenew:true, assertion}` only when `mark` is a
+ * genuine INCREASE over `lastRenewedMark`; `{shouldRenew:false}` otherwise.
+ *
+ * ⛔ A mark of 0 never renews, even on the first check. Zero is `defaultProgressMark`'s own
+ * "no progress observed" value AND what it returns when it cannot resolve the worktree or the
+ * git call fails — so renewing on 0 would mean renewing on a READ FAILURE, which is precisely
+ * the "a liveness verdict was wrong" class this plane exists to eliminate. A non-finite or
+ * non-numeric mark is treated the same way: skip, never throw.
+ *
+ * Pure and total, so the distinct-assertion property is provable without a network or a timer.
+ */
+export function decideRenewal({ phase, mark, lastRenewedMark }) {
+  if (typeof mark !== "number" || !Number.isFinite(mark) || mark <= 0) return { shouldRenew: false };
+  if (typeof lastRenewedMark === "number" && mark <= lastRenewedMark) return { shouldRenew: false };
+  return { shouldRenew: true, assertion: `${phase}-progress:${mark}` };
+}
+
+/** defaultReadClusterGeneration — the ticket's granted nonce, as written by the claim path. */
+function defaultReadClusterGeneration(orchDir, ticket) {
+  try {
+    const raw = JSON.parse(readFileSync(join(orchDir, "workers", ticket, "cluster-generation.json"), "utf8"));
+    return raw?.generation ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * renewActiveLeases — one tick of the renewal scan. Walks this host's actively-running phases,
+ * asks `decideRenewal` whether each has earned a renewal, and renews the ones that have.
+ *
+ * Scoping, in order — every one of these is a REFUSAL to act, never a best guess:
+ *   • nested phase signals only (a legacy flat signal has a numeric phase and no lease scope)
+ *   • `status === "running"` with a `bg_job_id` — a phase this daemon actually dispatched
+ *   • `host.name` equal to THIS node — never renew a tenure another host holds. The holder
+ *     identity on the wire IS the host name (`claimViaLease` claims with `node: getHostName()`).
+ *   • a `cluster-generation.json` on record — that generation IS the grant nonce, and renewing
+ *     without one would mean inventing a fencing token.
+ *
+ * ⛔ The nonce is passed through UNCHANGED and the server does not advance it: one tenure, one
+ * fencing token, however many renewals. A container credential is bound to that nonce.
+ *
+ * FAIL-OPEN, like `refreshLeaseEntitlement`: every per-ticket step is individually guarded so a
+ * git failure, an unreadable signal, or a cloud outage costs at most one ticket's renewal on one
+ * tick and never breaks the daemon's timer. Losing a lease this way is not silent — the fence
+ * machinery refuses the next external write and a later claim reclaims it.
+ *
+ * `lastRenewedMarks` is the caller's `Map<"ticket:phase", number>`, mutated in place and only on
+ * a CONFIRMED renewal: a refusal or a throw deliberately leaves it alone so the next tick
+ * re-attempts with the same mark. It is in-memory by design — a daemon restart costs at most one
+ * redundant or one skipped renewal, both harmless.
+ *
+ * Returns a `{scanned, renewed, skipped, refused, errors}` summary for logging and tests.
+ */
+export function renewActiveLeases({
+  client,
+  hostName,
+  orchDir,
+  lastRenewedMarks,
+  readSignals,
+  progressMark,
+  readGeneration = defaultReadClusterGeneration,
+  resolveRepoRoot = () => null,
+  log: logger = null,
+}) {
+  const summary = { scanned: 0, renewed: 0, skipped: 0, refused: 0, errors: 0 };
+
+  let signals;
+  try {
+    signals = readSignals(orchDir);
+  } catch (err) {
+    logger?.warn?.({ err: err?.message }, "lease renewal: could not read phase signals (continuing)");
+    summary.errors += 1;
+    return summary;
+  }
+
+  for (const sig of signals ?? []) {
+    try {
+      if (sig?.layout !== "nested") continue;
+      if (sig.status !== "running") continue;
+      if (sig.liveness?.value == null) continue;
+      if (sig.host?.name !== hostName) continue;
+      const ticket = sig.ticket;
+      const phase = sig.phase;
+      if (typeof ticket !== "string" || typeof phase !== "string") continue;
+
+      const generation = readGeneration(orchDir, ticket);
+      if (typeof generation !== "number" || !Number.isFinite(generation)) continue;
+
+      summary.scanned += 1;
+      const key = `${ticket}:${phase}`;
+      // ⛔ repoRoot, NOT worktreePath. `defaultProgressMark` resolves a code phase's worktree
+      // from repoRoot and SILENTLY IGNORES a worktreePath — passing the latter is how CTL-729
+      // made the hung-worker probe read 0 forever. Resolved per ticket (tickets on one host
+      // span repos) and degraded to null rather than allowed to abort the scan.
+      let repoRoot = null;
+      try {
+        repoRoot = resolveRepoRoot(ticket) ?? null;
+      } catch {
+        repoRoot = null;
+      }
+      const mark = progressMark({ ticket, phase, repoRoot, orchDir });
+      const { shouldRenew, assertion } = decideRenewal({
+        phase,
+        mark,
+        lastRenewedMark: lastRenewedMarks.get(key),
+      });
+      if (!shouldRenew) {
+        summary.skipped += 1;
+        continue;
+      }
+
+      const res = client.renew({ ticket, phase, holder: hostName, nonce: generation, assertion });
+      if (res?.renewed === true) {
+        lastRenewedMarks.set(key, mark);
+        summary.renewed += 1;
+      } else {
+        // Expected under I2 for a superseded or lapsed holder — informational, not an error.
+        summary.refused += 1;
+        logger?.info?.({ ticket, phase, refusal: res?.refusal }, "lease renewal refused");
+      }
+    } catch (err) {
+      summary.errors += 1;
+      logger?.warn?.(
+        { ticket: sig?.ticket, phase: sig?.phase, err: err?.message },
+        "lease renewal threw for one phase (continuing)"
+      );
+    }
+  }
+  return summary;
 }
 
 // ─── Auth spike (CTL-1786 Phase 1 §2) ────────────────────────────────────────
