@@ -607,7 +607,7 @@ mirroring `forward_dropped`'s `drop_reason`:
 
 | Attribute                                 | Present   | Value                                                                                                            |
 | ----------------------------------------- | --------- | ---------------------------------------------------------------------------------------------------------------- |
-| `catalyst.observability.failure_category` | always    | Bounded class: `http_429`, `http_5xx`, `timeout`, `aborted`, `connection_refused`, `dns`, `network`, or `other`. |
+| `catalyst.observability.failure_category` | always    | Bounded class: `http_429`, `http_5xx`, `timeout` (per-request `AbortSignal.timeout`, **or** a connect/socket `ETIMEDOUT`), `aborted`, `connection_refused`, `dns`, `network`, or `other`. |
 | `catalyst.observability.forward_err`      | always    | The raw error message (for reading the concrete cause).                                                          |
 | `catalyst.observability.http_status`      | HTTP only | The numeric status, present only when the failure was an `HttpError` (`429`/`5xx`).                              |
 
@@ -619,10 +619,16 @@ intentionally never an auth/payload class. Group per host by category with:
 sum by (host_name, catalyst_observability_failure_category) (
   count_over_time(
     {service_name="catalyst.otel-forward"}
-    | field="event.name" = "catalyst.observability.forward_failed" [1h]
+    | event_name="catalyst.observability.forward_failed" [1h]
   )
 )
 ```
+
+Note the two spellings: the attribute is emitted as `event.name` /
+`catalyst.observability.failure_category`, but Loki exposes structured metadata with dots replaced
+by underscores — so the **query** filters on `event_name` and groups by
+`catalyst_observability_failure_category`. Same filter shape as the replica-degradation queries in
+`docs/linear-replica.md`.
 
 > **Rollout gap.** Events already in the log before this shipped carry no `failure_category`; a
 > per-host distribution shows a `<none>` bucket for that pre-deploy tail — un-upgraded history, not

@@ -37,6 +37,15 @@ export function classifyForwardFailure(err: unknown): ForwardFailure {
     (err as { code?: unknown } | undefined)?.code;
   const codeStr = typeof code === "string" ? code : "";
 
+  // ⛔ Check the CODE before the message. A connect/socket timeout arrives as
+  // `ETIMEDOUT` (or undici's `UND_ERR_CONNECT_TIMEOUT`), and neither string matches
+  // /timed out|timeout/ — "ETIMEDOUT" does not contain "timeout". Without this branch a
+  // plain socket timeout fell through every rule to `other`, which is the
+  // could-not-classify bucket, in a classifier whose whole purpose is grouping. A
+  // connect timeout is one of the commonest OTLP forwarding failures, so `other` would
+  // have been a large and permanently unexplained slice of the per-category breakdown.
+  if (codeStr === "ETIMEDOUT" || codeStr === "UND_ERR_CONNECT_TIMEOUT" || /ETIMEDOUT/.test(msg))
+    return { category: "timeout" };
   if (name === "TimeoutError" || /timed out|timeout/i.test(msg)) return { category: "timeout" };
   if (name === "AbortError") return { category: "aborted" };
   if (codeStr === "ECONNREFUSED" || /ECONNREFUSED/.test(msg))
