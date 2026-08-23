@@ -1090,6 +1090,29 @@ jobs:
           bun test __tests__/layer1-relocation.test.mjs
           bun test __tests__/config-schema.test.mjs
 
+      - name: Config re-leak guards (CTL-1214 Phase 3)
+        # ⛔ PINNED IN THE SAME CHANGE. Verified before adding:
+        # `grep -n 'setup-sweep-config\|check-config-drift\|config-template-statemap\|config-docs-coverage' .github/workflows/`
+        # returned NOTHING for any of the four, so none of them has ever gated a
+        # PR. Positive control: the same grep for `orphan-sweep.test.sh` returns
+        # its own run line.
+        #
+        # These guard the writers that can put a relocated key BACK into a
+        # committed Layer-1 config — setup_sweep_config, feedback-consent grant,
+        # the shipped template, and check-config-drift's --merge-into. Without
+        # them the CTL-1214 slimming survives only until the next setup run, and
+        # the regression is silent: the config simply grows the stanza again.
+        #
+        # setup-sweep-config.test.sh additionally ends with a guard (S6) that
+        # fails if the suite touched the real ~/.config/catalyst/node.json —
+        # it did, while it was being written.
+        working-directory: plugins/dev/scripts
+        run: |
+          bash __tests__/setup-sweep-config.test.sh
+          bash __tests__/check-config-drift.test.sh
+          bash __tests__/config-template-statemap.test.sh
+          bash __tests__/config-docs-coverage.test.sh
+
       - name: Broker tests (CTL-1529, CTL-1809)
         # CTL-1529 round 2: broker/worker-state-projection.test.mjs guards the
         # bounded event-log scan in broker/projection.mjs (replayWorkerStateProjection),

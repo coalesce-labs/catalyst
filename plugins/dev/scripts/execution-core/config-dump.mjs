@@ -235,14 +235,20 @@ export const CONFIG_KEYS = Object.freeze(
       reader: "resolveDeploymentMode",
     },
 
-    // ── orchestration (Layer-1 owned) ────────────────────────────────────────
+    // ── orchestration (mixed scope) ──────────────────────────────────────────
+    // CTL-1214 D6: this block is NOT wholly Layer-1 owned. Four members —
+    // dispatchMode, executionCore.*, worktreeRefresh.*, reconcile.* — relocated to
+    // the NODE scope (~/.config/catalyst/node.json) and now declare a `layer2`
+    // source; the rest (executor, executorByPhase, codex, draftPr, fleetHealth,
+    // daemonWatchdog, orphanReaper.workerGc, …) are genuinely Layer-1 and stay.
     {
       key: "catalyst.orchestration.dispatchMode",
       kind: "value",
       layer1: "catalyst.orchestration.dispatchMode",
+      layer2: "catalyst.orchestration.dispatchMode",
       env: [],
       fallback: "oneshot-legacy",
-      reader: "orchestrate-register-interests.sh",
+      reader: "orchestrate-dispatch-next + catalyst_layer2_json",
     },
     {
       key: "catalyst.orchestration.executor",
@@ -305,18 +311,17 @@ export const CONFIG_KEYS = Object.freeze(
       fallback: null,
       reader: "resolveTargetSetpoint",
     },
-    {
-      key: "catalyst.orchestration.executionCore.eligibleQuery.status",
-      kind: "value",
-      layer1: "catalyst.orchestration.executionCore.eligibleQuery.status",
-      env: [],
-      fallback: null,
-      reader: "readExecutionCoreConcurrency",
-    },
+    // CTL-1214: the eligibleQuery.status row is GONE. It reported a Layer-1 key
+    // that no runtime reader dereferences — the effective eligibleQuery comes from
+    // execution-core/registry.json via resolveEligibleQuery, written from a
+    // hardcoded literal in setup-execution-core-states.sh. A provenance tool that
+    // reports a value nothing consumes is worse than silent: during an incident it
+    // sends the operator to edit a key that cannot change anything.
     {
       key: "catalyst.orchestration.worktreeRefresh.enabled",
       kind: "value",
       layer1: "catalyst.orchestration.worktreeRefresh.enabled",
+      layer2: "catalyst.orchestration.worktreeRefresh.enabled",
       env: [],
       fallback: null,
       reader: "readWorktreeRefreshConfig",
@@ -325,6 +330,7 @@ export const CONFIG_KEYS = Object.freeze(
       key: "catalyst.orchestration.worktreeRefresh.intervalSeconds",
       kind: "value",
       layer1: "catalyst.orchestration.worktreeRefresh.intervalSeconds",
+      layer2: "catalyst.orchestration.worktreeRefresh.intervalSeconds",
       env: [],
       fallback: null,
       reader: "readWorktreeRefreshConfig",
@@ -462,6 +468,22 @@ export const CONFIG_KEYS = Object.freeze(
 );
 
 // ─── resolution ──────────────────────────────────────────────────────────────
+
+// deepMergeLayer2 — CTL-1214. Byte-for-byte the same rule as config.mjs's
+// _deepMergeLayer2: recurse into plain objects, replace anything else. Kept local
+// because this module is deliberately import-light (it is the tool an operator
+// runs when the daemon will not start).
+export function deepMergeLayer2(target, source) {
+  const isPlain = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+  const out = isPlain(target) ? { ...target } : {};
+  for (const key of Object.keys(isPlain(source) ? source : {})) {
+    out[key] =
+      isPlain(source[key]) && isPlain(out[key])
+        ? deepMergeLayer2(out[key], source[key])
+        : source[key];
+  }
+  return out;
+}
 
 // getPath — read a dotted key out of a parsed JSON object. Returns undefined for
 // an absent key, a non-object ancestor, or a null root. Never throws.
@@ -609,6 +631,17 @@ export function dumpConfig({
   layer1Text = null,
   layer2Path = null,
   layer2Text = null,
+  // CTL-1214: the two Layer-2 SIBLINGS. readLayer2Merged composes
+  // config.json < node.json < cluster-secrets.json, and the migration writes the
+  // relocated keys to node.json — so a dump that reads only config.json reports
+  // every relocated knob as `default`. That is not a cosmetic gap: this tool's
+  // whole job is to tell an operator WHERE a value came from, and after the
+  // CTL-1214 slimming it would have answered "dispatchMode = oneshot-legacy,
+  // provenance default" while the runtime resolved phase-agents from node.json.
+  nodePath = null,
+  nodeText = null,
+  clusterSecretsPath = null,
+  clusterSecretsText = null,
   execCoreEnvPath = null,
   execCoreEnvText = "",
   daemonLayer1 = null,
@@ -617,8 +650,21 @@ export function dumpConfig({
   const effectiveEnv = overlayEnvFile(env, execCoreEnvText);
   const l1 = parseOrNull(layer1Text);
   const l2 = parseOrNull(layer2Text);
+  const lNode = parseOrNull(nodeText);
+  const lSecrets = parseOrNull(clusterSecretsText);
 
-  const rows = keys.map((row) => resolveRow(row, { env: effectiveEnv, layer1: l1.parsed, layer2: l2.parsed }));
+  // Same precedence and the same deep merge as config.mjs's readLayer2Merged:
+  // config.json (bottom) < node.json < cluster-secrets.json (top). A layer that is
+  // absent or unparseable contributes {} — layer-absent, never fatal — which is
+  // the fail-open posture every readLayer2* site already has.
+  const layer2Merged = deepMergeLayer2(
+    deepMergeLayer2(l2.parsed ?? {}, lNode.parsed ?? {}),
+    lSecrets.parsed ?? {},
+  );
+
+  const rows = keys.map((row) =>
+    resolveRow(row, { env: effectiveEnv, layer1: l1.parsed, layer2: layer2Merged }),
+  );
 
   const envFileEntries = parseEnvFileEntries(execCoreEnvText);
   const envFileKeys = [...new Set(envFileEntries.map((e) => e.key))].sort();
@@ -651,6 +697,18 @@ export function dumpConfig({
       path: layer2Path,
       present: layer2Text !== null && layer2Text !== undefined,
       parsed: l2.ok,
+      // CTL-1214: the siblings are reported individually so "the value is not
+      // where I expected" is answerable without guessing which file was read.
+      node: {
+        path: nodePath,
+        present: nodeText !== null && nodeText !== undefined,
+        parsed: lNode.ok,
+      },
+      clusterSecrets: {
+        path: clusterSecretsPath,
+        present: clusterSecretsText !== null && clusterSecretsText !== undefined,
+        parsed: lSecrets.ok,
+      },
     },
     // The env file's KEY SET is itself a divergence signal — values are never emitted.
     execCoreEnv: { path: execCoreEnvPath, present: execCoreEnvText !== "", keys: envFileKeys, bareKeys },
@@ -679,6 +737,10 @@ function readOrNull(path) {
 export function collectConfigDump({ env = process.env, cwd = process.cwd(), now = new Date() } = {}) {
   const home = env.HOME || "";
   const layer2Path = env.CATALYST_LAYER2_CONFIG_FILE || resolve(home, ".config", "catalyst", "config.json");
+  // CTL-1214: siblings resolved off the SAME directory, exactly as
+  // resolveNodeConfigPath()/resolveClusterSecretsPath() resolve them.
+  const nodePath = resolve(layer2Path, "..", "node.json");
+  const clusterSecretsPath = resolve(layer2Path, "..", "cluster-secrets.json");
   const execCoreEnvPath = env.CATALYST_EXECUTION_CORE_ENV || resolve(home, ".config", "catalyst", "execution-core.env");
   const execCoreEnvText = readOrNull(execCoreEnvPath) ?? "";
   const catalystDir = env.CATALYST_DIR || resolve(home, "catalyst");
@@ -712,6 +774,10 @@ export function collectConfigDump({ env = process.env, cwd = process.cwd(), now 
     layer1Text: readOrNull(layer1Path),
     layer2Path,
     layer2Text: readOrNull(layer2Path),
+    nodePath,
+    nodeText: readOrNull(nodePath),
+    clusterSecretsPath,
+    clusterSecretsText: readOrNull(clusterSecretsPath),
     execCoreEnvPath,
     execCoreEnvText,
     daemonLayer1,

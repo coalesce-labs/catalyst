@@ -29,11 +29,6 @@
       "user": null
     },
     "monitor": {
-      "github": {
-        "repoColors": {
-          "coalesce-labs/catalyst": "green"
-        }
-      },
       "linear": {
         "teams": [
           {
@@ -62,42 +57,6 @@
     "deployment": {
       "mode": "cluster"
     },
-    "orchestration": {
-      "dispatchMode": "phase-agents",
-      "worktreeRefresh": {
-        "enabled": true,
-        "intervalSeconds": 300,
-        "quietSeconds": 30
-      },
-      "reconcile": {
-        "mode": "notify",
-        "intervalSeconds": 600
-      },
-      "executionCore": {
-        "maxParallel": 4,
-        "minParallel": 1,
-        "maxParallelCeiling": 40,
-        "eligibleQuery": {
-          "status": "Todo",
-          "team": null,
-          "project": null,
-          "label": null,
-          "priority": null
-        }
-      }
-    },
-    "feedback": {
-      "autoFile": true,
-      "githubRepo": "coalesce-labs/catalyst",
-      "labels": [
-        "auto-submitted"
-      ]
-    },
-    "sweep": {
-      "idleHours": 48,
-      "intervalHours": 1,
-      "salvagePush": false,
-      "maxRemovalsPerRun": 10
-    }
+    "schemaVersion": 1
   }
 }

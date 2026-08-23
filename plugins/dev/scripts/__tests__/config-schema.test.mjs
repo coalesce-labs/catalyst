@@ -367,6 +367,61 @@ describe("config.template.json is sanitized (CTL-1214)", () => {
   });
 });
 
+// CTL-1214 Phase 4 — THIS repo's committed .catalyst/config.json, read from disk.
+// The regression guard cuts both ways: a migration that OVER-slims is as bad as
+// one that under-slims, and losing stateMap would break every phase transition in
+// the pipeline.
+describe("this repo's committed .catalyst/config.json is slimmed (CTL-1214)", () => {
+  const layer1Path = join(import.meta.dir, "..", "..", "..", "..", ".catalyst", "config.json");
+  const cfg = JSON.parse(readFileSync(layer1Path, "utf8"));
+
+  test("validates with no hard errors and schemaVersion 1", () => {
+    const r = validateLayer1Config(cfg);
+    expect(r.errors).toEqual([]);
+    expect(r.valid).toBe(true);
+    expect(cfg.catalyst.schemaVersion).toBe(1);
+    expect(r.recommendations).toEqual([]);
+  });
+
+  test("the only remaining leak is the roster, which CTL-1885 owns (D4)", () => {
+    expect(validateLayer1Config(cfg).deprecatedKeys).toEqual(["monitor.linear.teams"]);
+  });
+
+  test("carries no orchestration / feedback / sweep / repoColors", () => {
+    expect(cfg.catalyst.orchestration).toBeUndefined();
+    expect(cfg.catalyst.feedback).toBeUndefined();
+    expect(cfg.catalyst.sweep).toBeUndefined();
+    expect(cfg.catalyst.monitor?.github).toBeUndefined();
+    // The dead key is gone entirely, not relocated.
+    expect(JSON.stringify(cfg)).not.toContain("eligibleQuery");
+  });
+
+  test("the identity block is INTACT (the over-slim guard)", () => {
+    expect(cfg.catalyst.projectKey).toBe("catalyst-workspace");
+    expect(cfg.catalyst.project.ticketPrefix).toBe("CTL");
+    expect(cfg.catalyst.linear.teamKey).toBe("CTL");
+    expect(typeof cfg.catalyst.linear.teamId).toBe("string");
+    expect(cfg.catalyst.linear.teamId.length).toBeGreaterThan(0);
+    // All 12 states — losing stateMap breaks every phase transition.
+    expect(Object.keys(cfg.catalyst.linear.stateMap)).toHaveLength(12);
+    for (const k of [
+      "backlog", "todo", "triage", "research", "planning", "inProgress",
+      "verifying", "reviewing", "remediating", "inReview", "done", "canceled",
+    ]) {
+      expect(typeof cfg.catalyst.linear.stateMap[k]).toBe("string");
+    }
+    expect(cfg.catalyst.thoughts.org).toBe("coalesce-labs");
+    expect(cfg.catalyst.thoughts.directory).toBe("catalyst-workspace");
+    expect(cfg.catalyst.deployment.mode).toBe("cluster");
+    // The roster stays (CTL-1885) and still names this repo — resolveRepoFullName
+    // falls through to monitor.linear.teams[].vcsRepo once feedback.githubRepo is
+    // gone from Layer-1, so an empty roster here would break the plugin-refresh
+    // merge-event matcher.
+    expect(cfg.catalyst.monitor.linear.teams.length).toBeGreaterThan(0);
+    expect(cfg.catalyst.monitor.linear.teams[0].vcsRepo).toBe("coalesce-labs/catalyst");
+  });
+});
+
 describe("catalyst-config.schema.json (Layer-1 schema)", () => {
   test("minimal identity config conforms to the schema", () => {
     expect(validateAgainstSchema(minimalLayer1(), catalystConfigSchema)).toEqual([]);

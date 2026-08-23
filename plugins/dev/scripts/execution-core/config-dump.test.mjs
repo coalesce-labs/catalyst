@@ -520,3 +520,107 @@ describe("registry drift guards", () => {
     expect(readFileSync(resolve(HERE, "config-dump.mjs"), "utf8")).toContain("\\u0000");
   });
 });
+
+// ─── CTL-1214: the merged Layer-2 + the relocated rows ───────────────────────
+describe("CTL-1214 — merged Layer-2 and relocated rows", () => {
+  const l1 = JSON.stringify({ catalyst: { projectKey: "p", schemaVersion: 1 } });
+
+  test("a value in node.json resolves, with layer2 provenance", () => {
+    const d = dumpConfig({
+      layer1Text: l1,
+      layer2Text: JSON.stringify({ catalyst: {} }),
+      nodeText: JSON.stringify({
+        catalyst: { orchestration: { dispatchMode: "phase-agents" } },
+      }),
+    });
+    const row = d.rows.find((r) => r.key === "catalyst.orchestration.dispatchMode");
+    expect(row.value).toBe("phase-agents");
+    expect(row.layer).toBe("layer2");
+    // The sharp half: NOT the silent default a Layer-1-only read would report.
+    expect(row.value).not.toBe("oneshot-legacy");
+  });
+
+  test("a slimmed Layer-1 with NO node.json falls to the default (negative control)", () => {
+    const d = dumpConfig({ layer1Text: l1, layer2Text: JSON.stringify({ catalyst: {} }) });
+    const row = d.rows.find((r) => r.key === "catalyst.orchestration.dispatchMode");
+    expect(row.value).toBe("oneshot-legacy");
+    expect(row.provenance).toBe("default");
+  });
+
+  test("cluster-secrets.json outranks node.json, node.json outranks config.json", () => {
+    const mk = (v) => JSON.stringify({ catalyst: { orchestration: { dispatchMode: v } } });
+    const pick = (d) => d.rows.find((r) => r.key === "catalyst.orchestration.dispatchMode").value;
+    expect(pick(dumpConfig({ layer1Text: l1, layer2Text: mk("oneshot-legacy") }))).toBe("oneshot-legacy");
+    expect(
+      pick(dumpConfig({ layer1Text: l1, layer2Text: mk("oneshot-legacy"), nodeText: mk("phase-agents") })),
+    ).toBe("phase-agents");
+    expect(
+      pick(
+        dumpConfig({
+          layer1Text: l1,
+          layer2Text: mk("oneshot-legacy"),
+          nodeText: mk("phase-agents"),
+          clusterSecretsText: mk("execution-core"),
+        }),
+      ),
+    ).toBe("execution-core");
+  });
+
+  test("the Layer-2 merge is DEEP, not a replace", () => {
+    const d = dumpConfig({
+      layer1Text: l1,
+      layer2Text: JSON.stringify({
+        catalyst: { orchestration: { executionCore: { maxParallel: 4 } } },
+      }),
+      nodeText: JSON.stringify({
+        catalyst: { orchestration: { executionCore: { minParallel: 1 } } },
+      }),
+    });
+    const get = (k) => d.rows.find((r) => r.key === k).value;
+    expect(get("catalyst.orchestration.executionCore.maxParallel")).toBe(4);
+    expect(get("catalyst.orchestration.executionCore.minParallel")).toBe(1);
+  });
+
+  test("a malformed sibling is layer-ABSENT, never fatal", () => {
+    const d = dumpConfig({
+      layer1Text: l1,
+      layer2Text: JSON.stringify({ catalyst: { orchestration: { dispatchMode: "phase-agents" } } }),
+      nodeText: "{ not json at all",
+    });
+    expect(d.rows.find((r) => r.key === "catalyst.orchestration.dispatchMode").value).toBe("phase-agents");
+    expect(d.layer2.node.parsed).toBe(false);
+    expect(d.layer2.node.present).toBe(true);
+  });
+
+  test("the dead eligibleQuery.status row is GONE from CONFIG_KEYS", () => {
+    const keys = CONFIG_KEYS.map((r) => r.key);
+    expect(keys).not.toContain("catalyst.orchestration.executionCore.eligibleQuery.status");
+    // Positive control: the row set is otherwise intact and still names its
+    // orchestration neighbours, so "not contains" is not an empty-list artifact.
+    expect(keys).toContain("catalyst.orchestration.dispatchMode");
+    expect(keys).toContain("catalyst.orchestration.executor");
+    expect(keys.length).toBeGreaterThan(20);
+  });
+
+  test("the four relocated row families declare a layer2 source", () => {
+    const byKey = Object.fromEntries(CONFIG_KEYS.map((r) => [r.key, r]));
+    for (const k of [
+      "catalyst.orchestration.dispatchMode",
+      "catalyst.orchestration.reconcile.mode",
+      "catalyst.orchestration.executionCore.maxParallel",
+      "catalyst.orchestration.executionCore.minParallel",
+      "catalyst.orchestration.executionCore.maxParallelCeiling",
+      "catalyst.orchestration.worktreeRefresh.enabled",
+      "catalyst.orchestration.worktreeRefresh.intervalSeconds",
+    ]) {
+      expect(byKey[k]?.layer2).toBeTruthy();
+    }
+    // D6 negative control: the NON-relocating orchestration keys must NOT have
+    // grown a layer2 source — they are genuinely Layer-1.
+    // (some rows declare an explicit `layer2: null`, so the assertion is
+    // "declares no Layer-2 source", not "the property is absent")
+    expect(byKey["catalyst.orchestration.executor"].layer2 ?? null).toBeNull();
+    expect(byKey["catalyst.orchestration.executorByPhase"].layer2 ?? null).toBeNull();
+    expect(byKey["catalyst.orchestration.draftPr.enabled"].layer2 ?? null).toBeNull();
+  });
+});
