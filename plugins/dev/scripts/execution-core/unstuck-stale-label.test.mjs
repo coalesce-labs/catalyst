@@ -13,15 +13,15 @@ import {
 // ---------------------------------------------------------------------------
 describe("classifyTerminalStaleLabel (CTL-1064 catD)", () => {
   test("Canceled + needs-human → clear-label", () => {
-    const r = classifyTerminalStaleLabel({ linearState: "Canceled", attentionLabels: ["needs-human"], ticket: "CTL-X" });
+    const r = classifyTerminalStaleLabel({ linearState: "Canceled", attentionLabels: ["blocked"], ticket: "CTL-X" });
     expect(r.action).toBe("clear-label");
-    expect(r.label).toBe("needs-human");
+    expect(r.label).toBe("blocked");
   });
 
   test("Duplicate + needs-human → clear-label", () => {
-    const r = classifyTerminalStaleLabel({ linearState: "Duplicate", attentionLabels: ["needs-human"] });
+    const r = classifyTerminalStaleLabel({ linearState: "Duplicate", attentionLabels: ["blocked"] });
     expect(r.action).toBe("clear-label");
-    expect(r.label).toBe("needs-human");
+    expect(r.label).toBe("blocked");
   });
 
   test("Done + blocked → clear-label", () => {
@@ -37,13 +37,13 @@ describe("classifyTerminalStaleLabel (CTL-1064 catD)", () => {
   });
 
   test("In Progress + needs-human → skip (not terminal)", () => {
-    const r = classifyTerminalStaleLabel({ linearState: "In Progress", attentionLabels: ["needs-human"] });
+    const r = classifyTerminalStaleLabel({ linearState: "In Progress", attentionLabels: ["blocked"] });
     expect(r.action).toBe("skip");
     expect(r.reason).toBe("not-terminal");
   });
 
   test("Todo + needs-human → skip (not terminal)", () => {
-    const r = classifyTerminalStaleLabel({ linearState: "Todo", attentionLabels: ["needs-human"] });
+    const r = classifyTerminalStaleLabel({ linearState: "Todo", attentionLabels: ["blocked"] });
     expect(r.action).toBe("skip");
   });
 
@@ -65,21 +65,21 @@ describe("classifyTerminalStaleLabel (CTL-1064 catD)", () => {
   });
 
   test("unknown linearState + attention label → skip (fail-closed)", () => {
-    const r = classifyTerminalStaleLabel({ linearState: "Some Unknown State", attentionLabels: ["needs-human"] });
+    const r = classifyTerminalStaleLabel({ linearState: "Some Unknown State", attentionLabels: ["blocked"] });
     expect(r.action).toBe("skip");
     expect(r.reason).toBe("not-terminal");
   });
 
   test("null linearState → skip (fail-closed)", () => {
-    const r = classifyTerminalStaleLabel({ linearState: null, attentionLabels: ["needs-human"] });
+    const r = classifyTerminalStaleLabel({ linearState: null, attentionLabels: ["blocked"] });
     expect(r.action).toBe("skip");
     expect(r.reason).toBe("not-terminal");
   });
 
   test("terminal with multiple labels → first matching attention label returned", () => {
-    const r = classifyTerminalStaleLabel({ linearState: "Done", attentionLabels: ["unrelated", "needs-human", "blocked"] });
+    const r = classifyTerminalStaleLabel({ linearState: "Done", attentionLabels: ["unrelated", "blocked", "blocked"] });
     expect(r.action).toBe("clear-label");
-    expect(r.label).toBe("needs-human");
+    expect(r.label).toBe("blocked");
   });
 });
 
@@ -95,23 +95,23 @@ describe("collectTerminalStaleLabelCandidates (CTL-1064 catD census)", () => {
   test("Canceled ticket with needs-human → one candidate", () => {
     const out = collectTerminalStaleLabelCandidates({
       listLabeledTickets: () => [
-        { ticket: "CTL-CANCEL", labels: ["needs-human"], linearState: "Canceled" },
+        { ticket: "CTL-CANCEL", labels: ["blocked"], linearState: "Canceled" },
       ],
     });
     expect(out).toHaveLength(1);
     expect(out[0].ticket).toBe("CTL-CANCEL");
-    expect(out[0].evidence.attentionLabels).toEqual(["needs-human"]);
+    expect(out[0].evidence.attentionLabels).toEqual(["blocked"]);
     expect(out[0].isStaleLabel).toBe(true);
   });
 
   test("multi-label ticket → one candidate per attention label", () => {
     const out = collectTerminalStaleLabelCandidates({
       listLabeledTickets: () => [
-        { ticket: "CTL-MULTI", labels: ["needs-human", "blocked"], linearState: "Canceled" },
+        { ticket: "CTL-MULTI", labels: ["blocked", "blocked"], linearState: "Canceled" },
       ],
     });
     expect(out).toHaveLength(2);
-    expect(out.map(c => c.evidence.attentionLabels[0]).sort()).toEqual(["blocked", "needs-human"]);
+    expect(out.map(c => c.evidence.attentionLabels[0]).sort()).toEqual(["blocked", "blocked"]);
   });
 
   test("non-attention label ignored", () => {
@@ -128,7 +128,7 @@ describe("collectTerminalStaleLabelCandidates (CTL-1064 catD census)", () => {
     const out = collectTerminalStaleLabelCandidates({
       listLabeledTickets: () => [
         null,  // will throw when accessing .ticket
-        { ticket: "CTL-OK", labels: ["needs-human"], linearState: "Canceled" },
+        { ticket: "CTL-OK", labels: ["blocked"], linearState: "Canceled" },
       ],
     });
     expect(out.some(c => c.ticket === "CTL-OK")).toBe(true);
@@ -146,10 +146,14 @@ describe("collectTerminalStaleLabelCandidates (CTL-1064 catD census)", () => {
 // Constants
 // ---------------------------------------------------------------------------
 describe("ATTENTION_LABELS / TERMINAL_LINEAR_STATES (CTL-1064 catD)", () => {
-  test("ATTENTION_LABELS contains needs-human, blocked, waiting", () => {
-    expect(ATTENTION_LABELS).toContain("needs-human");
+  test("ATTENTION_LABELS contains blocked and waiting — and NOT needs-human (CTL-2161)", () => {
     expect(ATTENTION_LABELS).toContain("blocked");
     expect(ATTENTION_LABELS).toContain("waiting");
+    // ⛔ CTL-2161 NEGATIVE ASSERTION. `needs-human` is deleted; leaving it in this
+    // list would make the sweep chase a label nothing writes. `blocked`/`waiting`
+    // SURVIVE — they are the admission-gate pair, a different axis — which is why
+    // this module was NOT deleted wholesale as the phase brief specified.
+    expect(ATTENTION_LABELS).not.toContain("needs-human");
   });
   test("TERMINAL_LINEAR_STATES contains Canceled, Duplicate, Done", () => {
     expect(TERMINAL_LINEAR_STATES).toContain("Canceled");

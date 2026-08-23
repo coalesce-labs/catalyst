@@ -52,9 +52,9 @@ import {
   CLUSTER_SYNC_INTERVAL_MS, // CTL-1274: cluster-repo auto-pull cadence
   isHostNamePinnedFromConfig, // CTL-1093
   getCatalystRepoDir, // CTL-1093 sticky dir
-  readDelegateRunnerConfig, // CTL-1331: async board-health delegate runner kill-switch
   readCloudFeedConfig, // CTL-1847: cloud-feed dispatch-source mode
   readGithubFeedConfig, // CTL-1929: github-feed dispatch-source mode (SEPARATE knob)
+  resolveGithubFeedLayer2Mode, // CTL-2011 Phase 3: broker/orch-monitor view for the reader-split alarm
   readLinearWriteProxyConfig, // CTL-1889: Linear write-proxy transport mode
   resolveLeaseAuthorityMode, // CTL-1786: lease-authority claim gate (off/shadow/enforce)
   readLinearReplica, // CTL-1340: read-replica tier flag (inert; default off)
@@ -66,6 +66,7 @@ import {
   codexConfig, // CTL-1457: codex-exec runtime settings (codexHome/bin/…) for the boot-eligibility gate
   readGovernanceConfig, // CTL-1552: boot governance-mode + source self-report
   readGovernanceSources, // CTL-1552: which config layer each governance mode resolved from
+  resolvePublishPreflightMode,
 } from "./config.mjs";
 import { resolveBootIdentity } from "./host-boot-identity.mjs"; // CTL-1093
 import { readStickyIdentity, writeStickyIdentity } from "./host-sticky.mjs"; // CTL-1093
@@ -114,10 +115,6 @@ import { startWorktreeRefreshTimer, readWorktreeRefreshConfig } from "./worktree
 import { startCloudFeedTimer } from "./cloud-feed-timer.mjs"; // CTL-1847
 import { startGithubFeedTimer } from "./github-feed-timer.mjs"; // CTL-1929
 import { createCaptureSink, defaultCapturePath } from "./cloud-feed-capture.mjs"; // CTL-1847
-// CTL-1331: the async board-health delegate runner timer (kicks the DETACHED
-// drainer that does the heavy worktree-provision + `claude --bg` off the daemon
-// event loop). Gated by readDelegateRunnerConfig; Phase A ships it inert.
-import { startDelegateRunnerTimer } from "./delegate-runner.mjs";
 import { startStalePrRescueTimer, readStalePrRescueConfig } from "./stale-pr-rescue-timer.mjs";
 import { startStalledPrTimer as realStartStalledPrTimer, readStalledPrSweepConfig, DEFAULTS as STALLED_DEFAULTS } from "./stalled-pr-timer.mjs";
 import { startGithubQuotaTimer as realStartGithubQuotaTimer, readGithubQuotaSweepConfig, DEFAULTS as GITHUB_QUOTA_TIMER_DEFAULTS } from "./github-quota-timer.mjs";
@@ -145,7 +142,6 @@ import {
 } from "./scheduler.mjs";
 import * as linearWrite from "./linear-write.mjs"; // CTL-1067: writeStatus for defaultClearStall
 import { labelMarkerBase, clearStalledLabel } from "./label-guard.mjs"; // CTL-1567: canonical once-marker path (single source of truth); CTL-1552: clear needs-human LABEL + once-marker together (leaf module → no cycle)
-import { defaultForgetIntent } from "./recovery-reasoning.mjs"; // CTL-1567: re-arm recovery when a human responds
 import { forgetDurableEscalation } from "./durable-escalation.mjs"; // CTL-1643: clear durable record on operator clear
 import { appendWorkerTransitionEvent as defaultAppendWorkerTransitionEvent } from "./worker-transition-event.mjs"; // CTL-764 finding 11: needs-input→cleared on comment wake
 import {
@@ -158,6 +154,7 @@ import { resolveGithubBootAuth, rearmGithubTokenFromFile } from "./github-auth-p
 import { rearmClaudeAccountsFromFile } from "./claude-accounts-rearm.mjs"; // CTL-1984: account-slot live-rearm hook
 import { resolveBootDependencies, BOOT_DEPENDENCY_HOLD_REASON } from "./boot-dependency-preflight.mjs";
 import { getReconcileHealth } from "./reconcile-health.mjs";
+import { probePublishCapability as realProbePublishCapability, resolvePushRemote } from "./publish-preflight.mjs";
 import { registerRearmHook, armSecret } from "../lib/secret-contract.mjs"; // CTL-1623: wires rearmGithubTokenFromFile as the github-token row's registered timer rearm hook
 import { startAutoTuner } from "./autotune.mjs"; // CTL-684: side-car maxParallel auto-tuner
 import { dispatchTicket, makeCommentWakeDispatch, makePhaseAwareDispatchFn, setAgentSessionNarrator } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch; CTL-1365a/b: executor→dispatch selection at the launch seam + comment-wake executor binding; CTL-1457: per-phase-aware dispatchFn factory (owns the executor→dispatch selection internally)
@@ -165,7 +162,7 @@ import { resolveSdkBootExecutor, assertSdkAuth } from "./sdk-run-phase-agent.mjs
 import { resolveCodexBootEligibility } from "./codex-run-phase-agent.mjs"; // CTL-1457: codex boot gate (auth.json + `codex --version`) that degrades routed codex phases + emits execution-core.executor.codex-fallback
 import { removeLabel as defaultRemoveLabel } from "./linear-write.mjs"; // CTL-549: clear needs-human on resume
 import { setLinearWriteProxy, setLinearWriteProxyResolver } from "./linear-write.mjs"; // CTL-1889: install the cloud write-proxy transport + its replica-backed id resolver
-import { createLinearWriteProxy } from "./linear-write-proxy.mjs"; // CTL-1889
+import { createLinearWriteProxy, resolveWriteBudgetCaps } from "./linear-write-proxy.mjs"; // CTL-1889; CTL-2073: same cap resolution, for the boot-time doctor snapshot below
 import { createAgentSessionNarrator } from "./agent-session-narrator.mjs"; // CTL-1943
 import { createProxyResolver } from "./linear-write-proxy-resolve.mjs"; // CTL-1889
 import { buildTeamIdentityMismatchEvents } from "./config-identity-event.mjs"; // CTL-2076: surface a registry team-identity mismatch (CAT-52) on the unified event log
@@ -175,6 +172,7 @@ import { buildTeamIdentityMismatchEvents } from "./config-identity-event.mjs"; /
 import { classifyTicketResolution } from "./linear-query.mjs";
 import { createGatewayReader } from "./gateway-read.mjs";
 import { createReplicaReader } from "./replica-read.mjs"; // CTL-1340: read-replica tier reader
+import { createAskBlocksResolver } from "./ask-wake.mjs"; // CTL-2157: an answered ask wakes the work it blocks
 import { setLaneClaimGuard } from "./lane-claim-install.mjs"; // CTL-2068
 import { buildLaneClaimGuard, resolveStateMap } from "./lane-claim.mjs"; // CTL-2068
 // CTL-2070: the TIMELY per-ticket actor source (fleet write-ledger). loadLedger seeds the
@@ -244,8 +242,6 @@ let _reaper = null;
 let _orphanTimer = null;
 // CTL-707: periodic background worktree refresh timer.
 let _refreshTimer = null;
-// CTL-1331: async board-health delegate runner timer (gated CATALYST_DELEGATE_RUNNER).
-let _delegateRunnerTimer = null;
 // CTL-782: periodic stale/conflicting-PR rescue timer.
 let _stalePrRescueTimer = null;
 // CTL-1175: periodic orphan-PR detect+notify sweep timer.
@@ -586,6 +582,35 @@ export function clearNeedsHumanMarkers(orchDir, ticket, { rm = unlinkSync } = {}
   return { removed, failed };
 }
 
+// defaultResolveAskBlocks — CTL-2157. The PRODUCTION ask fan-out resolver:
+// `ticket` → the work tickets it blocks, when it carries an ask label.
+//
+// Replica-backed, so it costs ZERO Linear API quota: `details()` reads title +
+// description + labels + relations from ~/catalyst/catalyst-replica.db in one
+// snapshot, and the replica carries a normalized `relations` TABLE (937 `blocks`
+// rows, measured 2026-08-21). ⚠️ That table is NOT visible in `issues.raw`, whose
+// top-level keys carry no `relations` — reading `raw` is what makes local relation
+// data look unavailable. See ask-wake.mjs for the full note.
+//
+// Deliberately NOT gated on the CATALYST_LINEAR_REPLICA mode flag: this is not the
+// terminal-check accelerator (where a miss must fall through to a live read), it
+// is a wake path whose only alternative is not waking at all. Reader construction
+// is lazy and cached — a comment-heavy workspace opens one readonly handle, not
+// one per comment. Fail-open to `[]` (today's single-ticket wake) on ANY failure:
+// a replica that cannot answer must never invent a dispatch.
+let _askBlocksResolver = null;
+export function defaultResolveAskBlocks(ticket) {
+  try {
+    if (_askBlocksResolver === null) {
+      const reader = createReplicaReader();
+      _askBlocksResolver = createAskBlocksResolver((ids) => reader.details(ids));
+    }
+    return _askBlocksResolver(ticket);
+  } catch {
+    return [];
+  }
+}
+
 // handleCommentWake — CTL-549 re-dispatch hook. Called on each
 // `linear.comment.created` event by the daemon's `onComment` callback wired
 // into startMonitor. Scans all phase signals for the comment's ticket; for
@@ -618,13 +643,13 @@ export async function handleCommentWake(
     // workspace comment. Defaults to the real registry check (no wiring required,
     // so an unwired production path is still SAFE, not silently permissive).
     isManagedTicket = defaultIsManagedTicket,
-    // CTL-1567 (Codex P1): a human response must RE-ARM recovery, not just unpark.
-    // Clearing the label alone leaves `.recovery-intents/<TICKET>.json` latched
-    // `escalated:true` for up to 7 days, so the terminal sweep re-applies
-    // needs-human while the latch suppresses any fresh attempt — the ticket
-    // silently returns to the inbox and cannot be retried. A human answering IS
-    // the signal that another attempt is warranted.
-    forgetIntent = defaultForgetIntent,
+    // CTL-2157: ticket → the WORK tickets it blocks, when it is an ask. Defaults
+    // to the REAL replica-backed resolver, deliberately: a fan-out that only fires
+    // when some launcher remembers to wire it is a fan-out that ships INERT (the
+    // CTL-1919/CTL-1935 failure mode), and an ask nothing consumes is the exact
+    // pile-up this epic exists to delete. Costs zero Linear quota — see
+    // ask-wake.mjs. Injectable so tests never touch the replica.
+    resolveAskBlocks = defaultResolveAskBlocks,
   }
 ) {
   const { ticket } = parsed ?? {};
@@ -635,6 +660,113 @@ export async function handleCommentWake(
   // writers' guard. botUserId accepts a string or Set<string>.
   if (_isBotId(botUserId, parsed.authorId)) return;
 
+  // ── CTL-2157: WHO does this comment wake? ────────────────────────────────────
+  // Until now the answer was always "the ticket the comment landed on". An ASK is
+  // a DIFFERENT ticket — one ask ticket carrying a `blocks` relation to the work
+  // it holds up — so a human's answer landed exactly where nothing was looking and
+  // the parked agent waited forever (ADV-1374/1376 sat for DAYS because nothing
+  // consumed the ask). An ask that does not wake its agent piles up precisely the
+  // way the `needs-human` label did: the same disease with a nicer name. So the
+  // wake is re-keyed — the commented ticket, PLUS every ticket an ask blocks.
+  //
+  // ⛔ GATED ON POSITIVE HUMAN PROVENANCE, not merely on "not a known bot" (the
+  // self-echo guard above). The agent posts the ask body and its follow-ups as the
+  // app actor; in the SUPPORTED botUserId-unset config `_isBotId` cannot recognize
+  // those, so an ungated fan-out would re-dispatch every ticket the ask blocks on
+  // the agent's OWN comment — CTL-756's self-wake bug, one indirection further
+  // out. Computed once here because it describes the comment, not the target.
+  const humanProvenance = Boolean(parsed.authorId) && Boolean(botUserId);
+  let askBlocked = [];
+  if (humanProvenance) {
+    try {
+      const raw = resolveAskBlocks(ticket);
+      askBlocked = (Array.isArray(raw) ? raw : []).filter(
+        (t) => typeof t === "string" && t !== "" && t !== ticket
+      );
+    } catch (err) {
+      // Fail-open in the SAFE direction: no fan-out, i.e. exactly today's
+      // single-ticket wake. A replica that cannot answer must never invent one.
+      askBlocked = [];
+      log.warn(
+        { ticket, err: err?.message },
+        "handleCommentWake: ask fan-out resolve failed — waking only the commented ticket"
+      );
+    }
+    if (askBlocked.length > 0) {
+      log.info(
+        { ask: ticket, wakes: askBlocked },
+        "handleCommentWake: ask answered — waking the work it blocks"
+      );
+    }
+  }
+
+  const perTicket = {
+    orchDir,
+    dispatch,
+    removeLabel,
+    resolveSession,
+    clearStall,
+    appendWorkerTransitionEvent,
+    clearDispositionEmit,
+    isManagedTicket,
+    humanProvenance,
+  };
+  // The commented ticket keeps its exact legacy treatment; the ask's blocked work
+  // is additive. Sequential, not Promise.all: each target does its own Linear
+  // writes, and a fan-out of N must not become N concurrent write bursts.
+  //
+  // ⛔ PER-TARGET FAULT ISOLATION, and it is not defensive decoration. Every other
+  // step in wakeParkedTicket is individually try/caught; `dispatch` was not, so one
+  // target throwing (a bad worker dir, an executor refusing) took the WHOLE fan-out
+  // down — every LATER ticket the ask blocks stayed parked, invisibly, and the
+  // rejection escaped into the daemon's `onComment` callback, which calls this
+  // function WITHOUT awaiting it (see startDaemon's monitorFn wiring): an unhandled
+  // promise rejection, not a logged failure. Pre-existing for one ticket; the fan-out
+  // made it able to take out UNRELATED tickets. Verified: with the guard, a target
+  // that throws is logged and the next target is still woken.
+  await wakeOneTargetSafely(ticket, perTicket);
+  for (const blocked of askBlocked) {
+    await wakeOneTargetSafely(blocked, { ...perTicket, viaAsk: ticket });
+  }
+}
+
+// wakeOneTargetSafely — one target's wake, isolated. Never throws, so a fan-out
+// survives a bad target AND handleCommentWake never rejects into its un-awaited
+// production call site.
+async function wakeOneTargetSafely(ticket, perTicket) {
+  try {
+    await wakeParkedTicket(ticket, perTicket);
+  } catch (err) {
+    log.error(
+      { ticket, ask: perTicket?.viaAsk ?? null, err: err?.message },
+      "handleCommentWake: waking this ticket FAILED — continuing with the rest of the fan-out"
+    );
+  }
+}
+
+// wakeParkedTicket — everything handleCommentWake does FOR ONE TICKET: the
+// clear-first block (park labels, once-markers, recovery re-arm) and then the
+// per-signal stall-clear / re-dispatch loop. Split out for CTL-2157 so the same
+// treatment can be applied to a ticket the comment did NOT land on — the work an
+// answered ask was blocking. `viaAsk` is the ask's identifier when this ticket was
+// reached through one (observability only; the treatment is identical, because a
+// human answering the ask IS the answer this ticket was parked on).
+async function wakeParkedTicket(
+  ticket,
+  {
+    orchDir,
+    dispatch,
+    removeLabel,
+    resolveSession = resolvePhaseSessionId,
+    clearStall = () => false,
+    appendWorkerTransitionEvent = defaultAppendWorkerTransitionEvent,
+    clearDispositionEmit = defaultClearDispositionEmit,
+    isManagedTicket = defaultIsManagedTicket,
+    humanProvenance = false,
+    viaAsk = null,
+  }
+) {
+  if (viaAsk) log.info({ ticket, ask: viaAsk }, "handleCommentWake: waking via an answered ask");
   // CTL-1567: CLEAR FIRST — a human answered, so the ticket must drop off the
   // "Needs you" list before anything else is attempted, and regardless of whether
   // anything else succeeds.
@@ -669,7 +801,8 @@ export async function handleCommentWake(
   //      configured bot set before believing a human answered.
   //  (b) MANAGED ticket. The daemon sees every workspace comment; only clear on
   //      tickets this installation actually manages.
-  const humanProvenance = Boolean(parsed.authorId) && Boolean(botUserId);
+  // `humanProvenance` and the ask fan-out are computed ONCE by handleCommentWake and
+  // passed in — they describe the COMMENT, not the ticket being woken (CTL-2157).
   let clearedNeedsHuman = false;
   // Codex #2970 round 3: distinct from clearedNeedsHuman (which also covers the
   // idempotent already-absent case and gates the marker reconcile below — that
@@ -686,7 +819,11 @@ export async function handleCommentWake(
   // genuine write, wherever it happens in this invocation, produces exactly one
   // emission instead of zero.
   let needsInputWroteEarly = false;
-  if (humanProvenance && isManagedTicket(ticket, orchDir)) {
+  // CTL-2157: NAME the authorization, because it — not the label write — is what
+  // the local-state half of this block is really keyed on. See the marker block
+  // below for why the difference is load-bearing.
+  const parkClearAuthorized = humanProvenance && isManagedTicket(ticket, orchDir);
+  if (parkClearAuthorized) {
     try {
       const res = await removeLabel(ticket, "needs-human");
       clearedNeedsHuman = res?.removed !== false; // undefined (test stub) ⇒ success
@@ -721,18 +858,27 @@ export async function handleCommentWake(
     } catch {
       /* fail-open — same reasoning as above */
     }
-    // Re-arm recovery: without this the latch survives and suppresses the retry
-    // this response was meant to authorize (see the forgetIntent option above).
-    try {
-      forgetIntent(ticket, { orchDir });
-    } catch (err) {
-      log.warn(
-        { ticket, err: err?.message },
-        "handleCommentWake: recovery-intent re-arm failed — a retry may stay suppressed"
-      );
-    }
   }
-  if (clearedNeedsHuman) {
+  // ⛔ CTL-2157 — RE-KEYED, and this is not cosmetics. This block used to be gated
+  // on `clearedNeedsHuman`, i.e. on the RESULT of `removeLabel(ticket,
+  // "needs-human")`. What lives inside it is NOT label cosmetics:
+  // `clearNeedsHumanMarkers` deletes `workers/<T>/.linear-label-needs-human.applied`,
+  // and boot-resume.mjs (:493-498) reads that marker to SUPPRESS auto-resume of a
+  // chronically-failing ticket. Two ways the old gate failed:
+  //   • a Linear 5xx on the removeLabel call (caught, fail-open) left
+  //     `clearedNeedsHuman` false, so a human's reply silently did NOT clear the
+  //     marker — the ticket stayed suppressed;
+  //   • when the label write itself is deleted (the point of this epic), the gate
+  //     would be false FOREVER and the marker would never clear again — a silent
+  //     regression that no test would have caught, because nothing asserted the
+  //     marker independently of the label.
+  // So it is keyed on the same AUTHORIZATION the clear runs under: a human
+  // answered (positive provenance) on a ticket we manage. That is the fact the
+  // local state actually depends on. The `.skipped` marker goes with it: a human
+  // response is precisely the signal that re-arming labelOnce is warranted.
+  // The Linear-write-gated half (the worker.transition emission) keeps its own,
+  // narrower gate below — only the host that actually WROTE should emit.
+  if (parkClearAuthorized) {
     // Keep the once-marker in step with the label. Clearing one without the other
     // is the desync that leaves labelOnce permanently disarmed (or the board
     // showing a park Linear no longer has).
@@ -792,10 +938,16 @@ export async function handleCommentWake(
       } catch {
         /* observability only */
       }
-      // CTL-1643: clear the durable escalation record so the board durable-escalation
-      // card disappears when the operator responds. Fail-open (never throws).
-      forgetDurableEscalation(orchDir, ticket);
     }
+    // CTL-1643: clear the durable escalation record so the board durable-escalation
+    // card disappears when the operator responds. Fail-open (never throws).
+    // CTL-2157: keyed on the AUTHORIZATION, not on the label write — the card
+    // records that a human was asked, and the human has now answered. Leaving it
+    // keyed on the label write would strand the card the day the label goes away,
+    // which is the same silent regression the marker block above describes. (The
+    // dedup reset above keeps its confirmed-clear gate: that map is about the
+    // Linear LABEL's state and is meaningless without it.)
+    forgetDurableEscalation(orchDir, ticket);
   }
 
   const workerDir = join(orchDir, "workers", ticket);
@@ -956,7 +1108,19 @@ export async function handleCommentWake(
       }
     }
 
-    dispatch(orchDir, ticket, parkedPhase, { handoffPath, resumeSession });
+    // Guarded like every other step in this function (removeLabel, clearStall,
+    // clearStalledLabel all are). This was the ONE unwrapped call, so a
+    // throwing executor aborted the remaining phase signals for this ticket as well as
+    // every later ticket in the fan-out. Logged at error — a wake that did not
+    // dispatch is a ticket still parked, which nobody must have to infer from silence.
+    try {
+      dispatch(orchDir, ticket, parkedPhase, { handoffPath, resumeSession });
+    } catch (err) {
+      log.error(
+        { ticket, phase: parkedPhase, ask: viaAsk, err: err?.message },
+        "handleCommentWake: re-dispatch FAILED — the ticket stays parked"
+      );
+    }
   }
 }
 
@@ -1165,7 +1329,23 @@ export function startDaemon({
   // AFTER the pid file — readers require both to agree, so the reverse order would
   // publish a snapshot that is briefly unverifiable. `pidFile` is recorded in the
   // payload because EXECUTION_CORE_PID_FILE can relocate it (round-5 P2).
-  writeDaemonRuntimeEnv(orchDir, { pidFile });
+  // CTL-2073 (Codex P1): fold the write-proxy's live budget into the SAME pid-gated
+  // snapshot drain-disabled already uses (round-3 P1's fix for CTL-1678) — a stale
+  // execution-core.env read otherwise disagrees with what THIS process actually
+  // enforces once the file is edited post-boot but pre-restart. Mode is read here
+  // (again — it is pure/cheap; the real read for proxy construction happens later
+  // at its own call site) purely to decide whether a live budget exists to record;
+  // "off" means there is no live proxy to disagree with the file, so write-budget-
+  // health.mjs's own ledger-absent branch already covers that host state.
+  const writeBudgetSnapshot =
+    readLinearWriteProxyConfig().mode !== "off" ? resolveWriteBudgetCaps(process.env) : null;
+  writeDaemonRuntimeEnv(orchDir, {
+    pidFile,
+    writeBudget: writeBudgetSnapshot && {
+      CATALYST_LINEAR_WRITE_DAILY_BUDGET: writeBudgetSnapshot.dailyBudget,
+      CATALYST_LINEAR_WRITE_TICKET_CAP: writeBudgetSnapshot.perTicketCap,
+    },
+  });
 
   // A throw from any composed boot step must not leave a stale PID file —
   // stopDaemon removes _pidFile via unlinkSync. Rethrow so the main()-level
@@ -1763,12 +1943,21 @@ export function startDaemon({
     if (githubFeedCfg.mode !== "off") {
       _githubFeedTimer = startGithubFeedTimer({
         mode: githubFeedCfg.mode,
+        source: githubFeedCfg.source,
         intervalSec: githubFeedCfg.intervalSec,
         orchDir,
         dbPath: getReplicaDbPath(),
         eventLogPath: getEventLogPath(),
         appendFn: (path, line) => appendFileSync(path, line),
         logger: log,
+        // CTL-2011 Phase 3: hand the timer the broker/orch-monitor view so it can
+        // edge-detect a reader split (github-feed.readers-diverged/-converged).
+        // Without this the resolver defaults to null and the alarm is inert in
+        // production — the CTL-1644 dead-detector trap. The daemon's own mode
+        // (githubFeedCfg) carries this process's CATALYST_GITHUB_FEED pin;
+        // resolveGithubFeedLayer2Mode strips that pin to reproduce what the broker
+        // (which never sources execution-core.env) resolves.
+        resolveLayer2ModeFn: () => resolveGithubFeedLayer2Mode(),
       });
       log.info(
         {
@@ -1894,6 +2083,18 @@ export function startDaemon({
       // terminal-ness from the local Catalyst-Cloud replica. undefined → inert.
       replica: replicaReader,
       isBgJobAlive,
+      // CAT-60: production arms the otherwise-hermetic scheduler seam. Resolve
+      // the project repo from the ticket prefix and cache per remote slug.
+      publishPreflightMode: resolvePublishPreflightMode({ configPath }),
+      probePublishCapability: ({ ticket }) => {
+        const team = String(ticket || "").split("-")[0];
+        const project = realListProjects().find((p) => p.team === team);
+        return realProbePublishCapability({
+          repoRoot: project?.repoRoot,
+          pushRemote: resolvePushRemote({ repoRoot: project?.repoRoot, layer1Path: configPath, layer2Path }),
+          cacheDir: join(orchDir, ".publish-preflight"),
+        });
+      },
       // CTL-1044: provide the production operator-event appender for the
       // scheduler's `appendIntentEvent` seam (scheduler.mjs:4300). Without this
       // the seam is null and the advance-shadow comparator's disagree/tick
@@ -2522,21 +2723,6 @@ function startReaperAndTimer({
     });
   }
 
-  // CTL-1331: start the async board-health delegate runner timer. Gated by
-  // CATALYST_DELEGATE_RUNNER — readDelegateRunnerConfig().mode resolves "off"
-  // unless board-health is enforce, so Phase A is inert: startDelegateRunnerTimer
-  // returns a no-op { stop } handle and nothing drains. When "on" (Phase B), the
-  // timer kicks a DETACHED child each interval that does the heavy
-  // worktree-provision + `claude --bg` off the daemon event loop. (Phase B also
-  // wires CATALYST_EXECUTION_CORE_DIR onto the child spawn so the entry resolves
-  // orchDir; until then a forced-on child fails safe — "no orchDir" → exit 0.)
-  const delegateRunnerCfg = readDelegateRunnerConfig();
-  _delegateRunnerTimer = startDelegateRunnerTimer({
-    enabled: delegateRunnerCfg.mode === "on",
-    intervalMs: delegateRunnerCfg.intervalMs,
-    orchDir,
-  });
-
   // CTL-782: start the periodic stale/conflicting-PR rescue timer.
   // No orchId / linearWrite threading needed: the timer derives the per-ticket
   // orchestrator id from the phase signal's `.orchestrator` (orchId === ticket
@@ -2772,15 +2958,6 @@ export function stopDaemon() {
     setCloudFeedGate(null);
   } catch {
     /* monitor module not loaded */
-  }
-  // CTL-1331: stop the delegate runner timer (no-op handle when gated off).
-  if (_delegateRunnerTimer) {
-    try {
-      _delegateRunnerTimer.stop();
-    } catch {
-      /* timer already stopped */
-    }
-    _delegateRunnerTimer = null;
   }
   if (_stalePrRescueTimer) {
     try {

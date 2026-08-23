@@ -780,17 +780,33 @@ describe("readTailUtf8 (CTL-1529)", () => {
     let out: string;
     try {
       out = readTailUtf8(path, 10_000); // 10 KB cap
-      const requested = bytesRequested(readSyncSpy.mock.calls as unknown[][]);
-      expect(requested).toBeLessThanOrEqual(10_000);
+      const requested = bytesRequested(readSyncSpy.mock.calls);
+      // CTL-1550 (P2): the boundary check reads one extra byte (the byte before
+      // `from`) to determine whether the window starts on a record boundary.
+      // That probe is 1 byte, so the total stays at most cap + 1.
+      expect(requested).toBeLessThanOrEqual(10_001);
       expect(readFileSyncSpy.mock.calls.filter((c) => c[0] === path)).toEqual([]);
     } finally {
       readSyncSpy.mockRestore();
       readFileSyncSpy.mockRestore();
     }
-    // The cap lands exactly on a line boundary, so the fragment rule drops one
-    // whole line: 10_000 / 100 = 100 lines requested, 99 complete ones returned.
-    expect(out.length).toBe(9_900);
-    expect(out).toBe(LINE.repeat(99));
+    // 10_000 / 100 = 100 lines requested. CTL-1550 fix: the cap lands exactly on
+    // a line boundary (byte 9,989,999 is '\n'), so the first buffered line is a
+    // COMPLETE record and must be kept. All 100 lines are returned.
+    expect(out.length).toBe(10_000);
+    expect(out).toBe(LINE.repeat(100));
+  });
+
+  it("(CTL-1550) keeps the first complete record when `from` is exactly on a line boundary", () => {
+    // Two 50-byte lines. Cap = 50 → from = 50. Byte at position 49 is '\n', so
+    // the first byte of the tail window is the very start of line 2 — a complete
+    // record. The boundary check must detect this and keep the line.
+    const L50 = "z".repeat(49) + "\n";
+    const path = join(workdir, "boundary.jsonl");
+    writeFileSync(path, L50.repeat(2)); // 100 bytes total
+    const out = readTailUtf8(path, 50);
+    expect(out).toBe(L50); // one complete line, not an empty string
+    expect(out.length).toBe(50);
   });
 
   it("DROPS the leading fragment so a cut record cannot parse into a bogus event", () => {

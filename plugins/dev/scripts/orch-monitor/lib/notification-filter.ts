@@ -7,6 +7,9 @@ export type NotificationEvent =
       attention: BoardAttention;
       humanQuestion?: string;
       title?: string;
+      /** CAT-170: "anchor" | "member" | null. A correlated incident labels every
+       *  member raises an ask, but only the anchor may notify — see shouldNotify. */
+      correlationRole?: string | null;
     }
   | { kind: "daemon"; to: "healthy" | "degraded" | "offline" }
   | { kind: "anomaly" };
@@ -33,8 +36,14 @@ const TMPL = {
 export function shouldNotify(ev: NotificationEvent): PushNotification | null {
   if (ev.kind === "ticket") {
     if (ev.attention === null) return null;
+    // CAT-170: collapse a correlated incident to ONE alert. Every correlated
+    // ticket still carries its own escalation signal and board card —
+    // only the PUSH is suppressed for members, so the operator gets a single
+    // "<anchor> needs your decision" instead of one notification per member.
+    // Unknown/absent role (the uncorrelated singleton case) notifies as before.
+    if (ev.correlationRole === "member") return null;
     const label =
-      ev.attention === "needs-human"
+      ev.attention === "ask"
         ? TMPL.TICKET_NEEDS_DECISION
         : TMPL.TICKET_WAITING;
     const body =
@@ -75,6 +84,8 @@ export interface ProjectorBoard {
     attentionSince?: string | null;
     humanQuestion?: string;
     title?: string;
+    /** CAT-170: correlation role projected by board-data's deriveAttention. */
+    correlationRole?: string | null;
   }>;
   daemon?: "healthy" | "degraded" | "offline";
   anomaly?: boolean;
@@ -187,6 +198,7 @@ export function createNotificationProjector(
           attention: t.attention,
           humanQuestion: t.humanQuestion,
           title: t.title,
+          correlationRole: t.correlationRole, // CAT-170
         });
         if (n) {
           out.push(n);

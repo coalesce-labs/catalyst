@@ -1,7 +1,7 @@
 # CTL-1176 Implementation Plan: LLM Recovery Sweep
 
 ## Goal
-Build rung 3 (LLM tier) of the self-healing recovery ladder that reasons over stuck/failed/needs-human tickets and either autonomously fixes them or escalates genuine human decisions.
+Build rung 3 (LLM tier) of the self-healing recovery ladder that reasons over stuck/failed/escalated tickets and either autonomously fixes them or escalates genuine human decisions.
 
 ## Architecture Overview
 
@@ -33,7 +33,7 @@ Build rung 3 (LLM tier) of the self-healing recovery ladder that reasons over st
 ### 1. Create `recovery-reasoning.mjs`
 - Export `reasoningRecoveryPass(items, opts)` — the main entry point
 - Parameters:
-  - `items` — stuck/failed/needs-human tickets with their signals + evidence
+  - `items` — stuck/failed/escalated tickets with their signals + evidence
   - `opts` — injectable:
     - `classifyTicket(evidence)` → {reason, fix_class, details}
     - `invokeSeam(ticket, seam_id, brief)` → {success, reason}

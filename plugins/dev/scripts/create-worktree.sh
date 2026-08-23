@@ -133,6 +133,15 @@ BASE_BRANCH="${POSITIONAL[1]:-$(git branch --show-current)}"
 # Get repository information
 REPO_ROOT=$(git rev-parse --show-toplevel)
 REPO_NAME=$(basename "$REPO_ROOT")
+_CW_DRAFT_PR_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/draft-pr.sh"
+if [ -r "$_CW_DRAFT_PR_LIB" ]; then
+	# shellcheck source=/dev/null
+	source "$_CW_DRAFT_PR_LIB"
+fi
+PUSH_REMOTE="origin"
+if type _draft_pr_push_remote >/dev/null 2>&1; then
+	PUSH_REMOTE="$(_draft_pr_push_remote)"
+fi
 
 # Try to detect GitHub org from remote URL
 GIT_REMOTE=$(git config --get remote.origin.url 2>/dev/null || echo "")
@@ -309,11 +318,11 @@ else
 	# between the snapshot and the fetch could be missed), and a missing ticket ref simply
 	# makes the fetch exit non-zero so we fall through to seeding from base.
 	if [ "$SKIP_FETCH" = false ] && [ "$FROM_REMOTE" = true ] \
-		&& git fetch --quiet origin \
-			"+refs/heads/${WORKTREE_NAME}:refs/remotes/origin/${WORKTREE_NAME}" 2>/dev/null; then
-		START_POINT="refs/remotes/origin/${WORKTREE_NAME}"
+		&& git fetch --quiet "$PUSH_REMOTE" \
+			"+refs/heads/${WORKTREE_NAME}:refs/remotes/${PUSH_REMOTE}/${WORKTREE_NAME}" 2>/dev/null; then
+		START_POINT="refs/remotes/${PUSH_REMOTE}/${WORKTREE_NAME}"
 		SEEDED_FROM_REMOTE=true
-		echo "🌱 Resuming from origin/${WORKTREE_NAME}; seeding worktree from its pushed tip (CTL-1640)"
+		echo "🌱 Resuming from ${PUSH_REMOTE}/${WORKTREE_NAME}; seeding worktree from its pushed tip (CTL-1640)"
 	fi
 	if [ "$SEEDED_FROM_REMOTE" = false ] && [ "$SKIP_FETCH" = false ]; then
 		if git fetch --quiet origin "$BASE_BRANCH" 2>/dev/null; then
@@ -331,11 +340,11 @@ else
 		# the add. It does NOT fully close the race — the durable fix is a cluster-fence guard
 		# on the producer's early-draft push — but it converts the common case back to a resume.
 		if [ "$FROM_REMOTE" = true ] \
-			&& git fetch --quiet origin \
-				"+refs/heads/${WORKTREE_NAME}:refs/remotes/origin/${WORKTREE_NAME}" 2>/dev/null; then
-			START_POINT="refs/remotes/origin/${WORKTREE_NAME}"
+			&& git fetch --quiet "$PUSH_REMOTE" \
+				"+refs/heads/${WORKTREE_NAME}:refs/remotes/${PUSH_REMOTE}/${WORKTREE_NAME}" 2>/dev/null; then
+			START_POINT="refs/remotes/${PUSH_REMOTE}/${WORKTREE_NAME}"
 			SEEDED_FROM_REMOTE=true
-			echo "🌱 origin/${WORKTREE_NAME} appeared during provisioning; resuming from its pushed tip (CTL-1640)"
+			echo "🌱 ${PUSH_REMOTE}/${WORKTREE_NAME} appeared during provisioning; resuming from its pushed tip (CTL-1640)"
 		fi
 	fi
 	git worktree add -b "$WORKTREE_NAME" "$WORKTREE_PATH" "$START_POINT"
@@ -449,33 +458,18 @@ for CFG_DIR in .claude .catalyst; do
 	fi
 done
 
-# Pre-trust worktree in Claude Code so no trust dialog appears on first launch
-CLAUDE_JSON="$HOME/.claude.json"
-if [ -f "$CLAUDE_JSON" ]; then
-	if jq -e --arg path "$WORKTREE_PATH" '.projects[$path]' "$CLAUDE_JSON" > /dev/null 2>&1; then
-		TMPFILE="$(mktemp "$CLAUDE_JSON.XXXXXX")"
-		jq --arg path "$WORKTREE_PATH" \
-			'.projects[$path].hasTrustDialogAccepted = true' \
-			"$CLAUDE_JSON" > "$TMPFILE" && mv "$TMPFILE" "$CLAUDE_JSON"
+# Pre-trust worktree in Claude Code so no trust dialog appears on first launch.
+# Routed through the locked mutation seam (CTL-1890) so concurrent calls with
+# trust-workspace.sh cannot race on ~/.claude.json.
+_CW_CJM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "${CLAUDE_JSON:-${HOME}/.claude.json}" ]; then
+	if bash "${_CW_CJM_DIR}/lib/claude-json-mutate.sh" trust-project "$WORKTREE_PATH" 2>/dev/null; then
+		echo "🔒 Worktree pre-trusted in Claude Code"
 	else
-		TMPFILE="$(mktemp "$CLAUDE_JSON.XXXXXX")"
-		jq --arg path "$WORKTREE_PATH" \
-			'.projects[$path] = {
-				"allowedTools": [],
-				"mcpContextUris": [],
-				"mcpServers": {},
-				"enabledMcpjsonServers": [],
-				"disabledMcpjsonServers": [],
-				"hasTrustDialogAccepted": true,
-				"projectOnboardingSeenCount": 0,
-				"hasClaudeMdExternalIncludesApproved": false,
-				"hasClaudeMdExternalIncludesWarningShown": false,
-				"hasCompletedProjectOnboarding": false
-			}' \
-			"$CLAUDE_JSON" > "$TMPFILE" && mv "$TMPFILE" "$CLAUDE_JSON"
+		echo "Warning: claude-json-mutate trust-project failed; continuing without pre-trust" >&2
 	fi
-	echo "🔒 Worktree pre-trusted in Claude Code"
 fi
+unset _CW_CJM_DIR
 
 # Initialize workflow context with ticket from worktree name (before setup runs)
 # This ensures .catalyst/.workflow-context.json exists with currentTicket set

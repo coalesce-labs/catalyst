@@ -700,12 +700,13 @@ Emitted by two producers: `recordTransition` in `scheduler.mjs` (the sync chokep
 scheduler-owned transitions), and the daemon's `handleCommentWake` (CTL-768,
 `execution-core/daemon.mjs`), which calls `appendWorkerTransitionEvent` directly at two sites,
 bypassing `recordTransition` because the scheduler never observes these edges:
-- The `needs-human`→cleared resolution on a confirmed human reply to a managed ticket — emitted
-  unconditionally (not gated on a local worker dir/signal existing).
+- The escalation→cleared resolution on a confirmed human reply to a managed ticket — emitted
+  unconditionally (not gated on a local worker dir/signal existing). Historically this carried
+  `from_disposition: "needs-human"`; see the RETIRED note under `to_disposition` below.
 - The `needs-input`→cleared resolution after a comment-driven wake — **only for signal-backed
   wakes**: it fires from inside the per-signal loop over local `phase-*.json` files, which requires
   a local worker dir. When the ticket has **no** local worker dir (e.g. already reaped) but still
-  carries a durable Linear `needs-input` label, the needs-human block's secondary
+  carries a durable Linear `needs-input` label, the clear-first block's secondary
   `removeLabel(ticket, "needs-input")` cleanup call still clears that label — but the function
   returns before ever reaching the per-signal loop, so **no `worker.transition` is emitted for that
   clear**. This is a real, unrecorded disposition change, not just a documentation gap — the same
@@ -714,12 +715,27 @@ bypassing `recordTransition` because the scheduler never observes these edges:
 Dims are **attributes** (not `body.payload`) because `otel-forward` strips `body.payload` before
 forwarding off-machine.
 
+> ⛔ **RETIRED VALUE — `catalyst.worker.to_disposition: "needs-human"` (CTL-2161).**
+> This is an **off-machine consumer contract**, not a doc mention, so it is retired in two halves
+> and only one of them is a deletion:
+>
+> - **Nothing emits it any more.** The `needs-human` label is deleted (CTL-2155 epic). SYSTEM
+>   trouble now raises ONE fleet-scoped `catalyst.alert.raised` (CTL-2156) instead of N per-ticket
+>   dispositions, and a genuine human question becomes ONE ask ticket (CTL-2157). A consumer that
+>   *waits for* `to_disposition="needs-human"` will wait forever and must be repointed at
+>   `catalyst.alert.*` (system) or the ask ticket's labels (human).
+> - **Consumers must still PARSE it.** The value is all over the historical log — ~29k
+>   `review-needs-human`, ~11k `cohort_frozen_needs_human` and the `worker.transition` records
+>   themselves, this month alone. A consumer that treats an unknown disposition as an error, or
+>   drops the record, breaks on replay of any window that predates this change. Treat it as a
+>   legacy synonym for "escalated"; do not add it to a new allow-list.
+
 | attribute                          | type    | values / notes                                                              |
 | ---------------------------------- | ------- | --------------------------------------------------------------------------- |
 | `catalyst.worker.ticket`           | string  | ticket identifier                                                           |
 | `catalyst.worker.to_stage`         | string  | next pipeline phase (e.g. `plan`) — present on stage transitions            |
 | `catalyst.worker.from_stage`       | string  | Linear from_state (e.g. `Research`) — present when known                    |
-| `catalyst.worker.to_disposition`   | string  | `queued` \| `blocked` \| `needs-input` \| `needs-human` \| `cleared` (a clear — CTL-764 finding 12: encoded as the literal `cleared`, never `null`, so off-machine consumers can tell a clear from an unset axis; `body.payload.to_disposition` keeps the raw `null`) |
+| `catalyst.worker.to_disposition`   | string  | `queued` \| `blocked` \| `needs-input` \| `cleared` (a clear — CTL-764 finding 12: encoded as the literal `cleared`, never `null`, so off-machine consumers can tell a clear from an unset axis; `body.payload.to_disposition` keeps the raw `null`). **RETIRED VALUE: `needs-human`** — see below. |
 | `catalyst.worker.from_disposition` | string  | previous disposition — present on clears                                    |
 | `catalyst.worker.reason`           | string  | human-readable reason — present when provided                               |
 | `phase.attempt`                    | integer | dispatch attempt count — present when known                                 |

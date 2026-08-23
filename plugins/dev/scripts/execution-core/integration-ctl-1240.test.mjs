@@ -7,6 +7,12 @@
 //
 // Test structure mirrors the CTL-537 forwarding test (scheduler.test.mjs:6808) and
 // the CTL-1191 terminal-filter test (scheduler.test.mjs:8906).
+//
+// CTL-2141 removed "Phase 1" (site #3 of the original five: the Pass 0r terminal
+// filter at the old scheduler.mjs:3464-3471) along with the rest of Pass 0r —
+// that call site no longer exists, so there is nothing left to thread gateway
+// into there. Phase 2 (sites 4 and 5, the census closures) is mechanical and
+// unaffected.
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import {
@@ -106,82 +112,6 @@ const noopWriteStatus = {
   removeLabel: () => ({ removed: true }),
   runTransition: () => ({ applied: false }),
 };
-
-// Recovery-intent marker path (mirrors CTL-1191 test at scheduler.test.mjs:8903).
-const recoveryIntentMarker = (ticket) =>
-  join(orchDir, ".recovery-intents", `${ticket}.json`);
-
-// ── Phase 1 ────────────────────────────────────────────────────────────────────
-//
-// Drives ONE synchronous startScheduler tick with CATALYST_RECOVERY_PASS=shadow.
-// The Pass 0r terminal filter (scheduler.mjs:3464–3471) resolves Linear state via
-// fetchTicketState(id, { cache, gateway }) using the in-scope schedulerTick gateway.
-//
-// PRE-FIX: gateway is dropped at startScheduler → spy.getDescriptor never called,
-//          and the Done ticket is NOT filtered (linearis exec falls through to null
-//          → fail-open non-terminal → both tickets processed).
-// POST-FIX: spy consulted; Done ticket filtered (terminal), In-Progress ticket kept.
-
-describe("CTL-1240 Phase 1 — gateway threaded through startScheduler spine", () => {
-  const DONE_TICKET = "CTL-1240-DONE";
-  const LIVE_TICKET = "CTL-1240-LIVE";
-
-  test("startScheduler threads gateway into the reasoning-pass terminal filter", () => {
-    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
-    writeSignal(DONE_TICKET, "implement", "stalled");
-    writeSignal(LIVE_TICKET, "implement", "stalled");
-
-    const fresh = new Date().toISOString(); // within the 60s gateway-fresh window
-    const gateway = makeGatewaySpy({
-      [DONE_TICKET]: { state: "Done", removed: false, updatedAt: fresh },
-      [LIVE_TICKET]: { state: "In Progress", removed: false, updatedAt: fresh },
-    });
-
-    process.env.CATALYST_RECOVERY_PASS = "shadow";
-
-    startScheduler({
-      orchDir,
-      dispatch: fakeDispatch({ code: 0 }),
-      readEligible: () => [],
-      gateway,
-      liveBackgroundCount: () => 0,
-      tickIntervalMs: 60_000,
-      debounceMs: 5,
-      writeStatus: noopWriteStatus,
-    });
-
-    // Threading proof: the gateway spy must be consulted on the initial synchronous tick.
-    // PRE-FIX: gateway is dropped at startScheduler → this assertion fails (calls.length === 0).
-    expect(gateway.calls.length).toBeGreaterThan(0);
-
-    // Behavioral proof: Done ticket was filtered (terminal → not processed);
-    // In-Progress ticket was processed (non-terminal). CTL-1157 F #5 retired the
-    // recovery-intent MARKER as the observable — shadow mode no longer writes a
-    // cooldown marker for a DEFERRED (untyped stuck) item (it would mutate enforce
-    // scheduler state). The processing observable is now the recovery.would-defer
-    // EVENT in the unified log (under the redirected CATALYST_DIR): the non-terminal
-    // LIVE ticket emits it; the terminal DONE ticket is filtered by Pass 0r → no
-    // recovery event names it.
-    const eventsDir = join(catalystDir, "events");
-    const eventLines = existsSync(eventsDir)
-      ? readdirSync(eventsDir)
-          .flatMap((f) => readFileSync(join(eventsDir, f), "utf8").split("\n"))
-          .filter(Boolean)
-      : [];
-    // LIVE (non-terminal) was PROCESSED by the reasoning pass → per-item would-defer.
-    expect(eventLines.some((l) => l.includes(LIVE_TICKET) && l.includes("would-defer"))).toBe(true);
-    // DONE (terminal) was FILTERED by Pass 0r before the reasoning pass → it has NO
-    // per-item reasoning event (recovery.decision / recovery.would-*). It legitimately
-    // appears in the whole-board recovery.board-scan snapshot — that is a census, not
-    // processing — so match only the per-item event names, not a bare "recovery.".
-    const donePerItem = eventLines.some(
-      (l) => l.includes(DONE_TICKET) && (l.includes("recovery.decision") || l.includes("would-")),
-    );
-    expect(donePerItem).toBe(false);
-    // And the DONE ticket is still never cooled down (terminal → filtered before processing).
-    expect(existsSync(recoveryIntentMarker(DONE_TICKET))).toBe(false);
-  });
-});
 
 // ── Phase 2 ────────────────────────────────────────────────────────────────────
 //

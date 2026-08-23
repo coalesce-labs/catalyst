@@ -1,4 +1,6 @@
 import { describe, it, expect } from "bun:test";
+import { readFileSync } from "fs";
+import { join } from "path";
 import {
   shouldNotify,
   createNotificationProjector,
@@ -6,12 +8,12 @@ import {
 } from "../lib/notification-filter";
 
 describe("shouldNotify (template parity with lib.rs)", () => {
-  it("needs-human ticket → '{id} needs your decision' + humanQuestion body + deep link", () => {
+  it("ask ticket → '{id} needs your decision' + humanQuestion body + deep link", () => {
     expect(
       shouldNotify({
         kind: "ticket",
         id: "CTL-9",
-        attention: "needs-human",
+        attention: "ask",
         humanQuestion: "Approve plan?",
         title: "T",
       }),
@@ -43,7 +45,7 @@ describe("shouldNotify (template parity with lib.rs)", () => {
       shouldNotify({
         kind: "ticket",
         id: "CTL-9",
-        attention: "needs-human",
+        attention: "ask",
         humanQuestion: "",
         title: "",
       })?.body,
@@ -54,6 +56,52 @@ describe("shouldNotify (template parity with lib.rs)", () => {
     expect(
       shouldNotify({ kind: "ticket", id: "CTL-9", attention: null }),
     ).toBeNull();
+  });
+
+  // CAT-170: one correlated incident → ONE alert. Members are labeled/rendered
+  // normally; only their push is suppressed so the anchor speaks for the group.
+  it("correlated MEMBER ticket → suppressed (the anchor carries the alert)", () => {
+    expect(
+      shouldNotify({
+        kind: "ticket",
+        id: "CTL-11",
+        attention: "ask",
+        humanQuestion: "Approve plan?",
+        correlationRole: "member",
+      }),
+    ).toBeNull();
+  });
+
+  it("correlated ANCHOR ticket → still notifies", () => {
+    expect(
+      shouldNotify({
+        kind: "ticket",
+        id: "CTL-10",
+        attention: "ask",
+        humanQuestion: "Approve plan?",
+        correlationRole: "anchor",
+      }),
+    ).toEqual({
+      title: "CTL-10 needs your decision",
+      body: "Approve plan?",
+      deepLink: "/?ticket=CTL-10",
+    });
+  });
+
+  it("uncorrelated singleton (no role) → notifies as before", () => {
+    expect(
+      shouldNotify({
+        kind: "ticket",
+        id: "CTL-12",
+        attention: "ask",
+        humanQuestion: "Approve plan?",
+        correlationRole: null,
+      }),
+    ).toEqual({
+      title: "CTL-12 needs your decision",
+      body: "Approve plan?",
+      deepLink: "/?ticket=CTL-12",
+    });
   });
 
   it("daemon → healthy → 'Catalyst — daemon recovered'", () => {
@@ -85,10 +133,11 @@ describe("createNotificationProjector (edge detection + dedup)", () => {
   const board = (over: Record<string, unknown> = {}) => ({
     tickets: [] as Array<{
       id: string;
-      attention: "needs-human" | "waiting-on-you" | null;
+      attention: "ask" | "waiting-on-you" | null;
       attentionSince?: string | null;
       humanQuestion?: string;
       title?: string;
+      correlationRole?: string | null;
     }>,
     daemon: "healthy" as "healthy" | "degraded" | "offline",
     anomaly: false,
@@ -101,17 +150,70 @@ describe("createNotificationProjector (edge detection + dedup)", () => {
     const out = p.project(
       board({
         tickets: [
-          { id: "CTL-1", attention: "needs-human", attentionSince: "s1" },
+          { id: "CTL-1", attention: "ask", attentionSince: "s1" },
         ],
       }),
     );
     expect(out.map((n) => n.title)).toEqual(["CTL-1 needs your decision"]);
   });
 
+  // CAT-170 regression pin: THE bug this ticket exists to fix. A three-ticket
+  // correlated incident used to produce three separate operator pushes because the
+  // projector keys purely on ticket id. Exactly one alert — the anchor's — now escapes.
+  it("a 3-ticket correlated incident emits exactly ONE alert (the anchor's)", () => {
+    const p = createNotificationProjector();
+    const out = p.project(
+      board({
+        tickets: [
+          { id: "CTL-1", attention: "ask", attentionSince: "s1", correlationRole: "anchor" },
+          { id: "CTL-2", attention: "ask", attentionSince: "s1", correlationRole: "member" },
+          { id: "CTL-3", attention: "ask", attentionSince: "s1", correlationRole: "member" },
+        ],
+      }),
+    );
+    expect(out.map((n) => n.title)).toEqual(["CTL-1 needs your decision"]);
+  });
+
+  // CAT-170 (Codex #3209 round-3 P1): the suppression above only works if the role
+  // actually REACHES the projector. server.ts's `toProjectorBoard` rebuilds each
+  // ticket field-by-field, and both server notification paths (SSE + web push) go
+  // through it — so an omitted `correlationRole` there silently re-broke the feature
+  // one layer below these tests, which construct ProjectorBoard tickets directly and
+  // therefore cannot catch it. Pin the adapter's forwarding at the source level
+  // (same technique as the broker namespace-parity source-scan).
+  it("server.ts's toProjectorBoard forwards correlationRole to the projector", () => {
+    const src = readFileSync(join(import.meta.dir, "..", "server.ts"), "utf8");
+    const start = src.indexOf("const toProjectorBoard");
+    expect(start).toBeGreaterThan(-1);
+    const mapping = src.slice(start, src.indexOf("daemon: nav.daemon", start));
+    expect(mapping).toContain("correlationRole");
+  });
+
+  it("a suppressed member still notifies later if it becomes its own anchor", () => {
+    const p = createNotificationProjector();
+    p.project(
+      board({
+        tickets: [
+          { id: "CTL-2", attention: "ask", attentionSince: "s1", correlationRole: "member" },
+        ],
+      }),
+    );
+    // Same episode, now promoted to anchor: suppression must not have latched the
+    // dedup key (fired.add only runs on a real emit), so the alert still lands.
+    const out = p.project(
+      board({
+        tickets: [
+          { id: "CTL-2", attention: "ask", attentionSince: "s1", correlationRole: "anchor" },
+        ],
+      }),
+    );
+    expect(out.map((n) => n.title)).toEqual(["CTL-2 needs your decision"]);
+  });
+
   it("does not re-fire the same ticket attention episode", () => {
     const p = createNotificationProjector();
     const t = [
-      { id: "CTL-1", attention: "needs-human" as const, attentionSince: "s1" },
+      { id: "CTL-1", attention: "ask" as const, attentionSince: "s1" },
     ];
     p.project(board({ tickets: t }));
     expect(p.project(board({ tickets: t }))).toEqual([]);
@@ -121,12 +223,12 @@ describe("createNotificationProjector (edge detection + dedup)", () => {
     const p = createNotificationProjector();
     p.project(
       board({
-        tickets: [{ id: "CTL-1", attention: "needs-human", attentionSince: "s1" }],
+        tickets: [{ id: "CTL-1", attention: "ask", attentionSince: "s1" }],
       }),
     );
     const out = p.project(
       board({
-        tickets: [{ id: "CTL-1", attention: "needs-human", attentionSince: "s2" }],
+        tickets: [{ id: "CTL-1", attention: "ask", attentionSince: "s2" }],
       }),
     );
     expect(out).toHaveLength(1);

@@ -66,6 +66,7 @@ import {
   resolveClusterHosts,
   hostMembershipWarning,
   getLivenessAnchorIssue,
+  getLivenessReadSource,
   getExecutor, // CTL-1367 item 9: resolve the phase-worker executor for the sdk-auth gate
   // CTL-1355: class-aware grading — resolveNodeClass selects the rubric, isDraining
   // + getExecutionCoreDir drive the developer/monitor "will NOT pick up work" gate.
@@ -131,7 +132,7 @@ import { scanEventsSince } from "./event-tail.mjs"; // CTL-1529: bounded event-l
 // only), like lib/secret-contract.mjs — safe under doctor's bare-Node runtime.
 import { evaluateDepSkew, readDepsBreadcrumb } from "./cloud-sync-deps.mjs";
 import { ownedBy } from "./hrw.mjs";
-import { readPeerHeartbeats } from "./cluster-heartbeat.mjs";
+import { readAnchorHealth, readPeerHeartbeats } from "./cluster-heartbeat.mjs";
 // CTL-1616 PR2: the shared secret-contract engine, imported DIRECTLY from the
 // zero-import lib leaf (node:fs/os/path only) — same pattern cluster-sync.mjs
 // already uses (`../lib/secret-contract.mjs`), NOT re-exported through
@@ -176,6 +177,8 @@ import { listProjects } from "./registry.mjs";
 // is no bun: protocol anywhere in its graph (asserted in config-dump.test.mjs).
 // Read-only and advisory: nothing in this module can change a grade to FAIL.
 import { collectConfigDump } from "./config-dump.mjs";
+import { probePublishCapability, resolvePushRemote } from "./publish-preflight.mjs"; // CAT-60: worker write-capability gate
+import { resolvePublishPreflightMode } from "./config.mjs";
 
 // readLinearBotUserIds — inlined from daemon.mjs to avoid pulling in the full
 // daemon dependency chain (which includes bun: protocol imports incompatible
@@ -249,6 +252,46 @@ export { checkLinearWriteBudget };
 export { checkAgentToolsWritePath };
 export { checkExecutionCoreEnvDrift };
 export { checkIndexServingRoot };
+
+// checkRepoPushPermission — CAT-60. Grade the worker's ability to publish to
+// its resolved write remote independently of scheduler dispatch. Only a
+// definitive denial can fail; operational uncertainty is always informational.
+export function checkRepoPushPermission(deps = {}) {
+  const {
+    repoRoot = process.cwd(),
+    pushRemote,
+    configPath = process.env.CATALYST_CONFIG_FILE || layer1Path(),
+    layer2ConfigPath = layer2Path(),
+    env = process.env,
+    cacheDir = resolve(getExecutionCoreDir(), ".publish-preflight"),
+    probe = probePublishCapability,
+    resolveMode = resolvePublishPreflightMode,
+    now,
+    spawn,
+  } = deps;
+  const resolvedPushRemote = pushRemote ?? resolvePushRemote({ repoRoot, env, layer1Path: configPath, layer2Path: layer2ConfigPath, spawn });
+  let mode;
+  try { mode = resolveMode({ env, configPath }); } catch { mode = "shadow"; }
+  if (mode === "off") {
+    return [mkCheck("repo-push-permission", STATUS.INFO, "publish preflight is off — push permission not checked")];
+  }
+  let verdict;
+  try { verdict = probe({ repoRoot, pushRemote: resolvedPushRemote, env, cacheDir, now, spawn }); }
+  catch (err) {
+    verdict = { state: "unknown", detail: err?.message ?? "publish probe threw" };
+  }
+  const target = `${verdict?.slug ?? "the configured repository"} via ${resolvedPushRemote}`;
+  const identity = verdict?.login ? ` for ${verdict.login}` : "";
+  const cached = verdict?.cached ? " (cached)" : "";
+  if (verdict?.state === "allowed") {
+    return [mkCheck("repo-push-permission", STATUS.PASS, `publish push permission allowed on ${target}${identity}${cached}`)];
+  }
+  if (verdict?.state === "denied") {
+    const status = mode === "enforce" ? STATUS.FAIL : STATUS.WARN;
+    return [mkCheck("repo-push-permission", status, `publish push permission denied on ${target}${identity} (${mode})${cached}`)];
+  }
+  return [mkCheck("repo-push-permission", STATUS.INFO, `publish push permission could not be determined for ${target}: ${verdict?.detail ?? "unknown"}${cached}`)];
+}
 
 // ─── CTL-1616 PR2/PR3: secret-contract observability (zero grade change) ─────
 //
@@ -644,7 +687,8 @@ export async function checkPeerUniqueness(deps = {}) {
       mkCheck(
         "peer-uniqueness",
         STATUS.WARN,
-        `peer heartbeats returned empty — cluster may be freshly initialized or anchor is stale`,
+        `peer heartbeats returned empty — cluster may be freshly initialized or anchor is stale ` +
+          `(see the liveness-anchor check for whether the anchor itself resolves)`,
       ),
     ];
   }
@@ -667,6 +711,100 @@ export async function checkPeerUniqueness(deps = {}) {
       `no live peer is using host name "${self}" (${peerKeys.length} peer(s) seen)`,
     ),
   ];
+}
+
+// checkLivenessAnchor — grades the configured Linear attachment anchor without
+// conflating a definitive missing/archived issue with an unknown transport error.
+export async function checkLivenessAnchor(deps = {}) {
+  const {
+    getLivenessAnchorIssue: _getAnchor = getLivenessAnchorIssue,
+    getLivenessReadSource: _getReadSource = getLivenessReadSource,
+    resolveClusterHosts: _resolveClusterHosts = resolveClusterHosts,
+    resolveSecretContract = resolveSecret,
+    hasLinearToken = () => resolveLinearTokenLive(resolveSecretContract) != null,
+    readAnchorHealth: _readAnchorHealth = readAnchorHealth,
+  } = deps;
+  const name = "liveness-anchor";
+
+  let anchor;
+  let source;
+  try {
+    anchor = _getAnchor();
+    source = _getReadSource();
+  } catch (err) {
+    return [mkCheck(name, STATUS.WARN, `could not resolve the liveness anchor config: ${err?.message ?? err}`)];
+  }
+
+  if (!anchor) {
+    const multiHost = _resolveClusterHosts().multiHost;
+    return [mkCheck(
+      name,
+      source === "linear" && multiHost ? STATUS.FAIL : STATUS.INFO,
+      `no liveness anchor issue configured — set CATALYST_LIVENESS_ANCHOR_ISSUE or ` +
+        `catalyst.cluster.livenessAnchorIssue (see 'catalyst-cluster set-anchor <ticket>')` +
+        (source === "linear" && multiHost
+          ? `; this multi-host roster cannot publish cross-host heartbeats without an anchor`
+          : ""),
+    )];
+  }
+  if (source !== "linear") {
+    return [mkCheck(
+      name,
+      STATUS.INFO,
+      `liveness read source is '${source}' — anchor '${anchor}' is configured but not load-bearing`,
+    )];
+  }
+  if (!hasLinearToken()) {
+    return [mkCheck(name, STATUS.WARN, `no Linear API token — cannot verify anchor '${anchor}'`)];
+  }
+
+  let health;
+  try {
+    health = await _readAnchorHealth(anchor);
+  } catch (err) {
+    return [mkCheck(name, STATUS.WARN, `anchor probe failed for '${anchor}': ${err?.message ?? err}`)];
+  }
+
+  if (health.error) {
+    return [mkCheck(name, STATUS.WARN, `could not read anchor '${anchor}': ${health.error}`)];
+  }
+  if (health.found === false) {
+    return [mkCheck(
+      name,
+      STATUS.FAIL,
+      `liveness anchor '${anchor}' does not resolve in Linear (deleted or wrong identifier) — ` +
+        `${health.rawError ? `Linear reported: ${health.rawError}. ` : ""}` +
+        `Every host's heartbeat publish aborts, so cross-host failover is dead. Point ` +
+        `catalyst.cluster.livenessAnchorIssue at a live ticket ('catalyst-cluster set-anchor <ticket>') ` +
+        `and restart the stack on every host.`,
+    )];
+  }
+  if (health.archived) {
+    return [mkCheck(
+      name,
+      STATUS.FAIL,
+      `liveness anchor '${anchor}' is ARCHIVED in Linear — un-archive it, or move the anchor ` +
+        `with 'catalyst-cluster set-anchor <ticket>' on every host. This ticket is fleet ` +
+        `infrastructure and must stay open.`,
+    )];
+  }
+  if (health.closed) {
+    return [mkCheck(
+      name,
+      STATUS.WARN,
+      `liveness anchor '${anchor}' is in a closed state ('${health.stateName ?? health.stateType}') — ` +
+        `Linear still serves its attachments so liveness works today, but a completed issue is ` +
+        `auto-archived eventually and archival DOES break the fleet. Reopen it.`,
+    )];
+  }
+  if (health.found !== true) {
+    return [mkCheck(name, STATUS.WARN, `anchor health for '${anchor}' is indeterminate`)];
+  }
+  return [mkCheck(
+    name,
+    STATUS.PASS,
+    `liveness anchor '${anchor}' is open and resolvable (${health.stateName ?? "state unknown"})`,
+  )];
 }
 
 // ─── Phase 4: Bot-credential identity + Linear connectivity ──────────────────
@@ -4589,7 +4727,10 @@ export function checkRegistryTeamIdentity(deps = {}) {
   const { listProjects: readProjects = listProjects } = deps;
   let projects;
   try {
-    projects = readProjects();
+    // CAT-116: revision inspection is deliberately opt-in so listProjects()'s
+    // scheduler/daemon hot path remains free of git subprocesses. Doctor is a
+    // one-shot caller and grades the revision a fresh dispatch would install.
+    projects = readProjects({ withDispatchIdentity: true });
   } catch (err) {
     return mkCheck(
       "registry-team-identity",
@@ -4604,18 +4745,98 @@ export function checkRegistryTeamIdentity(deps = {}) {
       "registry has no projects — nothing to check (the zero-project warning is the daemon's, CTL-854)",
     );
   }
-  const mismatches = projects.filter((project) => project?.identity?.matches === false);
+
+  // Every defect category is classified in ONE pass and reported TOGETHER
+  // (Codex #3232 P2). Precedence is per ENTRY, not per report: an entry whose
+  // dispatch revision mismatches is described only by that (strongest) category,
+  // because what dispatch installs outranks checkout state — create-worktree.sh
+  // restores tracked .catalyst paths from its start revision after copying the
+  // checkout. But precedence must never SUPPRESS a different entry's defect:
+  // returning on the first non-empty category let a multi-project run name one
+  // project while leaving another project's known mismatch undisclosed until the
+  // first was repaired and doctor rerun.
+  const classified = new Set();
+  const claim = (list) => {
+    list.forEach((project) => classified.add(project));
+    return list;
+  };
+  const revisionMismatches = claim(
+    projects.filter((project) => project?.dispatchIdentity?.matches === false),
+  );
+  const drifted = claim(projects.filter((project) =>
+    !classified.has(project) &&
+    typeof project?.identity?.declared === "string" &&
+    typeof project?.dispatchIdentity?.declared === "string" &&
+    project.identity.declared !== project.dispatchIdentity.declared));
+  const mismatches = claim(projects.filter((project) =>
+    !classified.has(project) && project?.identity?.matches === false));
+
+  const findings = [];
+  if (revisionMismatches.length) {
+    const details = revisionMismatches
+      .map((project) =>
+        `${project.team} → ${project.repoRoot} (dispatch revision ` +
+        `${project.dispatchIdentity.rev ?? "unknown"} declares ` +
+        `"${project.dispatchIdentity.declared}")`)
+      .join("; ");
+    findings.push(
+      `${revisionMismatches.length} registry entr${revisionMismatches.length === 1 ? "y" : "ies"} ` +
+        "would receive a DIFFERENT Linear team from the dispatch revision: " +
+        `${details} — a fresh worktree follows that revision (CAT-116)`,
+    );
+  }
+  if (drifted.length) {
+    const details = drifted
+      .map((project) =>
+        `${project.team} → ${project.repoRoot} (checkout declares ` +
+        `"${project.identity.declared}"; fresh worktree follows ` +
+        `"${project.dispatchIdentity.declared}" at ` +
+        `${project.dispatchIdentity.rev ?? "unknown"})`)
+      .join("; ");
+    findings.push(
+      `${drifted.length} registry entr${drifted.length === 1 ? "y has" : "ies have"} ` +
+        `checkout ↔ dispatch-revision team identity drift: ${details} (CAT-116)`,
+    );
+  }
   if (mismatches.length) {
     const details = mismatches
       .map((project) =>
         `${project.team} → ${project.repoRoot} (declares "${project.identity.declared}")`)
       .join("; ");
-    return mkCheck(
-      "registry-team-identity",
-      STATUS.WARN,
+    findings.push(
       `${mismatches.length} registry entr${mismatches.length === 1 ? "y" : "ies"} point at a ` +
         "checkout that declares a DIFFERENT Linear team — worktrees cut from it inherit that " +
         `checkout's Layer-1 catalyst.linear config and ticket prefix: ${details} (CAT-52)`,
+    );
+  }
+  if (findings.length) {
+    return mkCheck("registry-team-identity", STATUS.WARN, findings.join(" | "));
+  }
+  // Preserve the pre-CAT-116 injectable project shape: when no entry carries
+  // dispatchIdentity, grade checkout identity exactly as before. Once any
+  // entry opts into the new arm, every entry must verify both arms for PASS.
+  const hasDispatchArm = projects.some((project) =>
+    Object.prototype.hasOwnProperty.call(project ?? {}, "dispatchIdentity"));
+  if (hasDispatchArm) {
+    const knownBoth = projects.filter((project) =>
+      project?.identity?.matches === true &&
+      project?.dispatchIdentity?.matches === true &&
+      project.identity.declared === project.dispatchIdentity.declared).length;
+    if (knownBoth < projects.length) {
+      const unverified = projects.length - knownBoth;
+      return mkCheck(
+        "registry-team-identity",
+        STATUS.INFO,
+        `${knownBoth}/${projects.length} registry entries verified against both checkout and ` +
+          `dispatch revision; ${unverified} could not be checked on both arms — no mismatch ` +
+          "found, but the dispatch revision contract is unverified (CAT-116)",
+      );
+    }
+    return mkCheck(
+      "registry-team-identity",
+      STATUS.PASS,
+      `${knownBoth}/${projects.length} registry entries verified against both checkout and ` +
+        "dispatch revision; no mismatches or drift (CAT-116)",
     );
   }
   const known = projects.filter((project) => project?.identity?.matches === true).length;
@@ -6355,6 +6576,86 @@ export function checkSkillsDirPlugins(deps = {}) {
   ];
 }
 
+// checkGithubFeedReaderConsistency — CTL-2011 (AC1, AC2). Detects when
+// execution-core.env carries a CATALYST_GITHUB_FEED pin that the broker/orch-monitor
+// don't see, splitting the four readers into two authority regimes. Worker-class only
+// (matches checkWebhookIngestion). Injectable for unit tests.
+//
+// Execution-core view: overlay the env file's exported CATALYST_GITHUB_FEED pin onto
+// the ambient env — identical to what the daemon resolver sees after the launcher
+// sources the file. Broker/monitor view: strip the pin entirely (only Layer-2 applies).
+// Compare the two resolved modes; FAIL on disagreement. PASS on agreement. WARN when
+// the env file is unreadable for a non-ENOENT reason (cannot compute exec-core view).
+export function checkGithubFeedReaderConsistency(deps = {}) {
+  const {
+    resolveGithubFeedModeFn = resolveGithubFeedMode,
+    execCoreEnvPath = defaultExecCoreEnvPath(),
+    readEnvFileFn = (p) => {
+      try {
+        return readFileSync(p, "utf8");
+      } catch (err) {
+        if (err?.code === "ENOENT") return ""; // absent → no pin → valid agree case
+        throw err; // non-ENOENT → INCONCLUSIVE
+      }
+    },
+    env = process.env,
+  } = deps;
+
+  let envFileText;
+  try {
+    envFileText = readEnvFileFn(execCoreEnvPath);
+  } catch (err) {
+    if (err?.code === "ENOENT") {
+      // Absent file → no pin; both views fall through to Layer-2/default. Valid agree case.
+      envFileText = "";
+    } else {
+      return [
+        mkCheck(
+          "github-feed-reader-consistency",
+          STATUS.WARN,
+          `could not read execution-core.env (${err?.message ?? String(err)}) — cannot compare reader resolutions`,
+        ),
+      ];
+    }
+  }
+
+  // Build exec-core effective env: lift the CATALYST_GITHUB_FEED pin from the file
+  // (if any exported assignment is present) and overlay it on the ambient env.
+  const pin = parseEnvFileFlag(
+    envFileText,
+    /^\s*(?:export\s+)?CATALYST_GITHUB_FEED=["']?([^"'\s]+)/m,
+  );
+  const execCoreEnv = pin !== null ? { ...env, CATALYST_GITHUB_FEED: pin } : { ...env };
+  const execCoreResult = resolveGithubFeedModeFn({ env: execCoreEnv });
+
+  // Broker/monitor view: strip the env pin so only Layer-2 (or default) applies.
+  // The broker inherits the ambient env but never sources execution-core.env.
+  const { CATALYST_GITHUB_FEED: _gf, CATALYST_GITHUB_FEED_INTERVAL_SEC: _gfi, ...strippedEnv } =
+    { ...env };
+  const brokerResult = resolveGithubFeedModeFn({ env: strippedEnv });
+
+  if (execCoreResult.mode !== brokerResult.mode) {
+    return [
+      mkCheck(
+        "github-feed-reader-consistency",
+        STATUS.FAIL,
+        `readers disagree: execution-core resolves "${execCoreResult.mode}" ` +
+          `(source=${execCoreResult.source}, from ${execCoreEnvPath}) while ` +
+          `broker/orch-monitor resolve "${brokerResult.mode}" (source=${brokerResult.source}) — ` +
+          `smee is suppressed while the producer emits markers; total loss for suppressible github.* names`,
+      ),
+    ];
+  }
+  return [
+    mkCheck(
+      "github-feed-reader-consistency",
+      STATUS.PASS,
+      `readers agree: both resolve "${execCoreResult.mode}" ` +
+        `(exec-core source=${execCoreResult.source}, broker source=${brokerResult.source})`,
+    ),
+  ];
+}
+
 // ─── Suite selection ─────────────────────────────────────────────────────────
 
 // checksForClass — build the check-thunk suite for a resolved node class. This is
@@ -6384,6 +6685,13 @@ export function checksForClass(nc, opts = {}) {
     hasStackAgent,
     hasUpdaterAgent,
     pluginPullOwner,
+    repoRoot,
+    pushRemote,
+    publishProbe,
+    publishPreflightMode,
+    publishCacheDir,
+    publishNow,
+    publishSpawn,
     // CTL-1473: pre-install flag downgrades install-remediable checks (shipper, agents-for-class)
     // from FAIL to WARN when the join gate runs BEFORE install-services (which creates the services).
     preinstall = !!process.env.CATALYST_DOCTOR_PREINSTALL,
@@ -6578,6 +6886,7 @@ export function checksForClass(nc, opts = {}) {
     () => checkHostIdentity(),
     () => checkHrwPartition(),
     () => checkPeerUniqueness(),
+    () => checkLivenessAnchor(),
     () => checkBotCredentials({ expectedBotUserId }),
     () => checkConnectivity({ seed, otel }),
     () => checkSecretsHygiene(),
@@ -6588,6 +6897,7 @@ export function checksForClass(nc, opts = {}) {
     staleLockThunk, // CTL-1415: a stale plugin-source index.lock silently freezes the broker's pulls
     skillsDirPluginsThunk, // skills-dir migration: catalyst loads in-place via ~/.claude/skills; no marketplace/wrapper residue (FAIL on a worker)
     () => checkWebhookIngestion(), // CTL-1284: multiHost member ingests webhooks; single-host does not
+    () => checkGithubFeedReaderConsistency(), // CTL-2011: execution-core.env pin vs broker/monitor view — FAILs on disagreement
     () => checkThoughts(), // CTL-1293: member thoughts repo provisioned + non-foreign primary
     () => checkClaudeSettings(), // CTL-1231: member settings.json pins host identity + OTLP endpoint
     () => checkReaper(), // CTL-1306: orphan-sweep reaper installed + baked path still exists (not dead-127)
@@ -6604,6 +6914,15 @@ export function checksForClass(nc, opts = {}) {
     () => checkSdkDaemonEnv(), // CTL-1396 item A: under executor=sdk, the RUNNING daemon's process env must carry CLAUDE_CODE_OAUTH_TOKEN (not just the operator shell) + surface recent silent sdk→bg degrades
     () => checkConfigScopeLeak(), // CTL-1214: committed Layer-1 .catalyst/config.json must not carry node/cluster scope (roster/orchestration/feedback/sweep/repoColors/hosts.json)
     () => checkRepoIconTokenScope(), // CTL-1375: monitor daemon's gh token can read configured private repos' contents (else favicons fall back to the org avatar) — advisory (never FAIL)
+    () => checkRepoPushPermission({
+      repoRoot,
+      pushRemote,
+      probe: publishProbe,
+      resolveMode: publishPreflightMode ? () => publishPreflightMode : undefined,
+      cacheDir: publishCacheDir,
+      now: publishNow,
+      spawn: publishSpawn,
+    }), // CAT-60: workers must be able to publish to the resolved write remote
     () => checkMonitorProductionBuild(), // CTL-1372: warn if the local monitor serves a dev-build React bundle (leaks via performance.measure) — advisory (never FAIL)
     () => checkWorkerLabels(), // CTL-1481: worker:<host> label is a best-effort visibility projection, never the claim arbiter — advisory only
     () => checkDrainDisabled(), // CTL-1678: surface the per-node drain override + the draining-but-ignored third state — advisory only (never FAIL)

@@ -220,9 +220,9 @@ PR, a human PR opened outside the pipeline, an abandoned spike); monitor-merge
 tracked only the pipeline's OWN PR. Marking Done while another PR that is part of
 the solution is still open is the silent-rot failure CTL-1157 exists to prevent.
 
-This is the same open-PR remediation rubric the recovery-pass delegate uses —
-applied here as **"teardown verifies it's done."** It complements (does not
-replace) the merge safety-gate above.
+This is the same open-PR remediation rubric CTL-1157 introduced — applied here
+as **"teardown verifies it's done."** It complements (does not replace) the
+merge safety-gate above.
 
 **STEP 1 — Enumerate the ticket's OPEN PRs (the facts).** The fence below runs the
 CTL-1157 open-PR ENUMERATOR (`open-pr-gate.mjs` — the single source of truth that

@@ -2,7 +2,7 @@
 // on the board even when the worker dir has been GC'd and even when the Linear label
 // never confirmed (Hole 1 + Hole 2 in combination).
 //
-// Pattern mirrors board-parked-needs-human.test.ts:
+// Pattern mirrors board-parked-ask.test.ts:
 //   • the PURE synthesizer emits one attention card per durable record, deduped
 //     against the existing worker-dir / queued / orphan / parked card set;
 //   • labelConfirmed:false records surface identically to labelConfirmed:true
@@ -36,7 +36,7 @@ const synthesizeDurableEscalations = (boardMod as Record<string, unknown>)
 
 // Minimal durable record as recordDurableEscalation writes it.
 const durableRec = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
-  ticket: "CTL-9",
+  ticket: "PROJ-9",
   phase: "implement",
   reason: "Worker stuck > 24h, no progress",
   escalatedAt: new Date(100_000).toISOString(),
@@ -60,11 +60,27 @@ function mkPayload(tickets: BoardTicket[]): BoardPayload {
 }
 
 describe("synthesizeDurableEscalations — the pure card builder", () => {
+  it("a fence-standoff durable record round-trips as ask attention (CAT-173)", () => {
+    const cards = synthesizeDurableEscalations(
+      [durableRec({
+        ticket: "PROJ-53",
+        reason: "fence-standoff: superseded on 2 hosts",
+        escalatedAt: "2026-08-11T00:00:00Z",
+        source: "fence-standoff",
+      })],
+      new Set<string>(),
+      Date.now(),
+    );
+    expect(cards[0].attention).toBe("ask");
+    expect(cards[0].humanQuestion).toMatch(/fence-standoff/);
+    expect(cards[0].attentionSince).toBe("2026-08-11T00:00:00Z");
+  });
+
   it("(a) a durable record with labelConfirmed:false and no existing card → attention card (Hole 1)", () => {
     const cards = synthesizeDurableEscalations([durableRec()], new Set<string>(), 600_000);
     expect(cards).toHaveLength(1);
-    expect(cards[0].id).toBe("CTL-9");
-    expect(cards[0].attention).toBe("needs-human");
+    expect(cards[0].id).toBe("PROJ-9");
+    expect(cards[0].attention).toBe("ask");
     // attentionSince anchored to the original escalatedAt (not lastTs / now).
     expect(cards[0].attentionSince).toBe(new Date(100_000).toISOString());
     // humanQuestion carries the escalation reason from the record.
@@ -74,7 +90,7 @@ describe("synthesizeDurableEscalations — the pure card builder", () => {
     const model = deriveInbox(mkPayload(cards));
     expect(model.counts.attention).toBe(1);
     expect(model.counts.needsYou).toBe(1);
-    expect(model.sections.find((s) => s.kind === "attention")?.rows[0].id).toBe("CTL-9");
+    expect(model.sections.find((s) => s.kind === "attention")?.rows[0].id).toBe("PROJ-9");
   });
 
   it("(b) a durable record with labelConfirmed:true surfaces identically to labelConfirmed:false", () => {
@@ -85,14 +101,14 @@ describe("synthesizeDurableEscalations — the pure card builder", () => {
     );
     expect(cards).toHaveLength(1);
     expect(cards[0].id).toBe("CTL-10");
-    expect(cards[0].attention).toBe("needs-human");
+    expect(cards[0].attention).toBe("ask");
     expect(classifyTicket(cards[0])).toBe("attention");
   });
 
   it("(c) a ticket already carded (worker-dir / parked / queued) is NOT duplicated", () => {
     const cards = synthesizeDurableEscalations(
       [durableRec()],
-      new Set(["CTL-9"]),
+      new Set(["PROJ-9"]),
       600_000,
     );
     expect(cards).toHaveLength(0);
@@ -109,7 +125,7 @@ describe("synthesizeDurableEscalations — the pure card builder", () => {
 
   it("(d) terminal-aware: linfo carries Done linearState → NO card", () => {
     const linfo: Record<string, { linearState?: string }> = {
-      "CTL-9": { linearState: "Done" },
+      "PROJ-9": { linearState: "Done" },
     };
     const cards = synthesizeDurableEscalations(
       [durableRec()],
@@ -128,7 +144,7 @@ describe("synthesizeDurableEscalations — the pure card builder", () => {
       600_000,
       {},
       {},
-      new Set(["CTL-9"]),
+      new Set(["PROJ-9"]),
     );
     expect(cards).toHaveLength(0);
   });
@@ -139,7 +155,7 @@ describe("synthesizeDurableEscalations — the pure card builder", () => {
       new Set<string>(),
       600_000,
       {},
-      { "CTL-9": { linearState: "Canceled" } },
+      { "PROJ-9": { linearState: "Canceled" } },
     );
     expect(cards).toHaveLength(0);
   });
@@ -150,7 +166,7 @@ describe("synthesizeDurableEscalations — the pure card builder", () => {
       new Set<string>(),
       600_000,
       {},
-      { "CTL-9": { linearState: "Implement" } },
+      { "PROJ-9": { linearState: "Implement" } },
     );
     expect(cards).toHaveLength(1);
   });
@@ -160,8 +176,8 @@ describe("synthesizeDurableEscalations — the pure card builder", () => {
       [durableRec()],
       new Set<string>(),
       600_000,
-      { "CTL-9": "Replica title" },
-      { "CTL-9": { title: "Linfo title" } },
+      { "PROJ-9": "Replica title" },
+      { "PROJ-9": { title: "Linfo title" } },
     );
     expect(replica[0].title).toBe("Replica title");
 
@@ -170,23 +186,23 @@ describe("synthesizeDurableEscalations — the pure card builder", () => {
       new Set<string>(),
       600_000,
       {},
-      { "CTL-9": { title: "Linfo title" } },
+      { "PROJ-9": { title: "Linfo title" } },
     );
     expect(linfoOnly[0].title).toBe("Linfo title");
 
     const bareId = synthesizeDurableEscalations([durableRec()], new Set<string>(), 600_000);
-    expect(bareId[0].title).toBe("CTL-9");
+    expect(bareId[0].title).toBe("PROJ-9");
   });
 
   it("card has the correct type, team, and repo fields", () => {
     const cards = synthesizeDurableEscalations([durableRec()], new Set<string>(), 600_000);
     expect(cards[0].type).toBe("durable-escalation");
-    expect(cards[0].team).toBe("CTL");
+    expect(cards[0].team).toBe("PROJ");
     expect(classifyTicket(cards[0])).not.toBe("done");
   });
 
   it("existingIds may arrive as a plain array (also deduped)", () => {
-    const cards = synthesizeDurableEscalations([durableRec()], ["CTL-9"], 600_000);
+    const cards = synthesizeDurableEscalations([durableRec()], ["PROJ-9"], 600_000);
     expect(cards).toHaveLength(0);
   });
 
@@ -223,5 +239,142 @@ describe("assembleBoard wiring — durable escalation cards", () => {
     const nospace = (s: string) => s.replace(/\s+/g, "");
     expect(nospace(boardDataSrc)).toContain(nospace("synthesizeDurableEscalations("));
     expect(boardDataSrc).toContain("...durableTickets");
+  });
+});
+
+// ─── CAT-173 (Codex #3241 round-1 P1) ───────────────────────────────────────
+// The id dedupe in synthesizeDurableEscalations DROPS a record whose ticket
+// already has a card. Correct for terminal-sweep (that card already renders
+// ask via deriveAttention's phaseFailed path), but it silently swallowed
+// a fence-standoff break-glass on a BEHIND PR: the rescue timer only reaches
+// break-glass through an existing worker dir (so a card always exists), BEHIND is
+// excluded from PR_BLOCKER_STATES, and the fence suppressed the ask
+// label — leaving the escalation on no operator surface at all.
+const mergeDurableEscalationsIntoCards = (boardMod as Record<string, unknown>)
+  .mergeDurableEscalationsIntoCards as (
+  tickets: unknown,
+  records: unknown,
+  linfo?: unknown,
+  terminalIds?: unknown,
+) => BoardTicket[];
+
+describe("mergeDurableEscalationsIntoCards — CAT-173 standoff visibility", () => {
+  const card = (over: Record<string, unknown> = {}): BoardTicket =>
+    ({
+      id: "PROJ-9",
+      title: "a behind PR",
+      attention: null,
+      attentionSince: null,
+      humanQuestion: null,
+      ...over,
+    }) as unknown as BoardTicket;
+
+  it("fills attention on an existing attention-less card (the BEHIND-PR hole)", () => {
+    const tickets = [card()];
+    mergeDurableEscalationsIntoCards(tickets, [durableRec({ source: "fence-standoff" })]);
+    expect(tickets[0].attention).toBe("ask");
+    expect(tickets[0].humanQuestion).toBe("Worker stuck > 24h, no progress");
+    // Anchored to the ORIGINAL escalation, not this tick.
+    expect(tickets[0].attentionSince).toBe(new Date(100_000).toISOString());
+  });
+
+  it("never overwrites an attention that is already set (live reason wins)", () => {
+    const tickets = [
+      card({ attention: "waiting-on-you", humanQuestion: "answer my question", attentionSince: "X" }),
+    ];
+    mergeDurableEscalationsIntoCards(tickets, [durableRec()]);
+    expect(tickets[0].attention).toBe("waiting-on-you");
+    expect(tickets[0].humanQuestion).toBe("answer my question");
+    expect(tickets[0].attentionSince).toBe("X");
+  });
+
+  it("never pages on a terminal ticket", () => {
+    const bySet = [card()];
+    mergeDurableEscalationsIntoCards(bySet, [durableRec()], {}, new Set(["PROJ-9"]));
+    expect(bySet[0].attention).toBeNull();
+
+    const byLinfo = [card()];
+    mergeDurableEscalationsIntoCards(byLinfo, [durableRec()], { "PROJ-9": { linearState: "Done" } });
+    expect(byLinfo[0].attention).toBeNull();
+  });
+
+  it("ignores records with no matching card — synthesis owns those", () => {
+    const tickets = [card({ id: "PROJ-OTHER" })];
+    mergeDurableEscalationsIntoCards(tickets, [durableRec()]);
+    expect(tickets[0].attention).toBeNull();
+    expect(tickets).toHaveLength(1);
+  });
+
+  it("is total on junk input and never throws", () => {
+    expect(() => mergeDurableEscalationsIntoCards(null, null)).not.toThrow();
+    expect(() => mergeDurableEscalationsIntoCards([card()], [null, {}, { ticket: "" }])).not.toThrow();
+  });
+
+  it("leaves the dedupe path intact: a merged card still yields no second card", () => {
+    const tickets = [card()];
+    const recs = [durableRec({ source: "fence-standoff" })];
+    mergeDurableEscalationsIntoCards(tickets, recs);
+    const extra = synthesizeDurableEscalations(recs, new Set(tickets.map((t) => t.id)), 600_000);
+    expect(extra).toHaveLength(0);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CTL-2159 — the class gate on the durable-escalation card.
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// ⛔ WHY. This store is a per-ticket escalation ARTIFACT in its own right, and
+// both paths above turn a record into `attention:"ask"` + a
+// humanQuestion. Deleting the Linear label while leaving this untouched would
+// have moved the artifact one layer down instead of removing it: a provider
+// outage across N tickets would still light N human cards. SYSTEM and MOOT are
+// filtered at the read; ASK, HELD and any class-less legacy record still surface.
+const durableMod = await import(
+  join(HERE, "..", "..", "execution-core", "durable-escalation.mjs"),
+);
+const isHumanFacing = (durableMod as Record<string, unknown>)
+  .isHumanFacingEscalationRecord as (rec: unknown) => boolean;
+
+describe("CTL-2159 — SYSTEM/MOOT durable records produce no human card", () => {
+  const card = (over: Record<string, unknown> = {}): BoardTicket =>
+    ({
+      id: "PROJ-9",
+      title: "a stalled ticket",
+      attention: null,
+      attentionSince: null,
+      humanQuestion: null,
+      ...over,
+    }) as unknown as BoardTicket;
+
+
+  it("the board's read is FILTERED — the wiring, pinned", () => {
+    // A predicate nothing calls is a predicate that ships inert. This pins the
+    // one call site that makes it real.
+    const squeeze = (t: string) => t.replace(/\s+/g, "");
+    expect(boardDataSrc).toContain("isHumanFacingEscalationRecord");
+    expect(squeeze(boardDataSrc)).toContain(
+      squeeze("readDurableEscalations(EC).filter( isHumanFacingEscalationRecord, )"),
+    );
+  });
+
+  it("a SYSTEM record is dropped before it can set attention", () => {
+    const recs = [durableRec({ stallClass: "system" })].filter(isHumanFacing);
+    const tickets = [card()];
+    mergeDurableEscalationsIntoCards(tickets, recs);
+    expect(tickets[0].attention).toBeNull();
+    expect(synthesizeDurableEscalations(recs, new Set<string>(), 600_000)).toHaveLength(0);
+  });
+
+  it("POSITIVE CONTROL: a HELD record survives the same filter and DOES set attention", () => {
+    // Without this, the zero above could mean the filter drops everything.
+    const recs = [durableRec({ stallClass: "held" })].filter(isHumanFacing);
+    const tickets = [card()];
+    mergeDurableEscalationsIntoCards(tickets, recs);
+    expect(tickets[0].attention).toBe("ask");
+  });
+
+  it("a legacy record with NO class still surfaces (fail-open)", () => {
+    const recs = [durableRec()].filter(isHumanFacing);
+    expect(recs).toHaveLength(1);
   });
 });

@@ -7,10 +7,83 @@ import {
   isRateClassLinearError,
   parseHeartbeatMetadata,
   publishHeartbeat,
+  readAnchorHealth,
   readPeerHeartbeats,
   resolveIssueId,
   runCli,
 } from "./cluster-heartbeat.mjs";
+
+describe("readAnchorHealth (CAT-46)", () => {
+  const stub = (data) => async () => data;
+
+  test("resolves a healthy open anchor", async () => {
+    expect(await readAnchorHealth("PROJ-1", {
+      post: stub({ issue: { id: "uuid-1", identifier: "PROJ-1", state: { name: "In Progress", type: "started" }, archivedAt: null } }),
+    })).toEqual({
+      ok: true, found: true, identifier: "PROJ-1", stateName: "In Progress",
+      stateType: "started", archived: false, closed: false, error: null,
+      rawError: null,
+    });
+  });
+
+  test("a missing issue is found:false, ok:false", async () => {
+    const health = await readAnchorHealth("PROJ-999", { post: stub({ issue: null }) });
+    expect(health.found).toBe(false);
+    expect(health.ok).toBe(false);
+    expect(health.error).toBeNull();
+    expect(health.rawError).toBeNull();
+  });
+
+  test("an archived anchor is archived:true, ok:false", async () => {
+    const health = await readAnchorHealth("PROJ-1", { post: stub({ issue: {
+      id: "u", identifier: "PROJ-1", state: { name: "Done", type: "completed" },
+      archivedAt: "2026-08-01T00:00:00.000Z",
+    } }) });
+    expect(health.archived).toBe(true);
+    expect(health.ok).toBe(false);
+  });
+
+  test.each(["completed", "canceled"])("a %s anchor is closed:true but still ok", async (type) => {
+    const health = await readAnchorHealth("PROJ-1", { post: stub({ issue: {
+      id: "u", identifier: "PROJ-1", state: { name: "Done", type }, archivedAt: null,
+    } }) });
+    expect(health.closed).toBe(true);
+    expect(health.ok).toBe(true);
+  });
+
+  test("a transport throw is captured, never rethrown", async () => {
+    const health = await readAnchorHealth("PROJ-1", { post: async () => { throw new Error("linear graphql http 500: boom"); } });
+    expect(health.ok).toBe(false);
+    expect(health.found).toBeNull();
+    expect(health.error).toContain("http 500");
+  });
+
+  test("Linear's Entity not found GraphQL error is a definitive missing issue", async () => {
+    const health = await readAnchorHealth("PROJ-999999", {
+      post: async () => { throw new Error("linear graphql errors: Entity not found: Issue"); },
+    });
+    expect(health.found).toBe(false);
+    expect(health.ok).toBe(false);
+    expect(health.error).toBeNull();
+    expect(health.rawError).toContain("Entity not found");
+  });
+
+  test("an empty/absent ticket short-circuits without a network call", async () => {
+    let called = false;
+    const health = await readAnchorHealth("", { post: async () => { called = true; return {}; } });
+    expect(called).toBe(false);
+    expect(health.found).toBeNull();
+    expect(health.error).toMatch(/no anchor/i);
+  });
+
+  test("tolerates a partial issue payload (no state block)", async () => {
+    const health = await readAnchorHealth("PROJ-1", { post: stub({ issue: { id: "u" } }) });
+    expect(health.found).toBe(true);
+    expect(health.stateType).toBeNull();
+    expect(health.closed).toBe(false);
+    expect(health.ok).toBe(true);
+  });
+});
 
 async function captureStdout(fn) {
   const chunks = [];

@@ -66,11 +66,24 @@ import { CONFIG_TEAM_IDENTITY_MISMATCH } from "../execution-core/config-identity
 import { ENTITLEMENT_EVENT_NAMES } from "../execution-core/entitlement-event.mjs";
 // CTL-2056 — the needs-human escalation event, imported from its owning module so a
 // rename cannot leave a re-typed literal behind that still passes.
-import { ESCALATION_EVENT_NEEDS_HUMAN } from "../execution-core/escalation-event.mjs";
+import { ESCALATION_EVENT_TICKET_ESCALATED } from "../execution-core/escalation-event.mjs";
 // CTL-2052 — the label retry-exhausted escalation, imported from its owning module
 // (not a re-typed literal). The `linear.label.` prefix is UNPROTECTED under the
 // namespace contract (a dedicated test below asserts it, alongside the salvage family).
 import { LABEL_RETRY_EXHAUSTED_EVENT } from "../execution-core/label-retry-event.mjs";
+import { FENCE_STANDOFF_EVENT } from "../execution-core/fence-standoff.mjs"; // CAT-173
+// CTL-2011 — the reader-split pair (exec-core env-pin diverges from broker/orch-monitor view),
+// imported from their owning module by import rather than re-typed as literals.
+import {
+  EVENT_READERS_DIVERGED,
+  EVENT_READERS_CONVERGED,
+} from "../execution-core/github-feed-timer.mjs";
+// CAT-60 — the publish-capability preflight blocked/would-block pair, imported from its
+// owning module so a rename cannot leave a re-typed literal behind that still passes.
+import {
+  PUBLISH_PREFLIGHT_BLOCKED,
+  PUBLISH_PREFLIGHT_WOULD_BLOCK,
+} from "../execution-core/publish-preflight-event.mjs";
 
 // Inline names that don't have a dedicated exported constant; verified against
 // the source file they appear in.
@@ -92,9 +105,6 @@ const INLINE_EVENT_NAMES = [
   "fence.claimed.CTL-1",              // CTL-863 fence-event.mjs (exec-core-owned, projected-not-re-emitted)
   "fence.released.CTL-1",             // CTL-863 fence-event.mjs
   "escalation.explanation-absent",    // CTL-1609 label-guard.mjs (warn when explanation omitted)
-  "delegate.would-route",             // CTL-1609 delegate-first.mjs (shadow mode — would enqueue)
-  "delegate.routed",                  // CTL-1609 delegate-first.mjs (enforce mode — enqueued ok)
-  "delegate.route-fallback",          // CTL-1609 delegate-first.mjs (enforce mode — queue full / failed)
   "catalyst.replica.writer_idle",     // CAT-21 cloud-sync.mjs (tokenless writer provisioning gap)
   "cloud-feed.would-dispatch",        // CTL-1847 cloud-feed-timer.mjs (shadow mode — would dispatch from the feed)
 ];
@@ -120,8 +130,13 @@ const EXEC_CORE_EVENT_NAMES = [
   ...LEASE_EVENT_NAMES, // CTL-1786 lease-authority.mjs — shadow would-grant / would-refuse
   CONFIG_TEAM_IDENTITY_MISMATCH, // CTL-2076 config-identity-event.mjs — registry team-identity mismatch (CAT-52), boot telemetry
   ...ENTITLEMENT_EVENT_NAMES, // CTL-1785 entitlement-event.mjs — would-shed / shed / restored (v3 bare-name, host-suffixed)
-  ESCALATION_EVENT_NEEDS_HUMAN, // CTL-2056 escalation-event.mjs — ticket.escalated (entity=ticket/action=escalated)
+  ESCALATION_EVENT_TICKET_ESCALATED, // CTL-2056 escalation-event.mjs — ticket.escalated (entity=ticket/action=escalated)
   LABEL_RETRY_EXHAUSTED_EVENT, // CTL-2052 label-retry-event.mjs — the "stopped after N and said so" escalation
+  FENCE_STANDOFF_EVENT, // CAT-173 fence-standoff.mjs — mutual fence standoff escalation
+  EVENT_READERS_DIVERGED, // CTL-2011 github-feed-timer.mjs — exec-core env-pin diverges from broker/orch-monitor view
+  EVENT_READERS_CONVERGED, // CTL-2011 github-feed-timer.mjs — readers converged after a prior split
+  PUBLISH_PREFLIGHT_BLOCKED, // CAT-60 publish-preflight-event.mjs — denied push capability
+  PUBLISH_PREFLIGHT_WOULD_BLOCK, // CAT-60 publish-preflight-event.mjs — shadow mode would-block
   ...INLINE_EVENT_NAMES,
 ];
 
@@ -165,6 +180,13 @@ describe("exec-core static event names", () => {
     }
   });
 });
+
+// CTL-2141: the CAT-170 "recovery escalation correlation event names" describe
+// block (asserting recovery.escalation.correlated / .would-correlate) was
+// removed here. Their sole producer, escalation-correlation.mjs (called from
+// recovery-reasoning.mjs's escalateExhaustedIntents), was deleted along with
+// the rest of the recovery-pass judgment layer — see docs/architecture.md's
+// CAT-170 section removal for the deletion rationale.
 
 // ── Dynamic phase-slot producers: recovery.mjs ───────────────────────────────
 // recovery.mjs builds names as `phase.${phase}.${action}.${ticket}`.

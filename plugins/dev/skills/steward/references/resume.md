@@ -28,6 +28,14 @@ anywhere, so none of them survived.
 Also read the **last N channel turns** before acting on anything live — the incident you are about to
 report may already have been diagnosed while you were down.
 
+> ⚠️ **If a cited handoff file is missing on disk, the channel is authoritative.** Recover from the
+> last turn's text and keep going — never treat the missing file as lost work. `thoughts/shared` is a
+> *per-project symlink*, so a relative citation written in another worktree resolves elsewhere here,
+> and a sync that aborted leaves the file on the writing host until the next tick. The content is
+> almost always still there; re-doing landed work on the assumption it is gone is the costlier
+> mistake. (`create-handoff` now cites an absolute path and returns a `synced` / `local-only`
+> verdict, so a fresh handoff tells you which case you are in — CTL-2104.)
+
 ## Say that you resumed
 
 Your first turn after a restart states it plainly: **"resumed from `<artifact>` at `<time>`"**, plus

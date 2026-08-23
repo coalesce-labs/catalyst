@@ -845,6 +845,41 @@ HAS_ASSERTED=$(jq -r 'has("assertedBy")' "$SIGNAL")
 assert_eq "false" "$HAS_ASSERTED" "--no-signal-update leaves the signal untouched"
 
 echo ""
+# CTL-1679 Phase 2: --payload-json retry_safe rides into BOTH the event payload
+# AND the phase-<P>.json signal (as retrySafe). Absent --payload-json → no
+# retrySafe key (back-compat).
+echo "Test 53 (CTL-1679): --payload-json retry_safe → event payload + signal.retrySafe"
+fresh_env t53
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-pr.json"
+echo '{"status":"running","ticket":"CTL-100","phase":"pr","generation":3}' >"$SIGNAL"
+"$EMIT_SCRIPT" --phase pr --ticket CTL-100 --status failed \
+	--reason "cluster_fence_stale" --payload-json '{"retry_safe":true}' >/dev/null 2>&1
+LINE=$(read_event_line)
+if [[ -z $LINE ]]; then
+	fail "Test 49: no event line emitted"
+else
+	P_RETRY=$(echo "$LINE" | jq -r '.body.payload.retry_safe')
+	P_REASON=$(echo "$LINE" | jq -r '.body.payload.failure_reason')
+	assert_eq "true" "$P_RETRY" "event body.payload.retry_safe = true"
+	assert_eq "cluster_fence_stale" "$P_REASON" "event failure_reason still carried"
+fi
+SIG_RETRY=$(jq -r '.retrySafe' "$SIGNAL")
+SIG_REASON=$(jq -r '.failureReason' "$SIGNAL")
+SIG_GEN=$(jq -r '.generation' "$SIGNAL")
+assert_eq "true" "$SIG_RETRY" "signal.retrySafe = true"
+assert_eq "cluster_fence_stale" "$SIG_REASON" "signal.failureReason preserved"
+assert_eq "3" "$SIG_GEN" "signal.generation preserved"
+
+echo ""
+echo "Test 54 (CTL-1679): absent --payload-json → no retrySafe key on signal (back-compat)"
+fresh_env t54
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-pr.json"
+echo '{"status":"running","ticket":"CTL-100","phase":"pr"}' >"$SIGNAL"
+"$EMIT_SCRIPT" --phase pr --ticket CTL-100 --status failed --reason "some_other_reason" >/dev/null 2>&1
+HAS_RETRY=$(jq -r 'has("retrySafe")' "$SIGNAL")
+assert_eq "false" "$HAS_RETRY" "no --payload-json → signal has no retrySafe key"
+
+echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-emit-complete: ${PASSES} passed, ${FAILURES} failed"
 if [[ $FAILURES -gt 0 ]]; then

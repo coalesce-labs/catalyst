@@ -15,11 +15,11 @@ export type BoardActiveState = "active" | "stuck" | "dead" | null;
 
 // CTL-729: the single "needs attention" bucket (operator-approved 2026-06-11) —
 // the ONE yellow board accent + Inbox "Needs you" reason. 'waiting-on-you' (a live
-// worker's bg job is blocked, paused for a human prompt) | 'needs-human' (a
-// watchdog/phase escalation via a needs-human/needs-input label or the host-local
-// marker) | null. needs-human wins over waiting-on-you. DISTINCT from `held` (the
+// worker's bg job is blocked, paused for a human prompt) | 'ask' (an open human
+// question: an ask ticket label, needs-input, a stuck PR or a failed phase) |
+// null. `ask` wins over waiting-on-you. DISTINCT from `held` (the
 // admission-gate blocked/waiting pair).
-export type BoardAttention = "waiting-on-you" | "needs-human" | null;
+export type BoardAttention = "waiting-on-you" | "ask" | null;
 
 /** CTL-1158: GitHub PR merge state from the PrStatusFetcher cache. */
 export type PrMergeStateStatus =
@@ -160,16 +160,20 @@ export interface BoardTicket {
    *  carried no startedAt. */
   currentPhaseSince: string | null;
   /** CTL-729: the single needs-attention bucket — 'waiting-on-you' (live worker's
-   *  bg job blocked, paused for a human prompt) | 'needs-human' (a watchdog/phase
-   *  escalation via a needs-human/needs-input label or the host-local marker) |
-   *  null. needs-human wins. Drives the ONE yellow board accent + Inbox "Needs
+   *  bg job blocked, paused for a human prompt) | 'ask' (an ask / needs-input
+   *  label, a stuck PR or a failed phase — CTL-2161) |
+   *  null. `ask` wins. Drives the ONE yellow board accent + Inbox "Needs
    *  you" section. DISTINCT from `held` (the admission-gate pair). */
   attention: BoardAttention;
   /** CTL-729: ISO timestamp the attention started — the worker's current-phase
-   *  start for waiting-on-you; null for needs-human (no durable label-applied
+   *  start for waiting-on-you; null for `ask` (no durable label-applied
    *  stamp is projected). The Inbox row anchors its duration to attentionSince ??
    *  heldSince; null is rendered unavailable, never fabricated. */
   attentionSince: string | null;
+  /** CAT-170: "anchor" | "member" | null — the escalation-correlation role for a
+   *  multi-ticket incident. Members render normally but are suppressed by the
+   *  notification projectors so one incident yields ONE operator alert. */
+  correlationRole: string | null;
   /** CTL-922 (BFF10): the node owning this ticket, from the phase signals
    *  host:{name,id} (CTL-852) or the durable fence projection owner_host (BFF11).
    *  null when no host is named (single-host resolves to the one node). */
@@ -181,8 +185,8 @@ export interface BoardTicket {
   /** CTL-1066: reason a stalled/failed phase gave up, from the surfaced phase
    *  signal's stalledReason/failureReason. null unless status is stalled/failed. */
   failureReason?: string | null;
-  /** CTL-1110: extended escalation explanation for the needs-human detail-pane
-   *  card. null/absent unless attention is needs-human and a signal carried the
+  /** CTL-1110: extended escalation explanation for the `ask` detail-pane
+   *  card. null/absent unless attention is `ask` and a signal carried the
    *  extended fields. */
   explanation?: BoardEscalationExplanation | null;
   /** CTL-1220: true when this ticket was auto-fixed by the recovery sweep. */
@@ -248,13 +252,13 @@ export interface BoardConfig {
   /** CTL-764: monitor-dispatched triage workers — never consume a maxParallel slot.
    *  Optional so existing BoardConfig fixtures stay valid. */
   triage?: number;
-  /** CTL-764: per-disposition ticket counts (queued/blocked/needsInput/needsHuman).
+  /** CTL-764: per-disposition ticket counts (queued/blocked/needsInput/ask).
    *  Optional so existing BoardConfig fixtures stay valid; the runtime populates via
    *  deriveStatusCounts spread into config. */
   queued?: number;
   blocked?: number;
   needsInput?: number;
-  needsHuman?: number;
+  ask?: number;
 }
 
 /** CTL-1050 §3.2: one current service outage, decorated onto the board payload
@@ -315,35 +319,50 @@ export const HELD_LABEL_BLOCKED: string;
 export const HELD_LABEL_WAITING: string;
 export function heldFor(labels: unknown): "blocked" | "queued" | null;
 
-/** CTL-1131: the durable needs-human age anchor — the newest phase signal's
- *  needsHumanSince stamp. null when none carries it (never fabricated). */
-export function deriveNeedsHumanSince(phaseSigs: unknown[]): string | null;
+/** CTL-1131: the durable escalation age anchor — the newest phase signal's
+ *  `needsHumanSince` stamp (the on-disk field name is deliberately unchanged —
+ *  see the note in board-data.mjs). null when none carries it (never fabricated). */
+export function deriveEscalationSince(phaseSigs: unknown[]): string | null;
 
-/** CTL-729: the escalation labels that trigger attention 'needs-human'. */
-export const ATTENTION_LABEL_NEEDS_HUMAN: string;
+/** CTL-2161: the ask labels that trigger attention 'ask'. */
+export const ATTENTION_LABELS_ASK: readonly string[];
+export function hasAskLabel(labels?: string[] | null): boolean;
 export const ATTENTION_LABEL_NEEDS_INPUT: string;
-/** CTL-729: PURE classifier for the single needs-attention bucket. needs-human
- *  (a needs-human/needs-input label OR the host-local marker) WINS over
+/** CTL-729: PURE classifier for the single needs-attention bucket. `ask`
+ *  (an ask / needs-input label, a stuck PR, a failed phase) WINS over
  *  waiting-on-you (a live worker's blocked bg job). The anchor follows the winning
  *  reason; null when that reason carries no durable stamp (never fabricated).
  *  CTL-1158: also accepts prStuck/prStuckSince for the PR-stuck signal.
- *  CTL-1180: phaseFailed surfaces a self-emitted failed phase as needs-human;
+ *  CTL-1180: phaseFailed surfaces a self-emitted failed phase as `ask`;
  *  escalationType is a passthrough from deriveEscalationType. */
 export function deriveAttention(opts?: {
   waitingOnUser?: boolean;
   labels?: unknown;
-  needsHumanMarker?: boolean;
+  escalationMarker?: boolean;
   waitingSince?: string | null;
-  needsHumanSince?: string | null;
+  escalationSince?: string | null;
   prStuck?: boolean;
   prStuckSince?: string | null;
   phaseFailed?: boolean;
   escalationType?: string | null;
   /** CTL-1239: true when the ticket's live Linear state is terminal (Done/Canceled).
    *  Short-circuits all attention reasons to null — a shipped/canceled ticket must
-   *  never surface as needs-human / waiting-on-you from a stale phase signal. */
+   *  never surface as ask / waiting-on-you from a stale phase signal. */
   linearTerminal?: boolean;
-}): { attention: BoardAttention; attentionSince: string | null; escalationType: string | null };
+  /** CAT-170: the escalation-correlation role ("anchor" | "member") from
+   *  deriveCorrelationRole. Surfaced only on the `ask` branch — it is the
+   *  projection the notification path uses to suppress a member's duplicate push. */
+  correlationRole?: string | null;
+}): {
+  attention: BoardAttention;
+  attentionSince: string | null;
+  escalationType: string | null;
+  correlationRole: string | null;
+};
+
+/** CAT-170: extract the top-level `correlation.role` from the most-recent phase
+ *  signal carrying one. Returns "anchor" | "member" | null. */
+export function deriveCorrelationRole(phaseSigs: unknown[]): string | null;
 
 /** CTL-1239: true when a dead bg-job corpse sits on a Linear-terminal ticket
  *  (Done/Canceled) — leftover state on a shipped/canceled ticket, not a real dead
@@ -426,7 +445,7 @@ export function deriveCapacity(
 
 /** CTL-764 Phase 7: PURE per-disposition ticket counts. Tickets owned by a live
  *  worker (in inFlightTicketIds) are excluded to avoid double-counting.
- *  Precedence: needs-human > needs-input > blocked > queued. */
+ *  Precedence: ask > needs-input > blocked > queued. */
 export function deriveStatusCounts(
   tickets: ReadonlyArray<{
     id: string;
@@ -435,7 +454,7 @@ export function deriveStatusCounts(
     workerStatus?: string | null;
   }>,
   inFlightTicketIds: Set<string>
-): { queued: number; blocked: number; needsInput: number; needsHuman: number };
+): { queued: number; blocked: number; needsInput: number; ask: number };
 
 /** CTL-928: classify a worker's top-level liveness — durable bg-job state FIRST
  *  (a `running` signal is not proof of life), transcript age second. Returns
@@ -480,7 +499,7 @@ export function synthesizeQueuedTicket(
   teamRepoMap?: Record<string, string>,
   replicaTitles?: Record<string, string>
 ): BoardTicket;
-/** One BoardTicket-shaped card (type:"orphan-pr", attention:"needs-human") per notified
+/** One BoardTicket-shaped card (type:"orphan-pr", attention:"ask") per notified
  *  orphan in the orphan-PR state file — no capacity/queue impact (deriveStatusCounts
  *  skips them). */
 export function synthesizeOrphanTickets(

@@ -241,7 +241,7 @@ describe("provenance — mode knobs", () => {
   });
 
   test('the "0" kill-switch is an env override resolving to off', () => {
-    const r = row(dump({ env: { CATALYST_BOARD_HEALTH: "0" } }), "catalyst.boardHealth.mode");
+    const r = row(dump({ env: { CATALYST_STALL_JANITOR: "0" } }), "catalyst.stallJanitor.mode");
     expect(r.value).toBe("off");
     expect(r.provenance).toBe(PROVENANCE.ENV);
   });

@@ -1,5 +1,5 @@
 // CTL-1239: a ticket terminal in Linear (Done/Canceled) must never surface as
-// needs-human / waiting-on-you, regardless of a stale failed/stalled phase signal,
+// ask / waiting-on-you, regardless of a stale failed/stalled phase signal,
 // and its dead bg-job corpse must drop from the dead-worker set. Covered via the
 // exported pure functions assembleBoard composes from (assembleBoard itself is not
 // unit-testable — WORKERS_DIR is a homedir const).
@@ -15,24 +15,24 @@ describe("deriveAttention — linearTerminal short-circuit (CTL-1239)", () => {
     expect(r.escalationType).toBeNull();
   });
 
-  it("linearTerminal:true overrides needsHumanMarker:true → attention:null", () => {
-    expect(deriveAttention({ needsHumanMarker: true, linearTerminal: true }).attention).toBeNull();
+  it("linearTerminal:true overrides escalationMarker:true → attention:null", () => {
+    expect(deriveAttention({ escalationMarker: true, linearTerminal: true }).attention).toBeNull();
   });
 
-  it("linearTerminal:true overrides a needs-human label → attention:null", () => {
-    expect(deriveAttention({ labels: ["needs-human"], linearTerminal: true }).attention).toBeNull();
+  it("linearTerminal:true overrides a ask label → attention:null", () => {
+    expect(deriveAttention({ labels: ["catalyst-ask"], linearTerminal: true }).attention).toBeNull();
   });
 
   it("linearTerminal:true overrides waitingOnUser:true → attention:null", () => {
     expect(deriveAttention({ waitingOnUser: true, waitingSince: "2026-06-17T00:00:00Z", linearTerminal: true }).attention).toBeNull();
   });
 
-  it("linearTerminal:false leaves phaseFailed:true → needs-human (unchanged)", () => {
-    expect(deriveAttention({ phaseFailed: true, linearTerminal: false }).attention).toBe("needs-human");
+  it("linearTerminal:false leaves phaseFailed:true → ask (unchanged)", () => {
+    expect(deriveAttention({ phaseFailed: true, linearTerminal: false }).attention).toBe("ask");
   });
 
   it("default (no linearTerminal) preserves prior behavior — back-compat", () => {
-    expect(deriveAttention({ phaseFailed: true }).attention).toBe("needs-human");
+    expect(deriveAttention({ phaseFailed: true }).attention).toBe("ask");
     expect(deriveAttention({ waitingOnUser: true }).attention).toBe("waiting-on-you");
   });
 });

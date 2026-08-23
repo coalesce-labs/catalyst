@@ -4,6 +4,13 @@ const config: KnipConfig = {
   ignoreExportsUsedInFile: true,
   // Tags: honour @ignore JSDoc annotation on exports (e.g. DetailBody, contract types).
   tags: ["-ignore"],
+  // System binaries invoked by the monitor and its integration tests. These are
+  // host-provided commands rather than package.json dependencies.
+  ignoreBinaries: [
+    "jq", // event filtering and jq compatibility coverage
+    "sqlite3", // read-model fixture databases
+    "fc-list", // optional fontconfig probe for Nerd Font detection
+  ],
   // Unused files (dead code from prior tickets — pending cleanup):
   ignoreFiles: [
     "ui/src/components/layout/sidebar.tsx",

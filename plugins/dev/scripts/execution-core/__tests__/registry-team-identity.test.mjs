@@ -32,7 +32,9 @@ describe("teamIdentityOf", () => {
     expect(result.matches).toBe(true);
   });
 
-  test("detects the live CAT to CTL mismatch", () => {
+  // The real CAT -> CTL dispatch-revision case belongs to
+  // registry-dispatch-revision-identity.test.mjs; this suite covers Arm A.
+  test("detects a mismatch between the registry team and the declared teamKey", () => {
     const result = teamIdentityOf(
       { team: "CAT", repoRoot: "/clone" },
       reader({ "/clone/.catalyst/config.json": JSON.stringify({ catalyst: { linear: { teamKey: "CTL" } } }) }),

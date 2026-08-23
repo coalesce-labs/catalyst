@@ -11,7 +11,10 @@ import {
   buildRescueDispatchArgs,
   defaultMergeTree,
   defaultLinearWrite,
+  defaultEscalate,
 } from "./stale-pr-rescue-timer.mjs";
+import { readFenceStandoff } from "./fence-standoff.mjs";
+import { recordDurableEscalation } from "./durable-escalation.mjs";
 import * as linearWriteModule from "./linear-write.mjs";
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
@@ -623,8 +626,107 @@ describe("escalation default seam", () => {
     clock.advance(1_000);
     await new Promise(r => setTimeout(r, 20));
 
-    expect(labels).toEqual([{ ticket: "CTL-31", label: "needs-human" }]);
+    // ⛔ CTL-2159: was `[{ ticket: "CTL-31", label: "needs-human" }]`. The default
+    // escalate no longer writes a Linear label — the once-marker below is the
+    // record `rescue.json.escalatedAt` latches on, and it is unchanged.
+    expect(labels).toEqual([]);
     expect(existsSync(join(orchDir, "workers", "CTL-31", ".linear-label-needs-human.applied"))).toBe(true);
+  });
+
+  it("fence-suppressed rescue records the episode and writes one durable escalation past the bound (CAT-173)", () => {
+    const orchDir = mkOrchDir();
+    const events = [];
+    let now = 1_000;
+    const fenceGuardFn = (_ctx, opts) => {
+      opts.onSuppress?.({ ticket: "PROJ-173", reason: "unverifiable", generation: 7 });
+      return false;
+    };
+    const deps = {
+      orchDir,
+      linearWrite: {},
+      multiHost: true,
+      env: {
+        CATALYST_FENCE_STANDOFF_CAP: "2",
+        CATALYST_FENCE_STANDOFF_MIN_AGE_MS: "1",
+      },
+      now: () => now,
+      fenceGuardFn,
+      appendStandoffEvent: (payload) => {
+        events.push(payload);
+        return true;
+      },
+    };
+
+    const first = defaultEscalate("PROJ-173", { prNumber: 173, reason: "conflicting" }, deps);
+    expect(first.reason).toBe("fence-suppressed");
+    expect(readFenceStandoff(orchDir, "PROJ-173")?.count).toBe(1);
+    expect(existsSync(join(orchDir, ".escalations", "PROJ-173.json"))).toBe(false);
+
+    now += 2;
+    const second = defaultEscalate("PROJ-173", { prNumber: 173, reason: "conflicting" }, deps);
+    expect(second.reason).toBe("fence-suppressed");
+    const durable = JSON.parse(readFileSync(join(orchDir, ".escalations", "PROJ-173.json"), "utf8"));
+    expect(durable.source).toBe("fence-standoff");
+    expect(durable.reason).toMatch(/fence-standoff.*PR #173/);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ ticket: "PROJ-173", site: "stale-pr-rescue", count: 2 });
+
+    now += 2;
+    defaultEscalate("PROJ-173", { prNumber: 173, reason: "conflicting" }, deps);
+    expect(events).toHaveLength(1);
+  });
+
+  it("retries break-glass until both the durable record and event append succeed (CAT-173 P1)", () => {
+    const orchDir = mkOrchDir();
+    let now = 2_000;
+    let durableAttempts = 0;
+    let eventAttempts = 0;
+    const deps = {
+      orchDir,
+      linearWrite: {},
+      multiHost: true,
+      env: {
+        CATALYST_FENCE_STANDOFF_CAP: "1",
+        CATALYST_FENCE_STANDOFF_MIN_AGE_MS: "1",
+      },
+      now: () => now,
+      fenceGuardFn: (_ctx, opts) => {
+        opts.onSuppress?.({ ticket: "PROJ-174", reason: "unverifiable", generation: 8 });
+        return false;
+      },
+      recordDurableEscalationFn: (record) => {
+        durableAttempts += 1;
+        return durableAttempts > 1 ? recordDurableEscalation(record) : null;
+      },
+      appendStandoffEvent: () => {
+        eventAttempts += 1;
+        return eventAttempts > 1;
+      },
+    };
+
+    now += 2;
+    defaultEscalate("PROJ-174", { prNumber: 174 }, deps);
+    expect(readFenceStandoff(orchDir, "PROJ-174")?.breakGlassAt).toBeNull();
+    expect(eventAttempts).toBe(0);
+
+    now += 2;
+    defaultEscalate("PROJ-174", { prNumber: 174 }, deps);
+    expect(readFenceStandoff(orchDir, "PROJ-174")?.breakGlassAt).toBeNull();
+    expect(eventAttempts).toBe(0);
+
+    now += 2;
+    defaultEscalate("PROJ-174", { prNumber: 174 }, deps);
+    expect(readFenceStandoff(orchDir, "PROJ-174")?.breakGlassAt).toBeNull();
+    expect(eventAttempts).toBe(1);
+
+    now += 2;
+    defaultEscalate("PROJ-174", { prNumber: 174 }, deps);
+    expect(readFenceStandoff(orchDir, "PROJ-174")?.breakGlassAt).toBe(now);
+    expect(eventAttempts).toBe(2);
+
+    now += 2;
+    defaultEscalate("PROJ-174", { prNumber: 174 }, deps);
+    expect(eventAttempts).toBe(2);
   });
 });
 

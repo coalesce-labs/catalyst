@@ -138,7 +138,7 @@ function buildDefaultColumns(terminalCols: number): ResolvedColumn[] {
       const desc = COLUMN_DESCRIPTORS[id];
       if (!desc) return null;
       if (terminalCols < desc.minTerminalWidth) return null;
-      return { ...desc, width: desc.computeWidth(terminalCols) } as ResolvedColumn;
+      return { ...desc, width: desc.computeWidth(terminalCols) };
     })
     .filter((c): c is ResolvedColumn => c !== null);
 

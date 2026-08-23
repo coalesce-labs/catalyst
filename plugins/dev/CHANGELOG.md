@@ -1,5 +1,54 @@
 # Changelog
 
+## [12.63.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.62.0...catalyst-dev-v12.63.0) (2026-08-22)
+
+
+### Features
+
+* **dev:** CAT-60 — publish capability preflight ([#3837](https://github.com/coalesce-labs/catalyst/issues/3837)) ([cd5e0d1](https://github.com/coalesce-labs/catalyst/commit/cd5e0d166a71d077dc6d8548667ad735518c7fe7))
+* **dev:** CTL-2011 — tell operator when GitHub-feed readers disagree ([#3757](https://github.com/coalesce-labs/catalyst/issues/3757)) ([a7600c2](https://github.com/coalesce-labs/catalyst/commit/a7600c2fe84e0d429db313ddf0d59616580e91c7))
+* **dev:** CTL-2061 — an infra-class phase failure retries with backoff, never parks needs-human ([#3722](https://github.com/coalesce-labs/catalyst/issues/3722)) ([7104d6d](https://github.com/coalesce-labs/catalyst/commit/7104d6d8f7c72be2bc73d8c9ec2505397b16abef))
+* **dev:** CTL-2129 — scope→steward resolver (scopeKeys registry + ticket→scope + per-item turn counting + instrument wiring) ([#3845](https://github.com/coalesce-labs/catalyst/issues/3845)) ([5ef0d4e](https://github.com/coalesce-labs/catalyst/commit/5ef0d4ead993d512687bb48ff63ae8cc96828142))
+* **dev:** gate zero — diagnose why it is stuck before escalating to a human ([#3881](https://github.com/coalesce-labs/catalyst/issues/3881)) ([e5f5c13](https://github.com/coalesce-labs/catalyst/commit/e5f5c13061622d7b533071a0b3e55ab48d2c3176))
+
+
+### Bug Fixes
+
+* **dev:** CAT-216 make journey event log injectable ([#3905](https://github.com/coalesce-labs/catalyst/issues/3905)) ([006281d](https://github.com/coalesce-labs/catalyst/commit/006281ddafad7301b9c2a4b0c79f4d5d9824ba77))
+* **dev:** CTL-2073 — doctor graded the daemon's write budget against a shell env it never runs in ([#3727](https://github.com/coalesce-labs/catalyst/issues/3727)) ([d430568](https://github.com/coalesce-labs/catalyst/commit/d430568c0c7144a465f3dbdca28c635b2bb06d95))
+* **dev:** CTL-2083 — back off removeLabel on a budget refusal (mirror COORD-236's apply-side cool-down) ([#3740](https://github.com/coalesce-labs/catalyst/issues/3740)) ([b9cc783](https://github.com/coalesce-labs/catalyst/commit/b9cc783d53ebe16035f393e1fbe83d28f563f2c0))
+* **dev:** CTL-2098 — restore the dropped converged flag so needs-human marker-retention is reachable on enforce ([#3885](https://github.com/coalesce-labs/catalyst/issues/3885)) ([f2711b5](https://github.com/coalesce-labs/catalyst/commit/f2711b54c249242701eeec859fd1152795f87642))
+
+## [12.62.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.61.0...catalyst-dev-v12.62.0) (2026-08-21)
+
+
+### Features
+
+* **dev:** CAT-170 correlated recovery-pass retry-cap alerts (lands [#3209](https://github.com/coalesce-labs/catalyst/issues/3209)) ([#3842](https://github.com/coalesce-labs/catalyst/issues/3842)) ([d8fab3b](https://github.com/coalesce-labs/catalyst/commit/d8fab3b40e0212e79680a8168d83b00beaf5d0bb))
+* **dev:** CAT-173 surface mutual fence standoffs (lands [#3241](https://github.com/coalesce-labs/catalyst/issues/3241)) ([#3839](https://github.com/coalesce-labs/catalyst/issues/3839)) ([083e390](https://github.com/coalesce-labs/catalyst/commit/083e3904d75519be793c81eca8b97d85a29118c2))
+* **dev:** CAT-46 durable liveness anchor health checks (lands [#3219](https://github.com/coalesce-labs/catalyst/issues/3219)) ([#3841](https://github.com/coalesce-labs/catalyst/issues/3841)) ([42efe53](https://github.com/coalesce-labs/catalyst/commit/42efe53e482c91c7a2a713a864d3fa82c323e465))
+* **dev:** CTL-1210 — split node config by lifecycle (cluster-secrets.json + node.json) ([#3823](https://github.com/coalesce-labs/catalyst/issues/3823)) ([8c0dc4b](https://github.com/coalesce-labs/catalyst/commit/8c0dc4bccaad91370fe6cd2352ebb888864bfe68))
+* **dev:** CTL-1679 — recovery pass retries safe/retryable failures by default ([#3835](https://github.com/coalesce-labs/catalyst/issues/3835)) ([f594755](https://github.com/coalesce-labs/catalyst/commit/f59475575e9cdb7f039f0fb208a6a65073e5ef26))
+* **dev:** CTL-1958 — owner comms tools write through the cloud proxy, read from the replica; mint deleted ([#3816](https://github.com/coalesce-labs/catalyst/issues/3816)) ([cee3edf](https://github.com/coalesce-labs/catalyst/commit/cee3edfd11dbafb967480916cf180f5c6b24e22e))
+* **dev:** CTL-2085 — auto-update claude CLI and Agent SDK on persistent hosts ([#3817](https://github.com/coalesce-labs/catalyst/issues/3817)) ([668c731](https://github.com/coalesce-labs/catalyst/commit/668c731d762a44cf1adad449cf7a43c1bbecd40b))
+* **dev:** CTL-2151 — ask skill gains duplicate-search and blast-radius triage ([#3866](https://github.com/coalesce-labs/catalyst/issues/3866)) ([1bff497](https://github.com/coalesce-labs/catalyst/commit/1bff49728bf6145f9f843a6d2b7175e4a89f90c5))
+
+
+### Bug Fixes
+
+* **dev:** CAT-116 — validate registry identity at dispatch revision ([#3838](https://github.com/coalesce-labs/catalyst/issues/3838)) ([5343dc1](https://github.com/coalesce-labs/catalyst/commit/5343dc13fe6adef75bdd014ff19ce8d797ffb13f))
+* **dev:** CAT-124 close deferred recovery-pass review findings ([#3836](https://github.com/coalesce-labs/catalyst/issues/3836)) ([542d69e](https://github.com/coalesce-labs/catalyst/commit/542d69eb77051276d8ef62bb4db3123991833c61))
+* **dev:** CAT-139 — watchdog runner accepts an explicit --config path ([#3833](https://github.com/coalesce-labs/catalyst/issues/3833)) ([4f4c567](https://github.com/coalesce-labs/catalyst/commit/4f4c567924d3f94f58d4f6e70bbb2d4096ce3c04))
+* **dev:** CAT-251 — prevent HOME-restoration leaks in tests ([#3834](https://github.com/coalesce-labs/catalyst/issues/3834)) ([bf5be52](https://github.com/coalesce-labs/catalyst/commit/bf5be52b863f61ce9f171f57ba205bd0263a8043))
+* **dev:** CAT-47 commit the audit-comment dedup latch only on confirmed delivery ([#3831](https://github.com/coalesce-labs/catalyst/issues/3831)) ([5e6fee4](https://github.com/coalesce-labs/catalyst/commit/5e6fee48092db49591ed5ba2fe1e5a5e1440036f))
+* **dev:** CTL-1550 — Bounded event-log coverage correctness (4 bugs: backfill probe, cap size, window clamp, first-line drop, per-event filter) ([#3760](https://github.com/coalesce-labs/catalyst/issues/3760)) ([d52d085](https://github.com/coalesce-labs/catalyst/commit/d52d085f4d781da12fc0b119a08e49092f1ddd83))
+* **dev:** CTL-1596 — cluster secret sync hardening (5 latent bugs) ([#3821](https://github.com/coalesce-labs/catalyst/issues/3821)) ([80fd237](https://github.com/coalesce-labs/catalyst/commit/80fd237c51df698f50a1961d17bfe7cc016d80b8))
+* **dev:** CTL-2052 — classify the refused proxy label-write, cool it down, and stop after N ([#3815](https://github.com/coalesce-labs/catalyst/issues/3815)) ([6069d8b](https://github.com/coalesce-labs/catalyst/commit/6069d8bb88febcc0af13a6baac7c3fca4cd3a1ff))
+* **dev:** CTL-2056 — fix two fleet alarm blind spots (ratelimit-poller + escalation counter) ([#3761](https://github.com/coalesce-labs/catalyst/issues/3761)) ([fb66677](https://github.com/coalesce-labs/catalyst/commit/fb66677526a19b0807a5b45029d4a6e756f1a3ea))
+* **dev:** CTL-2108 — emit entitlement.restored.&lt;host&gt; when a shed host regains entitlement ([#3840](https://github.com/coalesce-labs/catalyst/issues/3840)) ([e6a0581](https://github.com/coalesce-labs/catalyst/commit/e6a0581da541c9b217632da59a4e0632374ccb46))
+* **dev:** CTL-2137 — exclude listing-`blocked` bg sessions from the admission count ([#3846](https://github.com/coalesce-labs/catalyst/issues/3846)) ([7d8480d](https://github.com/coalesce-labs/catalyst/commit/7d8480d0b5c803e246fd575245e4a95700960eb4))
+* **dev:** trust the Tailscale MagicDNS name in the monitor's reply-origin allowlist ([#3830](https://github.com/coalesce-labs/catalyst/issues/3830)) ([d8bde5d](https://github.com/coalesce-labs/catalyst/commit/d8bde5ddfe777cf7cd3516cf1ce60b7cc2515a93))
+
 ## [12.61.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.60.0...catalyst-dev-v12.61.0) (2026-08-21)
 
 

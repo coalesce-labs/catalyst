@@ -181,7 +181,15 @@ linear_graphql_post() {
 
 # --- worker-status label group reconcile (CTL-764) --------------------------
 # Idempotently ensures a workspace-scoped exclusive 'worker-status' label group
-# with 4 members (queued/blocked/needs-input/needs-human) via issueLabelCreate.
+# with 3 members (queued/blocked/needs-input) via issueLabelCreate.
+#
+# ⛔ CTL-2159: `needs-human` was the fourth member and is DELIBERATELY GONE. This
+# function is what recreates the label on a fresh install, so leaving it here
+# would rebuild the bin on every new host no matter how many producers stopped
+# writing it. Removing it here is the half of the deletion that makes it stick.
+# The two assertion loops that WARNed on its absence (check-setup.sh,
+# check-project-setup.sh) are updated in the same change — a host that stops
+# creating a label and then warns that it is missing is worse than either.
 # Workspace-scoped (no teamId) so it applies across CTL + ADV teams without
 # duplication. Re-parents/supersedes CTL-755's team-level blocked/waiting labels
 # (no API delete — avoids stripping labels off historical tickets).
@@ -195,8 +203,7 @@ worker_status_members() {
 	jq -nc '[
     {"name":"queued",      "color":"#0099cc"},
     {"name":"blocked",     "color":"#eb5757"},
-    {"name":"needs-input", "color":"#f2c94c"},
-    {"name":"needs-human", "color":"#ff6b00"}
+    {"name":"needs-input", "color":"#f2c94c"}
   ]'
 }
 
@@ -282,7 +289,7 @@ reconcile_worker_status_labels() {
 	group_name=$(worker_status_group_name)
 
 	if [[ ${dry_run:-0} -eq 1 ]]; then
-		echo "DRY-RUN: would ensure worker-status label group (${group_name}) with 4 members (queued/blocked/needs-input/needs-human)"
+		echo "DRY-RUN: would ensure worker-status label group (${group_name}) with 3 members (queued/blocked/needs-input)"
 		return 0
 	fi
 

@@ -35,6 +35,8 @@ PHASE_DISPATCH="${REPO_ROOT}/plugins/dev/scripts/phase-agent-dispatch"
 SKILL_IMPLEMENT="${REPO_ROOT}/plugins/dev/skills/phase-implement/SKILL.md"
 SKILL_PR="${REPO_ROOT}/plugins/dev/skills/phase-pr/SKILL.md"
 SKILL_MONITOR_MERGE="${REPO_ROOT}/plugins/dev/skills/phase-monitor-merge/SKILL.md"
+SKILL_MM_DIR="${REPO_ROOT}/plugins/dev/skills/phase-monitor-merge"
+SKILL_MM_MIRROR="${SKILL_MM_DIR}/references/mirror.md"
 # shellcheck source=lib/linearis-stub.sh
 source "${SCRIPT_DIR}/lib/linearis-stub.sh"
 
@@ -214,9 +216,12 @@ if [[ -f $SKILL_MONITOR_MERGE ]]; then
 	# Reuses the reactive PR-lifecycle pattern (CTL-228 monitor-events Pattern 3).
 	# The listen loop must wait on events rather than polling, so the skill body
 	# must reference catalyst-events wait-for and the GitHub event filter.
-	assert_grep 'catalyst-events wait-for' "$SKILL_MONITOR_MERGE" "uses catalyst-events wait-for (event-driven loop)"
-	assert_grep 'github\.pr\.merged|github\.check_suite|github\.pr_review' "$SKILL_MONITOR_MERGE" \
-		"references GitHub PR-lifecycle event names"
+	grep -rqE 'catalyst-events wait-for' "$SKILL_MM_DIR" 2>/dev/null && \
+		pass "uses catalyst-events wait-for (event-driven loop)" || \
+		fail "uses catalyst-events wait-for (event-driven loop) — not found in skill dir"
+	grep -rqE 'github\.pr\.merged|github\.check_suite|github\.pr_review' "$SKILL_MM_DIR" 2>/dev/null && \
+		pass "references GitHub PR-lifecycle event names" || \
+		fail "references GitHub PR-lifecycle event names — not found in skill dir"
 	# CTL-703: Linear Done is written by phase-teardown (10th phase), not phase-monitor-merge.
 	assert_not_grep 'linear-transition\.sh' "$SKILL_MONITOR_MERGE" \
 		"phase-monitor-merge does NOT transition Linear to done (CTL-703: teardown owns it)"
@@ -814,11 +819,21 @@ if [[ -f $SKILL_PR ]]; then
 	assert_grep 'verify\.json' "$SKILL_PR" "phase-pr: surfaces verify.json pre-merge verification"
 fi
 if [[ -f $SKILL_MONITOR_MERGE ]]; then
-	assert_grep 'phase-monitor-merge-mirror' "$SKILL_MONITOR_MERGE" "phase-monitor-merge: body contains uniquely-named mirror fence"
-	assert_grep '\.linear-mirror-' "$SKILL_MONITOR_MERGE" "phase-monitor-merge: references the per-phase marker file"
-	assert_grep 'linear-comment-post.sh' "$SKILL_MONITOR_MERGE" "phase-monitor-merge: calls linear-comment-post.sh"
-	assert_grep 'phase-monitor-merge: linear-comment-post failed \(continuing\)' "$SKILL_MONITOR_MERGE" "phase-monitor-merge: fail-open warning string"
-	assert_grep 'statusCheckRollup' "$SKILL_MONITOR_MERGE" "phase-monitor-merge: summarizes CI check rollup"
+	grep -rqE 'phase-monitor-merge-mirror' "$SKILL_MM_DIR" 2>/dev/null && \
+		pass "phase-monitor-merge: body contains uniquely-named mirror fence" || \
+		fail "phase-monitor-merge: body contains uniquely-named mirror fence — not found in skill dir"
+	grep -rqE '\.linear-mirror-' "$SKILL_MM_DIR" 2>/dev/null && \
+		pass "phase-monitor-merge: references the per-phase marker file" || \
+		fail "phase-monitor-merge: references the per-phase marker file — not found in skill dir"
+	grep -rqE 'linear-comment-post.sh' "$SKILL_MM_DIR" 2>/dev/null && \
+		pass "phase-monitor-merge: calls linear-comment-post.sh" || \
+		fail "phase-monitor-merge: calls linear-comment-post.sh — not found in skill dir"
+	grep -rqE 'phase-monitor-merge: linear-comment-post failed \(continuing\)' "$SKILL_MM_DIR" 2>/dev/null && \
+		pass "phase-monitor-merge: fail-open warning string" || \
+		fail "phase-monitor-merge: fail-open warning string — not found in skill dir"
+	grep -rqE 'statusCheckRollup' "$SKILL_MM_DIR" 2>/dev/null && \
+		pass "phase-monitor-merge: summarizes CI check rollup" || \
+		fail "phase-monitor-merge: summarizes CI check rollup — not found in skill dir"
 fi
 
 # ─── Test 16 (CTL-632): phase-pr mirror runtime — happy/fail-open/idempotent ──
@@ -952,11 +967,11 @@ awk '
   /^```bash phase-monitor-merge-mirror$/ {capture=1; next}
   /^```$/ {if (capture) {capture=0}}
   capture { print }
-' "$SKILL_MONITOR_MERGE" >"$MM_MIRROR_FILE"
+' "${SKILL_MM_DIR}/references/mirror.md" >"$MM_MIRROR_FILE"
 if [[ -s $MM_MIRROR_FILE ]]; then
-	pass "phase-monitor-merge mirror block extractable from SKILL.md"
+	pass "phase-monitor-merge mirror block extractable from references/mirror.md"
 else
-	fail 'phase-monitor-merge mirror block extractable — no ```bash phase-monitor-merge-mirror``` fence found'
+	fail 'phase-monitor-merge mirror block extractable — no ```bash phase-monitor-merge-mirror``` fence found in references/mirror.md'
 fi
 
 seed_mm_worker() {
@@ -1023,9 +1038,12 @@ fi
 echo ""
 echo "Test 18 (CTL-632 footer): implement mirror appends footer when PLUGIN_ROOT + bg fixture present"
 # Structural: every phase mirror skill wires the shared footer helper.
-for skill in "$SKILL_IMPLEMENT" "$SKILL_PR" "$SKILL_MONITOR_MERGE"; do
+for skill in "$SKILL_IMPLEMENT" "$SKILL_PR"; do
 	assert_grep 'phase-mirror-footer\.sh' "$skill" "$(basename "$(dirname "$skill")"): wires phase-mirror-footer.sh"
 done
+grep -rqE 'phase-mirror-footer\.sh' "$SKILL_MM_DIR" 2>/dev/null && \
+	pass "phase-monitor-merge: wires phase-mirror-footer.sh" || \
+	fail "phase-monitor-merge: wires phase-mirror-footer.sh — not found in skill dir"
 
 # Runtime: run the extracted implement mirror block with PLUGIN_ROOT pointed at
 # the real plugin + a bg-job fixture, and confirm the footer lands in the body.

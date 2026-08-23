@@ -1,0 +1,85 @@
+import { describe, expect, test } from "bun:test";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { checkRepoPushPermission, runDoctor } from "./doctor.mjs";
+
+const verdict = (state, extra = {}) => ({
+  state, slug: "coalesce-labs/catalyst", login: "octocat", detail: state, cached: false, ...extra,
+});
+const check = (state, mode = "shadow", extra = {}) => checkRepoPushPermission({
+  repoRoot: "/repo", pushRemote: "fork", resolveMode: () => mode,
+  probe: () => verdict(state, extra),
+})[0];
+
+describe("checkRepoPushPermission (CAT-60)", () => {
+  test("allowed is PASS and names slug and resolved remote", () => {
+    const got = check("allowed");
+    expect(got.status).toBe("pass");
+    expect(got.detail).toContain("coalesce-labs/catalyst");
+    expect(got.detail).toContain("fork");
+  });
+
+  test("denied in shadow is WARN and does not affect runDoctor exit code", async () => {
+    const fn = () => checkRepoPushPermission({ resolveMode: () => "shadow", probe: () => verdict("denied") });
+    expect((await fn())[0].status).toBe("warn");
+    expect(await runDoctor({ checks: [fn], log: () => {}, resolveClass: () => ({ recognized: true, class: "worker" }) })).toBe(0);
+  });
+
+  test("denied in enforce is FAIL", () => expect(check("denied", "enforce").status).toBe("fail"));
+  test("unknown is INFO and never FAIL", () => expect(check("unknown", "enforce").status).toBe("info"));
+
+  test("fresh probe cache is reused without a gh call", () => {
+    const cacheDir = mkdtempSync(join(tmpdir(), "doctor-publish-"));
+    let ghCalls = 0;
+    const spawn = (cmd, args) => {
+      if (cmd === "git") return { status: 0, stdout: "git@github.com:coalesce-labs/catalyst.git\n" };
+      ghCalls += 1;
+      return args[1] === "user" ? { status: 0, stdout: "octocat\n" } : { status: 0, stdout: '{"push":true,"owner":"coalesce-labs"}' };
+    };
+    const deps = { repoRoot: "/repo", cacheDir, spawn, now: () => 1000, resolveMode: () => "shadow" };
+    expect(checkRepoPushPermission(deps)[0].status).toBe("pass");
+    expect(checkRepoPushPermission(deps)[0].status).toBe("pass");
+    expect(ghCalls).toBe(3); // identity is refreshed before selecting its cache key
+  });
+
+  // Regression: every other case here injects `resolveMode`, so the real
+  // resolver was never exercised — and checkRepoPushPermission was calling it
+  // as resolveMode({ env }) without the configPath it had already destructured
+  // for resolvePushRemote. A Layer-1 enforce was therefore invisible to doctor
+  // and a denied verdict graded WARN instead of the documented FAIL. Drive the
+  // mode from a config FILE (no stub, no env) so that omission cannot return.
+  test("Layer-1 config enforce reaches the real resolver and makes denied a FAIL", () => {
+    const dir = mkdtempSync(join(tmpdir(), "doctor-preflight-cfg-"));
+    const configPath = join(dir, "config.json");
+    writeFileSync(configPath, JSON.stringify({
+      catalyst: { orchestration: { publishPreflight: { mode: "enforce" } } },
+    }));
+    const got = checkRepoPushPermission({
+      repoRoot: "/repo", pushRemote: "fork", configPath, env: {},
+      probe: () => verdict("denied"),
+    })[0];
+    expect(got.status).toBe("fail");
+    expect(got.detail).toContain("(enforce)");
+  });
+
+  test("env still overrides a Layer-1 config mode", () => {
+    const dir = mkdtempSync(join(tmpdir(), "doctor-preflight-cfg-"));
+    const configPath = join(dir, "config.json");
+    writeFileSync(configPath, JSON.stringify({
+      catalyst: { orchestration: { publishPreflight: { mode: "enforce" } } },
+    }));
+    const got = checkRepoPushPermission({
+      repoRoot: "/repo", pushRemote: "fork", configPath,
+      env: { CATALYST_PUBLISH_PREFLIGHT: "shadow" },
+      probe: () => verdict("denied"),
+    })[0];
+    expect(got.status).toBe("warn");
+    expect(got.detail).toContain("(shadow)");
+  });
+
+  test("all messages qualify permission as push/publish", () => {
+    for (const state of ["allowed", "denied", "unknown"])
+      expect(check(state).detail).toMatch(/push permission|publish/i);
+  });
+});

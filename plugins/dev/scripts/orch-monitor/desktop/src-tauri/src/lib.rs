@@ -7,7 +7,7 @@
 // Two Rust-side bridges run against whatever server is configured:
 //   attention_bridge (polls /api/board):
 //     * Dock badge   = # of tickets needing a HUMAN (attention != null:
-//                      needs-human ∪ waiting-on-you). NOT queue depth — the
+//                      ask ∪ waiting-on-you). NOT queue depth — the
 //                      pipeline handles the queue; the badge is reserved for
 //                      "something is waiting for YOU".
 //     * Notification = a ticket that NEWLY needs you (deduped; baselined on the
@@ -76,7 +76,8 @@ async fn attention_bridge(app: tauri::AppHandle) {
                     notify(&app, "Catalyst", &format!("Connected — watching {base}"));
                     announced = true;
                 }
-                let mut current: Vec<(String, String, String)> = Vec::new();
+                // (id, attention, body, is_correlated_member)
+                let mut current: Vec<(String, String, String, bool)> = Vec::new();
                 if let Some(tickets) = board.get("tickets").and_then(|t| t.as_array()) {
                     for t in tickets {
                         let Some(att) = t.get("attention").and_then(serde_json::Value::as_str) else {
@@ -94,7 +95,14 @@ async fn attention_bridge(app: tauri::AppHandle) {
                             .or_else(|| t.get("title").and_then(serde_json::Value::as_str))
                             .unwrap_or("needs your attention")
                             .to_string();
-                        current.push((id, att.to_string(), body));
+                        // CAT-170: a correlated MEMBER still counts toward the badge and
+                        // still renders in the list, but must not raise its own toast —
+                        // the anchor carries the single alert for the whole incident.
+                        let member = t
+                            .get("correlationRole")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|r| r == "member");
+                        current.push((id, att.to_string(), body, member));
                     }
                 }
 
@@ -104,9 +112,9 @@ async fn attention_bridge(app: tauri::AppHandle) {
                 }
 
                 if !first_poll {
-                    for (id, att, body) in &current {
-                        if !known.contains(id) {
-                            let label = if att == "needs-human" {
+                    for (id, att, body, member) in &current {
+                        if !known.contains(id) && !*member {
+                            let label = if att == "ask" {
                                 "needs your decision"
                             } else {
                                 "is waiting on you"
@@ -116,7 +124,7 @@ async fn attention_bridge(app: tauri::AppHandle) {
                     }
                 }
 
-                known = current.into_iter().map(|(id, _, _)| id).collect();
+                known = current.into_iter().map(|(id, _, _, _)| id).collect();
                 first_poll = false;
             }
         }

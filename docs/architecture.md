@@ -251,9 +251,10 @@ evidence about `catalyst-state.sh`'s **callers**, not as an execution-core depen
   enrollment under `execution-core/projects/` and the `/orchestrate` enroll step were retired in
   CTL-582. Access flows through `registry.mjs` `list-projects`/`get-project-config` — the D9 cloud
   seam (swappable to a hosted table without touching callers). Each entry's `team` must match its
-  `repoRoot`'s Layer-1 `catalyst.linear.teamKey`; `listProjects()` warns on a mismatch and
-  `catalyst doctor` grades it with the advisory `registry-team-identity` check. Catalyst's own CAT
-  registration is recorded in ADR-028.
+  `repoRoot`'s Layer-1 `catalyst.linear.teamKey`. The hot-path `listProjects()` check reads the
+  working tree and warns on mismatch; the opt-in `catalyst doctor` arm reads the dispatch revision
+  from local refs only and grades working-tree/revision drift as WARN. Both remain advisory under
+  `registry-team-identity`. Catalyst's own CAT registration is recorded in ADR-028.
 - **Heartbeat** — orchestrators write `lastHeartbeat` every 2–3 min; entries stale >10 min are GC'd
   as `abandoned`.
 
@@ -321,14 +322,51 @@ advisory `entitlement-*` checks report the resolved mode, the provider (local vs
 whether the ordering constraint holds — INFO/WARN only, never FAIL. The `entitlement.*` event prefix
 is **unprotected** under the CTL-1142 namespace contract.
 
-**Board-health ownership scope (CAT-57).** Board-health uses the same dispatch roster as the
-scheduler's new-work gate when assigning eligible tickets, rather than hashing over the raw roster.
-Its `dispatchLiveness` invariant judges only this host's owned queue, while preserving the raw and
-owned depths in its scan context; dispatch-recency evidence is also host-scoped, fail-open for
-legacy events without host attribution. The separate `nodeProductivity` invariant reports a live
-peer that owns work but has not crossed a phase boundary within the configured window. It defaults
-to `shadow` and proposes only an escalate-only tier-3 move, so it cannot dispatch a recovery
-delegate.
+**Fence-standoff bound (CAT-173).** Two live hosts can each hold evidence that the other owns a
+ticket, causing every fence-guarded human escalation to be suppressed. Each escalation site records
+that suppression in the host-local, GC-surviving `.fence-standoff/<TICKET>.json` ledger. After both
+the configured count (default 4) and age (default 45 minutes) are reached, Catalyst writes an
+unfenced `.escalations/<TICKET>.json` record and emits `escalation.fence-standoff.<TICKET>`, so the
+notification bridge can surface the ticket without a Linear write.
+
+Only a MUTUAL standoff counts, and a standoff is by definition AMBIGUOUS — nobody can tell who owns
+the ticket. Just two `fenceGuard` verdicts are ambiguous in that sense and so accumulate toward the
+bound: `unverifiable` (the authoritative read neither confirmed nor refuted this host's generation)
+and `threw` (fail-closed on an error), alongside a non-fail-open `missing-generation`.
+
+The CONFIRMED-TAKEOVER verdicts are the opposite — positive evidence that a specific other host holds
+the claim, which is the correct outcome on the superseded host after a healthy takeover, where
+`fenceGuard` deliberately leaves the escalation to the current owner (whose own fence passes).
+There are TWO of them and BOTH are excluded: `foreign-owner` (the projection names a different owner
+host) and `superseded` (the authoritative read returned `stale: true`, i.e. a newer generation
+exists — the shape an ordinary healthy takeover takes on the old host, discovered via generation
+rather than owner identity). Counting either would let a lingering worker directory on the old host
+cross the bound and page an operator about a ticket the new owner is actively processing, so both are
+excluded from accounting and additionally CLEAR the ledger, letting a later genuine standoff start
+a fresh episode instead of inheriting a stale count and age.
+
+The record is GC-surviving and reaches the board two ways. When the ticket has **no** card,
+`synthesizeDurableEscalations` mints one. When it already has a card, that function's id dedupe
+drops the record, so `mergeDurableEscalationsIntoCards` runs first and stamps the escalation's
+reason onto the existing card — but only when that card carries no `attention` yet, so a live
+reason always wins. Both halves are needed: a terminal-sweep standoff has a live `failed`/`stalled`
+signal (hence a card, hence `deriveAttention`'s `phaseFailed` → `ask`) and only wanted the
+standoff-specific reason, whereas a stale-PR standoff on a `BEHIND` PR has a card with **no**
+attention at all — `BEHIND` is excluded from `PR_BLOCKER_STATES` as auto-rebasable and the fence
+suppressed the label — so before the merge pass its break-glass reached no operator surface,
+including the push bridge, which projects only board tickets.
+
+This changes no `fenceGuard` decision: every write suppressed before CAT-173 remains suppressed.
+It does change the **retry cadence** of those suppressed writes. Crossing the bound stamps a
+`.fence-standoff-cooldown` (default 6 h) that gates the same terminal-sweep probe+write block
+`.fence-suppressed` (15 min) already gated, so after a break-glass a healed standoff's escalation
+label write — and the terminal-clear branch that retracts it on a late Done — is retried every 6 h
+rather than every 15 min. A break-glass whose delivery FAILS drops the 15-minute marker to retry on
+the next tick, bounded by `CATALYST_FENCE_STANDOFF_DELIVERY_RETRY_MAX` (default 5) so a persistently
+unwritable sink cannot reintroduce the CTL-1329 per-tick probe burn. That bound is only enforceable
+while the attempt counter survives the tick, so a failed-delivery increment that cannot be persisted
+(full disk, read-only mount) fails CLOSED — reported as not-retryable rather than retryable-forever,
+since an unpersisted counter can never grow past the max.
 
 **Worker signal projection (CTL-532 = ADR-018 Phase 3, shipped; Phase 1 retired, CTL-1628).**
 Per-worker `workers/<TICKET>.json` files are still written by ~7 scripts with no inter-process
@@ -554,6 +592,66 @@ via `orchestrate-phase-advance`, and dispatches the next `--bg` job. Dispatcher:
 `plugins/dev/scripts/phase-agent-dispatch` (CTL-448). `oneshot-legacy` (single long-lived
 job/ticket) is the runtime fallback when the key is missing.
 
+### Publish-capability preflight and the push remote (CAT-60)
+
+GitHub access is asymmetric: cloning, fetching, and reading a repository can succeed for an identity
+that cannot publish a branch there. Catalyst resolves the write target separately and checks its
+push capability inside `dispatchAndVerify`, immediately before launching a phase worker.
+
+Historically three surfaces assumed `origin`: the rebase/diff base, the push target, and remote-branch
+discovery during resume. CAT-60 makes the push target and resume discovery use the resolved push
+remote. The rebase/diff base deliberately remains `origin/<base>`; publication routing cannot
+change the canonical integration base.
+
+The probe returns `allowed`, `denied`, or `unknown` under an `off` / `shadow` / `enforce` rollout
+flag (`CATALYST_PUBLISH_PREFLIGHT` over Layer-2 configuration, default `shadow`). Shadow emits
+`publish.preflight.would-block` and continues. Enforce blocks only a definitive denial and emits
+`publish.preflight.blocked`; unknown always proceeds. A bounded identity-aware cache conserves
+GitHub quota. The worker-only doctor check reports PASS when allowed, WARN for shadow denial, FAIL
+for enforce denial, and INFO when inconclusive.
+
+### The Codex account selector seam (CTL-2072)
+
+`codexConfig().codexHome` (`execution-core/config.mjs`) resolves
+`CATALYST_CODEX_HOME` → Layer-1 `catalyst.orchestration.codex.codexHome` →
+`${catalystDir()}/codex-home`, and `buildCodexEnv` sets the child's `CODEX_HOME` from it on
+every dispatch. With neither pin set that third rung is a **constant path that is a symlink**,
+re-resolved per dispatch — so repointing the symlink changes which account the next `codex exec`
+child runs under **with no daemon restart and no rearm hook**. That is the whole switching
+mechanism (`catalyst-stack codex-account switch`), and it is strictly simpler than the Claude
+side, which must call `cmd_restart` because the SDK executor captures its token at boot.
+`execution-core` needs **zero** changes for this: the resolver's single-string contract is
+preserved, and multi-account state lives entirely in the filesystem layout beside it.
+
+Two consequences are load-bearing:
+
+- **The symlink is the LAST rung, so a pin silently wins.** A host with `CATALYST_CODEX_HOME`
+  exported or Layer-1 `codexHome` set never reaches the selector, and a switch would repoint a
+  link nothing reads while reporting success. `_cx_assert_selector_unpinned` refuses instead,
+  naming the pin. A check that cannot fail is not a check.
+- **Credentials never travel.** Codex subscription `auth.json` is rotation-bound — a copy goes
+  stale the moment the original refreshes — so each host runs `codex login` per account into its
+  own `CODEX_HOME` and the cluster SOPS bundle carries only the selector's handle NAME. That
+  entry deliberately has **no `SECRET_REGISTRY` row**: every delivery type that would fit is in
+  `_BOOT_CAPTURED_DELIVERIES`, so a row would make every account switch emit a fleet-wide
+  restart-required signal (`cluster-sync.mjs:1182`) for a change that provably needs no restart.
+  `syncSecretFiles` materializes the entry regardless of registry membership, so nothing is lost.
+
+The account plane itself (`codex app-server`'s `account/read` + `account/rateLimits/read`) is
+read by `codex-accounts-usage.mjs` at **zero token cost**, unlike the Claude twin which must
+spend one inference call per account. Its `initialize` reply echoes the resolved `codexHome`
+back, which is a free positive control the Claude side never had: a read whose echo does not
+match the requested home is an `error`, never an `ok` with plausible numbers. ⚠️ The echo is
+**realpath-resolved**, so that comparison must resolve both sides — the selector being a symlink
+is exactly the case a raw string compare would break on.
+
+⛔ Quota windows are named from `windowDurationMins`, **never** from field position. Measured on
+mini-2 (codex-cli 0.147.0, 2026-08-22): the top-level `codex` bucket's `primary` is a WEEKLY
+window with `secondary: null`, while a real 5-hour window exists only under a different bucket
+(`codex_bengalfox`). The naive positional `{primary→fiveHour, secondary→sevenDay}` port of the
+Claude shape would mislabel the weekly window as 5h and report the 5h window as absent — both in
+the direction that reads as "quota to spare".
+
 ### Dispatch-time rebase (front-load conflict surfacing, CTL-667 + CTL-707 + CAT-31)
 
 On a **fresh** dispatch of a **build** phase (`research`,`plan`,`implement`,`verify`,`review`),
@@ -575,7 +673,7 @@ destroy-and-recreate from selecting a bystander worktree.
   stall rc=3; real source → CTL-708 stub (always unavailable) → stall rc=2.
 - **L3 — Phase-aware fallback** (`phase-agent-dispatch`): terminal source conflict (rc=2) on
   `research`/`plan` → destroy+recreate worktree fresh; same on `implement`/`verify`/`review` → park
-  `needs-human`; thoughts conflict (rc=3) → park on all phases.
+  an escalation; thoughts conflict (rc=3) → park on all phases.
 - **L4 — Telemetry** (`lib/rebase-telemetry.sh`):
 
 | Event                                                | Severity | Emitter                  |
@@ -631,88 +729,54 @@ active work:
 - **Deferred**: reading `.draftPr` draft-state as a secondary advancement signal (advancement
   currently driven by signal `status === "done"` only).
 
-### Recovery-pass `pr_not_merged` remediation (CTL-1496)
-
-When `phase-teardown` emits `failed(reason: "pr_not_merged")`, the scheduler's **Pass 0r** sweeps it
-as a recovery item. Previously the classifier blindly escalated it to a human. With CTL-1496
-(`CATALYST_RECOVERY_PASS=shadow|enforce`), the classifier instead probes live GitHub state
-(`pr-block-probe.mjs` → one `gh pr view` + GraphQL `reviewThreads` + `gh pr view --json reviews`):
-
-- **Failing required checks or unresolved bot (Codex) threads, no human `CHANGES_REQUESTED`** →
-  `{ decision: "fix", fix_class: "bounded-llm" }` with a `"pr-not-merged"` brief embedding the
-  concrete failing-check names and thread ids. The recovery-pass worker fixes the CI, addresses the
-  review findings, resolves the threads, and posts `@codex review` via
-  `gh-pr-comment.sh --idempotent` to re-trigger the automated reviewer, then merges when `CLEAN`.
-- **Human `CHANGES_REQUESTED`** → `escalate` with the specific reviewer ask (PR and thread linked),
-  never the opaque `"Failure reason: pr_not_merged"` string.
-- **Probe throws** → `defer` (transient GitHub outage — retry next tick).
-- **No open PR found** → `escalate`.
-
-The behavior is gated by `CATALYST_RECOVERY_PASS` (off by default); shadow mode logs a
-`recovery.would-fix` event without dispatching; enforce dispatches the recovery-pass worker.
-
 ### Orphan-stale merged-PR reconciliation (CAT-47)
 
-Pass 0r and Pass 0u share the same production act-seam dependencies. `runTick` constructs the
-PR-state resolver, background-job liveness probe, stall clearer, and status writer once; Pass 0u
-uses them to build its act registry, while Pass 0r receives both that registry and the raw bundle
-for capability-checked fallback construction. An injected partial registry therefore falls back to
-real dependencies instead of either using inert defaults or failing as unavailable.
+`runTick` constructs the `unstuckSeamDeps` bundle — PR-state resolver, background-job liveness
+probe, stall clearer, and status writer — once via `buildRecoverySeamDeps`, and Pass 0u uses it to
+build its act registry. (CTL-2141 deleted Pass 0r, the bundle's other historical consumer; the
+bundle-then-registry shape and the `seamFallbackSuppressed` posture below are unchanged for Pass 0u
+alone.)
+
+An embedder- or test-supplied `unstuckActByCategory` is an intentional posture: a partial registry
+or `{}` sets `seamFallbackSuppressed`, so the pass reports suppression instead of silently rebuilding
+a live registry behind the override. With no injected registry, capability fallback remains active.
 
 The recovery candidate contract is `{ ticket, phase, signal }`. `phase` names the exact
 `.unstuck-orphan-merge-<phase>.applied` idempotency marker, and `signal.bg_job_id` feeds the
 liveness gate. Marker construction fails closed when phase is absent, preventing malformed
-`undefined` or `null` marker names. PR-state readers are synchronous; thenables are surfaced as
-`pr-state-async-unsupported` rather than silently interpreted as missing evidence.
+`undefined` or `null` marker names. PR-state readers are synchronous. The act seam surfaces a
+thenable as `pr-state-async-unsupported` with an error-code identity; the census warns and returns
+`null`, which classifies as `pr-state-unknown`. A resolver error merely mentioning the unsupported
+code still fails closed to `pr-state-unknown`.
 
-Repeated identical fix failures are stored at
-`<orchDir>/.recovery-fix-failures/<ticket>-<fix_class>.json`, outside `workers/` because completed
-tickets may no longer have worker directories. This separate family is not erased by
-`recoveryForgetIntent`. After `RECOVERY_FIX_BACKOFF_THRESHOLD` identical failures (default 3),
-retries use exponential windows controlled by `RECOVERY_FIX_BACKOFF_BASE_MS` (default 30 minutes)
-and `RECOVERY_FIX_BACKOFF_MAX_MS` (default 24 hours). Audit-comment hashes are committed only after
-successful delivery, so an outage leaves the comment eligible for retry while delivered duplicate
-content is suppressed.
+Synthetic completion is restricted by `ORPHAN_MERGE_PHASE_ALLOWLIST` to `monitor-merge` and
+`monitor-deploy`. The classifier applies that as its first gate, refusing an early phase with
+`phase-not-allowlisted` even when its PR is merged.
 
-### Delegate-first escalation + explanation chokepoint (CTL-1609)
+### Explanation-required escalation chokepoint (CTL-1609, delegate-first routing removed CTL-2141)
 
-Two gaps closed at the point where the scheduler labels a ticket `needs-human`:
+CTL-1609 originally closed two gaps at the point where the scheduler escalates a ticket: a
+delegate-first routing seam (`routeStuckTicketToDelegate` / `execution-core/delegate-first.mjs`,
+gated by `CATALYST_DELEGATE_FIRST`) that could route a stuck ticket to the delegate runner instead
+of labelling it, and an explanation-required chokepoint on the direct label path. CTL-2141 deleted
+the delegate-first seam along with the rest of the recovery-pass/board-health judgment layer it fed
+— off-mode was always byte-identical to the direct label call in production, so removing it changed
+no live behavior. All six escalation producer sites (`scheduler.mjs` / `monitor.mjs` /
+`stale-pr-rescue-timer.mjs`) now call `labelNeedsHumanUnlessBeliefOwner` directly, as they did before
+CTL-1609 and as they always resolved to in production regardless.
 
-**Gap 1 — Delegate-first routing seam.** Every `needs-human` producer (six sites in `scheduler.mjs`
-/ `monitor.mjs` / `stale-pr-rescue-timer.mjs`, not including `attempts-exhausted` which is
-post-delegate by definition) now routes through `routeStuckTicketToDelegate`
-(`execution-core/delegate-first.mjs`) instead of calling `labelNeedsHumanUnlessBeliefOwner`
-directly. Ordered fallback: **(1) auto-fix [deferred]** → **(2) delegate runner** → **(3) human**.
-
-- **`CATALYST_DELEGATE_FIRST=off`** (default): byte-identical to the direct call — no behavior
-  change until the flag is lit.
-- **`CATALYST_DELEGATE_FIRST=shadow`**: logs a `delegate.would-route` event per eligible ticket but
-  still labels `needs-human`. Safe dry-run.
-- **`CATALYST_DELEGATE_FIRST=enforce`**: calls `enqueueDelegateIntent`; if the queue accepts
-  (`enqueued`, `already-pending`, or `worker-live`) emits `delegate.routed` and returns without
-  labelling. Queue-full / write-failed / no-orch-dir → emit `delegate.route-fallback` and fall back
-  to labelling. Side effects (`recordTransition`, `cache.invalidate`) are gated on
-  `result.labelled === true` so routed tickets never record a spurious `needs-human` transition.
-
-**Gap 2 — Explanation-required chokepoint.** `labelNeedsHumanUnlessBeliefOwner`
-(`execution-core/label-guard.mjs`) now accepts an optional `explanation` object. After a confirmed
-label application:
+**The explanation-required chokepoint stays.** `labelNeedsHumanUnlessBeliefOwner`
+(`execution-core/label-guard.mjs`) accepts an optional `explanation` object. After a confirmed label
+application:
 
 - If `explanation` is absent → emits `escalation.explanation-absent` warn and coerces a degraded
   fallback via `coerceExplanation` (type `authorization`, `degraded: true`).
 - Writes the coerced or caller-supplied explanation to `workers/<TICKET>/phase-recovery-pass.json`
-  via `writeExplanationSignal` (atomic tmp+rename). A **no-overwrite guard** protects the rich
-  curated signal written by `escalateExhaustedIntents` before it calls the label function —
-  `prior.explanation && prior.explanation.degraded !== true` prevents the thin hint from clobbering
-  it.
+  via `writeExplanationSignal` (atomic tmp+rename).
 - All six wired sites supply a `problem` + `call_to_action` structured explanation so the operator
   inbox can render a real "What's needed now" card instead of a bare label.
-- The `attempts-exhausted` site passes a thin hint; `escalateExhaustedIntents` writes the full
-  curated explanation first via a direct `writeExplanationSignal` call, and the no-overwrite guard
-  ensures the chokepoint's coercion cannot overwrite it.
 
-New event names (registered in `broker/namespace-parity.test.mjs`): `escalation.explanation-absent`,
-`delegate.would-route`, `delegate.routed`, `delegate.route-fallback`.
+New event name (registered in `broker/namespace-parity.test.mjs`): `escalation.explanation-absent`.
 
 ### Runaway-loop guards (CTL-671)
 
@@ -737,7 +801,7 @@ reclaim storms). Three additive defenses:
   `orchDir/.runaway-alerts/`). Surfaces in HUD; does not quarantine.
 
 Enforcement reuses the sweep + breaker: a `stalled` signal makes `isTicketInFlight` drop the ticket;
-the terminal sweep applies `needs-human` via `labelOnce`.
+the terminal sweep publishes the escalation via `labelOnce`.
 
 A worker directory must not persist with zero phase signals (CAT-24). The shared stall-clear seam
 removes the directory when it deletes the last real signal — but only once `clearStalledLabel`
@@ -1084,27 +1148,36 @@ Every worker ticket has **two orthogonal axes** — never blurred:
 - **Axis 1 — Pipeline stage** (WHERE the ticket is in the pipeline): written through the single
   `applyPhaseStatus` chokepoint → Linear workflow Status, audited by `linear.state.write.<TICKET>`.
 - **Axis 2 — Worker disposition** (HOW the worker is doing): a single-valued workspace-scoped
-  `worker-status` Linear label group with four mutually exclusive values:
+  `worker-status` Linear label group with **three** mutually exclusive values:
 
   | Value         | Detection seam                                      | Cleared by                  |
   | ------------- | --------------------------------------------------- | --------------------------- |
   | `queued`      | converger (admission gate, tick-converged)          | pickup / Done               |
   | `blocked`     | converger (dependency not terminal, tick-converged) | dep becomes terminal / Done |
   | `needs-input` | daemon `handleCommentWake` (worker paused, CTL-768) | human reply                 |
-  | `needs-human` | `labelOnce` (sticky — NOT tick-converged)           | two paths — see below       |
 
-**Precedence** (only one label at a time): `needs-human > needs-input > blocked > queued > none`.
-`needs-human` is **sticky** — it is never included in `TICK_CONVERGED_DISPOSITIONS` and only cleared
-at explicit resolution, not on steady-state ticks.
+⛔ **CTL-2161 — the group lost its fourth member, `needs-human`.** It is deleted (CTL-2155 epic):
+across 86 items it flagged, 3 genuinely needed a person and 41 were the model provider being
+overloaded, escalated one ticket at a time. Its replacements are not worker-disposition labels at
+all — SYSTEM trouble raises ONE fleet-scoped, auto-clearing alert (CTL-2156) with zero per-ticket
+artifacts, and a genuine human question becomes ONE ask ticket carrying a `blocks` relation to the
+work it holds (CTL-2157). The three survivors are genuinely *worker* states, which is what this axis
+is for; `needs-human` never was.
 
-**Resolution-gated clearing — TWO removal paths for `needs-human` (Codex #2970 round 5).**
-Tick-converged labels (`queued`/`blocked`/`needs-input`) are re-derived on every tick and
-applied/removed on diff. `needs-human` is different: it is removed only by an explicit,
-confirmed-removal signal, and there are two of those, not one:
+**Precedence** (only one label at a time): `needs-input > blocked > queued > none`. All three are
+tick-converged (re-derived on every tick, applied/removed on diff). The sticky, `labelOnce`-applied
+member is gone with `needs-human` — but the `labelOnce` machinery and its on-disk once-marker are
+NOT: five retry loops read the publish result as their STOP, and `boot-resume` reads the marker to
+suppress auto-resume of a chronically failing ticket (CTL-2159).
+
+**Resolution-gated clearing — the TWO removal paths (Codex #2970 round 5).** Built for
+`needs-human`, they are deliberately retained after it: they are what clears the label off the ~69
+tickets that still wear it during the CTL-2160 migration, and deleting a clearer before the backlog
+is swept strands every one of them. The two confirmed-removal signals:
 
 1. **`clearStalledLabel`'s `onRemoved` callback**, fired only on a confirmed Linear label removal at
    scheduler-side resolution points (terminal-done-clear, terminal-sweep-clear, no-stall-clear).
-2. **The daemon's `handleCommentWake` needs-human clear** (CTL-1612/#2970) — a _write-gated_,
+2. **The daemon's `handleCommentWake` escalation clear** (CTL-1612/#2970) — a _write-gated_,
    _emission-carrying_ removal on a managed ticket's confirmed human reply. It calls `removeLabel`
    directly (not `clearStalledLabel`), only treats the removal as genuine when the call performed a
    real write (not a no-op re-check), emits the `worker.transition` clear itself
@@ -1139,10 +1212,10 @@ reasons, not one shared rationale:
   comment explains the bypass: "scheduler.mjs owns the park/apply emission; the clear is emitted
   here (the daemon removes the durable label out-of-band and redispatches — the scheduler never
   observes this edge)."
-- The **`needs-human` clear** runs once per comment-wake call, gated on positive human provenance
+- The **escalation clear** runs once per comment-wake call, gated on positive human provenance
   and a managed ticket — before any per-signal / worker-dir lookup, and with **no redispatch** in
   that block at all. It bypasses `recordTransition` for the same underlying reason (the scheduler's
-  own STICKY needs-human handling explicitly defers clearing to an external confirmed-removal
+  own STICKY escalation handling explicitly defers clearing to an external confirmed-removal
   signal, never clearing it itself on a steady-state admission pass), but the "redispatches" half of
   the quoted rationale above does not apply to this site.
 
@@ -1152,7 +1225,7 @@ Both are deliberate, self-documented second-producer sites, not a gap in the cho
 hung-worker escalation (`killHungWorker` in `watchdog-action.mjs`, invoked from `scheduler.mjs`'s
 progress-watchdog pass) does emit `phase.terminal.reap-requested` (via `emitReapIntent`, when
 `bgJobId` exists) for the kill/reap side of the sequence — that part of the path is observable. But
-it applies the `needs-human` label via `labelNeedsHumanUnlessBeliefOwner` (`label-guard.mjs`) and
+it publishes the escalation via the shared guard (`label-guard.mjs`) and
 never calls `recordTransition`, `appendWorkerTransitionEvent`, or any other `worker.transition`
 emitter anywhere in that path — a real Axis-2 transition with no `worker.transition` record. Unlike
 the daemon's comment-wake sites above, this is a genuine coverage gap in the transition stream
@@ -1219,12 +1292,11 @@ resolve fleet events locally with no polling loop. The fan-in is transport-abstr
 ### GitHub core REST quota snapshot (CAT-40)
 
 The execution-core daemon samples `gh api rate_limit` on a dedicated timer and atomically writes the
-host's normalized core REST quota to `<orchDir>/github-quota.json`. Board-health reads that local
-snapshot rather than spending a GitHub call on its scan path, publishes the remaining count,
-percentage, reset time, sampling host, and snapshot age, and emits the scalar values on
-`recovery.board-scan`. Sampling and publication are on by default, but actuation is not:
-`CATALYST_BH_GH_QUOTA` defaults to `shadow`, so `rateLimitHeadroom` stays unobservable to Gate 3
-until an operator explicitly selects `enforce`.
+host's normalized core REST quota to `<orchDir>/github-quota.json` (`orchestration.githubQuotaSweep`,
+see the configuration reference). CTL-2141 deleted this snapshot's only consumer (board-health's
+`rateLimitHeadroom` gate and its `recovery.board-scan` emission); the sampler still runs and
+publishes the snapshot, so the local read-avoidance benefit is retained, but nothing currently acts
+on the published quota.
 
 **Worktree salvage-before-destroy (CTL-1639).** Every destructive worktree removal — the
 dispatcher's L3 destroy+recreate, the orphan-sweep, phase-teardown, and the JS reaper's PR-merged
@@ -1373,7 +1445,7 @@ a revive, a resume, and a new-work pull).
   pass after deploy reads `absent` / `no-marker`. Do not alarm on `absent` until a full ticket has
   cycled.
 - **Scope**: only the terminal-**success** writers are stamped (plus the SDK backstop). The ~20
-  `stalled`/`failed`/`aborted`/`needs-human` writers are deliberately unstamped — those statuses are
+  `stalled`/`failed`/`aborted` writers are deliberately unstamped — those statuses are
   never advance-eligible (`deriveAdvancement` gates on `done`, or `skipped` for `monitor-deploy`
   only), so they can never be the `from` signal of an applied advance.
 
@@ -1417,7 +1489,7 @@ its own job needs nobody, and conflating them imports CTL-1850's false-page defe
   declared). `failed` is in `signal-reader.mjs`'s `TERMINAL` set, so reclaim short-circuits to
   `noop` and the terminal sweep routes through the CTL-1609 delegate-first path — identical to a
   plain abandonment, so no yield-expire-redispatch loop is constructible. Deliberately not
-  `stalled`, which routes to `needs-human` and would page an operator for every expired yield.
+  `stalled`, which routes to the escalation guard and would page an operator for every expired yield.
 - **Vocabulary collision**: CTL-615/CTL-702's `phase-*-yield-*.json` tombstones are an unrelated
   mechanism (a duplicate worker bowing out to the canonical one). A `grep` for "yield" returns both.
 

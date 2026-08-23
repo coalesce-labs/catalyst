@@ -255,6 +255,23 @@ describe("buildSourceConflictActSeam (CTL-1219)", () => {
     expect(pushCall).toContain("--force-with-lease");
   });
 
+  test("force-push seam targets the resolved push remote", () => {
+    const gitCalls = [];
+    const seam = buildSourceConflictActSeam(
+      makeStubDeps({
+        resolvePushRemote: () => "fork",
+        runGit: (args) => {
+          gitCalls.push(args);
+          return cleanBranchGit()(args);
+        },
+      })
+    );
+    seam(sourceConflictCandidate(), { category: "source-conflict", action: "force-push-if-clean" });
+    const pushCall = gitCalls.find((a) => a.includes("push"));
+    expect(pushCall).toContain("fork");
+    expect(pushCall).not.toContain("origin");
+  });
+
   test("throws (no push) when the worktree is dirty with real work", () => {
     const gitCalls = [];
     const seam = buildSourceConflictActSeam(
@@ -690,5 +707,133 @@ describe("buildUnstuckActSeams — registry factory (CTL-1219)", () => {
   test("the registry object is frozen (no accidental mutation of wired seams)", () => {
     const seams = buildUnstuckActSeams(makeStubDeps());
     expect(Object.isFrozen(seams)).toBe(true);
+  });
+});
+
+describe("CAT-124: pr-state async contract + linearTerminal shape", () => {
+  test("a non-allowlisted phase fails closed before emitting or writing a marker", () => {
+    const emits = [];
+    const markers = [];
+    const seam = buildOrphanStaleActSeam(
+      makeStubDeps({
+        emitPhaseComplete: (value) => {
+          emits.push(value);
+          return true;
+        },
+        writeMarker: (value) => {
+          markers.push(value);
+        },
+        nowMs: () => new Date("2025-01-01T00:00:00Z").getTime(),
+      })
+    );
+
+    expect(() =>
+      seam(
+        orphanStaleCandidate({
+          phase: "implement",
+          signal: {
+            phase: "implement",
+            status: "failed",
+            failureReason: "orphan-sweep-stale",
+            bg_job_id: "dead",
+            updatedAt: "2020-01-01T00:00:00Z",
+          },
+        }),
+        {}
+      )
+    ).toThrow(/phase-not-allowlisted/);
+    expect(emits).toHaveLength(0);
+    expect(markers).toHaveLength(0);
+  });
+
+  test("a resolver error mentioning the async marker fails closed", () => {
+    const emits = [];
+    const seam = buildOrphanStaleActSeam(
+      makeStubDeps({
+        resolvePrState: () => {
+          throw new Error("gh: pr-state-async-unsupported adapter crashed");
+        },
+        emitPhaseComplete: (value) => {
+          emits.push(value);
+          return true;
+        },
+      })
+    );
+
+    expect(() => seam(orphanStaleCandidate(), {})).toThrow(
+      /orphan-stale: pr-state-unknown/
+    );
+    expect(emits).toHaveLength(0);
+  });
+
+  test("a thenable resolver fails loud with an identity-tagged sentinel", () => {
+    const emits = [];
+    const seam = buildOrphanStaleActSeam(
+      makeStubDeps({
+        resolvePrState: () => Promise.resolve("MERGED"),
+        emitPhaseComplete: (value) => {
+          emits.push(value);
+          return true;
+        },
+      })
+    );
+
+    let caught;
+    try {
+      seam(orphanStaleCandidate(), {});
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught?.code).toBe("pr-state-async-unsupported");
+    expect(caught?.message).toMatch(/orphan-stale: pr-state-async-unsupported \(CTL-3\)/);
+    expect(emits).toHaveLength(0);
+  });
+
+  test("orphan-stale honors evidence.linearTerminal when the top-level key is absent", () => {
+    const emits = [];
+    const { linearTerminal: _drop, ...candidate } = orphanStaleCandidate({
+      evidence: {
+        reason: "orphan-sweep-stale",
+        ticket: "CTL-3",
+        phase: "monitor-merge",
+        linearTerminal: true,
+      },
+    });
+    const seam = buildOrphanStaleActSeam(
+      makeStubDeps({
+        nowMs: () => new Date("2025-01-01T00:00:00Z").getTime(),
+        emitPhaseComplete: (value) => {
+          emits.push(value);
+          return true;
+        },
+      })
+    );
+
+    expect(() => seam(candidate, {})).toThrow(/linear-terminal/);
+    expect(emits).toHaveLength(0);
+  });
+
+  test("the Pass 0r candidate shape deliberately classifies with linearTerminal false", () => {
+    const emits = [];
+    const candidate = {
+      ticket: "CAT-901",
+      phase: "monitor-merge",
+      signal: {
+        bg_job_id: "dead",
+        updatedAt: "2020-01-01T00:00:00Z",
+      },
+    };
+    const seam = buildOrphanStaleActSeam(
+      makeStubDeps({
+        nowMs: () => new Date("2025-01-01T00:00:00Z").getTime(),
+        emitPhaseComplete: (value) => {
+          emits.push(value);
+          return true;
+        },
+      })
+    );
+
+    expect(() => seam(candidate, {})).not.toThrow();
+    expect(emits).toEqual([{ ticket: "CAT-901", phase: "monitor-merge" }]);
   });
 });

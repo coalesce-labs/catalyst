@@ -14,7 +14,6 @@
 import { describe, it, expect } from "bun:test";
 import { deriveClusterSignal } from "../lib/cluster-signal.mjs";
 import { assembleClusterView } from "../lib/cluster-view.mjs";
-import type { ClusterView } from "../lib/cluster-view.mjs";
 import type { BoardPayload, BoardTicket } from "../lib/board-data.mjs";
 
 function ticket(id: string, overrides: Partial<BoardTicket> = {}): BoardTicket {
@@ -49,6 +48,7 @@ function ticket(id: string, overrides: Partial<BoardTicket> = {}): BoardTicket {
     currentPhaseSince: null,
     attention: null,
     attentionSince: null,
+    correlationRole: null, // CAT-170
     host: null,
     generation: null,
     ...overrides,
@@ -142,7 +142,7 @@ describe("deriveClusterSignal — Scenario: Multiple nodes show per-node health"
 
 describe("deriveClusterSignal — defensive", () => {
   it("degrades a malformed/empty view to a coherent empty single-host signal", () => {
-    const signal = deriveClusterSignal(null as unknown as ClusterView);
+    const signal = deriveClusterSignal(null);
     expect(signal.singleHost).toBe(true);
     expect(signal.nodes).toEqual([]);
     expect(typeof signal.generatedAt).toBe("string");
@@ -169,7 +169,7 @@ describe("deriveClusterSignal selfHost (CTL-1551)", () => {
       generatedAt: "2026-07-30T17:00:00Z",
       singleHost: true,
       nodes: [],
-    } as never);
+    });
     expect("selfHost" in sig).toBe(false);
   });
 });

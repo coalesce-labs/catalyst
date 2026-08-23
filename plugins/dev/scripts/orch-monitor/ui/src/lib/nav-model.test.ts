@@ -408,7 +408,7 @@ describe("nav-model — inboxAttentionCount", () => {
   it("sums attention + blocked + waiting across the fleet for the overall row", () => {
     const p = payload({
       tickets: [
-        t({ id: "ADV-1", repo: "adva", team: "ADV", attention: "needs-human" }),
+        t({ id: "ADV-1", repo: "adva", team: "ADV", attention: "ask" }),
         t({ id: "CTL-1", repo: "catalyst", held: "blocked" }),
         t({ id: "CTL-2", repo: "catalyst", held: "waiting" }),
         t({ id: "CTL-3", repo: "catalyst", activeState: "active", working: true, status: "running" }),

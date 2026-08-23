@@ -153,6 +153,78 @@ export function _bonjourResolveCount() {
 }
 
 /**
+ * This machine's Tailscale MagicDNS name (`<host>.<tailnet>.ts.net`), or null.
+ *
+ * A fleet reached over Tailscale is routinely browsed by this name rather than
+ * by `os.hostname()` or the Bonjour `.local` name — neither of which matches
+ * it, so without deriving it every host 403s every reply identically (observed
+ * live across a multi-host fleet, each browsed as `<name>.<tailnet>.ts.net`).
+ * Reading it is best-effort, mirroring `bonjourName()`: any failure (Tailscale
+ * not installed, not running, CLI not found) falls back to null rather than
+ * throwing, so a non-Tailscale deployment is unaffected.
+ */
+let tailscaleCache = null;
+let tailscaleResolved = false;
+let tailscaleResolvedAt = 0;
+let tailscaleResolveCount = 0; // test seam: how many times we actually resolved
+// Same DoS-guard + staleness rationale as BONJOUR_TTL_MS.
+const TAILSCALE_TTL_MS = 300_000;
+// The CLI's install location varies by platform/install method; `tailscale` on
+// PATH covers Linux/Homebrew, the app-bundle path covers a GUI-only macOS
+// install (confirmed: a GUI-only macOS install has no `tailscale` on PATH,
+// only this app-bundle binary).
+const TAILSCALE_CLI_CANDIDATES = [
+  "tailscale",
+  "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+  "/opt/homebrew/bin/tailscale",
+  "/usr/local/bin/tailscale",
+  "/usr/bin/tailscale",
+];
+
+export function tailscaleMagicDnsName() {
+  // MEMOIZED FOR THE PROCESS LIFETIME — same DoS guard as bonjourName(): the
+  // allowlist rebuilds on every rejected Origin, and this spawns a subprocess
+  // (1s timeout) that blocks Bun's event loop. The MagicDNS name is stable for
+  // a process lifetime (a tailnet rename needs a daemon restart, like any
+  // other identity), so resolving it once is correct as well as safe.
+  if (tailscaleResolved && performance.now() - tailscaleResolvedAt < TAILSCALE_TTL_MS) {
+    return tailscaleCache;
+  }
+  tailscaleResolved = true;
+  tailscaleResolvedAt = performance.now();
+  tailscaleResolveCount++;
+  for (const bin of TAILSCALE_CLI_CANDIDATES) {
+    try {
+      const out = execFileSync(bin, ["status", "--json"], {
+        encoding: "utf8",
+        timeout: 1000,
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      const dnsName = JSON.parse(out)?.Self?.DNSName;
+      if (typeof dnsName !== "string" || dnsName === "") return (tailscaleCache = null);
+      // MagicDNS names are DNS-absolute (trailing dot); Origin never carries one.
+      return (tailscaleCache = dnsName.replace(/\.$/, "").toLowerCase());
+    } catch {
+      continue; // this candidate isn't the right binary/isn't installed — try the next
+    }
+  }
+  return (tailscaleCache = null);
+}
+
+/** Test seam: forget the memoized MagicDNS name. */
+export function _resetTailscaleCache() {
+  tailscaleCache = null;
+  tailscaleResolved = false;
+  tailscaleResolvedAt = 0;
+  tailscaleResolveCount = 0;
+}
+
+/** Test seam: how many times the underlying lookup actually ran. */
+export function _tailscaleResolveCount() {
+  return tailscaleResolveCount;
+}
+
+/**
  * This machine's own non-loopback IP addresses.
  *
  * Included because operators routinely reach the monitor by IP rather than by
@@ -201,6 +273,7 @@ export function selfAddresses() {
  *   addresses?: string[],
  *   devOrigins?: string[] | string | null,
  *   bindHost?: string | null,
+ *   tailscaleDnsName?: string | null,
  * }} opts
  * @returns {Set<string>}
  */
@@ -212,6 +285,7 @@ export function buildTrustedOrigins(opts = {}) {
     addresses,
     devOrigins = null,
     bindHost = null,
+    tailscaleDnsName,
   } = opts;
   const out = new Set();
   const boundPort = Number.isFinite(port) ? Number(port) : null;
@@ -327,6 +401,21 @@ export function buildTrustedOrigins(opts = {}) {
   // The REAL Bonjour name, which need not share os.hostname()'s first label.
   const bonjour = hostnames === undefined && isWildcardBind ? bonjourName() : null;
   if (bonjour !== null) addOwn(bonjour.endsWith(".local") ? bonjour : `${bonjour}.local`);
+
+  // This machine's Tailscale MagicDNS name — the name operators actually type
+  // when the fleet is reached over Tailscale, and neither os.hostname() nor the
+  // Bonjour name. Same wildcard-bind gate as Bonjour and `hostnames` above: it
+  // is an own-name, not an address, so trusting it makes sense only when this
+  // port is owned on every interface — applied unconditionally, whether the
+  // value comes from live resolution or the `tailscaleDnsName` test seam.
+  // `=== undefined` (not merely falsy) is the seam convention, matching
+  // `hostnames` — an explicit `null` opts out even on a wildcard bind.
+  const tailscale = isWildcardBind
+    ? tailscaleDnsName === undefined
+      ? tailscaleMagicDnsName()
+      : tailscaleDnsName
+    : null;
+  if (tailscale !== null && tailscale !== undefined) addOwn(tailscale);
 
   // This machine's own IPs (LAN, Tailscale 100.x), filtered to the bound family
   // for the same reason as the loopback literals: with an IPv4-only bind we do

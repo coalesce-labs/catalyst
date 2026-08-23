@@ -1,13 +1,13 @@
-// escalation-event.mjs — CTL-2056. Needs-human escalation event builder +
+// escalation-event.mjs — CTL-2056. Ticket-escalation event builder +
 // best-effort appender. Mirrors ratelimit-event.mjs's shape (OTel envelope,
 // appendFileSync, never throws) so the catalyst-otel count connector picks up
 // event.entity="ticket" / event.action="escalated" and the unchanged
 // catalyst_recovery_escalation_burst alarm selector matches real escalations.
 //
 // One event name:
-//   ticket.escalated — INFO, emitted at the confirmed-apply chokepoint in
-//   label-guard.mjs's labelNeedsHumanUnlessBeliefOwner (one per genuine
-//   escalation — the marker guard in labelOnce ensures cardinality = 1).
+//   ticket.escalated — INFO, emitted at the confirmed-publish chokepoint in
+//   label-guard.mjs's escalation guard (one per genuine escalation — the marker
+//   guard in labelOnce ensures cardinality = 1).
 
 import { mkdirSync, appendFileSync } from "node:fs";
 import { dirname } from "node:path";
@@ -15,11 +15,11 @@ import { randomBytes } from "node:crypto";
 import { getEventLogPath, log } from "./config.mjs";
 import { buildCatalystResource } from "./lib/catalyst-resource.mjs";
 
-export const ESCALATION_EVENT_NEEDS_HUMAN = "ticket.escalated";
+export const ESCALATION_EVENT_TICKET_ESCALATED = "ticket.escalated";
 
 /**
- * buildEscalationEnvelope — assemble the canonical OTel envelope for a
- * needs-human escalation event. Pure (modulo random ids + timestamp); no I/O.
+ * buildEscalationEnvelope — assemble the canonical OTel envelope for a ticket
+ * escalation event. Pure (modulo random ids + timestamp); no I/O.
  *
  * The count connector in catalyst-otel/collector-config.yaml keys on
  * event.entity × event.action, so setting entity="ticket" and action="escalated"
@@ -31,23 +31,38 @@ export const ESCALATION_EVENT_NEEDS_HUMAN = "ticket.escalated";
  * @param {object} [meta]
  * @param {string} [meta.site]   short caller id (e.g. "scheduler", "monitor")
  * @param {string} [meta.reason] human-readable reason string or null
+ * @param {string} [meta.stallClass] CTL-2159 stall class — "system"|"ask"|"moot"|"held"
+ * @param {string} [meta.stallRule]  the classifier rule that decided it
  * @param {object} [opts]
  * @param {Function} [opts.now]  injectable timestamp fn (returns ISO string)
  * @returns {object} the envelope object
  */
-export function buildEscalationEnvelope(ticket, { site = null, reason = null } = {}, { now } = {}) {
+export function buildEscalationEnvelope(
+  ticket,
+  { site = null, reason = null, stallClass = null, stallRule = null } = {},
+  { now } = {}
+) {
   const ts = now ? now() : new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
   const severityText = "INFO";
   const severityNumber = 9;
 
   const attributes = {
-    "event.name": ESCALATION_EVENT_NEEDS_HUMAN,
+    "event.name": ESCALATION_EVENT_TICKET_ESCALATED,
     "event.entity": "ticket",
     "event.action": "escalated",
     "event.label": ticket ?? "unknown",
   };
   if (site != null) attributes["escalation.site"] = site;
   if (reason != null) attributes["escalation.reason"] = reason;
+  // ⛔ CTL-2159 LOAD-BEARING: the broker's SYSTEM-trouble detector
+  // (broker/system-trouble.mjs) keys its `system_stall` rule on this attribute.
+  // The chokepoint has always PASSED `stallClass` in `meta`; this builder simply
+  // dropped it on the floor, so the one signal that could fan N system-class
+  // stalls into ONE fleet alert never reached the broker. Without it a SYSTEM
+  // stall produces no per-ticket artifact AND no alert — silent, which is the
+  // regression this epic exists to avoid.
+  if (stallClass != null) attributes["escalation.stall_class"] = stallClass;
+  if (stallRule != null) attributes["escalation.stall_rule"] = stallRule;
 
   return {
     ts,
@@ -60,7 +75,7 @@ export function buildEscalationEnvelope(ticket, { site = null, reason = null } =
     resource: buildCatalystResource({ serviceName: "catalyst.execution-core" }),
     attributes,
     body: {
-      payload: { ticket, site, reason },
+      payload: { ticket, site, reason, stallClass, stallRule },
     },
   };
 }
