@@ -95,7 +95,7 @@ describe("readEmissionAge", () => {
     try {
       age = readEmissionAge(catalystDir, { serviceName: "broker" }, now);
       expect(readFileSyncSpy.mock.calls.filter((c) => c[0] === path)).toEqual([]);
-      const requested = bytesRequested(readSyncSpy.mock.calls as unknown[][]);
+      const requested = bytesRequested(readSyncSpy.mock.calls);
       expect(requested).toBeGreaterThan(0);
       // CTL-1550: readTailUtf8's boundary-aware first-line drop reads ONE extra
       // byte (the byte immediately before the window) to tell a mid-record cut

@@ -78,13 +78,13 @@ describe("readClusterRoster — the single-host default tolerance", () => {
 
   it("cluster-repo roster wins even when a stray hosts.json is present alongside it (CTL-1274/CTL-1628: hosts.json is never read)", () => {
     const roster = readClusterRoster({
-      env: { CATALYST_CLUSTER_DIR: "/catalyst-cluster" } as NodeJS.ProcessEnv,
+      env: { CATALYST_CLUSTER_DIR: "/catalyst-cluster" },
       read: ((path: string) => {
         if (path.endsWith("hosts.json")) {
           return JSON.stringify(["legacy-should-never-be-read"]);
         }
         return JSON.stringify({ schemaVersion: 1, roster: ["mini", "mac-studio"] });
-      }) as (path: string, encoding: "utf8") => string,
+      }),
     });
     expect(roster).toEqual(["mini", "mac-studio"]);
   });
@@ -255,7 +255,7 @@ describe("Scenario 2: Per-host logs are never merged", () => {
 
 describe("resolvePeerBaseUrl — the cross-node transport seam (single-node-descoped)", () => {
   it("no CATALYST_PEER_MONITORS env → null (the single-node MVP default)", () => {
-    expect(resolvePeerBaseUrl("mac-studio", { env: {} as NodeJS.ProcessEnv })).toBeNull();
+    expect(resolvePeerBaseUrl("mac-studio", { env: {} })).toBeNull();
   });
 
   it("a configured map resolves the owning host's monitor base URL", () => {

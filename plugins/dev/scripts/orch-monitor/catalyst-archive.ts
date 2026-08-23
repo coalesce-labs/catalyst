@@ -101,7 +101,7 @@ function loadGlobalConfigArchiveBlock(configDir: string): GlobalArchiveBlock {
     if (parsed && typeof parsed === "object" && "archive" in parsed) {
       const block = (parsed as { archive?: unknown }).archive;
       if (block && typeof block === "object") {
-        return block as GlobalArchiveBlock;
+        return block;
       }
     }
   } catch {

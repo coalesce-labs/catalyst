@@ -1103,7 +1103,7 @@ describe("formatSource / formatRef — CTL-355 Nerd Font enabled", () => {
     const e = {
       ...baseEvent,
       attributes: { ...baseEvent.attributes, "event.name": "linear.issue.state_changed" },
-    } as CanonicalEvent;
+    };
     const out = formatSource(e);
     // CTL-358: nf-fa-ticket (U+F145) — Linear has no native NF logo; ticket
     // is the closest semantic match and lives in stable FA4 BMP range.
@@ -1173,7 +1173,7 @@ describe("formatIcon (CTL-391, bare mode)", () => {
     const linear = {
       ...baseEvent,
       attributes: { ...baseEvent.attributes, "event.name": "linear.issue.updated" },
-    } as CanonicalEvent;
+    };
     expect(formatIcon(linear)).toBe("");
     const wake = {
       ...baseEvent,
@@ -1205,7 +1205,7 @@ describe("formatIcon (CTL-391, Nerd Font enabled)", () => {
     const e = {
       ...baseEvent,
       attributes: { ...baseEvent.attributes, "event.name": "linear.issue.state_changed" },
-    } as CanonicalEvent;
+    };
     const out = formatIcon(e);
     expect(out.length).toBe(1);
     expect(out.codePointAt(0)).toBe(0xf145);

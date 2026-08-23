@@ -54,11 +54,15 @@ function spyFetch(responseData: unknown = { data: { issues: { nodes: [] } } }) {
 // A replica reader stub honouring the primitives' real contracts: a HIT is an
 // entry, a MISS is an ABSENT KEY (never a null value).
 function fakeReplica({
-  estimates = {} as Record<string, number>,
-  details = {} as Record<string, unknown>,
+  estimates = {},
+  details = {},
   // Codex P1 (#3355): the single-ticket DETAIL path gates on writer liveness.
   // Defaults true so every pre-existing case behaves exactly as before.
   isFresh = true,
+}: {
+  estimates?: Record<string, unknown>;
+  details?: Record<string, unknown>;
+  isFresh?: boolean;
 } = {}) {
   let closed = false;
   return {
