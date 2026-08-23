@@ -50,12 +50,34 @@ export function classifyForwardFailure(err: unknown): ForwardFailure {
   if (name === "AbortError") return { category: "aborted" };
   if (codeStr === "ECONNREFUSED" || /ECONNREFUSED/.test(msg))
     return { category: "connection_refused" };
+  // ⛔ BUN — the runtime the daemon actually runs under — does not use the Node codes.
+  // MEASURED on bun 1.3.5 (2026-08-23), fetch to a closed port AND to an unresolvable
+  // host BOTH produce:
+  //     name="Error"  code="ConnectionRefused"  msg="Unable to connect. Is the computer
+  //                                                  able to access the url?"
+  // with no `cause`. So neither the Node code check above nor any message regex below
+  // matched, and the commonest collector failure of all — collector down — landed in
+  // `other` on the production runtime while a Node-shaped synthetic test reached
+  // `connection_refused`. A classifier that only classifies under the runtime it is NOT
+  // deployed on is the "green in the test, blind in production" shape.
+  //
+  // Mapped to `network`, deliberately NOT to `connection_refused`: Bun reports a DNS
+  // failure with the SAME code, so the two are genuinely indistinguishable here and
+  // claiming `connection_refused` would send an operator to check a collector that may
+  // be fine when the real fault is resolution. `network` ("generic connectivity") is
+  // the honest answer, and it is a class the doc already defines.
+  if (codeStr === "ConnectionRefused") return { category: "network" };
   if (
     codeStr === "ENOTFOUND" ||
     codeStr === "EAI_AGAIN" ||
     /ENOTFOUND|EAI_AGAIN|getaddrinfo/.test(msg)
   )
     return { category: "dns" };
+  // Check the CODE as well as the message. Bun surfaces an abruptly closed socket with a
+  // TOP-LEVEL `code` and a message that carries none of these tokens, so a message-only
+  // test dropped it into `other` for the same reason as the ConnectionRefused case above.
+  if (codeStr === "ECONNRESET" || codeStr === "EPIPE" || codeStr === "ConnectionClosed")
+    return { category: "network" };
   if (/fetch failed|ECONNRESET|EPIPE|network/i.test(msg)) return { category: "network" };
   return { category: "other" };
 }

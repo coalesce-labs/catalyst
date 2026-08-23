@@ -67,6 +67,45 @@ describe("classifyForwardFailure", () => {
     expect(classifyForwardFailure(dns).category).toBe("dns");
   });
 
+  // ⛔ BUN SHAPES — the runtime the daemon actually runs under. MEASURED on bun 1.3.5
+  // (2026-08-23): a fetch to a closed port and to an unresolvable host BOTH yield
+  // name="Error", code="ConnectionRefused", msg="Unable to connect. Is the computer able
+  // to access the url?", with no `cause`. Before these branches existed, the commonest
+  // collector failure of all landed in `other` on production while the Node-shaped
+  // synthetic above reached `connection_refused` — green in the test, blind in prod.
+  const bunRefused = () =>
+    Object.assign(new Error("Unable to connect. Is the computer able to access the url?"), {
+      code: "ConnectionRefused",
+    });
+  test("bun connection-refused shape → network, not other", () => {
+    expect(classifyForwardFailure(bunRefused()).category).toBe("network");
+  });
+  test("bun DNS failure carries the SAME code, so it must not claim connection_refused", () => {
+    // Bun cannot distinguish the two; `network` is the honest class. Asserting the
+    // NEGATIVE pins that a future edit does not invent a precision the runtime lacks.
+    expect(classifyForwardFailure(bunRefused()).category).not.toBe("connection_refused");
+    expect(classifyForwardFailure(bunRefused()).category).not.toBe("dns");
+  });
+  test("top-level code ECONNRESET → network even when the message says nothing", () => {
+    const e = Object.assign(new Error("socket hang up-ish, no token here"), {
+      code: "ECONNRESET",
+    });
+    expect(classifyForwardFailure(e).category).toBe("network");
+  });
+  // Positive control: the Node shapes must still classify precisely. If the broad Bun
+  // branches were placed too early they would swallow these, and the two most useful
+  // categories would collapse into `network`.
+  test("the bun branches do not swallow the precise Node classes", () => {
+    const nodeRefused = Object.assign(new TypeError("fetch failed"), {
+      cause: { code: "ECONNREFUSED" },
+    });
+    const nodeDns = Object.assign(new TypeError("fetch failed"), {
+      cause: { code: "ENOTFOUND" },
+    });
+    expect(classifyForwardFailure(nodeRefused).category).toBe("connection_refused");
+    expect(classifyForwardFailure(nodeDns).category).toBe("dns");
+  });
+
   test("unknown → other, no httpStatus", () => {
     expect(classifyForwardFailure(new Error("weird"))).toEqual({ category: "other" });
     expect(classifyForwardFailure("string err")).toEqual({ category: "other" });

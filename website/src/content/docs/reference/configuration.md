@@ -624,6 +624,14 @@ sum by (host_name, catalyst_observability_failure_category) (
 )
 ```
 
+> **Runtime caveat — `connection_refused` vs `dns` under Bun.** The daemon runs under Bun, and
+> Bun reports *both* a refused connection and an unresolvable host as `code: "ConnectionRefused"`
+> with the message `Unable to connect. Is the computer able to access the url?` (measured, bun
+> 1.3.5). The two are genuinely indistinguishable there, so both classify as **`network`** rather
+> than claiming a precision the runtime does not provide. The finer `connection_refused` / `dns`
+> split applies to the Node-shaped `cause.code` errors. If you see a `network` spike, check
+> collector reachability **and** resolution.
+
 Note the two spellings: the attribute is emitted as `event.name` /
 `catalyst.observability.failure_category`, but Loki exposes structured metadata with dots replaced
 by underscores — so the **query** filters on `event_name` and groups by
