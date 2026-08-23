@@ -1158,6 +1158,51 @@ Observable events (LogQL
 - `lease.claim.would-grant.<TICKET>` — shadow hit; the lease **would** have granted (attachment still authoritative)
 - `lease.claim.would-refuse.<TICKET>` — shadow hit; the lease **would** have refused
 
+## Codex executor (`catalyst.orchestration.codex.*`, CTL-2072)
+
+Layer-1 keys read by `codexConfig()` (`execution-core/config.mjs`). Every key has an
+environment override that **outranks** it, and every key falls back to a default:
+
+| Key | Env override | Default | Meaning |
+|-----|--------------|---------|---------|
+| `codexHome` | `CATALYST_CODEX_HOME` | `${catalystDir()}/codex-home` | The `CODEX_HOME` each `codex exec` child runs under. ⚠️ See the pin warning below. |
+| `bin` | `CATALYST_CODEX_BIN` | `codex` | The Codex CLI binary. |
+| `model` | `CATALYST_CODEX_MODEL` | *(unset)* | Model override passed to the executor. |
+| `writableRoots` | — | `[catalystDir()]` | Sandbox roots the Codex child may write to. Non-string and empty entries are dropped; an empty result falls back to the default. |
+| `pluginRoot` | `CATALYST_CODEX_PLUGIN_ROOT` | *(unset)* | Plugin root exposed to the Codex child. |
+
+### ⚠️ Setting `codexHome` PINS the account and disables `codex-account switch`
+
+This is the answer to "why did my switch refuse?".
+
+`codexHome` resolves as `CATALYST_CODEX_HOME` → Layer-1 `catalyst.orchestration.codex.codexHome`
+→ `${catalystDir()}/codex-home`. That third rung is the fleet **selector symlink**, and
+repointing it is how [`catalyst-stack codex-account switch`](/reference/catalyst-stack/) moves
+the fleet between accounts — with no restart, because the path is re-resolved on every dispatch.
+
+If either pin is set, the resolver never reaches the symlink. A switch would repoint a link
+nothing reads and report success for a change that did not happen, so `switch` and `sync`
+**refuse and name the pin instead**:
+
+```
+[catalyst-stack] WARN: CATALYST_CODEX_HOME is set (/some/pinned/home) — it OVERRIDES the
+codex-home selector symlink, so a switch would not take effect. Unset it, then retry.
+```
+
+To switch this host, unset `CATALYST_CODEX_HOME` or remove the Layer-1 `codexHome` key. Leaving
+the pin in place is a supported configuration — the host simply keeps using the pinned account
+and opts out of fleet switching.
+
+### Credentials are node-local, never in config or SOPS
+
+No Codex credential appears in either config layer or in the cluster SOPS bundle. Codex
+subscription `auth.json` files are rotation-bound (a copy goes stale the moment the original
+refreshes), so each host runs `codex login` per account into its own `CODEX_HOME`. The bundle's
+`codex-account.env` entry carries only the selector's **handle name**, which is why it has no
+`SECRET_REGISTRY` row — every delivery type that would fit is boot-captured, and a row would
+make each account switch emit a fleet-wide restart-required signal for a change that provably
+needs no restart.
+
 ## Deployment mode (`catalyst.deployment.mode`, CTL-1617)
 
 `catalyst.deployment.mode` is the ONE declared answer to a question the system otherwise infers from
@@ -1333,7 +1378,7 @@ The 11 seed rows:
 | `github-token`              | `bare-file`        | `re-armable` / `timer`  | —            | aliases `GH_TOKEN`, `GITHUB_TOKEN`                                            |
 | `webhook-secret`            | `bare-file`        | `boot-only`             | —            | env alias `CATALYST_WEBHOOK_SECRET`                                           |
 | `linear-webhook-secret`     | `bare-file-family` | `boot-only`             | —            | `familyPrefix: "linear-webhook-secret-"`; a predicate, not a scalar           |
-| `claude-accounts.env`       | `env-file`         | `boot-only`             | —            | presence-only (a whole sourced env file, not one value)                       |
+| `claude-accounts.env`       | `env-file`         | `re-armable` / `timer`  | —            | presence-only (a whole sourced env file, not one value)                       |
 | `execution-core.env`        | `env-file`         | `boot-only`             | —            | same shape as `claude-accounts.env`                                           |
 | `linear-api-token`          | `env-alias`        | `re-armable` / `on-401` | —            | aliases `LINEAR_API_TOKEN`, `LINEAR_API_KEY`                                  |
 | `linear-orchestrator-actor` | `config-json`      | `re-armable` / `on-401` | —            | `catalyst.linear.bot.orchestrator` — kept separate from worker-actor          |

@@ -610,6 +610,48 @@ flag (`CATALYST_PUBLISH_PREFLIGHT` over Layer-2 configuration, default `shadow`)
 GitHub quota. The worker-only doctor check reports PASS when allowed, WARN for shadow denial, FAIL
 for enforce denial, and INFO when inconclusive.
 
+### The Codex account selector seam (CTL-2072)
+
+`codexConfig().codexHome` (`execution-core/config.mjs`) resolves
+`CATALYST_CODEX_HOME` → Layer-1 `catalyst.orchestration.codex.codexHome` →
+`${catalystDir()}/codex-home`, and `buildCodexEnv` sets the child's `CODEX_HOME` from it on
+every dispatch. With neither pin set that third rung is a **constant path that is a symlink**,
+re-resolved per dispatch — so repointing the symlink changes which account the next `codex exec`
+child runs under **with no daemon restart and no rearm hook**. That is the whole switching
+mechanism (`catalyst-stack codex-account switch`), and it is strictly simpler than the Claude
+side, which must call `cmd_restart` because the SDK executor captures its token at boot.
+`execution-core` needs **zero** changes for this: the resolver's single-string contract is
+preserved, and multi-account state lives entirely in the filesystem layout beside it.
+
+Two consequences are load-bearing:
+
+- **The symlink is the LAST rung, so a pin silently wins.** A host with `CATALYST_CODEX_HOME`
+  exported or Layer-1 `codexHome` set never reaches the selector, and a switch would repoint a
+  link nothing reads while reporting success. `_cx_assert_selector_unpinned` refuses instead,
+  naming the pin. A check that cannot fail is not a check.
+- **Credentials never travel.** Codex subscription `auth.json` is rotation-bound — a copy goes
+  stale the moment the original refreshes — so each host runs `codex login` per account into its
+  own `CODEX_HOME` and the cluster SOPS bundle carries only the selector's handle NAME. That
+  entry deliberately has **no `SECRET_REGISTRY` row**: every delivery type that would fit is in
+  `_BOOT_CAPTURED_DELIVERIES`, so a row would make every account switch emit a fleet-wide
+  restart-required signal (`cluster-sync.mjs:1182`) for a change that provably needs no restart.
+  `syncSecretFiles` materializes the entry regardless of registry membership, so nothing is lost.
+
+The account plane itself (`codex app-server`'s `account/read` + `account/rateLimits/read`) is
+read by `codex-accounts-usage.mjs` at **zero token cost**, unlike the Claude twin which must
+spend one inference call per account. Its `initialize` reply echoes the resolved `codexHome`
+back, which is a free positive control the Claude side never had: a read whose echo does not
+match the requested home is an `error`, never an `ok` with plausible numbers. ⚠️ The echo is
+**realpath-resolved**, so that comparison must resolve both sides — the selector being a symlink
+is exactly the case a raw string compare would break on.
+
+⛔ Quota windows are named from `windowDurationMins`, **never** from field position. Measured on
+mini-2 (codex-cli 0.147.0, 2026-08-22): the top-level `codex` bucket's `primary` is a WEEKLY
+window with `secondary: null`, while a real 5-hour window exists only under a different bucket
+(`codex_bengalfox`). The naive positional `{primary→fiveHour, secondary→sevenDay}` port of the
+Claude shape would mislabel the weekly window as 5h and report the 5h window as absent — both in
+the direction that reads as "quota to spare".
+
 ### Dispatch-time rebase (front-load conflict surfacing, CTL-667 + CTL-707 + CAT-31)
 
 On a **fresh** dispatch of a **build** phase (`research`,`plan`,`implement`,`verify`,`review`),

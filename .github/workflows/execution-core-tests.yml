@@ -869,6 +869,105 @@ jobs:
         working-directory: plugins/dev/scripts/lib
         run: bun test event-name.test.mjs
 
+      - name: codex account-plane core unit tests (bun, CTL-2072)
+        # lib/codex-account-plane.mjs is the pure core behind `catalyst-stack
+        # codex-account` — window derivation, bucket normalization, and the
+        # four-valued account verdict. Its own step (not the "Run stable unit
+        # tests" allowlist below) because that step's working-directory is
+        # execution-core/ and this is a deliberately ZERO-IMPORT leaf outside
+        # that tree — the same rationale the deployment-mode, entitlement, and
+        # event-name steps above carry.
+        #
+        # Registered in the SAME change that adds the suite, because CI runs an
+        # ENUMERATED list and an unpinned suite is an inert suite. This is not
+        # hypothetical here: the model this command is patterned on is itself
+        # CI-dark — `grep -c 'catalyst-stack-claude-account'` over this file
+        # returns 0, while the positive control
+        # `grep -c 'catalyst-account-usage-page.test.sh'` returns 1.
+        #
+        # ⚠️ Run it BY NAME, never via a bare `bun test` in that directory:
+        # agent-liveness.test.mjs calls process.exit(), which terminates bun's
+        # runner before the `Ran N tests` summary and returns rc=0 even when
+        # another file failed (measured 2026-08-22 — it masked a real
+        # fsm-descriptor.test.mjs failure exactly that way).
+        #
+        # Measured 40 pass / 0 fail on this branch; the file does not exist at
+        # the merge base, so there is no pre-existing red to import.
+        working-directory: plugins/dev/scripts/lib
+        run: bun test codex-account-plane.test.mjs
+
+      - name: codex app-server client unit tests (bun, CTL-2072)
+        # The transport half, driven against an INJECTED spawn seam — no real
+        # `codex`, no network, no token spend. Same zero-import-leaf rationale
+        # and same by-name run requirement as the step above.
+        #
+        # Two of these tests pin protocol facts measured live rather than
+        # inferred from schema: the server interleaves an id-less
+        # `remoteControl/status/changed` notification between replies (so
+        # replies must be matched by JSON-RPC id, not arrival order), and it
+        # REALPATH-RESOLVES CODEX_HOME (so the echo-vs-request positive control
+        # must compare resolved paths — the fleet selector ~/catalyst/codex-home
+        # is itself a symlink, and a raw string compare would report a home
+        # mismatch on every healthy read).
+        #
+        # Measured 25 pass / 0 fail on this branch.
+        working-directory: plugins/dev/scripts/lib
+        run: bun test codex-account-client.test.mjs
+
+      - name: codex-accounts-usage CLI contract (CTL-2072)
+        # Output/exit-code contract + secrets hygiene, against a FAKE codex that
+        # speaks the measured app-server protocol. The hygiene checks plant a
+        # token-shaped string in the fixture's auth.json and carry their own
+        # POSITIVE CONTROLS (the secret really is in the fixture; the human
+        # table really is non-empty), so a refutation cannot pass on an empty
+        # haystack.
+        #
+        # Measured 23 pass / 0 fail on this branch.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/codex-accounts-usage.test.sh
+
+      - name: catalyst-codex-usage-page alarm contract (CTL-2072)
+        # The paging half. What is pinned here is NOT "does it fire at 80%" — it
+        # is that every way of being unable to SEE Codex quota renders as
+        # UNOBSERVABLE and pages through the SAME sinks, never as "under
+        # threshold". Includes the `[].every(p) is true` false-clean directly: a
+        # payload with zero accounts must page DARK, and must never print the
+        # under-threshold all-clear.
+        #
+        # Also pinned: a REJECTED account pages regardless of percentage (the
+        # rate-limits RPC succeeds on a throttled account, so a purely numeric
+        # pager calls a dead account healthy), a weekly-only account pages as
+        # `weekly` and never as a fabricated 5-hour window, and a page NO SINK
+        # ACCEPTED is not recorded so the next run retries.
+        #
+        # Measured 24 pass / 0 fail on this branch.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-codex-usage-page.test.sh
+
+      - name: catalyst-stack codex-account contract (CTL-2072)
+        # The operator surface: handle validation, selector parsing, the sops
+        # sed flip, the local symlink apply, the pin guard, and probe/verify.
+        # Hermetic — no real sops, cluster repo, network, or `codex` binary.
+        #
+        # Two checks here are behavioural rather than textual and pin bugs that
+        # were found by running them, not by reading the code:
+        #   * the selector replace must not DEREFERENCE the old symlink. On macOS
+        #     a plain `mv -f newlink selector` follows the link and buries the new
+        #     link inside the OLD account's home while returning 0 — a silent
+        #     no-op reporting success. BSD needs `mv -h`, GNU needs `mv -T`, and
+        #     neither accepts the other, so BOTH are required: this job runs on
+        #     ubuntu-latest while the fleet runs macOS.
+        #   * the pin guard must REFUSE when CATALYST_CODEX_HOME or Layer-1
+        #     codexHome is set, because those outrank the symlink in
+        #     codexConfig()'s ladder and the switch would otherwise report a
+        #     change that never took effect. It carries positive controls so it
+        #     cannot pass by always refusing.
+        #
+        # Measured 48 pass / 0 fail on this branch; the sibling
+        # catalyst-stack-claude-account.test.sh stays 55/55 (unchanged block).
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-stack-codex-account.test.sh
+
       - name: deployment-mode Bash resolver unit test (CTL-1617)
         # The Bash mirror's own standalone suite (lib/catalyst-deployment-mode.sh) —
         # see the bun step above for why this suite was previously ungated.
