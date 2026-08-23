@@ -377,14 +377,39 @@ describe("routeStuckTicketToDelegate — infra-class short-circuit (CTL-2061)", 
     });
   }
 
-  test("a genuine product-class reason ('stalled') is UNCHANGED — still labels under off", () => {
+  test("a genuine product-class reason ('stalled') does NOT take the infra short-circuit", () => {
     const labelCalls = [];
     const opts = makeOpts({ labelCalls, env: { CATALYST_DELEGATE_FIRST: "off" } });
     // makeOpts()'s default reason is "stalled" — deliberately not infra-class.
 
     const result = routeStuckTicketToDelegate(orchDir, "CTL-PRODUCT-1", opts);
 
-    expect(labelCalls).toHaveLength(1);
+    // ⚠️ RE-AIMED BY CTL-2156…CTL-2162, NOT WEAKENED. This case was written for CTL-2061 as
+    // "still labels under off" and asserted `labelCalls` had length 1. That premise EXPIRED: this
+    // epic deletes the `needs-human` label, so CTL-2159 makes every producer stop calling
+    // applyLabel — `labelCalls` is now 0 for EVERY reason, infra-class or not. Left as it was, the
+    // assertion pinned behaviour the epic exists to remove.
+    //
+    // The case still has to earn its place, because it is the CONTROL for the infra-class cases
+    // above: without a product-class reason taking a visibly different path, those cases cannot
+    // tell "the short-circuit routes correctly" from "the short-circuit swallows everything". So
+    // it now asserts the discriminator that SURVIVES the epic — the shape of the return.
+    //
+    // infra-class  → applyInfraClassAction  → { action, count, until, reason }  (no stallClass)
+    // product-class→ the classifier seam    → { routed, labelled, stallClass }  (no action)
+    expect(result).not.toHaveProperty("action");
+    expect(result).not.toHaveProperty("count");
+    expect(result.routed).toBe(false);
+    expect(result.stallClass).toBe("held"); // reached the classifier rather than being short-circuited
+
+    // ⛔ NOBODY LABELS ANY MORE — the epic's whole point. Asserted explicitly so a producer that
+    // starts calling applyLabel again fails HERE, not silently.
+    expect(labelCalls).toHaveLength(0);
+
+    // ⚠️ `labelled` stays true while applyLabel was never called: post-CTL-2159 that boolean is a
+    // RETRY contract, not "a label was applied" (delegate-first.mjs documents this at labelDirect).
+    // The naming is a real trap and the same shape Codex flagged on this PR for publishEscalation —
+    // tracked as CTL-2178 AC2. Pinned here so the meaning cannot drift again unnoticed.
     expect(result.labelled).toBe(true);
   });
 
