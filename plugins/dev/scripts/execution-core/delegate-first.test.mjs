@@ -386,7 +386,7 @@ describe("routeStuckTicketToDelegate — infra-class short-circuit (CTL-2061)", 
 
     // ⚠️ RE-AIMED BY CTL-2156…CTL-2162, NOT WEAKENED. This case was written for CTL-2061 as
     // "still labels under off" and asserted `labelCalls` had length 1. That premise EXPIRED: this
-    // epic deletes the `needs-human` label, so CTL-2159 makes every producer stop calling
+    // epic deletes the per-ticket human-block label, so CTL-2159 makes every producer stop calling
     // applyLabel — `labelCalls` is now 0 for EVERY reason, infra-class or not. Left as it was, the
     // assertion pinned behaviour the epic exists to remove.
     //
