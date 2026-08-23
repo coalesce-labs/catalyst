@@ -2,6 +2,8 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "$comment": "Catalyst Configuration Template - Copy to config.json and fill in values. Secrets go in ~/.config/catalyst/config-{projectKey}.json",
   "catalyst": {
+    "_comment_schema": "schemaVersion 1 means this config has opted into the slimmed Layer-1 schema (CTL-1214): project identity only, no machine-scoped keys. The relocated stanzas — orchestration.{dispatchMode,executionCore,worktreeRefresh,reconcile}, feedback.*, sweep.*, monitor.github.repoColors — now live in the NODE-scoped ~/.config/catalyst/node.json. Run `catalyst-config-migrate` to move an existing repo's keys there. A config carrying schemaVersion is held to the strict contract; one without it stays lenient for the back-compat window.",
+    "schemaVersion": 1,
     "projectKey": "my-project",
     "repository": {
       "org": "[YOUR_ORG]",
@@ -31,11 +33,6 @@
     "thoughts": {
       "user": null
     },
-    "feedback": {
-      "autoFile": false,
-      "githubRepo": "coalesce-labs/catalyst",
-      "labels": ["auto-submitted"]
-    },
     "deploy": {
       "$comment": "Per-repo deploy verification config (CTL-211). Set skipDeployVerification: false for repos that emit GitHub Deployments to enable the orchestrator's merged → deploying → done state machine. Default for unknown repos is skipDeployVerification: true (today's CTL-133 behavior — done immediately on PR merge).",
       "[YOUR_ORG]/[YOUR_REPO]": {
@@ -57,16 +54,6 @@
     },
     "deployment": {
       "mode": "single-host"
-    },
-    "orchestration": {
-      "_comment": "Worker dispatch mode. 'phase-agents' (default) dispatches the 10-phase pipeline on claude --bg; 'oneshot-legacy' keeps the pre-CTL-452 single-shot oneshot worker on claude -p.",
-      "dispatchMode": "phase-agents",
-      "executionCore": {
-        "_comment": "Execution-core scheduler worker-slot ceiling (CTL-665). maxParallel is the committed source of truth (~/catalyst/execution-core/state.json is an optional runtime fallback consulted only when this is absent). minParallel/maxParallelCeiling clamp the resolved value — bounds for the future adaptive-concurrency feature. Default stays 4; the operator bump to 10 is gated on CTL-661/662/663. NOTE: eligibleQuery is intentionally NOT here — it lives centrally in registry.json (CTL-582 D4); only these concurrency knobs are templated.",
-        "maxParallel": 4,
-        "minParallel": 1,
-        "maxParallelCeiling": 10
-      }
     }
   }
 }

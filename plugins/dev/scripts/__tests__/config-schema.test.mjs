@@ -16,6 +16,7 @@
 
 import { describe, test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -317,6 +318,52 @@ describe("validateLayer1Config (CTL-1214)", () => {
       expect(typeof entry.destination).toBe("string");
       expect(entry.destination.length).toBeGreaterThan(0);
     }
+  });
+});
+
+// CTL-1214 Phase 3 — the AC's "template is sanitized" scenario, asserted against
+// the SHIPPED file on disk rather than a fixture. The template is what every new
+// repo starts from, so a relocated stanza here re-leaks into every future config
+// no matter how well the migration works.
+describe("config.template.json is sanitized (CTL-1214)", () => {
+  const templatePath = join(import.meta.dir, "..", "..", "templates", "config.template.json");
+  const template = JSON.parse(readFileSync(templatePath, "utf8"));
+
+  test("validates clean under validateLayer1Config", () => {
+    const r = validateLayer1Config(template);
+    expect(r.deprecatedKeys).toEqual([]);
+    expect(r.errors).toEqual([]);
+    expect(r.recommendations).toEqual([]);
+    expect(r.valid).toBe(true);
+  });
+
+  test("carries schemaVersion 1", () => {
+    expect(template.catalyst.schemaVersion).toBe(1);
+  });
+
+  test("ships no relocated stanza", () => {
+    expect(template.catalyst.orchestration).toBeUndefined();
+    expect(template.catalyst.feedback).toBeUndefined();
+    expect(template.catalyst.sweep).toBeUndefined();
+    expect(template.catalyst.monitor?.github?.repoColors).toBeUndefined();
+  });
+
+  test("keeps ticketPrefix PROJ, no teamId, no roster (the AC's template scenario)", () => {
+    expect(template.catalyst.project.ticketPrefix).toBe("PROJ");
+    expect("teamId" in template.catalyst.linear).toBe(false);
+    expect(template.catalyst.monitor?.linear?.teams).toBeUndefined();
+  });
+
+  test("keeps the genuinely Layer-1 blocks (a template that over-slims is as bad)", () => {
+    expect(template.catalyst.projectKey).toBeDefined();
+    expect(template.catalyst.linear.teamKey).toBe("PROJ");
+    expect(Object.keys(template.catalyst.linear.stateMap)).toHaveLength(12);
+    expect(template.catalyst.deployment.mode).toBe("single-host");
+    expect(template.catalyst.repository).toBeDefined();
+    expect(template.catalyst.deploy).toBeDefined();
+    expect(template.catalyst.filter).toBeDefined();
+    expect("botUserId" in template.catalyst.monitor.linear).toBe(true);
+    expect(template.catalyst.thoughts).toBeDefined();
   });
 });
 

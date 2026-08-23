@@ -104,22 +104,31 @@ case "$SUBCOMMAND" in
     ;;
 
   grant)
-    mkdir -p "$(dirname "$CONFIG_PATH")"
-    if [ ! -f "$CONFIG_PATH" ]; then
-      echo '{}' > "$CONFIG_PATH"
+    # CTL-1214: consent is NODE-scoped, so it is recorded in the machine-local
+    # node.json — never patched back into the committed .catalyst/config.json,
+    # which would re-leak the stanza the Phase-4 slimming removes. Reads stay
+    # Layer-1-then-Layer-2 (see read_auto_file above), so an operator who granted
+    # consent BEFORE this change is unaffected: their Layer-1 value still wins.
+    _FC_L2="${CATALYST_LAYER2_CONFIG_FILE:-${HOME}/.config/catalyst/config.json}"
+    _FC_NODE="$(dirname "$_FC_L2")/node.json"
+    mkdir -p "$(dirname "$_FC_NODE")"
+    if [ ! -f "$_FC_NODE" ]; then
+      printf '{}\n' > "$_FC_NODE"
+      chmod 600 "$_FC_NODE"
     fi
-    TMP="${CONFIG_PATH}.tmp.$$"
+    TMP="${_FC_NODE}.tmp.$$"
     if jq '.catalyst = (.catalyst // {})
-           | .catalyst.feedback = (.catalyst.feedback // {})
+           | .catalyst.feedback = (if (.catalyst.feedback | type) == "object" then .catalyst.feedback else {} end)
            | .catalyst.feedback.autoFile = true
            | .catalyst.feedback.githubRepo = (.catalyst.feedback.githubRepo // "coalesce-labs/catalyst")
            | .catalyst.feedback.labels = (.catalyst.feedback.labels // ["auto-submitted"])' \
-         "$CONFIG_PATH" > "$TMP"; then
-      mv "$TMP" "$CONFIG_PATH"
+         "$_FC_NODE" > "$TMP"; then
+      chmod 600 "$TMP"
+      mv "$TMP" "$_FC_NODE"
       echo "granted"
     else
       rm -f "$TMP"
-      echo "ERROR: failed to update config" >&2
+      echo "ERROR: failed to update ${_FC_NODE}" >&2
       exit 1
     fi
     ;;

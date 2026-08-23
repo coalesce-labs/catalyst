@@ -224,6 +224,43 @@ else
   ok "string-valued catalyst.feedback -> no jq index error"
 fi
 
+# CTL-1214 Phase 3: `grant` must record consent in node.json and leave the
+# committed Layer-1 config byte-for-byte alone — otherwise the Phase-4 slimming
+# survives only until the next consent grant.
+echo "== feedback-consent.sh grant: writes node.json, never Layer-1 =="
+L1="$(mk_l1 "$SLIM_L1")"
+L2DIR="$(mktemp -d "${TMP}/grantXXXXXX")"
+printf '{}' > "${L2DIR}/config.json"
+cp "$L1" "${TMP}/grant-before.json"
+OUT="$(CATALYST_LAYER2_CONFIG_FILE="${L2DIR}/config.json" bash "$FC" grant --config "$L1" 2>/dev/null)"
+expect_eq "grant reports granted" "granted" "$OUT"
+if cmp -s "${TMP}/grant-before.json" "$L1"; then
+  ok "grant leaves the committed Layer-1 config byte-for-byte unchanged"
+else
+  fail "grant leaves Layer-1 unchanged" "$(diff "${TMP}/grant-before.json" "$L1" | head -5)"
+fi
+expect_eq "grant writes autoFile into node.json" "true" \
+  "$(jq -r '.catalyst.feedback.autoFile' "${L2DIR}/node.json" 2>/dev/null)"
+expect_eq "grant writes the default githubRepo into node.json" "coalesce-labs/catalyst" \
+  "$(jq -r '.catalyst.feedback.githubRepo' "${L2DIR}/node.json" 2>/dev/null)"
+expect_eq "node.json is 0600" "600" \
+  "$(stat -f '%Lp' "${L2DIR}/node.json" 2>/dev/null || stat -c '%a' "${L2DIR}/node.json" 2>/dev/null)"
+# The granted consent must then READ back through the Layer-2 arm — a write that
+# no read can see would be worse than not writing at all.
+OUT="$(CATALYST_LAYER2_CONFIG_FILE="${L2DIR}/config.json" bash "$FC" check --config "$L1" 2>/dev/null)"
+expect_eq "the granted consent reads back as granted" "granted" "$OUT"
+
+# A node.json whose catalyst.feedback is a STRING (the live Layer-2 shape) must
+# be REPLACED with the object, not indexed into and crashed on.
+L1="$(mk_l1 "$SLIM_L1")"
+L2DIR="$(mktemp -d "${TMP}/grantstrXXXXXX")"
+printf '{}' > "${L2DIR}/config.json"
+printf '%s' '{"catalyst":{"feedback":"https://github.com/coalesce-labs/catalyst.git"}}' > "${L2DIR}/node.json"
+OUT="$(CATALYST_LAYER2_CONFIG_FILE="${L2DIR}/config.json" bash "$FC" grant --config "$L1" 2>/dev/null)"
+expect_eq "grant over a string-valued feedback still reports granted" "granted" "$OUT"
+expect_eq "grant over a string-valued feedback yields the object" "true" \
+  "$(jq -r '.catalyst.feedback.autoFile' "${L2DIR}/node.json" 2>/dev/null)"
+
 echo
 echo "RESULTS: $PASSES passed, $FAILURES failed"
 [[ "$FAILURES" -eq 0 ]]

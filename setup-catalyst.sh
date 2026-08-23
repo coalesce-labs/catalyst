@@ -3355,15 +3355,37 @@ setup_sweep_config() {
 	local REPO_ROOT="${PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo "$PWD")}"
 	local config_file="${REPO_ROOT}/.catalyst/config.json"
 	[[ -f $config_file ]] || return 0
+
+	# CTL-1214: catalyst.sweep is NODE-scoped, so the defaults go to the
+	# machine-local node.json — NOT back into the committed .catalyst/config.json.
+	# This function used to patch that committed file on EVERY run and print
+	# "wrote catalyst.sweep defaults", which means the Phase-4 slimming would have
+	# survived exactly until the next setup-catalyst.sh run. A repo that still
+	# carries a legacy catalyst.sweep in Layer-1 is deliberately LEFT ALONE — the
+	# Phase-1 readers still prefer that value, and deleting an operator's
+	# un-migrated config from a setup script would be a destructive surprise.
+	local layer2_file="${CATALYST_LAYER2_CONFIG_FILE:-${HOME}/.config/catalyst/config.json}"
+	local node_file
+	node_file="$(cd "$(dirname "$layer2_file")" 2>/dev/null && pwd)/node.json" || node_file=""
+	if [[ -z $node_file || $node_file == "/node.json" ]]; then
+		echo "setup: warning: could not resolve the Layer-2 config dir; skipping catalyst.sweep defaults" >&2
+		return 0
+	fi
+
 	local patch tmp
 	patch='{"idleHours":48,"intervalHours":1,"salvagePush":false,"maxRemovalsPerRun":10}'
-	tmp="${config_file}.tmp.$$"
-	# patch first so user overrides win
-	if jq --argjson p "$patch" '.catalyst.sweep = ($p + (.catalyst.sweep // {}))' "$config_file" >"$tmp" && mv "$tmp" "$config_file"; then
-		print_success "wrote catalyst.sweep defaults" 2>/dev/null || echo "setup: wrote catalyst.sweep defaults"
+	[[ -f $node_file ]] || printf '{}\n' >"$node_file"
+	tmp="${node_file}.tmp.$$"
+	# patch first so user overrides win (unchanged `+` semantics — the existing
+	# block is applied ON TOP of the defaults, so an operator's node.json value
+	# survives and only the un-set keys are filled in)
+	if jq --argjson p "$patch" '.catalyst = (.catalyst // {}) | .catalyst.sweep = ($p + (.catalyst.sweep // {}))' "$node_file" >"$tmp" \
+		&& chmod 600 "$tmp" && mv "$tmp" "$node_file"; then
+		print_success "wrote catalyst.sweep defaults to ${node_file}" 2>/dev/null \
+			|| echo "setup: wrote catalyst.sweep defaults to ${node_file}"
 	else
 		rm -f "$tmp"
-		echo "setup: warning: could not write catalyst.sweep defaults" >&2
+		echo "setup: warning: could not write catalyst.sweep defaults to ${node_file}" >&2
 	fi
 	local _os="${CATALYST_FORCE_OS:-$(uname -s 2>/dev/null || echo unknown)}"
 	if [[ $_os == "Darwin" ]]; then
