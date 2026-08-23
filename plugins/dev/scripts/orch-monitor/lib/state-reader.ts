@@ -13,7 +13,7 @@ import {
 } from "./session-store";
 
 export type { SessionState, SessionQuery } from "./session-store";
-export type { RollupBriefing, ShippedItem } from "./rollup";
+export type { RollupBriefing } from "./rollup";
 
 export interface DefinitionOfDone {
   testsWrittenFirst?: boolean;
@@ -799,4 +799,3 @@ export function groupByWorkspace(snapshot: MonitorSnapshot): WorkspaceGroup[] {
   groups.sort((a, b) => a.workspace.localeCompare(b.workspace));
   return groups;
 }
-

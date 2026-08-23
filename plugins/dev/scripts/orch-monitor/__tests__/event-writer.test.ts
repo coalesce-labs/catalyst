@@ -212,7 +212,7 @@ describe("CanonicalEventWriter", () => {
 
         // And the bounded API asked for at most one initial probe (64 KiB),
         // regardless of the file being 8 MiB.
-        const requested = bytesRequested(readSyncSpy.mock.calls as unknown[][]);
+        const requested = bytesRequested(readSyncSpy.mock.calls);
         expect(requested).toBeGreaterThan(0);
         expect(requested).toBeLessThanOrEqual(64 * 1024);
         expect(requested).toBeLessThan(BIG);

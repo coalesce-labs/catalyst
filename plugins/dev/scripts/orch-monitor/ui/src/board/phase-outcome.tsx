@@ -433,5 +433,3 @@ export function PhaseOutcome({
       return null;
   }
 }
-
-export type { PhaseSectionKind };

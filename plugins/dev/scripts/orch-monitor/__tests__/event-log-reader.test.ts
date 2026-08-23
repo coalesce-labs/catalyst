@@ -780,7 +780,7 @@ describe("readTailUtf8 (CTL-1529)", () => {
     let out: string;
     try {
       out = readTailUtf8(path, 10_000); // 10 KB cap
-      const requested = bytesRequested(readSyncSpy.mock.calls as unknown[][]);
+      const requested = bytesRequested(readSyncSpy.mock.calls);
       // CTL-1550 (P2): the boundary check reads one extra byte (the byte before
       // `from`) to determine whether the window starts on a record boundary.
       // That probe is 1 byte, so the total stays at most cap + 1.

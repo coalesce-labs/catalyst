@@ -163,11 +163,9 @@ const HELD_LABEL_WAITING = "queued";
 // phase render (which would let the Board and List drift). They stay module-local
 // to Board.tsx (the single source of truth); BOARD4 imports the named exports.
 // CTL-1153: ColorBy / accentFor / PHASE_C live in board-accent.ts (pure, no React)
-// so unit tests and the phase-drift guard import without pulling React. Re-exported
-// here for backward-compat with list-columns.tsx and other callers. PHASE_C is also
+// so unit tests and the phase-drift guard import without pulling React. PHASE_C is also
 // imported for direct use in PhaseStrip — the drift guard reads it from board-accent.ts
 // but the board renders it via this import.
-export type { ColorBy } from "./board-accent";
 import { PHASE_C, accentFor, type ColorBy } from "./board-accent";
 export { accentFor };
 // CTL-909 / SURF1: a stable per-node accent so the "group by Node" columns +
