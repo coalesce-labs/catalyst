@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { ownerForTicket } from "../execution-core/hrw.mjs";
 import {
+  CI_STATE,
   VerificationError,
+  classifyCheckRollup,
   countEventsByName,
   hrwOwner,
   mustBeConclusive,
@@ -449,5 +451,103 @@ describe("mustBeConclusive", () => {
     expect(() => mustBeConclusive(0)).toThrow(VerificationError);
     expect(() => mustBeConclusive(null)).toThrow(VerificationError);
     expect(() => mustBeConclusive({ value: 3 })).toThrow(VerificationError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// classifyCheckRollup (CTL-2181) — the ROLLUP verdict over a statusCheckRollup.
+//
+// THE trap this whole ticket turns on: pr-block-probe.mjs's isFailingState
+// returns false for a PENDING conclusion AND for an absent one alike, so a
+// !isFailingState test reads "no CI run at all" as "CI passed". A finished-draft
+// classifier built on that boolean has an unsatisfiable negative control, since
+// the negative control IS a draft with no CI run. Four-valued, not boolean.
+// ---------------------------------------------------------------------------
+describe("classifyCheckRollup — four-valued CI rollup state (CTL-2181)", () => {
+  test("empty rollup → none, never passing", () => {
+    expect(classifyCheckRollup([])).toBe(CI_STATE.NONE);
+    expect(classifyCheckRollup(null)).toBe(CI_STATE.NONE);
+    expect(classifyCheckRollup(undefined)).toBe(CI_STATE.NONE);
+    // The distinction that matters: NONE is not PASSING.
+    expect(CI_STATE.NONE).not.toBe(CI_STATE.PASSING);
+  });
+
+  test("a null/absent conclusion is PENDING, not passing", () => {
+    // PENDING_CHECK_STATES contains "" deliberately.
+    expect(classifyCheckRollup([{ name: "a", conclusion: null }])).toBe(CI_STATE.PENDING);
+    expect(classifyCheckRollup([{ name: "a", state: "" }])).toBe(CI_STATE.PENDING);
+    expect(classifyCheckRollup([{ name: "a" }])).toBe(CI_STATE.PENDING);
+  });
+
+  test("precedence: any failing beats pending beats passing", () => {
+    expect(
+      classifyCheckRollup([
+        { conclusion: "SUCCESS" },
+        { conclusion: "PENDING" },
+        { conclusion: "FAILURE" },
+      ]),
+    ).toBe(CI_STATE.FAILING);
+    expect(classifyCheckRollup([{ conclusion: "SUCCESS" }, { conclusion: "QUEUED" }])).toBe(
+      CI_STATE.PENDING,
+    );
+    expect(classifyCheckRollup([{ conclusion: "SUCCESS" }, { conclusion: "SKIPPED" }])).toBe(
+      CI_STATE.PASSING,
+    );
+  });
+
+  test("an unrecognised conclusion is UNKNOWN, never silently passing", () => {
+    expect(classifyCheckRollup([{ conclusion: "WAT" }])).toBe(CI_STATE.UNKNOWN);
+    // and it does not get masked by a passing sibling
+    expect(classifyCheckRollup([{ conclusion: "SUCCESS" }, { conclusion: "WAT" }])).toBe(
+      CI_STATE.UNKNOWN,
+    );
+    // UNKNOWN dominates even a genuine failure — "could not classify" is the
+    // louder verdict, matching prMergeBlockers's unclassifiedChecks discipline.
+    expect(classifyCheckRollup([{ conclusion: "FAILURE" }, { conclusion: "WAT" }])).toBe(
+      CI_STATE.UNKNOWN,
+    );
+  });
+
+  test("StatusContext entries (state, no conclusion) classify off `state`", () => {
+    expect(classifyCheckRollup([{ context: "legacy", state: "SUCCESS" }])).toBe(CI_STATE.PASSING);
+    expect(classifyCheckRollup([{ context: "legacy", state: "FAILURE" }])).toBe(CI_STATE.FAILING);
+  });
+
+  test("conclusion is case-insensitive and wins over state", () => {
+    expect(classifyCheckRollup([{ conclusion: "success" }])).toBe(CI_STATE.PASSING);
+    expect(classifyCheckRollup([{ conclusion: "FAILURE", state: "SUCCESS" }])).toBe(
+      CI_STATE.FAILING,
+    );
+  });
+
+  test("every FAILING_CHECK_STATES member classifies as failing (no enumerate-the-bad-ones gap)", () => {
+    for (const s of [
+      "FAILURE",
+      "TIMED_OUT",
+      "CANCELLED",
+      "ERROR",
+      "ACTION_REQUIRED",
+      "STARTUP_FAILURE",
+      "STALE",
+    ]) {
+      expect(classifyCheckRollup([{ conclusion: s }])).toBe(CI_STATE.FAILING);
+    }
+  });
+
+  test("CI_STATE is frozen and has exactly the five documented values", () => {
+    expect(Object.isFrozen(CI_STATE)).toBe(true);
+    expect(Object.values(CI_STATE).sort()).toEqual([
+      "failing",
+      "none",
+      "passing",
+      "pending",
+      "unknown",
+    ]);
+  });
+
+  test("a non-array rollup (object, string, number) is NONE, never a throw", () => {
+    for (const bad of [{}, "x", 42, true]) {
+      expect(classifyCheckRollup(bad)).toBe(CI_STATE.NONE);
+    }
   });
 });

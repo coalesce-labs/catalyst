@@ -6,7 +6,7 @@
 // exported pure pieces (computeStalledStamps, readStalledPrState, DEFAULTS).
 
 import { describe, test, expect } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { computeStalledStamps, readStalledPrState, DEFAULTS } from "./stalled-pr-timer.mjs";
@@ -115,5 +115,180 @@ describe("readStalledPrState — aggregate workers/*/stalled-pr.json", () => {
     const map = readStalledPrState(base);
     expect(map).toBeInstanceOf(Map);
     expect(map.size).toBe(0); // corrupt entry skipped
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CTL-2181 — the stamp gains the inputs a finished-draft classifier needs.
+// ---------------------------------------------------------------------------
+
+describe("CTL-2181 — the gh field list actually requests isDraft (C3)", () => {
+  // This is the POSITIVE CONTROL that the draft input reaches production.
+  // Without it every downstream test can pass against a fixture while the one
+  // sweep that walks every worker-tracked open PR stays structurally draft-blind
+  // — the exact shape of the C3 blind site. It fails CLOSED: if the `--json`
+  // literal moves or is restructured, the match is null and the test fails
+  // rather than quietly asserting nothing.
+  test("the gh field list requests isDraft", () => {
+    const src = readFileSync(new URL("./stalled-pr-timer.mjs", import.meta.url), "utf8");
+    const m = /"--json",\s*\n?\s*"([^"]*headRefOid[^"]*)"/.exec(src);
+    expect(m).not.toBeNull();
+    expect(m[1].split(",")).toContain("isDraft");
+  });
+
+  test("negative control: the same matcher does NOT find a field we never request", () => {
+    const src = readFileSync(new URL("./stalled-pr-timer.mjs", import.meta.url), "utf8");
+    const m = /"--json",\s*\n?\s*"([^"]*headRefOid[^"]*)"/.exec(src);
+    expect(m[1].split(",")).not.toContain("mergeStateStatus");
+  });
+});
+
+describe("CTL-2181 — computeStalledStamps carries isDraft + a four-way ciState", () => {
+  const T0 = "2026-08-03T10:00:00Z";
+
+  test("carries isDraft and a four-way ciState", () => {
+    const view = {
+      state: "OPEN",
+      isDraft: true,
+      headRefOid: "a",
+      statusCheckRollup: [{ conclusion: "SUCCESS", startedAt: T0 }],
+    };
+    const s = computeStalledStamps(null, view, NOW);
+    expect(s.isDraft).toBe(true);
+    expect(s.ciState).toBe("passing");
+  });
+
+  test("a non-draft PR stamps isDraft false, not undefined", () => {
+    const s = computeStalledStamps(null, { state: "OPEN", isDraft: false, headRefOid: "a" }, NOW);
+    expect(s.isDraft).toBe(false);
+  });
+
+  test("an absent isDraft in the view stamps null (unknown), never false", () => {
+    // A stamp written by a pre-CTL-2181 view must not claim the PR is ready.
+    const s = computeStalledStamps(null, { state: "OPEN", headRefOid: "a" }, NOW);
+    expect(s.isDraft).toBeNull();
+  });
+
+  test("no CI run → ciState 'none' (NOT passing) and ciFirstFailedAt stays null", () => {
+    const s = computeStalledStamps(
+      null,
+      { state: "OPEN", isDraft: true, headRefOid: "a", statusCheckRollup: [] },
+      NOW,
+    );
+    expect(s.ciState).toBe("none");
+    expect(s.ciFirstFailedAt).toBeNull();
+  });
+
+  test("pending / failing / unknown rollups each get their own ciState", () => {
+    const at = (rollup) =>
+      computeStalledStamps(null, { state: "OPEN", headRefOid: "a", statusCheckRollup: rollup }, NOW)
+        .ciState;
+    expect(at([{ conclusion: null }])).toBe("pending");
+    expect(at([{ conclusion: "FAILURE" }])).toBe("failing");
+    expect(at([{ conclusion: "WAT" }])).toBe("unknown");
+  });
+});
+
+describe("CTL-2181 — an honest first-observation push anchor", () => {
+  test("first observation anchors lastPushAt to the earliest check startedAt, not now", () => {
+    const earliest = "2026-08-02T00:00:00Z";
+    const view = {
+      state: "OPEN",
+      headRefOid: "a",
+      statusCheckRollup: [
+        { conclusion: "SUCCESS", startedAt: "2026-08-02T02:00:00Z" },
+        { conclusion: "SUCCESS", startedAt: earliest },
+      ],
+    };
+    const s = computeStalledStamps(null, view, NOW);
+    expect(s.lastPushAt).toBe(new Date(Date.parse(earliest)).toISOString());
+    expect(s.pushAnchor).toBe("check-started-at");
+  });
+
+  test("first observation with no usable startedAt falls back to now, and SAYS so", () => {
+    const s = computeStalledStamps(
+      null,
+      { state: "OPEN", headRefOid: "a", statusCheckRollup: [{ context: "x", state: "SUCCESS" }] },
+      NOW,
+    );
+    expect(s.lastPushAt).toBe(new Date(NOW).toISOString());
+    expect(s.pushAnchor).toBe("first-observation");
+  });
+
+  test("a startedAt in the FUTURE is refused — clock skew must not manufacture age", () => {
+    const s = computeStalledStamps(
+      null,
+      {
+        state: "OPEN",
+        headRefOid: "a",
+        statusCheckRollup: [{ conclusion: "SUCCESS", startedAt: new Date(NOW + 60_000).toISOString() }],
+      },
+      NOW,
+    );
+    expect(s.lastPushAt).toBe(new Date(NOW).toISOString());
+    expect(s.pushAnchor).toBe("first-observation");
+  });
+
+  test("an unparsable startedAt falls back rather than throwing", () => {
+    const s = computeStalledStamps(
+      null,
+      { state: "OPEN", headRefOid: "a", statusCheckRollup: [{ conclusion: "SUCCESS", startedAt: "wat" }] },
+      NOW,
+    );
+    expect(s.pushAnchor).toBe("first-observation");
+  });
+
+  test("a later tick never re-derives the anchor from checks (OID unchanged → age preserved)", () => {
+    const prev = {
+      lastPushAt: "2026-08-01T00:00:00Z",
+      lastKnownHeadOid: "abc",
+      pushAnchor: "check-started-at",
+    };
+    const s = computeStalledStamps(
+      prev,
+      {
+        state: "OPEN",
+        headRefOid: "abc",
+        statusCheckRollup: [{ conclusion: "SUCCESS", startedAt: "2026-08-02T00:00:00Z" }],
+      },
+      NOW,
+    );
+    expect(s.lastPushAt).toBe("2026-08-01T00:00:00Z");
+    expect(s.pushAnchor).toBe("check-started-at");
+  });
+
+  test("an observed push sets pushAnchor to 'push-observed' (the strongest anchor)", () => {
+    const first = computeStalledStamps(null, { state: "OPEN", headRefOid: "a" }, NOW);
+    const pushed = computeStalledStamps(first, { state: "OPEN", headRefOid: "b" }, NOW + 3_600_000);
+    expect(pushed.pushAnchor).toBe("push-observed");
+    expect(pushed.lastPushAt).toBe(new Date(NOW + 3_600_000).toISOString());
+  });
+
+  test("a prev with no pushAnchor (pre-CTL-2181 stamp) carries forward as first-observation", () => {
+    const prev = { lastPushAt: "2026-08-01T00:00:00Z", lastKnownHeadOid: "abc" };
+    const s = computeStalledStamps(prev, { state: "OPEN", headRefOid: "abc" }, NOW);
+    expect(s.pushAnchor).toBe("first-observation");
+  });
+});
+
+describe("CTL-2181 — regression guard: the CTL-1608 stamp fields are unchanged", () => {
+  test("ciFirstFailedAt/reviewRequestedAt semantics unchanged", () => {
+    const s = computeStalledStamps(
+      null,
+      { state: "OPEN", statusCheckRollup: [{ conclusion: "FAILURE" }], reviewDecision: "REVIEW_REQUIRED" },
+      NOW,
+    );
+    expect(s.ciFirstFailedAt).toBe(new Date(NOW).toISOString());
+    expect(s.reviewRequestedAt).toBe(new Date(NOW).toISOString());
+  });
+
+  test("an UNKNOWN check conclusion does not stamp ciFirstFailedAt (isFailingState untouched)", () => {
+    const s = computeStalledStamps(
+      null,
+      { state: "OPEN", statusCheckRollup: [{ conclusion: "WAT" }] },
+      NOW,
+    );
+    expect(s.ciFirstFailedAt).toBeNull();
+    expect(s.ciState).toBe("unknown"); // ...but the new field DOES say we could not tell
   });
 });

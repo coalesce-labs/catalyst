@@ -340,6 +340,45 @@ const FAILING_CHECK_STATES = new Set([
 const PENDING_CHECK_STATES = new Set(["", "PENDING", "IN_PROGRESS", "QUEUED", "WAITING", "REQUESTED"]);
 const PASSING_CHECK_STATES = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
 
+// CTL-2181 — the four-valued ROLLUP verdict over a statusCheckRollup array.
+//
+// `pr-block-probe.mjs`'s `isFailingState` returns false for a PENDING conclusion
+// AND for an absent one, so `!isFailingState(...)` reads "no CI run at all" as
+// "CI passed". Any detector whose negative control is a PR with no CI run is
+// therefore unsatisfiable when built on that boolean — which is exactly the
+// finished-draft classifier's case. NONE and PENDING are distinct from PASSING
+// here, and an unrecognised conclusion is UNKNOWN rather than silently green.
+export const CI_STATE = Object.freeze({
+  PASSING: "passing", // >=1 check, all SUCCESS/NEUTRAL/SKIPPED
+  PENDING: "pending", // >=1 not-yet-concluded check (incl. "" — PENDING_CHECK_STATES)
+  FAILING: "failing", // >=1 FAILURE/TIMED_OUT/CANCELLED/ERROR/ACTION_REQUIRED/STARTUP_FAILURE/STALE
+  NONE: "none", // zero checks — NOT green
+  UNKNOWN: "unknown", // a conclusion we have never seen — never silently passing
+});
+
+// classifyCheckRollup — pure. Precedence UNKNOWN > FAILING > PENDING > PASSING:
+// an unrecognised conclusion dominates because "we could not classify it" must
+// not be masked by a passing sibling — the same discipline `prMergeBlockers`
+// applies with its `unclassifiedChecks` list, which reads the same three sets.
+export function classifyCheckRollup(rollup) {
+  const checks = Array.isArray(rollup) ? rollup : [];
+  if (checks.length === 0) return CI_STATE.NONE;
+  let sawFailing = false;
+  let sawPending = false;
+  let sawUnknown = false;
+  for (const c of checks) {
+    const raw = c?.conclusion ?? c?.state ?? null;
+    const state = raw === null ? "" : String(raw).toUpperCase();
+    if (FAILING_CHECK_STATES.has(state)) sawFailing = true;
+    else if (PENDING_CHECK_STATES.has(state)) sawPending = true;
+    else if (!PASSING_CHECK_STATES.has(state)) sawUnknown = true;
+  }
+  if (sawUnknown) return CI_STATE.UNKNOWN;
+  if (sawFailing) return CI_STATE.FAILING;
+  if (sawPending) return CI_STATE.PENDING;
+  return CI_STATE.PASSING;
+}
+
 // isAutomatedReviewer — the bot whose review gates a merge here.
 function isAutomatedReviewer(login) {
   return typeof login === "string" && /codex/i.test(login);

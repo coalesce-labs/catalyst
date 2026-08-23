@@ -6,10 +6,20 @@
 // anyPhaseJobAlive — the whole point is to see stalls behind a live worker),
 // runs a live gh probe, and updates workers/<T>/stalled-pr.json stamps:
 //   • CI: isFailingState check → stamp ciFirstFailedAt if unset; else clear.
+//     Plus (CTL-2181) a four-valued `ciState` from lib/verified-checks.mjs's
+//     classifyCheckRollup — passing/pending/failing/none/unknown. The boolean
+//     above cannot express "no CI run at all", which reads identically to green.
 //   • Review: reviewDecision=REVIEW_REQUIRED → stamp reviewRequestedAt if unset; else clear.
-//   • No-push: headRefOid change → re-stamp lastPushAt. Init to now on first sight.
+//   • No-push: headRefOid change → re-stamp lastPushAt. On FIRST sight the anchor
+//     comes from the earliest check `startedAt` when one is usable (CTL-2181) —
+//     initialising to `now` made a PR that had already been quiet for a day read
+//     as 0 h old, deferring detection by a whole quiet window. `pushAnchor` says
+//     which anchor was used so a reader can decline rather than trust an
+//     invented age.
+//   • Draft (CTL-2181): `isDraft`, the input the finished-draft classifier needs.
 // This timer only WRITES its own state files — never labels, dispatches, or emits.
-// Board-health owns actuation (Phase 1 checkStalledPr + enforce).
+// `finished-draft-timer.mjs` reads these stamps (CTL-2181); board-health, the
+// original actuator named here, was deleted in CTL-2141.
 
 import {
   readFileSync,
@@ -21,6 +31,7 @@ import {
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { isFailingState } from "./pr-block-probe.mjs";
+import { classifyCheckRollup } from "../lib/verified-checks.mjs";
 import { log } from "./config.mjs";
 
 export const DEFAULTS = {
@@ -57,6 +68,10 @@ export function computeStalledStamps(prev, view, nowMs) {
   const nowIso = new Date(nowMs).toISOString();
   const checks = Array.isArray(view.statusCheckRollup) ? view.statusCheckRollup : [];
   const hasFailing = checks.some((c) => isFailingState(c?.conclusion ?? c?.state ?? ""));
+  // CTL-2181: the four-valued rollup verdict, alongside (never replacing) the
+  // CTL-1608 boolean above — `hasFailing`'s ciFirstFailedAt contract is pinned by
+  // a regression test and must not shift.
+  const ciState = classifyCheckRollup(view.statusCheckRollup);
 
   // CI staleness
   let ciFirstFailedAt;
@@ -81,18 +96,35 @@ export function computeStalledStamps(prev, view, nowMs) {
   const prevOid = prev?.lastKnownHeadOid ?? null;
   let lastPushAt;
   let lastKnownHeadOid;
+  let pushAnchor;
   if (prev == null) {
-    // First observation: initialize lastPushAt to now (conservative — age accrues from here)
-    lastPushAt = nowIso;
+    // First observation (CTL-2181). Initialising to `now` — the original CTL-1608
+    // behaviour — makes a PR that has ALREADY been quiet for a day read as 0 h
+    // old, which defers every detection built on this stamp by a full quiet
+    // window. A check run on the head SHA starts within seconds of the push, so
+    // its earliest startedAt is a far better anchor, and it is already in the
+    // payload so it costs no extra call. Never anchor into the future: a
+    // clock-skewed startedAt must not manufacture age. When no usable startedAt
+    // exists we still fall back to `now`, but we SAY so via pushAnchor, so a
+    // reader can decline rather than trust an invented age.
+    const anchorMs = earliestCheckStart(view.statusCheckRollup);
+    const usable = anchorMs !== null && anchorMs <= nowMs;
+    lastPushAt = usable ? new Date(anchorMs).toISOString() : nowIso;
+    pushAnchor = usable ? "check-started-at" : "first-observation";
     lastKnownHeadOid = headRefOid;
   } else if (headRefOid !== prevOid) {
-    // OID changed → a push landed
+    // OID changed → a push landed. This is the strongest anchor there is: we
+    // watched it happen, so the age is measured rather than inferred.
     lastPushAt = nowIso;
     lastKnownHeadOid = headRefOid;
+    pushAnchor = "push-observed";
   } else {
-    // Same OID → preserve age
+    // Same OID → preserve age AND the provenance of the original anchor. A stamp
+    // written before CTL-2181 has no pushAnchor; it degrades to the weakest
+    // value, which readers treat as unproven.
     lastPushAt = prev.lastPushAt ?? nowIso;
     lastKnownHeadOid = prevOid;
+    pushAnchor = prev.pushAnchor ?? "first-observation";
   }
 
   return {
@@ -100,12 +132,31 @@ export function computeStalledStamps(prev, view, nowMs) {
     prNumber: view.prNumber ?? prev?.prNumber ?? null,
     repo: view.repo ?? prev?.repo ?? null,
     state: view.state ?? "OPEN",
+    // CTL-2181: `null` when the view never carried the field, so a stamp written
+    // from a pre-CTL-2181 view cannot claim the PR is ready for review.
+    isDraft: typeof view.isDraft === "boolean" ? view.isDraft : null,
+    ciState,
     observedAt: nowIso,
     ciFirstFailedAt,
     reviewRequestedAt,
     lastPushAt,
+    pushAnchor,
     lastKnownHeadOid,
   };
+}
+
+// earliestCheckStart — the earliest parsable `startedAt` in a check rollup, or
+// null. StatusContext entries carry no startedAt (measured on PR #3884: the
+// CheckRun entries all have it, the StatusContext ones do not), so absence is
+// the normal case rather than an error.
+function earliestCheckStart(rollup) {
+  let best = null;
+  for (const c of Array.isArray(rollup) ? rollup : []) {
+    const ms = Date.parse(c?.startedAt ?? "");
+    if (Number.isNaN(ms)) continue;
+    if (best === null || ms < best) best = ms;
+  }
+  return best;
 }
 
 // readStalledPrState — aggregate workers/*/stalled-pr.json into Map<ticket, entry>.
@@ -160,7 +211,7 @@ async function defaultPrView(slug, prNumber) {
       "--repo",
       slug,
       "--json",
-      "number,state,statusCheckRollup,reviewDecision,reviewRequests,headRefOid",
+      "number,state,isDraft,statusCheckRollup,reviewDecision,reviewRequests,headRefOid",
     ],
     { encoding: "utf8", timeout: 15_000 }
   );
