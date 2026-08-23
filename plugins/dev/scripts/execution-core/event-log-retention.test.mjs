@@ -79,10 +79,21 @@ describe("partition layout", () => {
     expect(p.endMs - p.startMs).toBe(7 * DAY);
   });
 
-  test(".legacy partitions are recognized, not treated as foreign files", () => {
-    const p = parsePartition("2026-05.jsonl.legacy");
-    expect(p.kind).toBe("month");
-    expect(p.legacy).toBe(true);
+  test("rotated partitions inherit their partition's time bounds", () => {
+    // A rotation holds the DATA of its partition, so it must age out with that
+    // partition rather than becoming an unrecognized file (Codex #3953 P2).
+    for (const name of [
+      "2026-05.jsonl.legacy",
+      "2026-05.jsonl.legacy.20260501T000000Z.12345",
+      "2026-05.jsonl.legacy.2026-05-01T00-00-00-000Z.7",
+    ]) {
+      const p = parsePartition(name);
+      expect(p).not.toBeNull();
+      expect(p.kind).toBe("month");
+      expect(p.rotated).toBe(true);
+      expect(p.endMs).toBe(Date.UTC(2026, 5, 1)); // same bound as 2026-05.jsonl
+    }
+    expect(parsePartition("2026-05.jsonl").rotated).toBe(false);
   });
 
   test("out-of-range and unknown names do not parse", () => {

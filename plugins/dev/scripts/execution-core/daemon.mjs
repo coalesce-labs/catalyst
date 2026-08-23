@@ -25,6 +25,9 @@ import {
   readSync,
   closeSync,
   readdirSync,
+  // CTL-2189: free-space probe for the retention pressure REPORT. Optional at
+  // runtime (older/alternate runtimes lack it) — the call site guards with `?.`.
+  statfsSync,
 } from "node:fs";
 import { resolve, dirname, basename, join } from "node:path";
 import { homedir } from "node:os";
@@ -110,6 +113,7 @@ import { startOrphanReaperTimer, readOrphanReaperConfig } from "./orphan-reaper-
 import { sweepJobDirs } from "./job-dir-gc.mjs"; // CTL-1165 D3: ~/.claude/jobs/<id> dir GC
 import { sweepWorkerDirs } from "./worker-dir-gc.mjs"; // CTL-1205: execution-core/workers/<TICKET>/ GC
 import { sweepWtCleanupQueue } from "./wt-cleanup-drain.mjs"; // CTL-1218: wt-cleanup-queue drain
+import { createEventLogRetentionSweep } from "./event-log-retention.mjs"; // CTL-2189: event-log partition retention
 import { ProcReaper } from "./proc-reaper.mjs"; // CTL-1165 D2: orphan child-process reaper (default shadow)
 import { startWorktreeRefreshTimer, readWorktreeRefreshConfig } from "./worktree-refresh-timer.mjs";
 import { startCloudFeedTimer } from "./cloud-feed-timer.mjs"; // CTL-1847
@@ -2704,12 +2708,40 @@ function startReaperAndTimer({
           ...(drainCfg.batchCap != null ? { batchCap: Number(drainCfg.batchCap) } : {}),
         })
     : async () => {};
+  // CTL-2189: bind event-log retention onto the SAME 600s orphan-reaper cadence
+  // (no new daemon timer), exactly like the job-dir and worker-dir GCs above.
+  // Default-on; disable via .catalyst -> orphanReaper.eventLogRetention.enabled:false.
+  //
+  // The retention window is NOT configurable here on purpose: it is derived from
+  // the registered readers' coverage requirements inside the module, so an
+  // operator cannot set a window that races a reader from a config file.
+  const retentionCfg = cfg.eventLogRetention ?? {};
+  const retentionEnabled = retentionCfg.enabled !== false;
+  const eventLogRetention = retentionEnabled
+    ? createEventLogRetentionSweep({
+        eventsDir,
+        log,
+        // Free space feeds the AC2 pressure REPORT only — it can never widen what
+        // is deleted (see planRetention). statfsSync is guarded because it is not
+        // present on every runtime this daemon starts under.
+        freeBytesOf: (dir) => {
+          try {
+            const st = statfsSync?.(dir);
+            return st ? st.bavail * st.bsize : null;
+          } catch {
+            return null;
+          }
+        },
+      })
+    : async () => {};
+
   _orphanTimer = startOrphanReaperTimer({
     enabled: cfg.enabled !== false,
     intervalSeconds: cfg.intervalSeconds ?? 600,
     jobGc,
     workerGc,
     wtCleanupDrain, // CTL-1218
+    eventLogRetention, // CTL-2189
   });
 
   // CTL-707: start the periodic worktree-refresh timer.

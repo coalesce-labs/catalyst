@@ -120,6 +120,12 @@ export function retentionWindowMs({
   return maxCoverageRequirementMs(requirements) + marginMs;
 }
 
+// DEFAULT_MIN_FREE_BYTES — the headroom below which a host is reported as under
+// pressure. 20 GiB, sized for the CONSTRAINED host (mini-2: 228 GiB volume, 18
+// GiB free when CTL-2189 was filed), not the roomy one — a threshold comfortable
+// on a 926 GiB disk tells the host that is actually running out nothing.
+export const DEFAULT_MIN_FREE_BYTES = 20 * 1024 * 1024 * 1024;
+
 // ─── Partition layout ────────────────────────────────────────────────────────
 //
 // Two shapes exist on live hosts today, plus a `.legacy` suffix left by an older
@@ -133,8 +139,37 @@ export function retentionWindowMs({
 // irreversible, so an unexpected layout must stop the job rather than be
 // guessed at — a file this parser does not understand may well be the one file
 // somebody cannot afford to lose.
-const MONTH_RE = /^(\d{4})-(\d{2})\.jsonl(\.legacy)?$/;
-const WEEK_RE = /^(\d{4})-W(\d{2})\.jsonl(\.legacy)?$/;
+// ⛔ THE ROTATION SUFFIXES ARE DERIVED FROM THE WRITERS, NOT FROM A DIRECTORY.
+// Codex found the first version of this parser refusing names that live writers
+// actually emit — which, because an unrecognized file refuses the WHOLE run,
+// meant the job deleted nothing on any host that had ever rotated a legacy
+// month. The fix is to read the two emitters and encode what they produce, not
+// to widen a pattern until today's directory happens to pass:
+//
+//   lib/canonical-event.sh:784-785
+//     ${month_file}.legacy.${stamp}.$$          stamp = date -u +%Y%m%dT%H%M%SZ
+//     ${month_file}.legacy.${stamp}.$$.${n}     n = 1..50 collision counter
+//
+//   orch-monitor/lib/event-writer.ts:197
+//     ${filePath}.legacy.${stamp}               stamp = toISOString() with [:.] → "-"
+//     ${filePath}.legacy.${stamp}.${n}          n = 1..50 collision counter
+//
+//   plus the historical fixed `.legacy` (still on disk: 2026-05.jsonl.legacy).
+//
+// A rotated file holds the DATA OF ITS PARTITION, so it inherits that
+// partition's time bounds — `2026-05.jsonl.legacy.…` is May data and ages out
+// with May. That is why the suffix is stripped rather than making a new kind.
+const BASH_ROTATION_STAMP = String.raw`\d{8}T\d{6}Z`;
+const TS_ROTATION_STAMP = String.raw`\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z`;
+// `{0,2}` covers both shapes at once: bash appends pid (+ optional n), the TS
+// writer appends only an optional n.
+const ROTATION_SUFFIX_RE = new RegExp(
+  String.raw`^\.legacy(?:\.(?:${BASH_ROTATION_STAMP}|${TS_ROTATION_STAMP})(?:\.\d+){0,2})?$`
+);
+
+const PARTITION_EXT = ".jsonl";
+const MONTH_BASE_RE = /^(\d{4})-(\d{2})$/;
+const WEEK_BASE_RE = /^(\d{4})-W(\d{2})$/;
 
 // isoWeekStartMs — the UTC midnight that begins ISO week `week` of `year`.
 // ISO-8601: the week containing Jan 4 is week 1, and weeks start on Monday.
@@ -155,7 +190,17 @@ function isoWeekStartMs(year, week) {
 // is still inside the window holds data a reader may still need, however old its
 // first record is.
 export function parsePartition(name) {
-  const month = MONTH_RE.exec(name);
+  const extAt = name.indexOf(PARTITION_EXT);
+  if (extAt < 0) return null;
+  const base = name.slice(0, extAt);
+  const suffix = name.slice(extAt + PARTITION_EXT.length);
+  // An empty suffix is the live partition; anything else must be a rotation
+  // name one of the writers above can actually produce. `.gz`, `.bak`, a
+  // hand-made archive — none of those parse, and they still refuse the run.
+  if (suffix !== "" && !ROTATION_SUFFIX_RE.test(suffix)) return null;
+  const rotated = suffix !== "";
+
+  const month = MONTH_BASE_RE.exec(base);
   if (month) {
     const year = Number(month[1]);
     const mon = Number(month[2]);
@@ -163,33 +208,23 @@ export function parsePartition(name) {
     return {
       kind: "month",
       name,
-      legacy: Boolean(month[3]),
+      rotated,
       startMs: Date.UTC(year, mon - 1, 1),
       endMs: Date.UTC(year, mon, 1), // first instant of the next month
     };
   }
-  const week = WEEK_RE.exec(name);
+
+  const week = WEEK_BASE_RE.exec(base);
   if (week) {
     const year = Number(week[1]);
     const wk = Number(week[2]);
     if (wk < 1 || wk > 53) return null;
     const startMs = isoWeekStartMs(year, wk);
-    return {
-      kind: "week",
-      name,
-      legacy: Boolean(week[3]),
-      startMs,
-      endMs: startMs + 7 * DAY_MS,
-    };
+    return { kind: "week", name, rotated, startMs, endMs: startMs + 7 * DAY_MS };
   }
+
   return null;
 }
-
-// DEFAULT_MIN_FREE_BYTES — the headroom below which a host is reported as under
-// pressure. 20 GiB, sized for the CONSTRAINED host (mini-2: 228 GiB volume, 18
-// GiB free when CTL-2189 was filed), not the roomy one — a threshold comfortable
-// on a 926 GiB disk tells the host that is actually running out nothing.
-export const DEFAULT_MIN_FREE_BYTES = 20 * 1024 * 1024 * 1024;
 
 // ─── The plan ────────────────────────────────────────────────────────────────
 
@@ -329,4 +364,90 @@ export function runRetention({
   }
 
   return { ...plan, applied: apply, removed, reclaimedBytes };
+}
+
+// ─── The production binding ──────────────────────────────────────────────────
+//
+// ⛔ WHY THIS FACTORY EXISTS AT ALL. The first version of this module exported a
+// correct, thoroughly tested `runRetention` that NOTHING CALLED. It was present,
+// green, and inert — a control that reports success while doing nothing, which
+// is the exact defect class this file was written to relieve. Two independent
+// reasons for nothing to happen compounded it: no call site, AND `apply: false`
+// by default.
+//
+// So the real filesystem wiring and the `apply: true` decision live HERE, in one
+// exported factory, rather than being spelled out at the daemon call site where
+// they cannot be tested. daemon.mjs binds this onto the orphan-reaper's existing
+// 600 s cadence (no new timer), exactly as the job-dir and worker-dir GCs are
+// bound. `event-log-retention-wiring.test.mjs` asserts BOTH halves: that the
+// daemon binds it, and that the bound sweep actually unlinks.
+import { readdirSync, statSync, unlinkSync, existsSync } from "node:fs";
+import { join } from "node:path";
+
+// createEventLogRetentionSweep — returns the async seam daemon.mjs schedules.
+//
+// `apply` defaults to TRUE here, and that is deliberate: this factory IS the
+// production path, so a caller that forgets the flag gets the behaviour the
+// ticket asks for rather than a silent no-op. The dry run stays available and
+// stays the default on the lower-level `runRetention`, where forgetting it is a
+// mistake rather than the point.
+export function createEventLogRetentionSweep({
+  eventsDir,
+  apply = true,
+  minFreeBytes = DEFAULT_MIN_FREE_BYTES,
+  freeBytesOf = null,
+  log = null,
+  fs = { readdirSync, statSync, unlinkSync, existsSync },
+} = {}) {
+  return async function eventLogRetentionSweep() {
+    if (!eventsDir || !fs.existsSync(eventsDir)) return null;
+    let result;
+    try {
+      result = runRetention({
+        dir: eventsDir,
+        apply,
+        minFreeBytes,
+        freeBytes: typeof freeBytesOf === "function" ? freeBytesOf(eventsDir) : null,
+        readdir: (d) => fs.readdirSync(d),
+        sizeOf: (d, n) => fs.statSync(join(d, n)).size,
+        unlink: (d, n) => fs.unlinkSync(join(d, n)),
+        isFile: (n) => {
+          try {
+            return fs.statSync(join(eventsDir, n)).isFile();
+          } catch {
+            return false;
+          }
+        },
+      });
+    } catch (err) {
+      // Best-effort, like every other sweep on this cadence: retention must
+      // never take the reaper tick down with it.
+      log?.error?.({ err: err?.message ?? String(err) }, "ctl-2189: event-log retention failed");
+      return null;
+    }
+
+    // ONE report per run, not one per tick (AC2). A refusal and a cannot-help
+    // are reported at warn because both mean the disk problem is NOT being
+    // relieved; a normal run is info and says what it reclaimed.
+    if (result.refused) {
+      log?.warn?.({ reason: result.refused }, "ctl-2189: event-log retention refused");
+    } else if (result.cannotHelp) {
+      log?.warn?.(
+        { freeBytes: result.pressure, keep: result.keep.length },
+        "ctl-2189: host under disk pressure but every partition is inside a reader's coverage window — retention cannot help"
+      );
+    } else if (result.removed.length > 0) {
+      log?.info?.(
+        {
+          removed: result.removed,
+          reclaimedBytes: result.reclaimedBytes,
+          cutoff: new Date(result.cutoffMs).toISOString(),
+        },
+        apply
+          ? "ctl-2189: event-log retention removed expired partitions"
+          : "ctl-2189: event-log retention DRY RUN — these partitions would be removed"
+      );
+    }
+    return result;
+  };
 }
