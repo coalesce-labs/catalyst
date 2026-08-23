@@ -141,14 +141,14 @@ describe("upsertProject (CTL-1153)", () => {
   const cfg = BASE_CONFIG;
 
   it("unknown key → { ok: false, reason: 'unknown-key' }, input untouched", () => {
-    const result = upsertProject(cfg as Record<string, unknown>, "NOPE", { color: "green" });
+    const result = upsertProject(cfg, "NOPE", { color: "green" });
     expect(result.ok).toBe(false);
     expect((result as { reason: string }).reason).toBe("unknown-key");
     expect((cfg as Record<string, unknown>).catalyst).toBeDefined();
   });
 
   it("first edit creates catalyst.projects[] with vcsRepo copied from teams[]", () => {
-    const r = upsertProject(cfg as Record<string, unknown>, "ctl", { color: "green" });
+    const r = upsertProject(cfg, "ctl", { color: "green" });
     expect(r.ok).toBe(true);
     const projects = (r as { config: Record<string, unknown> }).config.catalyst as Record<string, unknown>;
     const projectsArr = (projects).projects as Array<Record<string, unknown>>;
@@ -157,13 +157,13 @@ describe("upsertProject (CTL-1153)", () => {
   });
 
   it("input config is NOT mutated (pure function)", () => {
-    const r = upsertProject(cfg as Record<string, unknown>, "CTL", { color: "green" });
+    const r = upsertProject(cfg, "CTL", { color: "green" });
     expect(r.ok).toBe(true);
     expect((cfg as any).catalyst.projects).toBeUndefined();
   });
 
   it("partial patch merges: second edit adds name, keeps color", () => {
-    const r1 = upsertProject(cfg as Record<string, unknown>, "CTL", { color: "green" });
+    const r1 = upsertProject(cfg, "CTL", { color: "green" });
     expect(r1.ok).toBe(true);
     const r2 = upsertProject((r1 as any).config, "CTL", { name: "Catalyst Core" });
     expect(r2.ok).toBe(true);
@@ -173,7 +173,7 @@ describe("upsertProject (CTL-1153)", () => {
   });
 
   it("null patch clears the field: name:null removes name", () => {
-    const r1 = upsertProject(cfg as Record<string, unknown>, "CTL", { name: "Core", color: "green" });
+    const r1 = upsertProject(cfg, "CTL", { name: "Core", color: "green" });
     expect(r1.ok).toBe(true);
     const r2 = upsertProject((r1 as any).config, "CTL", { name: null });
     expect(r2.ok).toBe(true);
@@ -183,7 +183,7 @@ describe("upsertProject (CTL-1153)", () => {
   });
 
   it("stateMap patch: sets stateMap", () => {
-    const r = upsertProject(cfg as Record<string, unknown>, "CTL", { stateMap: { inReview: "Code Review" } });
+    const r = upsertProject(cfg, "CTL", { stateMap: { inReview: "Code Review" } });
     expect(r.ok).toBe(true);
     const entry = ((r as any).config.catalyst.projects as Array<Record<string, unknown>>)[0];
     expect(entry.stateMap).toEqual({ inReview: "Code Review" });
@@ -193,7 +193,7 @@ describe("upsertProject (CTL-1153)", () => {
     // BASE_CONFIG's Layer-1 teams[] only carries CTL; ADV exists only in the
     // cluster roster. Passing it via the roster arg makes ADV a known, editable key
     // and seeds its vcsRepo from the cluster entry.
-    const r = upsertProject(cfg as Record<string, unknown>, "ADV", { color: "blue" }, [
+    const r = upsertProject(cfg, "ADV", { color: "blue" }, [
       { key: "ADV", vcsRepo: "groundworkapp/Adva" },
     ]);
     expect(r.ok).toBe(true);
@@ -207,7 +207,7 @@ describe("upsertProject (CTL-1153)", () => {
   });
 
   it("CTL-1214 P2 #4: a key absent from BOTH Layer-1 teams[] and the roster is still unknown-key", () => {
-    const r = upsertProject(cfg as Record<string, unknown>, "NOPE", { color: "green" }, [
+    const r = upsertProject(cfg, "NOPE", { color: "green" }, [
       { key: "ADV", vcsRepo: "groundworkapp/Adva" },
     ]);
     expect(r.ok).toBe(false);

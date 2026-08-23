@@ -20,7 +20,7 @@ function makeEvent(
     traceId: null,
     spanId: null,
     resource: { "service.name": "catalyst", "service.namespace": "catalyst", "service.version": "0.0.0", "host.name": "test-host", "host.id": "0000000000000000" },
-    attributes: { "event.name": name, ...attributes } as CanonicalEvent["attributes"],
+    attributes: { "event.name": name, ...attributes },
     body: { message, payload },
   };
 }

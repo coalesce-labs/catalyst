@@ -28,9 +28,9 @@ assert_not_contains() {
 }
 
 # Files to check — add new call sites here as a one-line addition.
+# CTL-2141: recovery-pass/SKILL.md removed (its judgment layer was deleted).
 CHECKED_FILES=(
   "plugins/dev/skills/merge-pr/SKILL.md"
-  "plugins/dev/skills/recovery-pass/SKILL.md"
   "plugins/dev/skills/triage-aging-prs/SKILL.md"
   "plugins/dev/templates/followup-prompt.md"
   "plugins/dev/templates/fixup-prompt.md"
@@ -96,8 +96,7 @@ echo "CTL-56: automated merge sites gate branch delete on an executable REST .me
 # merge+delete site. (CTL-56 Codex round-1 P1: merge-pr was previously excluded as "interactive and
 # human-gated", but human-gating gates the merge DECISION, not the merge-queue race — with a queue,
 # `gh pr merge` enqueues and returns success and the next line would delete a still-open PR's head
-# ref. So merge-pr now carries the executable `.merged` gate too; recovery-pass carries its own
-# cross-repo REST-confirm prose.)
+# ref. So merge-pr now carries the executable `.merged` gate too.)
 CONFIRM_GATED_FILES=(
   "plugins/dev/skills/merge-pr/SKILL.md"
   "plugins/dev/skills/triage-aging-prs/SKILL.md"
