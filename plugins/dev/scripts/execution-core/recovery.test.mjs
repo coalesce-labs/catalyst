@@ -406,10 +406,124 @@ describe("defaultStatJob", () => {
     expect(defaultStatJob("job-still-read")?.state).toBe("running");
   });
 
-  // The classification the reclaim path actually consumes: null → "dead-gone",
-  // which is what lets the scheduler free the slot.
-  test("CTL-2110: jobLifecycle(null) is dead-gone, so the slot can be reclaimed", () => {
+  // The classification the reclaim path consumes when there is genuinely no job.
+  test("CTL-2110: jobLifecycle(null) is dead-gone rather than a throw", () => {
     expect(jobLifecycle(null)).toBe("dead-gone");
+  });
+});
+
+// --- CTL-2110 — reclaim must use SDK-native liveness for a bg-less signal ----
+//
+// 442 of 443 phase signals on the live fleet (mini + mini-2, measured
+// 2026-08-22) are `executor:"sdk"` with `bg_job_id: null`, because an
+// in-process SDK worker never has a `claude --bg` job. So "no bg id" is the
+// NORMAL shape of a healthy worker, and the two failure modes are opposite:
+//
+//   throw       → the signal is never reclaimed and pins its slot forever
+//                 (the bug: CTL-2104/implement reached generation 11)
+//   "dead-gone" → EVERY in-flight SDK worker is treated as dead every tick,
+//                 re-dispatching on top of running workers (worse than the bug)
+//
+// The reclaim loop hands reclaimDeadWorkIfPossible every in-flight signal
+// without pre-filtering by classifyWorker, so this function must decide it.
+describe("reclaimDeadWorkIfPossible — bg-less (SDK) liveness (CTL-2110)", () => {
+  let dir;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "exec-core-sdk-reclaim-"));
+    mkdirSync(join(dir, "workers", "CTL-2110"), { recursive: true });
+    // A boot instant is REQUIRED to get past classifyWorker. With no
+    // daemon-boot.json, classifyDispatchDeadline returns "boot-unreadable" ⇒ not
+    // expired ⇒ classifyWorker says "unknown" ⇒ reclaimDeadWorkIfPossible
+    // short-circuits to "noop" and the liveness decision under test is never
+    // reached. Stamping the boot AFTER the dispatch fires Rule 1
+    // ("dispatch-predates-boot"), which is the real-world shape: an in-process
+    // SDK worker cannot survive its daemon's restart.
+    writeFileSync(
+      join(dir, "daemon-boot.json"),
+      JSON.stringify({ bootedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString() }),
+    );
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const signal = () => {
+    // Materialize the signal on disk exactly as the dispatcher writes it —
+    // status `dispatched`, executor `sdk`, bg_job_id null, started long enough
+    // ago to be past every dispatch-deadline floor. Without the real file the
+    // function short-circuits to "noop" before it ever reaches the liveness
+    // decision, which would make this test assert nothing.
+    const signalPath = join(dir, "workers", "CTL-2110", "phase-implement.json");
+    const startedAt = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+    const raw = {
+      ticket: "CTL-2110",
+      phase: "implement",
+      status: "dispatched",
+      executor: "sdk",
+      bg_job_id: null,
+      orchestrator: "CTL-2110",
+      attempt: 1,
+      generation: 1,
+      startedAt,
+      updatedAt: startedAt,
+    };
+    writeFileSync(signalPath, JSON.stringify(raw, null, 2));
+    return { ticket: "CTL-2110", phase: "implement", status: "dispatched", signalPath, raw };
+  };
+
+  // THE REGRESSION THIS TICKET IS ABOUT: a live in-process worker, no bg id.
+  // It must NOT be reclaimed, revived, escalated, or stopped.
+  test("a LIVE sdk worker with a null bg_job_id is never reclaimed", () => {
+    const killed = [];
+    const revived = [];
+    const r = reclaimDeadWorkIfPossible(dir, signal(), {
+      sdkWorkerLive: () => true,
+      killBgJob: (id) => {
+        killed.push(id);
+        return true;
+      },
+      reviveDispatch: (...a) => {
+        revived.push(a);
+        return true;
+      },
+      // A throwing statJob is the negative control for the OTHER half: if the
+      // bg-keyed probe is consulted at all for a bg-less signal, this fails loudly
+      // instead of silently taking the dead path.
+      statJob: () => {
+        throw new Error("statJob must not be consulted for a bg-less signal");
+      },
+    });
+    // THE property: a live worker is neither killed nor replaced. (The alive
+    // branch may still ESCALATE — flag for a human — when a long-running worker
+    // shows no committed work; that is the documented alive-path outcome and is
+    // explicitly "never a silent reclaim". What must never happen is a kill or a
+    // duplicate dispatch on top of the running worker.)
+    expect(killed).toEqual([]);
+    expect(revived).toEqual([]);
+    expect(["reclaimed", "revived", "wedged-redispatched", "no-progress-stopped"]).not.toContain(
+      String(r),
+    );
+  });
+
+  // The other side: no live worker ⇒ the signal is genuinely dead and the
+  // reclaim path must engage, which is what frees the slot.
+  test("a DEAD bg-less signal reaches the reclaim path instead of throwing", () => {
+    let threw = null;
+    let r;
+    try {
+      r = reclaimDeadWorkIfPossible(dir, signal(), {
+        sdkWorkerLive: () => false,
+        killBgJob: () => true,
+        reviveDispatch: () => true,
+        applyStalledLabel: () => true,
+        appendEscalatedEvent: () => true,
+        statJob: () => {
+          throw new Error("statJob must not be consulted for a bg-less signal");
+        },
+      });
+    } catch (err) {
+      threw = err;
+    }
+    expect(threw).toBeNull();
+    expect(r).not.toBe("noop");
   });
 });
 
