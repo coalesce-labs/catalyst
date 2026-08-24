@@ -1,0 +1,53 @@
+{
+  "packId": "catalyst-meta",
+  "identity": {
+    "description": "Workflow discovery, creation, reorganization, and audit tools: learn from community patterns, extend Catalyst with new workflows, safely reorganize directory structures, and audit plugin health.",
+    "author": {
+      "name": "Coalesce Labs",
+      "email": "hello@coalesce.dev",
+      "url": "https://github.com/coalesce-labs"
+    },
+    "homepage": "https://github.com/coalesce-labs/catalyst",
+    "repository": "https://github.com/coalesce-labs/catalyst.git",
+    "keywords": [
+      "meta",
+      "discovery",
+      "creation",
+      "best-practices",
+      "community",
+      "workflows",
+      "reorganize",
+      "audit",
+      "references"
+    ],
+    "license": "MIT"
+  },
+  "distribution": {
+    "claude": {
+      "enabled": true,
+      "marketplace": {
+        "description": "Workflow discovery and creation: learn from community patterns and extend Catalyst. Optional plugin for advanced users.",
+        "category": "development",
+        "keywords": [
+          "meta",
+          "discovery",
+          "creation",
+          "best-practices"
+        ]
+      }
+    },
+    "codex": {
+      "enabled": true
+    },
+    "agentsSkills": {
+      "enabled": true
+    }
+  },
+  "skills": {
+    "validate-frontmatter": {
+      "effects": ["file-read", "file-write"],
+      "invocation": "auto",
+      "exposure": ["catalog"]
+    }
+  }
+}

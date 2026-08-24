@@ -7,14 +7,16 @@
 // no writes); Phase 3 adds loss reporting; Phase 4 adds `--target`/`--write`;
 // Phase 6 adds `extraction-readiness`.
 
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 
 import { validateRenderedPack } from "./core/contract.mjs";
 import { renderPluginPack, listPluginRelPaths } from "./providers/local-provisional.mjs";
+import { buildLossReport, hasUnacknowledgedLosses, lossCounts, renderLossReportMarkdown } from "./core/loss.mjs";
 
 export const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
+const NON_CLAUDE_TARGETS = ["codex", "agentsSkills"];
 
 function readPackId(repoRootPath, pluginRelPath) {
   const plugin = JSON.parse(
@@ -49,8 +51,23 @@ export function renderAllPacks(repoRootPath = repoRoot) {
   });
 }
 
+/** computeLossReport(results, renderedAt) → the loss report across both non-Claude targets. */
+export function computeLossReport(results, renderedAt) {
+  const packs = results.map(({ packId, pack }) => ({ packId, pack }));
+  return buildLossReport({ packs, targetNames: NON_CLAUDE_TARGETS, renderedAt });
+}
+
+function writeLossReportArtifacts(repoRootPath, report) {
+  const distDir = resolve(repoRootPath, "scripts/packaging/dist");
+  mkdirSync(distDir, { recursive: true });
+  writeFileSync(resolve(distDir, "loss-report.json"), JSON.stringify(report, null, 2) + "\n");
+  writeFileSync(resolve(distDir, "LOSSES.md"), renderLossReportMarkdown(report) + "\n");
+}
+
 function cmdRender(args) {
   const dryRun = args.includes("--dry-run");
+  const allowLosses = args.includes("--allow-losses");
+  const write = args.includes("--write");
   const results = renderAllPacks(repoRoot);
 
   let totalSkills = 0;
@@ -78,7 +95,26 @@ function cmdRender(args) {
     if (!dryRun) process.exit(1);
   }
 
-  return { results, totalSkills, totalAgents, invalid };
+  const renderedAt = new Date().toISOString();
+  const report = computeLossReport(results, renderedAt);
+  const counts = lossCounts(report);
+  console.log("");
+  for (const [targetName, c] of Object.entries(counts)) {
+    console.log(`LOSSES ${targetName}: omitted=${c.omitted} degraded=${c.degraded} warnings=${c.warnings}`);
+  }
+
+  if (write) {
+    writeLossReportArtifacts(repoRoot, report);
+    console.log(`wrote scripts/packaging/dist/loss-report.json and LOSSES.md`);
+  }
+
+  const unacknowledged = hasUnacknowledgedLosses(report);
+  if (unacknowledged && !allowLosses && !dryRun) {
+    console.log("FAILED: unacknowledged losses (omitted/degraded entries) — pass --allow-losses to proceed anyway");
+    process.exit(1);
+  }
+
+  return { results, totalSkills, totalAgents, invalid, report };
 }
 
 function main() {
@@ -88,7 +124,7 @@ function main() {
       cmdRender(args);
       break;
     default:
-      console.error(`Unknown command: ${command ?? "(none)"}. Usage: cli.mjs render [--dry-run]`);
+      console.error(`Unknown command: ${command ?? "(none)"}. Usage: cli.mjs render [--dry-run] [--allow-losses] [--write]`);
       process.exit(1);
   }
 }

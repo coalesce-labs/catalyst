@@ -8,7 +8,8 @@ import { describe, test, expect } from "bun:test";
 import { readdirSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-import { renderAllPacks, repoRoot } from "../cli.mjs";
+import { renderAllPacks, computeLossReport, repoRoot } from "../cli.mjs";
+import { hasUnacknowledgedLosses } from "../core/loss.mjs";
 
 function realSkillCountAcrossRepo() {
   let total = 0;
@@ -39,5 +40,28 @@ describe("renderAllPacks — cli.mjs's render command core", () => {
     const total = results.reduce((sum, r) => sum + r.pack.skills.length, 0);
     expect(total).toBeGreaterThan(0);
     expect(total).toBe(realSkillCountAcrossRepo());
+  });
+});
+
+describe("computeLossReport — the real repo's day-one cohort", () => {
+  test("exactly the 3 opted-in skills (linearis, validate-frontmatter, setup-catalyst) are NOT omitted; everything else is — the large loss report is the designed outcome, not a bug", () => {
+    const results = renderAllPacks(repoRoot);
+    const report = computeLossReport(results, "2026-01-01T00:00:00.000Z");
+    expect(hasUnacknowledgedLosses(report)).toBe(true); // no silent caps: this MUST be visible
+
+    const totalSkills = results.reduce((sum, r) => sum + r.pack.skills.length, 0);
+    const omittedSkillIds = report.targets.codex.omitted.map((e) => e.skill);
+    const emittedCount = totalSkills - omittedSkillIds.length;
+
+    // Count-based, not boolean: `omitted + emitted === totalSkills` — a skill
+    // lost between the two buckets is a failure, not a smaller clean number.
+    expect(omittedSkillIds.length + emittedCount).toBe(totalSkills);
+    expect(emittedCount).toBe(3);
+    // The opted-in cohort must NOT appear in the omitted list...
+    expect(omittedSkillIds).not.toContain("catalyst-dev/linearis");
+    expect(omittedSkillIds).not.toContain("catalyst-meta/validate-frontmatter");
+    expect(omittedSkillIds).not.toContain("catalyst-foundry/setup-catalyst");
+    // ...while an ordinary, unclassified skill must.
+    expect(omittedSkillIds).toContain("catalyst-dev/commit");
   });
 });
