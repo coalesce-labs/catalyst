@@ -386,8 +386,12 @@ import {
   getDrainedMarkerPath, // CTL-1321: shared resolver for the drain.drained sentinel
   HEARTBEAT_GRACE_MS, // CTL-1191: dead-host grace for surviving-roster recovery gate
   HEARTBEAT_RESTORE_HOLD_MS, // CTL-1091: restore-side deflap hold for the dispatch roster
-  isInProcessDispatchMode, // CTL-1457 (T2): sdk|codex-exec occupancy gate predicate
 } from "./config.mjs";
+// CTL-2116 (Phase 4): armsInProcessOccupancy replaces the inline
+// `isInProcessDispatchMode(dispatchMode) || hasInProcessRoute` gate at every USE
+// site so a thunked hasInProcessRoute (the daemon's live policy re-read) is
+// re-evaluated per tick rather than boot-captured. See occupancy-arm.mjs.
+import { armsInProcessOccupancy } from "./occupancy-arm.mjs";
 import {
   emitDrainedEvent as defaultEmitDrainedEvent, // CTL-1095: drained sentinel
   maybeEmitDrainIgnored as defaultMaybeEmitDrainIgnored, // CTL-1678: drain-ignored tripwire
@@ -6876,8 +6880,11 @@ export function schedulerTick(
   // executor while the NODE mode is still bg (hasInProcessRoute) — the per-phase
   // rollout's routed no-bg worker must be counted too. countSdkInflight stays 0 on a
   // node nothing routes in-process, so a bg node with an empty map is unchanged.
+  // CTL-2116 (Phase 4): armsInProcessOccupancy re-evaluates hasInProcessRoute fresh
+  // when it is a thunk (the daemon passes one now that the routing map is live) —
+  // see occupancy-arm.mjs. Byte-identical for a boolean/undefined caller.
   let sdkInflight = 0;
-  if (isInProcessDispatchMode(dispatchMode) || hasInProcessRoute) {
+  if (armsInProcessOccupancy(dispatchMode, hasInProcessRoute)) {
     try {
       sdkInflight = countSdkInflight(orchDir);
     } catch {
@@ -8469,8 +8476,9 @@ export function schedulerTick(
   // way sdk does; the bg/oneshot-legacy path never recomputes (sdkInFlightCount stays
   // === inFlightCount) and keeps the byte-identical freeSlots formula below. CTL-1457
   // (N1): also re-sample when a per-phase in-process route is armed on a bg node.
+  // CTL-2116 (Phase 4): armsInProcessOccupancy re-evaluates a thunked route live.
   let sdkInFlightCount = inFlightCount;
-  if (isInProcessDispatchMode(dispatchMode) || hasInProcessRoute) {
+  if (armsInProcessOccupancy(dispatchMode, hasInProcessRoute)) {
     let resampledSdkInflight = sdkInflight;
     try {
       resampledSdkInflight = countSdkInflight(orchDir);
@@ -8509,7 +8517,8 @@ export function schedulerTick(
     livenessFresh && !draining
       ? // CTL-1457 (N1): the in-process budget formula also applies when a per-phase
         // route arms in-process occupancy on a bg node (hasInProcessRoute).
-        isInProcessDispatchMode(dispatchMode) || hasInProcessRoute
+        // CTL-2116 (Phase 4): armsInProcessOccupancy re-evaluates a thunked route live.
+        armsInProcessOccupancy(dispatchMode, hasInProcessRoute)
         ? // CTL-1367 P2 (item b): under executor=sdk take the MIN of two budgets so
           // whichever formula correctly accounts for the slot the other missed wins:
           //  (1) the re-sampled SDK count (sdkInFlightCount) — catches same-tick
