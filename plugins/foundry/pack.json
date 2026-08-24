@@ -1,0 +1,53 @@
+{
+  "packId": "catalyst-foundry",
+  "identity": {
+    "description": "Setup, maintenance, and compounding upkeep of the Catalyst framework and the thoughts/ knowledge base: framework diagnostics/repair (setup-catalyst), terminal launcher config (setup-warp), and research-doc curation (research-curate). Future home for the compound-engineering retro/learning loop.",
+    "author": {
+      "name": "Coalesce Labs",
+      "email": "hello@coalesce-labs.com",
+      "url": "https://github.com/coalesce-labs"
+    },
+    "homepage": "https://github.com/coalesce-labs/catalyst",
+    "repository": "https://github.com/coalesce-labs/catalyst.git",
+    "keywords": [
+      "setup",
+      "maintenance",
+      "thoughts",
+      "curation",
+      "diagnostics"
+    ],
+    "license": "MIT",
+    "dependencies": [
+      "catalyst-dev"
+    ]
+  },
+  "distribution": {
+    "claude": {
+      "enabled": true,
+      "marketplace": {
+        "description": "Setup, maintenance, and compounding upkeep of the Catalyst framework and the thoughts/ knowledge base: framework diagnostics/repair (setup-catalyst), terminal launcher config (setup-warp), and research-doc curation (research-curate).",
+        "category": "development",
+        "keywords": [
+          "setup",
+          "maintenance",
+          "thoughts",
+          "curation",
+          "diagnostics"
+        ]
+      }
+    },
+    "codex": {
+      "enabled": true
+    },
+    "agentsSkills": {
+      "enabled": true
+    }
+  },
+  "skills": {
+    "setup-catalyst": {
+      "effects": ["file-read", "file-write", "shell-exec"],
+      "invocation": "explicit",
+      "exposure": ["catalog"]
+    }
+  }
+}

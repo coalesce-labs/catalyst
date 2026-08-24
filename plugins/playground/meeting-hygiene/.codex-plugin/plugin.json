@@ -1,0 +1,34 @@
+{
+  "name": "catalyst-meeting-hygiene",
+  "version": "2.0.0",
+  "description": "Meeting workflow skills: agenda creation, transcript processing, end-of-day batch cleanup, and effectiveness retros — extracted from catalyst-pm",
+  "author": {
+    "name": "Coalesce Labs",
+    "email": "hello@coalesce.dev",
+    "url": "https://github.com/coalesce-labs"
+  },
+  "homepage": "https://github.com/coalesce-labs/catalyst",
+  "repository": "https://github.com/coalesce-labs/catalyst.git",
+  "keywords": [
+    "meetings",
+    "agenda",
+    "notes",
+    "transcripts",
+    "productivity"
+  ],
+  "license": "MIT",
+  "interface": {
+    "displayName": "Catalyst Meeting Hygiene",
+    "shortDescription": "Meeting workflow skills: agenda creation, transcript processing, end-of-day batch cleanup, and effectiveness retros — extracted…",
+    "longDescription": "Meeting workflow skills: agenda creation, transcript processing, end-of-day batch cleanup, and effectiveness retros — extracted from catalyst-pm",
+    "developerName": "Coalesce Labs",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Meeting workflow skills: agenda creation, transcript processing, end-of-day batch cleanup, and effectiveness retros — extracted…"
+    ]
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "packId": "catalyst-discovery",
+  "identity": {
+    "description": "User research, metrics, experimentation, and prototyping skills — the discovery/research companion to catalyst-pm",
+    "author": {
+      "name": "Coalesce Labs",
+      "email": "hello@coalesce.dev",
+      "url": "https://github.com/coalesce-labs"
+    },
+    "homepage": "https://github.com/coalesce-labs/catalyst",
+    "repository": "https://github.com/coalesce-labs/catalyst.git",
+    "keywords": [
+      "user-research",
+      "metrics",
+      "experimentation",
+      "prototyping",
+      "discovery",
+      "jtbd",
+      "analytics",
+      "pm"
+    ],
+    "license": "MIT"
+  },
+  "distribution": {
+    "claude": {
+      "enabled": true,
+      "marketplace": {
+        "description": "User research, metrics, experimentation, and prototyping skills — upstream discovery work for product teams. Enable when running user research, defining metrics, or building prototypes.",
+        "category": "productivity",
+        "keywords": [
+          "user-research",
+          "metrics",
+          "experimentation",
+          "prototyping",
+          "discovery",
+          "jtbd",
+          "analytics",
+          "pm"
+        ]
+      }
+    },
+    "codex": {
+      "enabled": true
+    },
+    "agentsSkills": {
+      "enabled": true
+    }
+  },
+  "skills": {}
+}

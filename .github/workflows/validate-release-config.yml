@@ -12,3 +12,6 @@ jobs:
 
       - name: Validate release-please config
         run: bash scripts/validate-release-config.sh
+
+      - name: Test validate-release-config.sh (CTL-1463)
+        run: bash scripts/__tests__/validate-release-config.test.sh

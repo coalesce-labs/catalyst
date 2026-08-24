@@ -13,5 +13,5 @@ assert "README exists"             "test -f '$ROOT/plugins/legacy/README.md'"
 assert "CHANGELOG exists"          "test -f '$ROOT/plugins/legacy/CHANGELOG.md'"
 assert "registered in marketplace" "jq -e '[.plugins[].name]|index(\"catalyst-legacy\")' '$ROOT/.claude-plugin/marketplace.json' >/dev/null"
 assert "marketplace source path"   "jq -e '.plugins[]|select(.name==\"catalyst-legacy\")|.source==\"./plugins/legacy\"' '$ROOT/.claude-plugin/marketplace.json' >/dev/null"
-assert "check-plugin-version knows legacy" "grep -qE 'PLUGINS=\([^)]*\"legacy\"' '$ROOT/scripts/check-plugin-version.sh'"
+assert "check-plugin-version knows legacy" "jq -e '.packages[\"plugins/legacy\"]' '$ROOT/release-please-config.json' >/dev/null && grep -q 'release-please-config.json' '$ROOT/scripts/check-plugin-version.sh'"
 exit $fail

@@ -1,6 +1,6 @@
 ---
 name: phase-triage
-description: Phase agent that triages a Linear ticket — expands acronyms, classifies (feature/bug/docs/refactor/chore), identifies genuine blockers (a semantic second-pass over the backlog — NOT a prose scrape; CTL-838), estimates scope, writes triage.json, and posts a triage analysis comment to Linear. Triage completion is signaled by that comment plus the local triage.json — there is no `triaged` label. Emits phase.triage.complete.<TICKET> on success and phase.triage.failed.<TICKET> on error. Dispatched by the phase-agent orchestrator (CTL-452) via slash command — `user-invocable: true` so the dispatcher's `claude --bg "/catalyst-dev:phase-triage ..."` resolves.
+description: "Phase agent that triages a Linear ticket — expands acronyms, classifies (feature/bug/docs/refactor/chore), identifies genuine blockers (a semantic second-pass over the backlog — NOT a prose scrape; CTL-838), estimates scope, writes triage.json, and posts a triage analysis comment to Linear. Triage completion is signaled by that comment plus the local triage.json — there is no `triaged` label. Emits phase.triage.complete.<TICKET> on success and phase.triage.failed.<TICKET> on error. Dispatched by the phase-agent orchestrator (CTL-452) via slash command — `user-invocable: true` so the dispatcher's `claude --bg \"/catalyst-dev:phase-triage ...\"` resolves."
 user-invocable: true
 disable-model-invocation: false  # invocable by model (Skill tool) AND user (slash command)
 allowed-tools: Bash, Read, Write, Grep

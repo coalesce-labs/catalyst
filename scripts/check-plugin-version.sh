@@ -21,13 +21,22 @@ if [[ -z "$CHANGED_FILES" ]]; then
   exit 0
 fi
 
-# Check each plugin directory
-PLUGINS=("dev" "pm" "pm-ops" "analytics" "debugging" "meta" "legacy")
+# Check every release package from the same config release-please uses. This
+# keeps playground paths and newly added plugins covered without a second,
+# silently drifting hardcoded roster.
+REPO_ROOT=$(git rev-parse --show-toplevel)
+RELEASE_CONFIG="$REPO_ROOT/release-please-config.json"
+if [[ ! -f "$RELEASE_CONFIG" ]]; then
+  echo "❌ release-please-config.json not found"
+  exit 1
+fi
+PLUGIN_DIRS=()
+while IFS= read -r plugin_dir; do
+  PLUGIN_DIRS+=("$plugin_dir")
+done < <(jq -r '.packages | keys[]' "$RELEASE_CONFIG")
 NEEDS_VERSION_BUMP=()
 
-for plugin in "${PLUGINS[@]}"; do
-  PLUGIN_DIR="plugins/$plugin"
-
+for PLUGIN_DIR in "${PLUGIN_DIRS[@]}"; do
   if [[ ! -d "$PLUGIN_DIR" ]]; then
     continue
   fi
@@ -39,12 +48,16 @@ for plugin in "${PLUGINS[@]}"; do
     continue
   fi
 
-  # Check if plugin.json version was also changed
-  VERSION_CHANGED=$(echo "$CHANGED_FILES" | grep "^$PLUGIN_DIR/.claude-plugin/plugin.json$" || true)
+  # Check if plugin.json version was also changed — CTL-1463: .codex-plugin/
+  # plugin.json is an equally valid bump target now that it carries a second
+  # extra-files-managed version, so a Codex-only manifest change (e.g. a
+  # release-please bump, or a manual regen after CTL-1461 lands) must not
+  # mis-fire this gate as "plugin files changed but version not bumped".
+  VERSION_CHANGED=$(echo "$CHANGED_FILES" | grep -E "^$PLUGIN_DIR/\.(claude|codex)-plugin/plugin\.json$" || true)
 
   # If plugin files changed but version didn't, flag it
   if [[ -n "$PLUGIN_CHANGED" ]] && [[ -z "$VERSION_CHANGED" ]]; then
-    NEEDS_VERSION_BUMP+=("$plugin")
+    NEEDS_VERSION_BUMP+=("$PLUGIN_DIR")
   fi
 done
 
@@ -67,9 +80,10 @@ if [[ ${#NEEDS_VERSION_BUMP[@]} -gt 0 ]]; then
     echo "ℹ️  Plugin files changed — version bump will be handled by Release Please"
     echo ""
     echo "The following plugins have modifications:"
-    for plugin in "${NEEDS_VERSION_BUMP[@]}"; do
-      echo "  📦 catalyst-$plugin"
-      echo "$CHANGED_FILES" | grep "^plugins/$plugin/" | sed 's/^/     - /'
+    for plugin_dir in "${NEEDS_VERSION_BUMP[@]}"; do
+      component=$(jq -r --arg pkg "$plugin_dir" '.packages[$pkg].component // $pkg' "$RELEASE_CONFIG")
+      echo "  📦 $component"
+      echo "$CHANGED_FILES" | grep "^$plugin_dir/" | sed 's/^/     - /'
     done
     echo ""
     echo "✅ Conventional commits detected — Release Please will bump versions on merge"
@@ -80,9 +94,10 @@ if [[ ${#NEEDS_VERSION_BUMP[@]} -gt 0 ]]; then
   echo "⚠️  Plugin files changed but version not bumped!"
   echo ""
   echo "The following plugins have modified files:"
-  for plugin in "${NEEDS_VERSION_BUMP[@]}"; do
-    echo "  📦 catalyst-$plugin"
-    echo "$CHANGED_FILES" | grep "^plugins/$plugin/" | sed 's/^/     - /'
+  for plugin_dir in "${NEEDS_VERSION_BUMP[@]}"; do
+    component=$(jq -r --arg pkg "$plugin_dir" '.packages[$pkg].component // $pkg' "$RELEASE_CONFIG")
+    echo "  📦 $component"
+    echo "$CHANGED_FILES" | grep "^$plugin_dir/" | sed 's/^/     - /'
   done
   echo ""
   echo "💡 Recommended action:"

@@ -1,7 +1,7 @@
 ---
 name: briefing-followup
 description:
-  Interactive walk-through of today's morning briefing. Loads the briefing markdown at
+  "Interactive walk-through of today's morning briefing. Loads the briefing markdown at
   thoughts/briefings/YYYY-MM-DD.md (built by [[morning-briefing]]), parses the structured
   decisions: frontmatter, walks the user through each open decision, and executes the
   selected action via supported handlers — schedule calendar entry, file Linear ticket,
@@ -9,7 +9,7 @@ description:
   code-drift ticket / defer with a drift note), plus compound-engineering ADR proposals
   from the ticket-compound curator (apply / edit / defer / reject — apply is the only
   writer of docs/adrs.md). Phase 4 (CTL-465) writes resolutions back to the briefing
-  markdown.
+  markdown."
 disable-model-invocation: true
 user-invocable: true
 allowed-tools: Read, Write, Edit, Bash, Task, mcp__*

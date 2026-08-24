@@ -57,12 +57,24 @@ A `next` branch + auto-updating companion marketplace is designed but not built 
 |---|---|---|
 | `plugins/<x>/version.txt` | Canonical version (`release-type: simple`) | Release Please |
 | `plugins/<x>/.claude-plugin/plugin.json` | Plugin version — gate for Claude Code auto-updates | Release Please (`extra-files` jsonpath `$.version`) |
+| `plugins/<x>/.codex-plugin/plugin.json` | Codex plugin version (CTL-1463) | Release Please (`extra-files` jsonpath `$.version`) |
 | `plugins/<x>/CHANGELOG.md` | Per-plugin changelog | Release Please |
-| `.claude-plugin/marketplace.json` | Plugin registry (paths only, **no versions**) | Manual |
+| `.claude-plugin/marketplace.json` | Claude plugin registry (paths only, **no versions**) | Manual |
+| `.agents/plugins/marketplace.json` | Codex plugin catalog (paths only, **no versions**) (CTL-1463) | Generated (`bun scripts/packaging/cli.mjs render --target codex --write`) |
 
 The `version` field in `plugin.json` is the auto-update gate: at session start Claude Code fetches
 the marketplace repo, and if `plugin.json.version` at the new HEAD differs from the installed
 version, it refreshes the cache. Same version → skipped even if code changed.
+
+**CTL-1463 invariant**: release-please writes BOTH `plugin.json` files' `$.version` in the same
+commit, via two `extra-files` entries per package — the Claude and Codex manifests can never drift
+because they are never bumped separately. `scripts/packaging/cli.mjs` (the vendor-neutral packaging
+pipeline — see `docs/specs/accepted/vendor-neutral-packaging/spec.md`) never writes a
+version itself: its Claude emitter copies `$.version` verbatim from the existing file, and its Codex
+emitter seeds from the Claude manifest on create and FAILS on regenerate if the two disagree. The
+compiler reads and asserts a version; it is never the version's source. `.codex-plugin/` and
+`.agents/plugins/` are **generated, gitattributes-marked** trees — never hand-edited — regenerated
+with `bun scripts/packaging/cli.mjs render --target <claude|codex|agentsSkills> --write`.
 
 ## Commit Conventions
 

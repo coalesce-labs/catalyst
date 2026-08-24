@@ -100,3 +100,6 @@ docs/specs/**/*.png
 # Worktree-safety machine-local noise marker (see MACHINE_LOCAL_NOISE in
 # plugins/dev/scripts/execution-core/worktree-safety.mjs)
 .orphaned_at
+
+# CTL-1463: generated packaging output — never hand-edited, never committed
+scripts/packaging/dist/
