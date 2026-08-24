@@ -34,6 +34,10 @@ import { readClusterLivenessFromLokiSync } from "../loki-liveness-sync.mjs";
 import { writeSecretConfig } from "../write-secret-config.mjs";
 import { listInFlightTickets } from "../scheduler.mjs";
 import { clusterSync } from "../cluster-sync.mjs";
+// CTL-2116: `catalyst cluster route <verb>` lives in its own module (kept out of
+// this file so it doesn't grow past readability) but is dispatched from this
+// file's main() switch below, alongside every other cluster verb.
+import { runRoute } from "./cluster-route.mjs";
 
 // ── Roster I/O helpers (shared across all mutating verbs) ──────────────────
 
@@ -51,7 +55,7 @@ function writeRosterAtomic(hostsPath, roster) {
   renameSync(tmp, hostsPath);
 }
 
-const defaultGit = (args) => execFileSync("git", args, { encoding: "utf8" });
+export const defaultGit = (args) => execFileSync("git", args, { encoding: "utf8" });
 
 function gitCommitRoster(git, hostsPath, message) {
   try {
@@ -66,14 +70,14 @@ function gitCommitRoster(git, hostsPath, message) {
 // the old reader/writer divergence is structurally impossible. When no cluster
 // clone is present the verbs fall back to the legacy .catalyst/hosts.json path.
 
-function clusterJsonPath(clusterDir) {
+export function clusterJsonPath(clusterDir) {
   return resolve(clusterDir, "cluster.json");
 }
 
 // hasClusterRepo — true when a catalyst-cluster clone with a cluster.json is
 // present (the same signal the reader keys off: cluster.json present → cluster-repo
 // is the active roster source). A bare dir without cluster.json is NOT a cluster repo.
-function hasClusterRepo(clusterDir) {
+export function hasClusterRepo(clusterDir) {
   return existsSync(clusterJsonPath(clusterDir));
 }
 
@@ -84,23 +88,31 @@ function readClusterRoster(clusterDir) {
   return roster.filter((h) => typeof h === "string" && h.length > 0);
 }
 
-// writeClusterRoster — rewrite cluster.json with `roster` set, preserving every
-// other key (anchorIssue, projects, defaults, schemaVersion). Pretty-printed +
-// trailing newline so the committed diff stays minimal/readable.
-function writeClusterRoster(clusterDir, roster) {
+// writeClusterJson — rewrite cluster.json with `patch` merged in at the top level,
+// preserving every other key. Pretty-printed + trailing newline so the committed
+// diff stays minimal/readable. CTL-2116: extracted from the roster-only
+// writeClusterRoster below so cli/cluster-route.mjs's policy writer reuses the
+// same edit/commit/push primitive rather than re-deriving it.
+export function writeClusterJson(clusterDir, patch) {
   const path = clusterJsonPath(clusterDir);
   const cfg = readClusterConfig(clusterDir) ?? {};
-  const next = { ...cfg, roster };
+  const next = { ...cfg, ...patch };
   const tmp = `${path}.tmp.${process.pid}`;
   writeFileSync(tmp, JSON.stringify(next, null, 2) + "\n");
   renameSync(tmp, path);
+}
+
+// writeClusterRoster — rewrite cluster.json with `roster` set, preserving every
+// other key (anchorIssue, projects, defaults, schemaVersion).
+function writeClusterRoster(clusterDir, roster) {
+  writeClusterJson(clusterDir, { roster });
 }
 
 // commitAndPushCluster — commit cluster.json in the clone and push so every node's
 // cluster-sync pull (pullClusterRepo) propagates the change. Best-effort: a commit
 // or push failure is surfaced (returned) but never throws — the local write already
 // landed, and a failed push leaves the change committed for a later retry/manual push.
-function commitAndPushCluster(git, clusterDir, message, { push = true } = {}) {
+export function commitAndPushCluster(git, clusterDir, message, { push = true } = {}) {
   const path = clusterJsonPath(clusterDir);
   try {
     git(["-C", clusterDir, "add", path]);
@@ -581,6 +593,7 @@ export function main(argv = process.argv.slice(2)) {
     case "tune":      code = runTune(rest); break;
     case "sync":      code = runSync(rest); break;
     case "ownership": code = runOwnership(rest); break;
+    case "route":     code = runRoute(rest); break;
     default:
       process.stderr.write(`catalyst cluster: unknown verb '${verb ?? ""}'\n`);
       code = 2;

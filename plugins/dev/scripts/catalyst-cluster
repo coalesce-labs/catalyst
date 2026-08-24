@@ -13,6 +13,7 @@
 #   set-anchor   Set the liveness anchor ticket (requires restart)     [restart]
 #   drain        Toggle the local drain flag                           [live]
 #   tune         Write a concurrency param to Layer-2                  [live]
+#   route        Set/clear/inspect the fleet executor-routing policy   [live]
 #
 # The token is a bearer secret: printed once to stdout, written to a 0600 store
 # under ${CATALYST_DIR:-~/catalyst}/cluster/join-token.json. Never logged to a
@@ -50,6 +51,11 @@ usage: catalyst cluster <verb>
                                       (remote-host drain: T13 — not yet implemented)
   tune <param> <value>                Write a concurrency param to Layer-2      [live]
                                       params: maxParallel, minParallel, maxParallelCeiling
+  route <verb> ...                    Fleet executor-routing policy (CTL-2116)  [live]
+                                      set <phase> <executor> | clear <phase> |
+                                      all <executor> --yes | rollback | show | history
+                                      (propagates to every host on its next
+                                      cluster-sync pull, ≤5 min — no restart)
   -h, --help                          Show this help
 EOF
 }
@@ -120,7 +126,7 @@ EOF
 
 case "${1:-}" in
   join-token) shift; cmd_join_token "$@" ;;
-  status|add|remove|rename|set-anchor|tune)
+  status|add|remove|rename|set-anchor|tune|route)
     [[ -n "$JS_RUN" ]] || { echo "catalyst cluster: no bun/node runtime found" >&2; exit 1; }
     [[ -f "$CLI_MJS" ]] || { echo "catalyst cluster: missing $CLI_MJS" >&2; exit 1; }
     exec "$JS_RUN" "$CLI_MJS" "$@" ;;

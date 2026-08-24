@@ -791,7 +791,11 @@ const EXECUTOR_BY_NODE_CLASS = Object.freeze({
 // the harness-qualified name and have it resolve to the canonical id. Applied
 // inside resolveExecutor (and resolveExecutorForPhase) BEFORE the EXECUTORS
 // membership check. Purely additive — never renames a stored value.
-const EXECUTOR_ALIASES = Object.freeze({
+// CTL-2116: exported (was module-private) so cli/cluster-route.mjs can validate
+// a `route set <phase> <executor>` value against the SAME alias table
+// resolveExecutorForPhase uses at read time, rather than hand-rolling a second,
+// silently-divergent copy.
+export const EXECUTOR_ALIASES = Object.freeze({
   "claude-bg": "bg",
   "claude-sdk": "sdk",
   "claude-oneshot": "oneshot-legacy",
