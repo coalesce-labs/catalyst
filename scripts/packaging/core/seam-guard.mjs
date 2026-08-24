@@ -92,7 +92,9 @@ export function countProviderImporters({ repoRoot, packagingRoot, providerBasena
   const absRoot = join(repoRoot, packagingRoot);
   const files = listFilesRecursive(absRoot, new Set(excludeDirNames)).filter((f) => !f.endsWith(`/${providerBasename}`));
   const importers = [];
-  const pattern = new RegExp(`providers/${providerBasename.replace(/\./g, "\\.")}`);
+  // Escape EVERY regex metacharacter, not just dots (CodeQL js/incomplete-sanitization —
+  // dots-only escaping leaves backslashes and the other metacharacters live in the pattern).
+  const pattern = new RegExp(`providers/${providerBasename.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`);
   for (const file of files) {
     const contents = readFileSync(file, "utf8");
     if (contents.split("\n").some((line) => PROVIDERS_REFERENCE.test(line) && pattern.test(line))) {
