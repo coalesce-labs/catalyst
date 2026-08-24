@@ -1,0 +1,23 @@
+{
+  "name": "catalyst-pm",
+  "version": "7.6.0",
+  "description": "Product strategy toolkit — PRDs, strategy docs, priorities, and release planning",
+  "author": {
+    "name": "Coalesce Labs",
+    "email": "hello@coalesce.dev",
+    "url": "https://github.com/coalesce-labs"
+  },
+  "homepage": "https://github.com/coalesce-labs/catalyst",
+  "repository": "https://github.com/coalesce-labs/catalyst.git",
+  "keywords": [
+    "product-management",
+    "strategy",
+    "prd",
+    "north-star",
+    "priorities",
+    "decisions",
+    "launch",
+    "release"
+  ],
+  "license": "MIT"
+}

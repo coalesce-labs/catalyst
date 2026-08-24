@@ -39,8 +39,12 @@ for plugin in "${PLUGINS[@]}"; do
     continue
   fi
 
-  # Check if plugin.json version was also changed
-  VERSION_CHANGED=$(echo "$CHANGED_FILES" | grep "^$PLUGIN_DIR/.claude-plugin/plugin.json$" || true)
+  # Check if plugin.json version was also changed — CTL-1463: .codex-plugin/
+  # plugin.json is an equally valid bump target now that it carries a second
+  # extra-files-managed version, so a Codex-only manifest change (e.g. a
+  # release-please bump, or a manual regen after CTL-1461 lands) must not
+  # mis-fire this gate as "plugin files changed but version not bumped".
+  VERSION_CHANGED=$(echo "$CHANGED_FILES" | grep -E "^$PLUGIN_DIR/\.(claude|codex)-plugin/plugin\.json$" || true)
 
   # If plugin files changed but version didn't, flag it
   if [[ -n "$PLUGIN_CHANGED" ]] && [[ -z "$VERSION_CHANGED" ]]; then

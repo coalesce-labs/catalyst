@@ -1,0 +1,30 @@
+name: packaging-gate
+
+# Guards the CTL-1463 vendor-neutral packaging pipeline (scripts/packaging/):
+# the RenderedPack contract, the CTL-1461 adapter seam, the pack.json
+# manifests, the loss classifier, and the claude/codex/agents-skills
+# emitters — most load-bearingly, the byte-exact Claude round-trip that
+# proves regeneration reproduces the committed tree.
+#
+# Same shape as skills-gate.yml and for the same reason: every PR, no
+# `paths:` filter. execution-core-tests.yml's detect-changes step is an
+# explicit allow-list that does not include scripts/packaging/**, so scoping
+# this gate behind that job would report `skipped` on exactly the PRs it
+# exists to check.
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  packaging-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Run packaging test suite
+        run: bun test scripts/packaging/__tests__/

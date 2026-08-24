@@ -120,6 +120,25 @@ if [[ -f "$MANIFEST" ]]; then
     fi
   done
 
+  # CTL-1463: also grade .codex-plugin/plugin.json against the same manifest,
+  # in the SAME loop and DRIFTED array as the Claude check above (not a
+  # separate check) — the two files' drift is the same failure mode
+  # (extra-files fell out of sync), and a message must name WHICH manifest
+  # drifted so an operator isn't left guessing which file to look at.
+  for pkg in $(jq -r '.packages | keys[]' "$CONFIG"); do
+    CODEX_JSON="$REPO_ROOT/$pkg/.codex-plugin/plugin.json"
+    manifest_ver=$(jq -r --arg pkg "$pkg" '.[$pkg] // empty' "$MANIFEST")
+
+    if [[ -f "$CODEX_JSON" ]]; then
+      codex_ver=$(jq -r '.version // empty' "$CODEX_JSON")
+      codex_name=$(jq -r '.name // empty' "$CODEX_JSON")
+
+      if [[ -n "$manifest_ver" ]] && [[ -n "$codex_ver" ]] && [[ "$manifest_ver" != "$codex_ver" ]]; then
+        DRIFTED+=("$codex_name: .codex-plugin/plugin.json=$codex_ver manifest=$manifest_ver")
+      fi
+    fi
+  done
+
   if [[ ${#DRIFTED[@]} -gt 0 ]]; then
     fail "plugin.json versions don't match manifest (other workspaces are getting stale plugins!)"
     for msg in "${DRIFTED[@]}"; do
@@ -127,7 +146,7 @@ if [[ -f "$MANIFEST" ]]; then
     done
     echo "  release-please extra-files should keep these in sync. Check if the release PR updated plugin.json."
   else
-    pass "plugin.json versions match manifest"
+    pass "plugin.json versions match manifest (both .claude-plugin and .codex-plugin)"
   fi
 else
   fail "Missing .release-please-manifest.json"

@@ -1,0 +1,219 @@
+{
+  "name": "catalyst",
+  "description": "Research-driven development workflow with Linear integration, PM tools, and infrastructure research agents — Codex plugin catalog.",
+  "owner": {
+    "name": "Coalesce Labs",
+    "email": "hello@coalesce.dev"
+  },
+  "plugins": [
+    {
+      "name": "catalyst-dev",
+      "source": "./plugins/dev",
+      "description": "Complete development workflow: research → plan → implement → validate → ship. Includes research agents, planning tools, handoff system, Linear integration, and PM commands.",
+      "author": {
+        "name": "Coalesce Labs",
+        "email": "hello@coalesce-labs.com"
+      },
+      "homepage": "https://github.com/coalesce-labs/catalyst",
+      "repository": "https://github.com/coalesce-labs/catalyst.git",
+      "license": "MIT",
+      "category": "development",
+      "keywords": [
+        "workflow",
+        "research",
+        "planning",
+        "agents",
+        "linear",
+        "handoff",
+        "pm"
+      ]
+    },
+    {
+      "name": "catalyst-pm",
+      "source": "./plugins/playground/pm",
+      "description": "Product strategy toolkit — PRDs, strategy docs, priorities, and release planning",
+      "author": {
+        "name": "Coalesce Labs",
+        "email": "hello@coalesce.dev"
+      },
+      "homepage": "https://github.com/coalesce-labs/catalyst",
+      "repository": "https://github.com/coalesce-labs/catalyst.git",
+      "license": "MIT",
+      "category": "productivity",
+      "keywords": [
+        "pm",
+        "linear",
+        "project-management",
+        "cycles",
+        "milestones",
+        "backlog",
+        "github"
+      ]
+    },
+    {
+      "name": "catalyst-analytics",
+      "source": "./plugins/playground/analytics",
+      "description": "Product analytics with PostHog MCP integration. Enable when analyzing user behavior, conversion metrics, and product usage. ~40k context tokens when enabled.",
+      "author": {
+        "name": "Coalesce Labs",
+        "email": "hello@coalesce.dev"
+      },
+      "homepage": "https://github.com/coalesce-labs/catalyst",
+      "repository": "https://github.com/coalesce-labs/catalyst.git",
+      "license": "MIT",
+      "category": "analytics",
+      "keywords": [
+        "analytics",
+        "posthog",
+        "metrics",
+        "product",
+        "conversion",
+        "funnel"
+      ]
+    },
+    {
+      "name": "catalyst-debugging",
+      "source": "./plugins/playground/debugging",
+      "description": "Production error monitoring with Sentry MCP integration. Enable when debugging errors, analyzing stack traces, and investigating incidents. ~20k context tokens when enabled.",
+      "author": {
+        "name": "Coalesce Labs",
+        "email": "hello@coalesce.dev"
+      },
+      "homepage": "https://github.com/coalesce-labs/catalyst",
+      "repository": "https://github.com/coalesce-labs/catalyst.git",
+      "license": "MIT",
+      "category": "debugging",
+      "keywords": [
+        "debugging",
+        "sentry",
+        "errors",
+        "monitoring",
+        "incidents",
+        "production"
+      ]
+    },
+    {
+      "name": "catalyst-meta",
+      "source": "./plugins/meta",
+      "description": "Workflow discovery, creation, reorganization, and audit tools: learn from community patterns, extend Catalyst with new workflows, safely reorganize directory structures, and audit plugin health.",
+      "author": {
+        "name": "Coalesce Labs",
+        "email": "hello@coalesce.dev"
+      },
+      "homepage": "https://github.com/coalesce-labs/catalyst",
+      "repository": "https://github.com/coalesce-labs/catalyst.git",
+      "license": "MIT",
+      "category": "development",
+      "keywords": [
+        "meta",
+        "discovery",
+        "creation",
+        "best-practices"
+      ]
+    },
+    {
+      "name": "catalyst-pm-ops",
+      "source": "./plugins/playground/pm-ops",
+      "description": "Linear cycle/backlog/PR ops, daily and weekly cadence, status updates, and team comms — extracted from catalyst-pm",
+      "author": {
+        "name": "Coalesce Labs",
+        "email": "hello@coalesce.dev"
+      },
+      "homepage": "https://github.com/coalesce-labs/catalyst",
+      "repository": "https://github.com/coalesce-labs/catalyst.git",
+      "license": "MIT",
+      "category": "productivity",
+      "keywords": [
+        "project-management",
+        "linear",
+        "github",
+        "standup",
+        "cadence",
+        "operations"
+      ]
+    },
+    {
+      "name": "catalyst-meeting-hygiene",
+      "source": "./plugins/playground/meeting-hygiene",
+      "description": "Meeting workflow skills: agenda creation, transcript processing, end-of-day batch cleanup, and effectiveness retros — extracted from catalyst-pm",
+      "author": {
+        "name": "Coalesce Labs",
+        "email": "hello@coalesce.dev"
+      },
+      "homepage": "https://github.com/coalesce-labs/catalyst",
+      "repository": "https://github.com/coalesce-labs/catalyst.git",
+      "license": "MIT",
+      "category": "productivity",
+      "keywords": [
+        "meetings",
+        "agenda",
+        "notes",
+        "transcripts",
+        "productivity"
+      ]
+    },
+    {
+      "name": "catalyst-discovery",
+      "source": "./plugins/playground/discovery",
+      "description": "User research, metrics, experimentation, and prototyping skills — the discovery/research companion to catalyst-pm",
+      "author": {
+        "name": "Coalesce Labs",
+        "email": "hello@coalesce.dev"
+      },
+      "homepage": "https://github.com/coalesce-labs/catalyst",
+      "repository": "https://github.com/coalesce-labs/catalyst.git",
+      "license": "MIT",
+      "category": "productivity",
+      "keywords": [
+        "user-research",
+        "metrics",
+        "experimentation",
+        "prototyping",
+        "discovery",
+        "jtbd",
+        "analytics",
+        "pm"
+      ]
+    },
+    {
+      "name": "catalyst-legacy",
+      "source": "./plugins/legacy",
+      "description": "Pre-phase-agent (wave-based) orchestration workflow preserved as a documented fallback: oneshot, orchestrate, god, setup-orchestrate. Superseded by catalyst-dev's execution-core/phase-agent pipeline. Requires catalyst-dev (shared backing scripts).",
+      "author": {
+        "name": "Coalesce Labs",
+        "email": "hello@coalesce-labs.com"
+      },
+      "homepage": "https://github.com/coalesce-labs/catalyst",
+      "repository": "https://github.com/coalesce-labs/catalyst.git",
+      "license": "MIT",
+      "category": "development",
+      "keywords": [
+        "legacy",
+        "orchestration",
+        "wave",
+        "oneshot",
+        "workflow"
+      ]
+    },
+    {
+      "name": "catalyst-foundry",
+      "source": "./plugins/foundry",
+      "description": "Setup, maintenance, and compounding upkeep of the Catalyst framework and the thoughts/ knowledge base: framework diagnostics/repair (setup-catalyst), terminal launcher config (setup-warp), and research-doc curation (research-curate). Future home for the compound-engineering retro/learning loop.",
+      "author": {
+        "name": "Coalesce Labs",
+        "email": "hello@coalesce-labs.com"
+      },
+      "homepage": "https://github.com/coalesce-labs/catalyst",
+      "repository": "https://github.com/coalesce-labs/catalyst.git",
+      "license": "MIT",
+      "category": "development",
+      "keywords": [
+        "setup",
+        "maintenance",
+        "thoughts",
+        "curation",
+        "diagnostics"
+      ]
+    }
+  ]
+}
