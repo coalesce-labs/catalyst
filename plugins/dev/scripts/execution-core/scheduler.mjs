@@ -7126,7 +7126,25 @@ export function schedulerTick(
       // BOTH pools' out-of-set blockers in one batched request (closes the D5
       // fail-open gap). The candidates are not in `eligible`, so they cannot leak
       // into sweep-2 selection — sweep 2 keeps its own computation over `eligible`.
-      const admissionPool = [...eligible, ...waitingDescriptors];
+      //
+      // CTL-2166: HRW-filter the `eligible` half before it enters ranking. An
+      // eligible ticket owned by a DIFFERENT host can never actually dispatch
+      // here (STEP B's promotion path is host-local; new-work Pass 2 below has
+      // its own `ready` ownership filter), so left unfiltered it can occupy one
+      // of this host's admission slots every tick, forever, while contributing
+      // nothing — starving real triaged waiters exactly like the CTL-2090
+      // triage-cap deadlock this same ranking already guards against. Filter
+      // only this derived copy: `eligible` itself stays raw (the phantom-
+      // quarantine sweep above keys off its `eligibleIds`, and narrowing that
+      // would mis-quarantine a sibling host's worker dirs — see the ownership
+      // comment on `ready` below). `waitingDescriptors` need no filter — they
+      // are built from `listInFlightTickets(orchDir)`, i.e. this host's own
+      // worker dirs. Single-host (!multiHost) is a strict no-op, same guard
+      // shape as the `ready` filter below.
+      const eligibleForAdmission = multiHost
+        ? eligible.filter((t) => ownedBy(t.identifier, _dispatchRoster(), self))
+        : eligible;
+      const admissionPool = [...eligibleForAdmission, ...waitingDescriptors];
       const admissionBlockerStates = hydrateOutOfSetBlockers(admissionPool, { cache, fetchBatch });
       const graph = analyzeDependencyGraph(admissionPool, {
         blockerStates: admissionBlockerStates,

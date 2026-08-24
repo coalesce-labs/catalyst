@@ -10721,6 +10721,77 @@ describe("CTL-850 — HRW ownership + claim-on-dispatch (schedulerTick new-work)
   });
 });
 
+// ── CTL-2166: HRW ownership filter applied to the STEP A admission pool ──────
+//
+// Live bug (mini-2, 2026-08-21): the STEP A admission ranking merges raw
+// `eligible` (the WHOLE board's untriaged/ready pool, not host-filtered) with
+// this host's own triaged-waiting descriptors, then ranks/slices the top
+// `freeSlots` for admission — with NO ownership filter. A higher-priority
+// eligible ticket owned by a DIFFERENT host wins a slot every tick even though
+// it can never actually dispatch here (STEP B's promotion is host-local; only
+// the phantom-quarantine sweep and the later `ready` computation are ownership-
+// aware), permanently starving real triaged waiters behind it. Measured live:
+// mini-2 needed freeSlots >= 6 to admit its first waiter under this ordering,
+// despite having only 3 total slots, because one of the 3 admitted slots was
+// always a mini-owned ticket that could never dispatch on mini-2.
+describe("CTL-2166 — HRW ownership filter applied to the STEP A admission pool", () => {
+  const ROSTER = ["mini", "mini-2"];
+  const NOT_MINE = "CTL-2166-FOREIGN";
+  // Compute the deterministic HRW owner of the fixture under the 2-host roster,
+  // then run the test AS the other host — this host does NOT own NOT_MINE.
+  const OWNER = ownerForTicket(NOT_MINE, ROSTER);
+  const SELF = ROSTER.find((h) => h !== OWNER);
+
+  test("a not-owned eligible ticket does not consume this host's only admission slot — the triaged waiter still promotes", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-7", "triage", "done"); // this host's own triaged waiter, unblocked, lower priority
+    const dispatch = fakeDispatch();
+    schedulerTick(orchDir, {
+      // Higher-priority than CTL-7's default, but HRW-owned by the OTHER host —
+      // can never dispatch on SELF. Pre-fix this still won the only slot.
+      readEligible: () => [
+        { identifier: NOT_MINE, priority: 1, createdAt: "2026-05-01T00:00:00Z" },
+      ],
+      dispatch,
+      hosts: ROSTER,
+      hostName: SELF,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0, // one slot, free
+      fetchBatch: mkBatch(() => relUnblocked()),
+    });
+    // The not-owned ticket is excluded from ranking before the slot slice, so
+    // the real (host-local) triaged waiter wins the only free slot instead.
+    expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-7", phase: "research" }]);
+  });
+
+  // Negative control (proves the fix test exercises ownership, not some other
+  // exclusion): the SAME shape but hostName = the ACTUAL owner of NOT_MINE — now
+  // NOT_MINE legitimately outranks CTL-7 and reserves the slot (CAT-36
+  // preserved; this is ordinary cross-host correctness, not the bug).
+  test("control: the SAME candidate owned by THIS host still outranks the waiter (ownership filter is not a blanket exclusion)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-7", "triage", "done");
+    const dispatch = fakeDispatch();
+    schedulerTick(orchDir, {
+      readEligible: () => [
+        { identifier: NOT_MINE, priority: 1, createdAt: "2026-05-01T00:00:00Z" },
+      ],
+      dispatch,
+      hosts: ROSTER,
+      hostName: OWNER, // this host DOES own NOT_MINE
+      claimDispatch: () => ({ won: true, generation: 1 }), // avoid a real cross-host Linear claim in tests
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchBatch: mkBatch(() => relUnblocked()),
+      hasTriageArtifact: () => true, // bypass the untriaged-cap probe; not the subject here
+    });
+    // The owned candidate legitimately reserves + wins the only slot as new
+    // work; CTL-7 stays held behind it (CAT-36 preserved — this is ordinary
+    // cross-host correctness, not the CTL-2166 starvation bug).
+    expect(dispatch.calls.map((c) => c.ticket)).toEqual(["CTL-2166-FOREIGN"]);
+  });
+});
+
 // ── CTL-1091: new-work dispatch fails over an OFFLINE HRW owner ───────────────
 //
 // The new-work ready filter (scheduler.mjs) must hash ownership over the LIVE
