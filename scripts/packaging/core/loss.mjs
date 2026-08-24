@@ -39,17 +39,17 @@ export function classifyPackLosses(packId, pack, targetName) {
     return { omitted, degraded, warnings };
   }
 
-  if (pack.hooks.present) {
-    warnings.push({
-      pack: packId,
-      class: "safety",
-      component: "hooks.toml",
-      reason: `hooks.toml is never projected to non-Claude targets (${pack.hooks.entryCount} entr${pack.hooks.entryCount === 1 ? "y" : "ies"}) — every skill in this pack is guard-reduced on ${targetName}`,
-    });
-  }
-
   for (const skill of pack.skills) {
     const label = skillLabel(packId, skill.id);
+
+    if (pack.hooks.present) {
+      omitted.push({
+        skill: label,
+        class: "safety",
+        reason: `hooks.toml is never projected to non-Claude targets (${pack.hooks.entryCount} entr${pack.hooks.entryCount === 1 ? "y" : "ies"}) — emitting this skill would silently remove a pack-level safety guard`,
+      });
+      continue;
+    }
 
     if (skill.neutral === null) {
       omitted.push({
@@ -83,11 +83,17 @@ export function classifyPackLosses(packId, pack, targetName) {
   }
 
   for (const agent of pack.agents) {
+    const label = agentLabel(packId, agent.id);
     degraded.push({
-      agent: agentLabel(packId, agent.id),
+      agent: label,
       class: "capability",
       reason: "Claude subagents are a capability the target lacks — omitting removes power, not a guard, so this warns rather than failing the build",
     });
+    for (const field of ["model", "color"]) {
+      if (agent.claudeOnly && Object.prototype.hasOwnProperty.call(agent.claudeOnly, field)) {
+        warnings.push({ agent: label, class: "cosmetic", field });
+      }
+    }
   }
 
   if (pack.mcpServers) {
@@ -130,7 +136,7 @@ export function buildLossReport({ packs, targetNames, renderedAt }) {
     targets[targetName] = {
       omitted: sortByKey(omitted, (e) => e.skill ?? e.pack ?? ""),
       degraded: sortByKey(degraded, (e) => e.agent ?? e.skill ?? e.pack ?? ""),
-      warnings: sortByKey(warnings, (e) => e.skill ?? e.pack ?? ""),
+      warnings: sortByKey(warnings, (e) => e.skill ?? e.agent ?? e.pack ?? ""),
     };
   }
 

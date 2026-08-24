@@ -15,6 +15,8 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SUBJECT="$SCRIPT_DIR/../validate-release-config.sh"
+RELEASE_HEALTH_SUBJECT="$SCRIPT_DIR/../check-release-health.sh"
+PLUGIN_VERSION_SUBJECT="$SCRIPT_DIR/../check-plugin-version.sh"
 
 PASSES=0
 FAILURES=0
@@ -124,6 +126,23 @@ else
 fi
 
 echo ""
+echo "=== Check 9: Codex extra-files registration is mandatory ==="
+ROOT="$(build_fixture missingcodexregistration 1.2.0)"
+mkdir -p "$ROOT/plugins/x/.codex-plugin" "$ROOT/.agents/plugins"
+echo '{ "name": "catalyst-x", "version": "1.2.0" }' >"$ROOT/plugins/x/.codex-plugin/plugin.json"
+echo '{ "plugins": [ { "name": "catalyst-x" } ] }' >"$ROOT/.agents/plugins/marketplace.json"
+jq 'del(.packages["plugins/x"]["extra-files"][] | select(.path == ".codex-plugin/plugin.json"))' \
+	"$ROOT/release-please-config.json" >"$ROOT/config.tmp"
+mv "$ROOT/config.tmp" "$ROOT/release-please-config.json"
+OUT="$(run_validate "$ROOT")"
+RC=$?
+if [[ $RC -ne 0 ]] && echo "$OUT" | grep -q 'FAIL:.*Codex.*extra-files'; then
+	pass "Check 9 FAILs when a package no longer registers Codex version propagation"
+else
+	fail "Check 9 catches a missing Codex extra-files entry" "rc=$RC" "$OUT"
+fi
+
+echo ""
 echo "=== Check 11: Codex catalog version ban — both directions ==="
 ROOT="$(build_fixture codexcatalog 1.0.0)"
 mkdir -p "$ROOT/plugins/x/.codex-plugin"
@@ -151,17 +170,97 @@ echo "=== End-to-end AC: simulate a release bump, both gates green ==="
 # The executable form of the Gherkin scenario: apply release-please's own
 # extra-files semantics (write \$.version to BOTH configured paths for one
 # package), then both checks must be green.
-ROOT="$(build_fixture e2e 2.0.0)"
+ROOT="$(build_fixture e2e 1.0.0)"
 mkdir -p "$ROOT/plugins/x/.codex-plugin"
-echo '{ "name": "catalyst-x", "version": "2.0.0" }' >"$ROOT/plugins/x/.codex-plugin/plugin.json"
+echo '{ "name": "catalyst-x", "version": "1.0.0" }' >"$ROOT/plugins/x/.codex-plugin/plugin.json"
 mkdir -p "$ROOT/.agents/plugins"
 echo '{ "plugins": [ { "name": "catalyst-x" } ] }' >"$ROOT/.agents/plugins/marketplace.json"
+# Derive the update targets from release-please-config.json. If the Codex
+# extra-files registration disappears, this simulation stops updating it and
+# the gates go red — unlike a fixture that hardcodes both output paths.
+while IFS= read -r rel_path; do
+	target="$ROOT/plugins/x/$rel_path"
+	jq --arg version "2.0.0" '.version = $version' "$target" >"$target.tmp"
+	mv "$target.tmp" "$target"
+done < <(jq -r '.packages["plugins/x"]["extra-files"][] | select(.jsonpath == "$.version") | .path' "$ROOT/release-please-config.json")
+echo '{ "plugins/x": "2.0.0" }' >"$ROOT/.release-please-manifest.json"
 OUT="$(run_validate "$ROOT")"
 RC=$?
 if [[ $RC -eq 0 ]] && echo "$OUT" | grep -q 'ALL CHECKS PASSED'; then
 	pass "post-release-bump fixture: ALL CHECKS PASSED"
 else
 	fail "post-release-bump fixture: ALL CHECKS PASSED" "rc=$RC" "$OUT"
+fi
+
+build_release_health_fixture() {
+	local name="$1" codex_mode="$2"
+	local root
+	root="$(build_fixture "$name" 1.2.0)"
+	mkdir -p "$root/scripts" "$root/bin"
+	cp "$RELEASE_HEALTH_SUBJECT" "$root/scripts/check-release-health.sh"
+	mkdir -p "$root/.agents/plugins"
+	echo '{ "plugins": [] }' >"$root/.agents/plugins/marketplace.json"
+	if [[ "$codex_mode" == "mismatch" ]]; then
+		mkdir -p "$root/plugins/x/.codex-plugin"
+		echo '{ "name": "catalyst-x", "version": "1.1.0" }' >"$root/plugins/x/.codex-plugin/plugin.json"
+	fi
+	cat >"$root/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == "run" ]]; then
+  echo '{"conclusion":"success","databaseId":1,"createdAt":"fixture"}'
+elif [[ "$1" == "pr" ]]; then
+  echo '{"number":1,"headRefName":"fixture"}'
+fi
+EOF
+	chmod +x "$root/bin/gh"
+	echo "$root"
+}
+
+run_release_health() {
+	local root="$1"
+	PATH="$root/bin:$PATH" bash "$root/scripts/check-release-health.sh" 2>&1
+}
+
+echo ""
+echo "=== Release-health Check 3: Codex drift and absence both fail loudly ==="
+ROOT="$(build_release_health_fixture healthmismatch mismatch)"
+OUT="$(run_release_health "$ROOT")"
+RC=$?
+if [[ $RC -ne 0 ]] && echo "$OUT" | grep -q '\.codex-plugin/plugin.json=1.1.0'; then
+	pass "release health FAILs and names a drifted Codex manifest"
+else
+	fail "release health catches Codex version drift" "rc=$RC" "$OUT"
+fi
+ROOT="$(build_release_health_fixture healthmissing missing)"
+OUT="$(run_release_health "$ROOT")"
+RC=$?
+if [[ $RC -ne 0 ]] && echo "$OUT" | grep -q 'missing.*\.codex-plugin/plugin.json'; then
+	pass "release health FAILs instead of skipping a missing Codex manifest"
+else
+	fail "release health catches a missing Codex manifest" "rc=$RC" "$OUT"
+fi
+
+echo ""
+echo "=== Plugin-version gate: every release-config package path is covered ==="
+ROOT="$SCRATCH/plugin-version-paths"
+mkdir -p "$ROOT/scripts" "$ROOT/plugins/foundry"
+cp "$PLUGIN_VERSION_SUBJECT" "$ROOT/scripts/check-plugin-version.sh"
+cat >"$ROOT/release-please-config.json" <<'EOF'
+{ "packages": { "plugins/foundry": { "component": "catalyst-foundry" } } }
+EOF
+echo baseline >"$ROOT/plugins/foundry/README.md"
+git -C "$ROOT" init -q
+git -C "$ROOT" config user.name fixture
+git -C "$ROOT" config user.email fixture@example.com
+git -C "$ROOT" add .
+git -C "$ROOT" commit -qm baseline
+echo changed >"$ROOT/plugins/foundry/README.md"
+OUT="$(cd "$ROOT" && STRICT_VERSION_CHECK=true bash scripts/check-plugin-version.sh 2>&1)"
+RC=$?
+if [[ $RC -ne 0 ]] && echo "$OUT" | grep -q 'catalyst-foundry'; then
+	pass "plugin-version gate covers plugins/foundry from release-please config"
+else
+	fail "plugin-version gate covers every configured package path" "rc=$RC" "$OUT"
 fi
 
 echo ""

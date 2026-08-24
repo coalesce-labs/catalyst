@@ -50,12 +50,15 @@ describe("the claude target never loses anything", () => {
 });
 
 describe("hooks.toml — safety, never projected", () => {
-  test("hooks.present true produces exactly one safety warning naming hooks.toml, on a non-Claude target", () => {
-    const pack = basePack({ hooks: { present: true, entryCount: 11 } });
+  test("hooks.present true omits every otherwise-classified skill from a non-Claude target", () => {
+    const pack = basePack({
+      skills: [classifiedSkill("guarded")],
+      hooks: { present: true, entryCount: 11 },
+    });
     const result = classifyPackLosses("catalyst-x", pack, "codex");
-    expect(result.warnings.length).toBe(1);
-    expect(result.warnings[0].class).toBe("safety");
-    expect(result.warnings[0].component).toBe("hooks.toml");
+    expect(result.omitted).toHaveLength(1);
+    expect(result.omitted[0]).toMatchObject({ skill: "catalyst-x/guarded", class: "safety" });
+    expect(result.omitted[0].reason).toContain("hooks.toml");
   });
 
   test("hooks.present false produces no hooks-related loss (negative control)", () => {
@@ -108,6 +111,20 @@ describe("model: / color: / argument-hint: / user-invocable: / version: — cosm
     const result = classifyPackLosses("catalyst-x", pack, "codex");
     expect(result.warnings.filter((w) => w.class === "cosmetic")).toEqual([]);
   });
+
+  for (const field of ["model", "color"]) {
+    test(`${field} on an omitted agent still produces a cosmetic warning naming the agent`, () => {
+      const pack = basePack({
+        agents: [{ id: "locator", name: "locator", description: "d", body: "b", claudeOnly: { [field]: "x" } }],
+      });
+      const result = classifyPackLosses("catalyst-x", pack, "codex");
+      expect(result.warnings).toContainEqual({
+        agent: "catalyst-x/locator",
+        class: "cosmetic",
+        field,
+      });
+    });
+  }
 });
 
 describe("presentation patterns in prose — warned, not omitted", () => {

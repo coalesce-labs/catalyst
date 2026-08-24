@@ -69,7 +69,7 @@ version, it refreshes the cache. Same version → skipped even if code changed.
 **CTL-1463 invariant**: release-please writes BOTH `plugin.json` files' `$.version` in the same
 commit, via two `extra-files` entries per package — the Claude and Codex manifests can never drift
 because they are never bumped separately. `scripts/packaging/cli.mjs` (the vendor-neutral packaging
-pipeline — see `docs/specs/accepted/2026-08-24-vendor-neutral-packaging/spec.md`) never writes a
+pipeline — see `docs/specs/accepted/vendor-neutral-packaging/spec.md`) never writes a
 version itself: its Claude emitter copies `$.version` verbatim from the existing file, and its Codex
 emitter seeds from the Claude manifest on create and FAILS on regenerate if the two disagree. The
 compiler reads and asserts a version; it is never the version's source. `.codex-plugin/` and

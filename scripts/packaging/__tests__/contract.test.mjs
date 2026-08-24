@@ -125,6 +125,41 @@ describe("validateRenderedPack — both directions of the neutral-classification
   });
 });
 
+describe("validateRenderedPack — portable file boundary", () => {
+  test("rejects a file relPath that escapes the skill directory", () => {
+    const pack = loadFixture("valid-classified-skill.json");
+    pack.skills[0].files = [
+      {
+        relPath: "../../../../outside.txt",
+        bytesRef: `sha256:${"a".repeat(64)}`,
+        content: "eA==",
+      },
+    ];
+    const result = validateRenderedPack(pack);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => e.includes("outside.txt") && e.includes("portable"))).toBe(true);
+  });
+
+  test("rejects a file entry with missing content instead of accepting a half-readable contract", () => {
+    const pack = loadFixture("valid-classified-skill.json");
+    pack.skills[0].files = [
+      { relPath: "scripts/run.sh", bytesRef: `sha256:${"b".repeat(64)}` },
+    ];
+    const result = validateRenderedPack(pack);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => e.includes("content"))).toBe(true);
+  });
+
+  test("rejects duplicate relPaths within one skill", () => {
+    const pack = loadFixture("valid-classified-skill.json");
+    const file = { relPath: "assets/icon.svg", bytesRef: `sha256:${"c".repeat(64)}`, content: "eA==" };
+    pack.skills[0].files = [file, { ...file }];
+    const result = validateRenderedPack(pack);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => e.includes("duplicate") && e.includes("assets/icon.svg"))).toBe(true);
+  });
+});
+
 describe("hooks.entryCount / hooks.present consistency", () => {
   test("entryCount must be 0 when present is false", () => {
     const pack = loadFixture("valid-minimal.json");

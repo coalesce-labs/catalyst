@@ -21,8 +21,39 @@
 // original file's frontmatter carries Claude-only keys.
 
 import { formatJson } from "../core/json-format.mjs";
+import { createHash } from "node:crypto";
+
+const PORTABLE_AUX_DIRS = new Set(["scripts", "references", "assets"]);
+
+function assertSafeSegment(value, label) {
+  if (typeof value !== "string" || value.length === 0 || value === "." || value === ".." || /[\\/]/.test(value)) {
+    throw new Error(`agents-skills emitter: ${label} ${JSON.stringify(value)} is not a safe path segment`);
+  }
+}
+
+function assertPortableAuxRelPath(relPath) {
+  const parts = typeof relPath === "string" ? relPath.split("/") : [];
+  const valid =
+    parts.length >= 2 &&
+    PORTABLE_AUX_DIRS.has(parts[0]) &&
+    parts.every((part) => part.length > 0 && part !== "." && part !== "..") &&
+    !relPath.includes("\\");
+  if (!valid) {
+    throw new Error(`agents-skills emitter: ${JSON.stringify(relPath)} is not a contained portable auxiliary path`);
+  }
+}
+
+function sourceHash(skill) {
+  const sourceIndex = [...skill.files]
+    .sort((a, b) => a.relPath.localeCompare(b.relPath))
+    .map((file) => `${file.relPath}\0${file.bytesRef}`)
+    .join("\n");
+  return `sha256:${createHash("sha256").update(sourceIndex).digest("hex")}`;
+}
 
 export function flatSkillName(packId, skillId) {
+  assertSafeSegment(packId, "packId");
+  assertSafeSegment(skillId, "skillId");
   return `${packId}-${skillId}`;
 }
 
@@ -48,6 +79,7 @@ export function planAgentsSkillsBundle(entries) {
   const files = [];
 
   for (const { packId, pack } of entries) {
+    if (pack.hooks.present) continue;
     for (const skill of pack.skills) {
       if (skill.neutral === null) continue;
 
@@ -64,6 +96,7 @@ export function planAgentsSkillsBundle(entries) {
 
       for (const f of skill.files) {
         if (f.relPath === "SKILL.md") continue; // regenerated above, never copied verbatim
+        assertPortableAuxRelPath(f.relPath);
         files.push({ flatName, relPath: `${flatName}/${f.relPath}`, base64: f.content, sourceRelPath: f.relPath });
       }
 
@@ -72,7 +105,13 @@ export function planAgentsSkillsBundle(entries) {
         relPath: `${flatName}/.generated-by-catalyst-packaging`,
         text:
           formatJson(
-            { generatedBy: "catalyst-packaging", pack: packId, skill: skill.id, sourceFileCount: skill.files.length },
+            {
+              generatedBy: "catalyst-packaging",
+              pack: packId,
+              skill: skill.id,
+              sourceFileCount: skill.files.length,
+              sourceHash: sourceHash(skill),
+            },
             { escapeNonAscii: false }
           ) + "\n",
       });

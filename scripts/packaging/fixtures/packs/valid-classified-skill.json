@@ -8,7 +8,7 @@
       "name": "linearis",
       "description": "Linear access rule + Linearis CLI reference.",
       "body": "# Linearis\n\nReference doc body.\n",
-      "files": [{ "relPath": "SKILL.md", "bytesRef": "sha256:deadbeef" }],
+      "files": [{ "relPath": "SKILL.md", "bytesRef": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "content": "eA==" }],
       "neutral": { "effects": [], "invocation": "explicit", "exposure": ["catalog"] },
       "claudeOnly": { "allowedTools": "Read, Grep", "disableModelInvocation": true }
     }

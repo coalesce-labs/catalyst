@@ -91,6 +91,17 @@ describe("scanForSeamViolations — planted-violation mutation control", () => {
 });
 
 describe("countProviderImporters", () => {
+  test("the real production tree has exactly one provider importer: cli.mjs", () => {
+    const result = countProviderImporters({
+      repoRoot,
+      packagingRoot: "scripts/packaging",
+      providerBasename: "local-provisional.mjs",
+      excludeDirNames: ["__tests__"],
+    });
+    expect(result.count).toBe(1);
+    expect(result.files[0]).toBe(resolve(repoRoot, "scripts/packaging/cli.mjs"));
+  });
+
   test("in a fixture tree, the provider is imported by exactly the one designated file", () => {
     const dir = fixtureDir();
     writeFile(dir, "providers/local-provisional.mjs", "export const render = () => {};\n");

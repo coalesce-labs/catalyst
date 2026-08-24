@@ -171,7 +171,16 @@ fi
 # Codex manifest an equal partner to plugin.json in the version-authority
 # chain, so its absence is exactly as broken as plugin.json's would be.
 MISSING_CODEX_VERSIONS=()
+MISSING_CODEX_EXTRA_FILES=()
 for pkg in $(jq -r '.packages | keys[]' "$CONFIG"); do
+  codex_extra_files=$(jq -r --arg pkg "$pkg" '
+    [(.packages[$pkg]["extra-files"] // [])[] |
+      select(type == "object" and .path == ".codex-plugin/plugin.json" and .jsonpath == "$.version")]
+    | length
+  ' "$CONFIG")
+  if [[ "$codex_extra_files" -ne 1 ]]; then
+    MISSING_CODEX_EXTRA_FILES+=("$pkg: expected exactly one Codex extra-files entry for .codex-plugin/plugin.json $.version; found $codex_extra_files")
+  fi
   CODEX_JSON="$REPO_ROOT/$pkg/.codex-plugin/plugin.json"
   if [[ -f "$CODEX_JSON" ]]; then
     codex_version=$(jq -r '.version // empty' "$CODEX_JSON")
@@ -182,6 +191,13 @@ for pkg in $(jq -r '.packages | keys[]' "$CONFIG"); do
     MISSING_CODEX_VERSIONS+=("$pkg/.codex-plugin/plugin.json (file missing)")
   fi
 done
+
+if [[ ${#MISSING_CODEX_EXTRA_FILES[@]} -gt 0 ]]; then
+  fail "Codex version propagation is missing or duplicated in release-please extra-files"
+  for msg in "${MISSING_CODEX_EXTRA_FILES[@]}"; do
+    echo "    $msg"
+  done
+fi
 
 if [[ ${#MISSING_CODEX_VERSIONS[@]} -gt 0 ]]; then
   fail ".codex-plugin/plugin.json files missing or missing version field"

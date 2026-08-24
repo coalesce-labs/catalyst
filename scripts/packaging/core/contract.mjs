@@ -39,6 +39,8 @@ const KNOWN_SKILL_KEYS = new Set([
 ]);
 
 const KNOWN_AGENT_KEYS = new Set(["id", "name", "description", "body", "claudeOnly"]);
+const KNOWN_FILE_KEYS = new Set(["relPath", "bytesRef", "content"]);
+const PORTABLE_FILE_DIRS = new Set(["scripts", "references", "assets"]);
 
 const KNOWN_NEUTRAL_KEYS = new Set(["effects", "invocation", "exposure"]);
 
@@ -56,6 +58,45 @@ function requireString(obj, field, label, errors) {
   if (typeof obj[field] !== "string" || obj[field].length === 0) {
     errors.push(`${label}: "${field}" must be a non-empty string`);
   }
+}
+
+function isPortableFileRelPath(relPath) {
+  if (typeof relPath !== "string" || relPath.length === 0 || relPath.includes("\\")) return false;
+  if (relPath === "SKILL.md") return true;
+  if (relPath.startsWith("/") || relPath.endsWith("/")) return false;
+  const parts = relPath.split("/");
+  if (!PORTABLE_FILE_DIRS.has(parts[0]) || parts.length < 2) return false;
+  return parts.every((part) => part.length > 0 && part !== "." && part !== "..");
+}
+
+function validateFiles(files, skillLabel, errors) {
+  const seen = new Set();
+  files.forEach((file, index) => {
+    const label = `${skillLabel}.files[${index}]`;
+    if (!isPlainObject(file)) {
+      errors.push(`${label}: must be an object`);
+      return;
+    }
+    const extra = unknownKeys(file, KNOWN_FILE_KEYS);
+    if (extra.length > 0) {
+      errors.push(`${label}: unknown key(s) ${JSON.stringify(extra)} — every file field must be declared in the contract`);
+    }
+    if (!isPortableFileRelPath(file.relPath)) {
+      errors.push(`${label}: ${JSON.stringify(file.relPath)} is not a portable skill file path (expected SKILL.md or a contained scripts/, references/, or assets/ path)`);
+    } else if (seen.has(file.relPath)) {
+      errors.push(`${label}: duplicate relPath ${JSON.stringify(file.relPath)}`);
+    } else {
+      seen.add(file.relPath);
+    }
+    if (typeof file.bytesRef !== "string" || !/^sha256:[0-9a-f]{64}$/.test(file.bytesRef)) {
+      errors.push(`${label}: "bytesRef" must be a sha256:<64 lowercase hex characters> string`);
+    }
+    if (typeof file.content !== "string" || file.content.length === 0) {
+      errors.push(`${label}: "content" must be a non-empty base64 string so emitters never re-read the source tree`);
+    } else if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(file.content)) {
+      errors.push(`${label}: "content" must be valid canonical base64`);
+    }
+  });
 }
 
 function validateSkill(skill, index, errors) {
@@ -78,6 +119,8 @@ function validateSkill(skill, index, errors) {
   }
   if (!Array.isArray(skill.files)) {
     errors.push(`${label}: "files" must be an array`);
+  } else {
+    validateFiles(skill.files, label, errors);
   }
 
   const skillId = typeof skill.id === "string" ? skill.id : `#${index}`;

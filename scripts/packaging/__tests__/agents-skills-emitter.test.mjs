@@ -68,6 +68,14 @@ describe("buildSkillMd — exactly name + description frontmatter, no Claude-onl
 });
 
 describe("planAgentsSkillsBundle", () => {
+  test("does not emit a neutral-classified skill when its pack has hooks that cannot be projected", () => {
+    const guardedPack = pack("catalyst-dev", [classifiedSkill("linearis")]);
+    guardedPack.hooks = { present: true, entryCount: 11 };
+    const result = planAgentsSkillsBundle([{ packId: "catalyst-dev", pack: guardedPack }]);
+    expect(result.emittedFlatNames).toEqual([]);
+    expect(result.files).toEqual([]);
+  });
+
   test("only neutral-classified skills are planned; unclassified skills are silently absent here (already omitted upstream by the loss classifier)", () => {
     const entries = [
       { packId: "catalyst-dev", pack: pack("catalyst-dev", [classifiedSkill("linearis"), { ...classifiedSkill("commit"), neutral: null }]) },
@@ -95,6 +103,15 @@ describe("planAgentsSkillsBundle", () => {
     const marker = files.find((f) => f.relPath === "catalyst-dev-linearis/.generated-by-catalyst-packaging");
     expect(marker).toBeDefined();
     expect(JSON.parse(marker.text).pack).toBe("catalyst-dev");
+    expect(JSON.parse(marker.text).sourceHash).toMatch(/^sha256:[0-9a-f]{64}$/);
+  });
+
+  test("rejects an auxiliary relPath that would escape the generated skill directory", () => {
+    const skill = classifiedSkill("linearis", {
+      files: [{ relPath: "../../../../outside.txt", bytesRef: `sha256:${"d".repeat(64)}`, content: "eA==" }],
+    });
+    const entries = [{ packId: "catalyst-dev", pack: pack("catalyst-dev", [skill]) }];
+    expect(() => planAgentsSkillsBundle(entries)).toThrow(/portable auxiliary path/);
   });
 
   test("a flat-name collision between two packs FAILS the build, naming both sources", () => {

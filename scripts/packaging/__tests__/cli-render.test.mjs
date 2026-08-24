@@ -44,7 +44,7 @@ describe("renderAllPacks — cli.mjs's render command core", () => {
 });
 
 describe("computeLossReport — the real repo's day-one cohort", () => {
-  test("exactly the 3 opted-in skills (linearis, validate-frontmatter, setup-catalyst) are NOT omitted; everything else is — the large loss report is the designed outcome, not a bug", () => {
+  test("only the 2 opted-in skills from hook-free packs are emitted; catalyst-dev/linearis is omitted because its pack has safety hooks", () => {
     const results = renderAllPacks(repoRoot);
     const report = computeLossReport(results, "2026-01-01T00:00:00.000Z");
     expect(hasUnacknowledgedLosses(report)).toBe(true); // no silent caps: this MUST be visible
@@ -56,9 +56,10 @@ describe("computeLossReport — the real repo's day-one cohort", () => {
     // Count-based, not boolean: `omitted + emitted === totalSkills` — a skill
     // lost between the two buckets is a failure, not a smaller clean number.
     expect(omittedSkillIds.length + emittedCount).toBe(totalSkills);
-    expect(emittedCount).toBe(3);
-    // The opted-in cohort must NOT appear in the omitted list...
-    expect(omittedSkillIds).not.toContain("catalyst-dev/linearis");
+    expect(emittedCount).toBe(2);
+    // Safety hooks guard every skill in catalyst-dev, so linearis cannot be projected.
+    expect(omittedSkillIds).toContain("catalyst-dev/linearis");
+    // The hook-free opted-in cohort must NOT appear in the omitted list...
     expect(omittedSkillIds).not.toContain("catalyst-meta/validate-frontmatter");
     expect(omittedSkillIds).not.toContain("catalyst-foundry/setup-catalyst");
     // ...while an ordinary, unclassified skill must.

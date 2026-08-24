@@ -129,13 +129,16 @@ if [[ -f "$MANIFEST" ]]; then
     CODEX_JSON="$REPO_ROOT/$pkg/.codex-plugin/plugin.json"
     manifest_ver=$(jq -r --arg pkg "$pkg" '.[$pkg] // empty' "$MANIFEST")
 
-    if [[ -f "$CODEX_JSON" ]]; then
-      codex_ver=$(jq -r '.version // empty' "$CODEX_JSON")
-      codex_name=$(jq -r '.name // empty' "$CODEX_JSON")
-
-      if [[ -n "$manifest_ver" ]] && [[ -n "$codex_ver" ]] && [[ "$manifest_ver" != "$codex_ver" ]]; then
-        DRIFTED+=("$codex_name: .codex-plugin/plugin.json=$codex_ver manifest=$manifest_ver")
-      fi
+    if [[ ! -f "$CODEX_JSON" ]]; then
+      DRIFTED+=("$pkg: missing .codex-plugin/plugin.json")
+      continue
+    fi
+    codex_ver=$(jq -r '.version // empty' "$CODEX_JSON")
+    codex_name=$(jq -r '.name // empty' "$CODEX_JSON")
+    if [[ -z "$codex_ver" ]]; then
+      DRIFTED+=("${codex_name:-$pkg}: .codex-plugin/plugin.json has no version")
+    elif [[ -n "$manifest_ver" ]] && [[ "$manifest_ver" != "$codex_ver" ]]; then
+      DRIFTED+=("$codex_name: .codex-plugin/plugin.json=$codex_ver manifest=$manifest_ver")
     fi
   done
 

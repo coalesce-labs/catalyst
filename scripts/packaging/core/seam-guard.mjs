@@ -26,7 +26,7 @@ import { join } from "node:path";
 const PROVIDERS_REFERENCE = /(?:\bfrom\s+|\brequire\(\s*)['"][^'"]*\bproviders\/[^'"]*['"]/;
 const PLUGINS_PATH_LITERAL = /(['"])plugins\/[^'"]*\1/;
 
-function listFilesRecursive(root) {
+function listFilesRecursive(root, excludeDirNames = new Set()) {
   let entries;
   try {
     entries = readdirSync(root);
@@ -38,7 +38,7 @@ function listFilesRecursive(root) {
     const full = join(root, entry);
     const stat = statSync(full);
     if (stat.isDirectory()) {
-      files.push(...listFilesRecursive(full));
+      if (!excludeDirNames.has(entry)) files.push(...listFilesRecursive(full, excludeDirNames));
     } else if (entry.endsWith(".mjs")) {
       files.push(full);
     }
@@ -88,14 +88,14 @@ export function scanForSeamViolations({ roots, repoRoot }) {
  * (cli.mjs)" — a provider a second file starts importing is the seam quietly
  * widening.
  */
-export function countProviderImporters({ repoRoot, packagingRoot, providerBasename }) {
+export function countProviderImporters({ repoRoot, packagingRoot, providerBasename, excludeDirNames = [] }) {
   const absRoot = join(repoRoot, packagingRoot);
-  const files = listFilesRecursive(absRoot).filter((f) => !f.endsWith(`/${providerBasename}`));
+  const files = listFilesRecursive(absRoot, new Set(excludeDirNames)).filter((f) => !f.endsWith(`/${providerBasename}`));
   const importers = [];
   const pattern = new RegExp(`providers/${providerBasename.replace(/\./g, "\\.")}`);
   for (const file of files) {
     const contents = readFileSync(file, "utf8");
-    if (pattern.test(contents)) {
+    if (contents.split("\n").some((line) => PROVIDERS_REFERENCE.test(line) && pattern.test(line))) {
       importers.push(file);
     }
   }
