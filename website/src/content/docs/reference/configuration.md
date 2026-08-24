@@ -1258,6 +1258,123 @@ refreshes), so each host runs `codex login` per account into its own `CODEX_HOME
 make each account switch emit a fleet-wide restart-required signal for a change that provably
 needs no restart.
 
+## Per-phase executor routing (`catalyst.orchestration.executorByPhase`, CTL-1457 + CTL-2116)
+
+`executorByPhase` is a `phase -> executor` map (`triage`/`research`/`plan`/`implement`/`verify`/
+`review`/`pr`/`monitor-merge`/`monitor-deploy`/`teardown` -> `bg`/`sdk`/`oneshot-legacy`/
+`codex-exec`, or a compound alias like `claude-sdk`). A phase absent from the map runs on the
+node's boot executor exactly as before this feature existed (empty map = zero behavior change).
+Read and validated by `resolveExecutorForPhase` (`execution-core/config.mjs`), which THROWS a
+loud, actionable error on an invalid value — per-phase routing never silently falls back on a
+typo. Consulted once per dispatch by `makePhaseAwareDispatchFn`.
+
+**Three-tier precedence, evaluated in this order:**
+
+| Rung | Source | Scope | Restart? |
+|------|--------|-------|----------|
+| 1 (highest) | Fleet cluster-repo **policy** (`cluster.json.executorPolicy.routes`) | Every host in the roster | No — read live, uncached, on every dispatch |
+| 2 | `CATALYST_EXECUTOR_BY_PHASE` env (a JSON map) | This host only | No — env is read live too, but only takes effect while the daemon process that has it in its env is running |
+| 3 (lowest) | Layer-1 `catalyst.orchestration.executorByPhase` | This host only, and only until the next `git reset --hard` on a worker node | Yes, in practice — the file is git-reset every few minutes on worker nodes |
+
+Each rung **fully replaces** the map from the rung below it — there is no per-phase merge across
+rungs, mirroring `resolveExecutor`'s existing env-over-Layer-1 precedence.
+
+### Rung 1 — the fleet policy (`catalyst cluster route`, CTL-2116)
+
+The actuator: a declarative routing policy stored **once** in the `catalyst-cluster` control-plane
+repo's `cluster.json`, changed with **one command**, propagated to every host by the same
+`clusterSync` pull that already refreshes the roster every `CLUSTER_SYNC_INTERVAL_MS` (≤5 min), and
+read live with **no restart** (`readExecutorPolicy`, `execution-core/executor-policy.mjs` — the
+same uncached-per-call posture as `readClusterConfig`).
+
+```bash
+catalyst cluster route set implement codex-exec   # route one phase
+catalyst cluster route all bg --yes               # route every phase (fleet-wide blast radius, needs --yes)
+catalyst cluster route clear implement             # unroute one phase (falls back to rung 2/3)
+catalyst cluster route rollback                    # restore the prior map, one command
+catalyst cluster route show [--json]               # current routes + updatedBy/updatedAt
+catalyst cluster route history [--json]            # who / when / prior value, newest-first
+```
+
+Every change is recorded twice: a bounded (`HISTORY_MAX = 20`, newest-first) `executorPolicy.history[]`
+array entry carrying `{id, at, by, host, change:{phase,from,to}, priorRoutes, rollbackOf?,
+forcedBudget?}` — `priorRoutes` is the WHOLE prior map, not just the changed key, so `rollback` is
+an exact restore rather than an inverse-op replay — and a git commit in the cluster repo whose
+message embeds prior → next, human-attributed (`by` resolves as `--by <name>` → `git config
+user.email` → `$USER` → `"unknown"`).
+
+**An empty `routes: {}` is a real policy** ("route nothing"), not "absent" — otherwise `route all
+bg` followed by `route clear` would silently resurrect a stale rung-2/3 pin.
+
+`CATALYST_EXECUTOR_POLICY=off` is the documented **per-host escape hatch**: it disables rung 1
+entirely on that host, falling through to rungs 2/3 unchanged. Use it when a host must keep a local
+override the fleet policy would otherwise supersede.
+
+Guard sequence on every mutating verb (`set`/`clear`/`all`/`rollback`), mirroring
+`catalyst-stack codex-account switch`'s proven template: cluster clone present → clone is clean →
+`git pull --ff-only` (so the prior value is derived from the fleet's current state, not a stale
+local copy) → validate phase + executor → the budget gate below (codex-adding changes only) →
+write → commit → push (a committed-but-unpushed result is surfaced as a **warning**, not a
+success — push manually so peers pick it up).
+
+### The command-time Codex budget gate (Scenario 3)
+
+A `route set`/`route all` that **adds** Codex load (routes a phase to `codex-exec` that was not
+already routed there) is refused — with the specific per-account headroom figures — when the
+maximum remaining headroom across usable Codex accounts is below the configured floor. A change
+that removes or does not add Codex load is **never gated** (no account read, no `codex` binary
+spawned). This is a **command-time** check ("may this policy change add load right now?"), distinct
+from CTL-1459's separate **dispatch-time** gate ("can we afford this dispatch") — they are
+independent gates at independent moments.
+
+The classifier (`classifyPolicyBudget`, `execution-core/executor-policy-budget.mjs`) is
+three-valued: `allow` / `refuse` / **`inconclusive`**. A zero-account or all-unauthenticated read is
+"I could not look", not "there is headroom" — the CLI refuses on `inconclusive` exactly like
+`refuse`, because the incident this gate exists to prevent (CTL-2046: a hand-set Codex pin made
+while nobody could see the quota) is precisely what treating "could not look" as "fine" would
+reproduce. Headroom is read via the same zero-token account plane CTL-2072 shipped
+(`lib/codex-account-client.mjs` + `lib/codex-account-plane.mjs`) — no new quota mechanism.
+
+Override with `--force`; the override is recorded on the history entry (`forcedBudget: true`) so
+the audit trail shows a human explicitly overrode the gate, never that it silently passed.
+
+Floor resolution ladder: `CATALYST_CODEX_BUDGET_FLOOR_PERCENT` env → `cluster.json.executorPolicy.
+codexBudgetFloorPercent` → `DEFAULT_CODEX_BUDGET_FLOOR_PERCENT` (**20**).
+
+### Rung 2 — the durable per-host env pin (`CATALYST_EXECUTOR_BY_PHASE`, CTL-1457 follow-up)
+
+A JSON `phase -> executor` map set in the daemon's launch env. This is the DURABLE, clobber-safe
+home for a per-host routing pin predating CTL-2116: on worker nodes the per-node Layer-1
+`.catalyst/config.json` is git-reset every few minutes, so a pin written to that file cannot
+persist, while an env var set in the daemon's launch environment survives the reset. Malformed JSON,
+a non-object, or a non-string route value WARN-logs actionably and falls through to the Layer-1 file
+— a pin never silently vanishes, and a typo never silently routes.
+
+**As of CTL-2116 this rung is demoted below rung 1** — the fleet policy now outranks it by design:
+a per-host pin that could silently outrank a fleet-wide decision is the exact CTL-2046 incident
+shape this feature exists to end. The override is not silent: when the fleet policy replaces an
+active env pin, the daemon WARN-logs once (per config path) naming both maps.
+
+### Rung 3 — the Layer-1 file (`catalyst.orchestration.executorByPhase`)
+
+The lowest-precedence rung: a plain `phase -> executor` object under `catalyst.orchestration` in
+the project's `.catalyst/config.json`. On a worker node this file is reset to the committed
+checkout on every pull, so a routing pin written here does not survive — rung 2 exists precisely to
+give an operator a rung that does.
+
+### Occupancy accounting under a live policy (CTL-2116 Phase 4)
+
+`hasInProcessRoute` — whether ANY routed phase runs in-process (`sdk`/`codex-exec`) even though the
+node's boot dispatch mode is `bg` — used to be derived **once at daemon boot** and threaded as a
+plain boolean into the scheduler/monitor occupancy gates. Because rung 1 is read live, a policy
+change that adds an in-process route to a **running** daemon now takes effect at dispatch
+immediately, while a boot-captured boolean would stay `false` until restart — under-counting
+occupancy and over-admitting past `maxParallel`. `armsInProcessOccupancy`
+(`execution-core/occupancy-arm.mjs`) accepts either a boolean (byte-identical, unchanged call
+sites) or a thunk; the daemon now passes a thunk that re-reads the routing map fresh on every
+scheduler/monitor tick — one small `readFileSync`, the same posture as the roster and deployment-
+mode readers (both already explicitly uncached).
+
 ## Deployment mode (`catalyst.deployment.mode`, CTL-1617)
 
 `catalyst.deployment.mode` is the ONE declared answer to a question the system otherwise infers from

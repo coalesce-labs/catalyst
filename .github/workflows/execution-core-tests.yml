@@ -1526,6 +1526,7 @@ jobs:
             cli/drain.test.mjs \
             cli/cluster-route.test.mjs \
             executor-policy.test.mjs \
+            executor-policy-budget.test.mjs \
             occupancy-arm.test.mjs \
             drain-event.test.mjs \
             config-node-class.test.mjs \

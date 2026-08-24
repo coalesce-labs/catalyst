@@ -581,7 +581,10 @@ export function runOwnership(argv = [], { listTickets = listTodoTickets } = {}) 
 
 // ── main — dispatch ───────────────────────────────────────────────────────
 
-export function main(argv = process.argv.slice(2)) {
+// CTL-2116 Phase 5: async — `route` can await the budget gate's account read
+// (checkBudget spawns a `codex app-server` child, lib/codex-account-client.mjs).
+// Every other verb stays synchronous; awaiting a non-Promise return is a no-op.
+export async function main(argv = process.argv.slice(2)) {
   const [verb, ...rest] = argv;
   let code;
   switch (verb) {
@@ -593,7 +596,7 @@ export function main(argv = process.argv.slice(2)) {
     case "tune":      code = runTune(rest); break;
     case "sync":      code = runSync(rest); break;
     case "ownership": code = runOwnership(rest); break;
-    case "route":     code = runRoute(rest); break;
+    case "route":     code = await runRoute(rest); break;
     default:
       process.stderr.write(`catalyst cluster: unknown verb '${verb ?? ""}'\n`);
       code = 2;

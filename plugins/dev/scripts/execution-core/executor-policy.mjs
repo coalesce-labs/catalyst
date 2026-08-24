@@ -70,6 +70,15 @@ export function readExecutorPolicy(clusterDir) {
     updatedAt: typeof policy.updatedAt === "string" ? policy.updatedAt : null,
     updatedBy: typeof policy.updatedBy === "string" ? policy.updatedBy : null,
     history: Array.isArray(policy.history) ? policy.history : [],
+    // CTL-2116 Phase 5: the operator-tunable floor for the budget gate
+    // (executor-policy-budget.mjs). Optional — cli/cluster-route.mjs's floor
+    // resolution ladder (env > this field > DEFAULT_CODEX_BUDGET_FLOOR_PERCENT)
+    // falls through to the default when absent/non-numeric.
+    codexBudgetFloorPercent:
+      typeof policy.codexBudgetFloorPercent === "number" &&
+      Number.isFinite(policy.codexBudgetFloorPercent)
+        ? policy.codexBudgetFloorPercent
+        : null,
   };
 }
 

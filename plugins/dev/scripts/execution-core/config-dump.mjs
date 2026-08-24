@@ -260,6 +260,30 @@ export const CONFIG_KEYS = Object.freeze(
       fallback: null,
       reader: "readExecutorByPhaseLayer1",
     },
+    // CTL-2116: the fleet cluster-repo POLICY tier now sits ABOVE the row
+    // above (readExecutorByPhaseLayer1's new first rung, executor-policy.mjs).
+    // Its VALUE (cluster.json.executorPolicy.routes) is not representable here
+    // — this module's inputs are Layer-1/Layer-2/env only, no cluster.json —
+    // so these two rows document the escape-hatch and the budget-gate knobs an
+    // operator can see in this host's effective env, not the routes themselves.
+    // `catalyst cluster route show` is the introspection surface for the
+    // policy's actual content.
+    {
+      key: "catalyst.orchestration.executorPolicy.disable",
+      kind: "value",
+      layer1: null,
+      env: ["CATALYST_EXECUTOR_POLICY"],
+      fallback: null,
+      reader: "readExecutorByPhaseLayer1",
+    },
+    {
+      key: "catalyst.orchestration.executorPolicy.codexBudgetFloorPercent",
+      kind: "value",
+      layer1: null,
+      env: ["CATALYST_CODEX_BUDGET_FLOOR_PERCENT"],
+      fallback: 20,
+      reader: "resolveFloorPercent",
+    },
     {
       key: "catalyst.orchestration.reconcile.mode",
       kind: "value",

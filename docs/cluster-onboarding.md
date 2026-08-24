@@ -412,13 +412,26 @@ node needs its OWN Codex auth — `mkdir -p ~/catalyst/codex-home && CODEX_HOME=
 (a dedicated auth home is deliberately isolated from any personal `codex` CLI
 login). This is NOT part of `catalyst-join.sh` — a freshly joined node has
 `codex` on PATH (if some other step installed it) but no credentials, and will
-fail immediately on any phase routed to it. If a fleet-wide `executorByPhase`
-setting isn't the same for every node (e.g., you're rolling Codex out
-node-by-node), pin the not-yet-ready node to non-Codex executors via the
-`CATALYST_EXECUTOR_BY_PHASE` env var in ITS OWN plist (env wins over the shared
-Layer-1 `executorByPhase` config, and — unlike a Layer-1 edit on a worker node,
-which gets reset on the next config pull — an env var in the plist is durable):
+fail immediately on any phase routed to it.
+
+**CTL-2116 supersedes the plist pin below as the normal way to set `executorByPhase`
+fleet-wide.** `catalyst cluster route set <phase> <executor>` / `route all <executor> --yes`
+writes a policy to `cluster.json` in the cluster repo — one command, propagated to every
+host on its next `clusterSync` pull (≤5 min, no restart, no per-host plist edit), audited
+(who/when/prior-value in both a `history[]` array and a git commit), and gated against
+adding Codex load the fleet's accounts can't afford. See "Per-phase executor routing" in
+the configuration reference.
+
+The plist env var below is now the documented **per-host escape hatch** for the one case
+the fleet-wide command can't handle by itself: temporarily pinning a NOT-YET-READY node
+(e.g. mid Codex rollout, before that node has run `codex login`) away from Codex while the
+rest of the fleet is already routed there. Set `CATALYST_EXECUTOR_POLICY=off` in that node's
+plist FIRST (so the fleet policy — rung 1 — doesn't simply override the pin), then the
+`CATALYST_EXECUTOR_BY_PHASE` env var in the same plist (rung 2, still durable across a
+Layer-1 config-pull reset unlike a Layer-1 edit):
 ```xml
+<key>CATALYST_EXECUTOR_POLICY</key>
+<string>off</string>
 <key>CATALYST_EXECUTOR_BY_PHASE</key>
 <string>{"triage":"bg","research":"bg","plan":"bg","implement":"bg","remediate":"bg","verify":"bg","review":"bg","pr":"bg"}</string>
 ```

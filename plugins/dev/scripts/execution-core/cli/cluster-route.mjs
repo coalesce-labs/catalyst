@@ -15,6 +15,7 @@
 // a repo. runRoute wires the real deps + prints + returns a process exit code.
 
 import { execFileSync } from "node:child_process";
+import { resolve } from "node:path";
 import {
   EXECUTORS,
   EXECUTOR_ALIASES,
@@ -22,6 +23,12 @@ import {
   getHostName,
 } from "../config.mjs";
 import { readExecutorPolicy, applyRouteChange, rollbackPolicy } from "../executor-policy.mjs";
+import {
+  DEFAULT_CODEX_BUDGET_FLOOR_PERCENT,
+  addsCodexLoad,
+  classifyPolicyBudget,
+} from "../executor-policy-budget.mjs";
+import { discoverCodexHomes, readAccountPlane } from "../../lib/codex-account-client.mjs";
 import {
   hasClusterRepo as clusterRepoPresent,
   writeClusterJson,
@@ -71,8 +78,12 @@ function parsePositional(rest) {
   return rest.filter((a) => !a.startsWith("-"));
 }
 
-// routeCommand — pure over `deps`. Returns { code, msg, json }.
-export function routeCommand(argv = [], deps = {}) {
+// routeCommand — pure over `deps`. Returns a Promise<{ code, msg, json }> — ASYNC
+// because the real `checkBudget` (Phase 5) spawns a `codex app-server` child per
+// account (lib/codex-account-client.mjs). `await`ing a synchronous mock's plain
+// return value is a no-op (Promise.resolve semantics), so every test that
+// supplies a sync `checkBudget` is unaffected.
+export async function routeCommand(argv = [], deps = {}) {
   const {
     clusterDir,
     hasClusterRepo = clusterRepoPresent,
@@ -204,8 +215,42 @@ export function routeCommand(argv = [], deps = {}) {
     }
   }
 
-  // ── guard 5: budget gate (Phase 5 wires the real codex-load check here) ─────
-  void checkBudget; // seam reserved for Phase 5; Phase 3 does not consult it.
+  // ── guard 5: budget gate — ONLY for a codex-ADDING change ────────────────────
+  // A change that removes or does not add Codex load is never gated (CTL-2116
+  // Scenario 3's third Then). `checkBudget` is the injected verdict provider —
+  // in production it wraps classifyPolicyBudget (executor-policy-budget.mjs)
+  // over a live account read; tests inject a fixed verdict.
+  const wouldAddCodexLoad = addsCodexLoad({
+    priorRoutes: policy.routes ?? {},
+    nextRoutes: result.next.routes ?? {},
+  });
+  if (wouldAddCodexLoad) {
+    const verdict = await checkBudget();
+    if (verdict?.verdict !== "allow") {
+      const forced = rest.includes("--force");
+      if (!forced) {
+        // Scenario 3's second Then: the current policy is left UNCHANGED —
+        // refuse before guard 6 ever writes/commits/pushes.
+        return {
+          code: 1,
+          msg: verdict?.message
+            ? `catalyst cluster route: REFUSED — routing would add Codex load, but ${verdict.message}\nThe current policy is unchanged. Override with --force (recorded in the audit history).`
+            : `catalyst cluster route: REFUSED — Codex budget check returned '${verdict?.verdict}' (${verdict?.reason ?? "no reason given"}). The current policy is unchanged. Override with --force (recorded in the audit history).`,
+        };
+      }
+      // --force overrides refuse/inconclusive — recorded on the entry so the
+      // audit trail shows a human explicitly overrode the gate, not that the
+      // gate silently passed.
+      result.entry = { ...result.entry, forcedBudget: true };
+      result.next = {
+        ...result.next,
+        history: [
+          { ...result.next.history[0], forcedBudget: true },
+          ...result.next.history.slice(1),
+        ],
+      };
+    }
+  }
 
   // ── guard 6: write → commit → push ───────────────────────────────────────────
   writePolicy(clusterDir, result.next);
@@ -293,22 +338,78 @@ function renderHistory(json) {
   );
 }
 
-export function runRoute(argv = []) {
+// resolveFloorPercent — CTL-2116 Phase 5. Precedence ladder (mirrors the
+// deployment-mode precedent): CATALYST_CODEX_BUDGET_FLOOR_PERCENT env >
+// cluster.json.executorPolicy.codexBudgetFloorPercent > the frozen default.
+function resolveFloorPercent(policy) {
+  const envVal = process.env.CATALYST_CODEX_BUDGET_FLOOR_PERCENT;
+  if (typeof envVal === "string" && envVal.trim() !== "") {
+    const n = Number(envVal);
+    if (Number.isFinite(n)) return n;
+  }
+  if (typeof policy?.codexBudgetFloorPercent === "number") {
+    return policy.codexBudgetFloorPercent;
+  }
+  return DEFAULT_CODEX_BUDGET_FLOOR_PERCENT;
+}
+
+// defaultReadAccounts — the SAME pair codex-accounts-usage.mjs uses
+// (discoverCodexHomes + readAccountPlane), folded to the {label,status,binding}
+// shape classifyPolicyBudget expects. Reads every home SEQUENTIALLY (one
+// short-lived `codex app-server` child at a time — zero token cost, ~1-2s each),
+// matching that tool's own rationale: no need to race a handful of short reads.
+async function defaultReadAccounts() {
+  const root = process.env.CATALYST_CODEX_ROOT
+    ? resolve(process.env.CATALYST_CODEX_ROOT)
+    : undefined;
+  const discovery = discoverCodexHomes(root);
+  const bin = process.env.CATALYST_CODEX_BIN || "codex";
+  const out = [];
+  for (const acct of discovery.accounts) {
+    const verdict = await readAccountPlane({ codexHome: acct.path, bin });
+    out.push({ label: acct.handle, status: verdict.status, binding: verdict.binding });
+  }
+  return out;
+}
+
+export async function runRoute(argv = []) {
   const asJson = argv.includes("--json");
+  const clusterDir = getClusterRepoDir();
   const deps = {
-    clusterDir: getClusterRepoDir(),
+    clusterDir,
     isDirty: defaultIsDirty,
     pull: defaultPull,
-    readPolicy: (clusterDir) => readExecutorPolicy(clusterDir),
+    readPolicy: (dir) => readExecutorPolicy(dir),
     writePolicy: defaultWritePolicy,
     commitAndPush: defaultCommitAndPush,
-    checkBudget: () => ({ verdict: "allow" }),
+    // CTL-2116 Phase 5: real budget check — only ever invoked by routeCommand
+    // for a codex-ADDING change (guard 5), so a codex-removing/no-op command
+    // never spawns a single codex app-server child. classifyPolicyBudget
+    // itself stays synchronous (its own contract — see
+    // executor-policy-budget.mjs); the async account read happens HERE, and
+    // the resolved list is handed in as `accounts`, not as a `readAccounts`
+    // thunk (which the classifier would call synchronously).
+    checkBudget: async () => {
+      let accounts;
+      try {
+        accounts = await defaultReadAccounts();
+      } catch {
+        // A throwing reader is exactly what `accounts: []` already classifies
+        // as inconclusive below — fail toward "could not look", never "allow".
+        accounts = [];
+      }
+      return classifyPolicyBudget({
+        addsCodexLoad: true,
+        floorPercent: resolveFloorPercent(readExecutorPolicy(clusterDir)),
+        accounts,
+      });
+    },
     by: resolveBy(argv),
     host: getHostName(),
     at: new Date().toISOString(),
     emitEvent: defaultAppendOperatorEvent,
   };
-  const r = routeCommand(argv, deps);
+  const r = await routeCommand(argv, deps);
   if (asJson && r.json) {
     process.stdout.write(JSON.stringify(r.json) + "\n");
   } else if (r.json && argv[0] === "show") {

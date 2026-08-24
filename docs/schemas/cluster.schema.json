@@ -35,6 +35,29 @@
           "projectKey": { "type": "string" }
         }
       }
+    },
+    "executorPolicy": {
+      "type": "object",
+      "description": "CTL-2116: the fleet-wide per-phase executor-routing policy, written by `catalyst cluster route <verb>` and read live (uncached, no restart) by every host via readExecutorPolicy (execution-core/executor-policy.mjs). Outranks the per-host CATALYST_EXECUTOR_BY_PHASE env pin.",
+      "additionalProperties": false,
+      "properties": {
+        "routes": {
+          "type": "object",
+          "description": "phase -> executor id (e.g. \"codex-exec\", \"sdk\", \"bg\", \"oneshot-legacy\", or a compound alias like \"claude-sdk\"), stored verbatim. An empty object is a real policy (routes nothing), not absent.",
+          "additionalProperties": { "type": "string", "minLength": 1 }
+        },
+        "codexBudgetFloorPercent": {
+          "type": "number",
+          "description": "Operator-tunable floor (percent headroom) for the Scenario-3 command-time budget gate. Overridable per-command via CATALYST_CODEX_BUDGET_FLOOR_PERCENT; defaults to DEFAULT_CODEX_BUDGET_FLOOR_PERCENT (20) when absent."
+        },
+        "updatedAt": { "type": ["string", "null"], "description": "ISO-8601 timestamp of the most recent route change." },
+        "updatedBy": { "type": ["string", "null"], "description": "The `--by`/git-email/$USER identity that made the most recent route change." },
+        "history": {
+          "type": "array",
+          "description": "Bounded (HISTORY_MAX = 20) newest-first audit trail. Each entry carries {id, at, by, host, change:{phase,from,to}, priorRoutes, rollbackOf?, forcedBudget?} — priorRoutes is the WHOLE prior routes map, not just the changed key, so rollback is an exact restore.",
+          "items": { "type": "object" }
+        }
+      }
     }
   }
 }
