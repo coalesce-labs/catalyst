@@ -18,6 +18,7 @@ import { buildLossReport, hasUnacknowledgedLosses, lossCounts, renderLossReportM
 import { renderPluginJson, renderMarketplaceJson, readExistingVersion } from "./emitters/claude.mjs";
 import { resolveCodexVersion, renderCodexPluginJson, renderCodexCatalog } from "./emitters/codex.mjs";
 import { planAgentsSkillsBundle } from "./emitters/agents-skills.mjs";
+import { checkExtractionReadiness } from "./core/extraction-readiness.mjs";
 
 export const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 const NON_CLAUDE_TARGETS = ["codex", "agentsSkills"];
@@ -235,14 +236,28 @@ function cmdRender(args) {
   return { results, totalSkills, totalAgents, invalid, report, targetOutcome };
 }
 
+function cmdExtractionReadiness() {
+  const result = checkExtractionReadiness({ repoRoot });
+  console.log(`${result.verdict}: ${result.reason}`);
+  // Informational only — this is a decision-record input (Phase 6's spec
+  // says "no extraction happens in this ticket"), never a gate. It always
+  // exits 0 so CI can print the verdict without blocking a build on it.
+  return result;
+}
+
 function main() {
   const [command, ...args] = process.argv.slice(2);
   switch (command) {
     case "render":
       cmdRender(args);
       break;
+    case "extraction-readiness":
+      cmdExtractionReadiness();
+      break;
     default:
-      console.error(`Unknown command: ${command ?? "(none)"}. Usage: cli.mjs render [--dry-run] [--allow-losses] [--write]`);
+      console.error(
+        `Unknown command: ${command ?? "(none)"}. Usage: cli.mjs render [--dry-run] [--allow-losses] [--write] [--target <claude|codex|agentsSkills>] | cli.mjs extraction-readiness`
+      );
       process.exit(1);
   }
 }

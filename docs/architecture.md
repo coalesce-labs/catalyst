@@ -12,6 +12,20 @@ see [Linear read replica](linear-replica.md).
 3. **Thoughts System** — external git-backed context at `~/thoughts/`, shared across worktrees,
    initialized per-project via `init-project.sh`.
 
+## Multi-Target Packaging (CTL-1463)
+
+Each plugin's canonical identity/distribution metadata lives in a hand-authored `pack.json`
+(`plugins/<name>/pack.json`) — everything except the version, which stays exclusively owned by
+Release Please via each target's `plugin.json` `extra-files` jsonpath (see `docs/releases.md`).
+`scripts/packaging/cli.mjs render --target <claude|codex|agentsSkills> --write` compiles that
+manifest through a provisional source provider (behind a seam CTL-1461 replaces wholesale) into
+three targets: Claude (`.claude-plugin/`, byte-exact regeneration of the existing tree), Codex
+(`.codex-plugin/` + `.agents/plugins/marketplace.json`), and a plain `.agents/skills/` bundle for
+skills whose `pack.json` opts them into a neutral (vendor-independent) classification. A two-tier
+loss classifier omits anything safety-relevant that isn't classified and warns on everything else —
+see the full model, the seam contract, and the day-one scope in
+`docs/specs/accepted/vendor-neutral-packaging/spec.md`.
+
 ## Memory & Workflow State
 
 Three memory layers manage context across projects:
