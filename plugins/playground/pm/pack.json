@@ -19,7 +19,10 @@
       "launch",
       "release"
     ],
-    "license": "MIT"
+    "license": "MIT",
+    "agents": [
+      "./agents/linear-research.md"
+    ]
   },
   "distribution": {
     "claude": {

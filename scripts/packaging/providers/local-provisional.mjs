@@ -79,13 +79,37 @@ function listFilesRecursive(absDir) {
   return out;
 }
 
+// The portable file surface named by the plan is exactly SKILL.md plus
+// scripts/references/assets — never the whole skill directory. A skill's own
+// `__tests__/` fixtures (e.g. plugins/foundry/skills/setup-catalyst/__tests__/)
+// are Claude-repo-internal test tooling, not distributable skill content;
+// including them silently would ship test scripts into a non-Claude target's
+// bundle.
+const PORTABLE_FILE_DIRS = new Set(["scripts", "references", "assets"]);
+
+function isPortableSkillFile(relPath) {
+  if (relPath === "SKILL.md") return true;
+  const topDir = relPath.split("/")[0];
+  return PORTABLE_FILE_DIRS.has(topDir);
+}
+
 function readFilesManifest(absSkillDir) {
   if (!existsSync(absSkillDir)) return [];
   return listFilesRecursive(absSkillDir)
-    .map((abs) => ({
-      relPath: relative(absSkillDir, abs).split(sep).join("/"),
-      bytesRef: sha256(readFileSync(abs)),
-    }))
+    .filter((abs) => isPortableSkillFile(relative(absSkillDir, abs).split(sep).join("/")))
+    .map((abs) => {
+      const bytes = readFileSync(abs);
+      return {
+        relPath: relative(absSkillDir, abs).split(sep).join("/"),
+        bytesRef: sha256(bytes),
+        // Base64 content, not just the hash: emitters must never read
+        // plugins/*/ directly (the seam guard), so a byte-copying emitter
+        // (agents-skills.mjs) needs the actual bytes carried IN the
+        // RenderedPack, not a pointer it would have to resolve by reading
+        // the source tree again.
+        content: bytes.toString("base64"),
+      };
+    })
     .sort((a, b) => a.relPath.localeCompare(b.relPath));
 }
 

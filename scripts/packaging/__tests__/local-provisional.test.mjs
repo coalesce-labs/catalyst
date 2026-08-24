@@ -167,3 +167,26 @@ describe("splitFrontmatter", () => {
     expect(splitFrontmatter("# Just a README\n\nNo frontmatter here.\n")).toBeNull();
   });
 });
+
+describe("files[] is scoped to SKILL.md + scripts/references/assets — real repo regression guard", () => {
+  test("plugins/foundry/skills/setup-catalyst's __tests__/ fixture is NOT included in its files[] manifest", () => {
+    const pack = renderPluginPack({ repoRoot, pluginRelPath: "plugins/foundry", packId: "catalyst-foundry" });
+    const skill = pack.skills.find((s) => s.id === "setup-catalyst");
+    expect(skill).toBeDefined();
+    expect(skill.files.some((f) => f.relPath.startsWith("__tests__/"))).toBe(false);
+    expect(skill.files.some((f) => f.relPath === "SKILL.md")).toBe(true);
+  });
+
+  test("a fixture skill with scripts/, references/, assets/, and an unrelated top-level dir only carries the portable four", () => {
+    const dir = fixtureDir();
+    writeFile(dir, "plugins/x/skills/s/SKILL.md", "---\nname: s\ndescription: d\n---\n\nbody\n");
+    writeFile(dir, "plugins/x/skills/s/scripts/run.sh", "echo hi\n");
+    writeFile(dir, "plugins/x/skills/s/references/notes.md", "notes\n");
+    writeFile(dir, "plugins/x/skills/s/assets/logo.svg", "<svg/>\n");
+    writeFile(dir, "plugins/x/skills/s/__tests__/fixture.test.sh", "test\n");
+    writeFile(dir, "plugins/x/skills/s/random-notes.txt", "scratch\n");
+    const pack = renderPluginPack({ repoRoot: dir, pluginRelPath: "plugins/x", packId: "x" });
+    const relPaths = pack.skills[0].files.map((f) => f.relPath).sort();
+    expect(relPaths).toEqual(["SKILL.md", "assets/logo.svg", "references/notes.md", "scripts/run.sh"]);
+  });
+});

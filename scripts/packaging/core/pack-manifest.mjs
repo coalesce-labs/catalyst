@@ -21,6 +21,7 @@ const KNOWN_IDENTITY_KEYS = new Set([
   "keywords",
   "license",
   "dependencies",
+  "agents",
 ]);
 const KNOWN_DISTRIBUTION_KEYS = new Set(["claude", "codex", "agentsSkills"]);
 const KNOWN_CLAUDE_DIST_KEYS = new Set(["enabled", "marketplace"]);

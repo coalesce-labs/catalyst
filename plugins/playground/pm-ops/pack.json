@@ -17,7 +17,13 @@
       "cadence",
       "operations"
     ],
-    "license": "MIT"
+    "license": "MIT",
+    "agents": [
+      "./agents/cycle-analyzer.md",
+      "./agents/milestone-analyzer.md",
+      "./agents/backlog-analyzer.md",
+      "./agents/github-linear-analyzer.md"
+    ]
   },
   "distribution": {
     "claude": {

@@ -12,8 +12,12 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 
 import { validateRenderedPack } from "./core/contract.mjs";
+import { readPackManifest } from "./core/pack-manifest.mjs";
 import { renderPluginPack, listPluginRelPaths } from "./providers/local-provisional.mjs";
 import { buildLossReport, hasUnacknowledgedLosses, lossCounts, renderLossReportMarkdown } from "./core/loss.mjs";
+import { renderPluginJson, renderMarketplaceJson, readExistingVersion } from "./emitters/claude.mjs";
+import { resolveCodexVersion, renderCodexPluginJson, renderCodexCatalog } from "./emitters/codex.mjs";
+import { planAgentsSkillsBundle } from "./emitters/agents-skills.mjs";
 
 export const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 const NON_CLAUDE_TARGETS = ["codex", "agentsSkills"];
@@ -32,8 +36,14 @@ function readSkillNeutralOverrides(repoRootPath, pluginRelPath) {
   return pack.skills ?? {};
 }
 
+/** readConfigPackageOrder(repoRootPath) → plugin rel-paths in release-please-config.json's declared order. */
+export function readConfigPackageOrder(repoRootPath) {
+  const config = JSON.parse(readFileSync(resolve(repoRootPath, "release-please-config.json"), "utf8"));
+  return Object.keys(config.packages);
+}
+
 /**
- * renderAllPacks(repoRootPath) → [{ pluginRelPath, packId, pack, validation }]
+ * renderAllPacks(repoRootPath) → [{ pluginRelPath, packId, pack, packManifest, validation }]
  *
  * Renders every real plugin directory through the provisional provider and
  * validates each against the contract. Never writes anything to disk.
@@ -47,7 +57,13 @@ export function renderAllPacks(repoRootPath = repoRoot) {
       packId,
       skillNeutralOverrides: readSkillNeutralOverrides(repoRootPath, pluginRelPath),
     });
-    return { pluginRelPath, packId, pack, validation: validateRenderedPack(pack) };
+    return {
+      pluginRelPath,
+      packId,
+      pack,
+      packManifest: readPackManifest(repoRootPath, pluginRelPath),
+      validation: validateRenderedPack(pack),
+    };
   });
 }
 
@@ -64,10 +80,90 @@ function writeLossReportArtifacts(repoRootPath, report) {
   writeFileSync(resolve(distDir, "LOSSES.md"), renderLossReportMarkdown(report) + "\n");
 }
 
+function writeFileEnsuringDir(absPath, contents) {
+  mkdirSync(resolve(absPath, ".."), { recursive: true });
+  writeFileSync(absPath, contents);
+}
+
+/** writeClaudeTarget(repoRootPath, results, { write }) → { pluginJsonPaths, marketplacePath } */
+function writeClaudeTarget(repoRootPath, results, { write }) {
+  const order = readConfigPackageOrder(repoRootPath);
+  const byRelPath = new Map(results.map((r) => [r.pluginRelPath, r]));
+  const pluginJsonPaths = [];
+
+  for (const pluginRelPath of order) {
+    const r = byRelPath.get(pluginRelPath);
+    if (!r) continue;
+    const existingVersion = readExistingVersion(repoRootPath, pluginRelPath);
+    const text = renderPluginJson(r.packManifest, existingVersion) + "\n";
+    const absPath = resolve(repoRootPath, pluginRelPath, ".claude-plugin/plugin.json");
+    if (write) writeFileEnsuringDir(absPath, text);
+    pluginJsonPaths.push(absPath);
+  }
+
+  const entries = order.map((pluginRelPath) => ({ pluginRelPath, packManifest: byRelPath.get(pluginRelPath).packManifest }));
+  const marketplaceText = renderMarketplaceJson(entries) + "\n";
+  const marketplacePath = resolve(repoRootPath, ".claude-plugin/marketplace.json");
+  if (write) writeFileEnsuringDir(marketplacePath, marketplaceText);
+
+  return { pluginJsonPaths, marketplacePath };
+}
+
+/** writeCodexTarget(repoRootPath, results, { write }) → { pluginJsonPaths, catalogPath } */
+function writeCodexTarget(repoRootPath, results, { write }) {
+  const order = readConfigPackageOrder(repoRootPath);
+  const byRelPath = new Map(results.map((r) => [r.pluginRelPath, r]));
+  const pluginJsonPaths = [];
+  const codexEntries = [];
+
+  for (const pluginRelPath of order) {
+    const r = byRelPath.get(pluginRelPath);
+    if (!r || r.packManifest.distribution.codex?.enabled !== true) continue;
+    const claudeVersion = readExistingVersion(repoRootPath, pluginRelPath);
+    const version = resolveCodexVersion({ repoRoot: repoRootPath, pluginRelPath, claudeVersion });
+    const text = renderCodexPluginJson(r.packManifest, version) + "\n";
+    const absPath = resolve(repoRootPath, pluginRelPath, ".codex-plugin/plugin.json");
+    if (write) writeFileEnsuringDir(absPath, text);
+    pluginJsonPaths.push(absPath);
+    codexEntries.push({ pluginRelPath, packManifest: r.packManifest });
+  }
+
+  const catalogText = renderCodexCatalog(codexEntries) + "\n";
+  const catalogPath = resolve(repoRootPath, ".agents/plugins/marketplace.json");
+  if (write) writeFileEnsuringDir(catalogPath, catalogText);
+
+  return { pluginJsonPaths, catalogPath };
+}
+
+/** writeAgentsSkillsTarget(repoRootPath, results, { write }) → { emittedFlatNames, fileCount } */
+function writeAgentsSkillsTarget(repoRootPath, results, { write }) {
+  const eligible = results.filter((r) => r.packManifest.distribution.agentsSkills?.enabled === true);
+  const entries = eligible.map((r) => ({ packId: r.packId, pack: r.pack }));
+  const { files, emittedFlatNames } = planAgentsSkillsBundle(entries);
+
+  if (write) {
+    for (const f of files) {
+      const absPath = resolve(repoRootPath, ".agents/skills", f.relPath);
+      const contents = f.text !== undefined ? f.text : Buffer.from(f.base64, "base64");
+      writeFileEnsuringDir(absPath, contents);
+    }
+  }
+
+  return { emittedFlatNames, fileCount: files.length };
+}
+
+const TARGET_WRITERS = {
+  claude: writeClaudeTarget,
+  codex: writeCodexTarget,
+  agentsSkills: writeAgentsSkillsTarget,
+};
+
 function cmdRender(args) {
   const dryRun = args.includes("--dry-run");
   const allowLosses = args.includes("--allow-losses");
   const write = args.includes("--write");
+  const targetIdx = args.indexOf("--target");
+  const target = targetIdx >= 0 ? args[targetIdx + 1] : null;
   const results = renderAllPacks(repoRoot);
 
   let totalSkills = 0;
@@ -108,13 +204,35 @@ function cmdRender(args) {
     console.log(`wrote scripts/packaging/dist/loss-report.json and LOSSES.md`);
   }
 
+  // The Claude target has no losses by construction (classifyPackLosses
+  // returns empty for it) — a `--target claude` invocation is the byte-exact
+  // round-trip check and must not be gated on codex/agentsSkills losses that
+  // this invocation isn't even touching.
   const unacknowledged = hasUnacknowledgedLosses(report);
-  if (unacknowledged && !allowLosses && !dryRun) {
+  if (unacknowledged && !allowLosses && !dryRun && target !== "claude") {
     console.log("FAILED: unacknowledged losses (omitted/degraded entries) — pass --allow-losses to proceed anyway");
     process.exit(1);
   }
 
-  return { results, totalSkills, totalAgents, invalid, report };
+  let targetOutcome = null;
+  if (target) {
+    const writer = TARGET_WRITERS[target];
+    if (!writer) {
+      console.log(`FAILED: unknown --target "${target}" (expected claude, codex, or agentsSkills)`);
+      process.exit(1);
+    }
+    targetOutcome = writer(repoRoot, results, { write });
+    console.log("");
+    console.log(`TARGET ${target}: ${write ? "wrote" : "planned (pass --write to persist)"}`);
+  } else if (write) {
+    targetOutcome = {};
+    for (const [name, writer] of Object.entries(TARGET_WRITERS)) {
+      targetOutcome[name] = writer(repoRoot, results, { write });
+      console.log(`TARGET ${name}: wrote output`);
+    }
+  }
+
+  return { results, totalSkills, totalAgents, invalid, report, targetOutcome };
 }
 
 function main() {
