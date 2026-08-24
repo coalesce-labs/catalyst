@@ -43,6 +43,12 @@ import {
 import { join } from "node:path";
 import { emitBootResumePending as defaultEmitBootResumePending } from "./dispatch-alert.mjs"; // CTL-1443
 import { labelNeedsHumanUnlessBeliefOwner } from "./label-guard.mjs"; // CTL-1443 (Codex P1)
+// CTL-2158: classify the stall and stamp "an escalation was published".
+import {
+  classifyStall,
+  stallClassSignalFields,
+  ESCALATION_PUBLISHED_FIELD,
+} from "./stall-class.mjs";
 import { applyLabel as defaultApplyLabel } from "./linear-write.mjs"; // CTL-1443 (Codex P1)
 import {
   readWorkerSignals,
@@ -72,6 +78,8 @@ import { defaultDispatch } from "./dispatch.mjs";
 import { liveAgents } from "./cli/sessions.mjs";
 import { YIELDED_STATUS } from "../lib/phase-yield.mjs"; // CTL-1854: the declared bounded wait
 import { countYieldedOccupancy } from "./signal-reader.mjs"; // CTL-1854: mode-independent yield occupancy
+// CTL-2192: the three-valued SDK liveness oracle (leaf module).
+import { classifySdkWorkerLiveness } from "./sdk-worker-registry.mjs";
 
 // ─── CTL-644: cheap/expensive classification ───────────────────────────────
 //
@@ -192,7 +200,19 @@ export function surfaceStalePendingApprovals({
   // not on a bare status flip. Route through the same label-guard path the
   // P0b exhaustion sweep uses (labelOnce markers = idempotence).
   labelNeedsHuman = (dir, t) =>
-    labelNeedsHumanUnlessBeliefOwner(dir, t, { applyLabel: defaultApplyLabel }, { site: "boot-resume-gate" }),
+    labelNeedsHumanUnlessBeliefOwner(
+      dir,
+      t,
+      { applyLabel: defaultApplyLabel },
+      {
+        site: "boot-resume-gate",
+        // ⛔ CTL-2159: forward the reason. `boot-resume-gate` is one of only eight
+        // exact ASK rows in the classifier table — a stale approval gate IS a
+        // person's decision — and without the token this classified HELD, leaving
+        // the ask path dark for the single site most likely to need it.
+        reason: "boot-resume-gate",
+      },
+    ),
 } = {}) {
   const surfaced = [];
   for (const gate of listPendingApprovals(orchDir, { now })) {
@@ -235,6 +255,22 @@ export function surfaceStalePendingApprovals({
         observed: { gate_age_hours: ageHours, phase },
         attempts: [],
       };
+      // CTL-2158 — OUTPUT RE-TARGET. The comment above says "mapped to skip in
+      // the unstuck sweep"; that mapping was a hand-typed reason row and is now
+      // derived from this stamp, so it survives the token's deletion. An expired
+      // approval gate is a genuine ASK: only an operator can approve the resume.
+      Object.assign(
+        sig,
+        stallClassSignalFields(
+          classifyStall({
+            reason: "boot-resume-gate-expired",
+            signal: sig,
+            explanation: sig.explanation,
+            site: "boot-resume-gate",
+          }),
+        ),
+      );
+      sig[ESCALATION_PUBLISHED_FIELD] = true;
       const tmp = `${sigPath}.tmp.${process.pid}`;
       writeFileSync(tmp, JSON.stringify(sig, null, 2));
       renameSync(tmp, sigPath);
@@ -410,6 +446,18 @@ export function selectBootResumeCandidates({
   // occupying slots before the restart, and the runner's semaphore still caps
   // real concurrency.
   sdkSessionHarvest = new Map(),
+  // CTL-2192 (Phase 4): the SDK-native liveness arm. hasLiveBgWorker matches only
+  // `claude agents` BACKGROUND sessions, and an SDK worker never registers there
+  // — so it reads false for EVERY live SDK worker and every in-flight SDK ticket
+  // is a boot-resume candidate on every daemon start. Default is a no-op
+  // `unknown` (preserving today's behaviour and leaving the 12 existing pure
+  // tests untouched), the same defaulting discipline onPhaseRegression uses;
+  // reconcileBootResume threads the real classifySdkWorkerLiveness.
+  sdkLiveness = () => ({ state: "unknown", reason: "no-oracle-injected", childPid: null }),
+  // CTL-2192 (Phase 4): tickets whose orphan reap could NOT be confirmed. Never
+  // dispatch beside a worker we could not prove is dead — that is two live
+  // generations in one worktree, the harm this ticket exists to prevent.
+  reapFailedTickets = new Set(),
 } = {}) {
   const inFlight = listInFlightTickets(orchDir);
   if (inFlight.size === 0) return [];
@@ -515,7 +563,46 @@ export function selectBootResumeCandidates({
       );
       continue;
     }
-    if (hasLiveBgWorker(agents, active.worktreePath)) {
+    // CTL-2192 (Phase 4): a ticket whose orphan survived its SIGTERM is not a
+    // candidate at any liveness verdict — we could not prove its worker is gone.
+    if (reapFailedTickets?.has?.(ticket)) {
+      logger.warn(
+        { ticket, phase: active.phase },
+        "boot-resume: orphan reap unconfirmed — not resuming beside a possibly-live worker (CTL-2192)"
+      );
+      liveCount++; // it may still hold its slot; charge it rather than over-dispatch
+      continue;
+    }
+    // CTL-2192 (Phase 4): ONE liveness question, two arms. EITHER arm reporting
+    // live is enough — a bg worker and an SDK worker are different shapes of the
+    // same fact. A throwing oracle degrades to `unknown` (candidate), because a
+    // liveness read must never take down the boot pass.
+    //
+    // ⚠️ HONEST SCOPE of the `sdkState === "live"` arm below. On the production
+    // boot path it is DEFENSIVE, not load-bearing: startDaemon runs
+    // reconcileSdkRegistryOnBoot BEFORE this pass, and after that reconcile no
+    // projection can still classify `live` here. Walk the oracle's branches —
+    // in-memory (1) is empty at boot; a live-daemon projection (3/4) is `kept`
+    // and answers `unknown`; a dead-daemon projection whose child survived is
+    // `reapFailed` and short-circuits above, before the oracle is consulted; one
+    // whose child died answers `orphan-child-dead`; a deleted one answers
+    // `no-projection`. reapFailedTickets is therefore the mechanism that
+    // actually protects a live SDK worker at boot, and this arm is the
+    // belt-and-braces second reader of the same fact. It is kept because
+    // reconcileBootResume is an EXPORTED seam — an embedder or a future caller
+    // that runs it without the reconcile in front gets the guard anyway — and
+    // because branch 1 makes it genuinely reachable through the REAL oracle when
+    // a worker IS registered in this process (asserted end-to-end in
+    // boot-resume.test.mjs with no stub oracle).
+    let sdkVerdict;
+    try {
+      sdkVerdict = sdkLiveness(ticket, active.worktreePath);
+    } catch (err) {
+      sdkVerdict = { state: "unknown", reason: "oracle-threw", childPid: null };
+      logger.warn({ ticket, err: err?.message }, "boot-resume: sdk liveness oracle threw — treating as unknown (CTL-2192)");
+    }
+    const sdkState = sdkVerdict?.state ?? "unknown";
+    if (hasLiveBgWorker(agents, active.worktreePath) || sdkState === "live") {
       liveCount++;
     } else {
       // CTL-690: capture bg_job_id (signal-reader exposes it as liveness.value
@@ -528,7 +615,26 @@ export function selectBootResumeCandidates({
         phase: active.phase,
         worktreePath: active.worktreePath,
         bgJobId,
+        // CTL-2192: stamp the verdict so the audit log can WATCH the legacy
+        // `unknown` population drain rather than assuming it has. Per the plan's
+        // Migration Notes: do not alarm on `unknown` until a full ticket has
+        // cycled on every host.
+        liveness: { source: "sdk", state: sdkState, reason: sdkVerdict?.reason ?? null },
       });
+      if (sdkState === "unknown") {
+        // CTL-2192 (remediation): INFO, not debug. A host where child-pid
+        // discovery never succeeds (no usable /usr/sbin/lsof, say) leaves every
+        // projection legacy-shaped, so the oracle answers `unknown` for every
+        // worker's whole life and the fix is silently a no-op. At `debug` that
+        // is indistinguishable from a healthy rollout in a default log config —
+        // the fail direction of the one-shot latch is toward inertness, so the
+        // rollout drain has to be VISIBLE to be watchable. It is bounded: one
+        // line per candidate per boot, not per tick.
+        logger.info(
+          { ticket, phase: active.phase, reason: sdkVerdict?.reason ?? null },
+          "boot-resume: sdk liveness unknown — resuming (today's behaviour); breadcrumb for the rollout drain (CTL-2192)"
+        );
+      }
     }
   }
 
@@ -667,6 +773,12 @@ export function reconcileBootResume({
   // and a deferred warm candidate would lose its UUID (the harvest lives only in
   // this boot pass — Sweep 1.5 has no access to it).
   sdkSessionHarvest = new Map(),
+  // CTL-2192 (Phase 4): the SDK-native liveness oracle and the set of tickets
+  // whose orphan reap could not be confirmed. Both come from
+  // reconcileSdkRegistryOnBoot's result, which startDaemon already runs before
+  // this pass — reap first, confirm the reap, THEN decide candidacy.
+  sdkLiveness = (ticket) => classifySdkWorkerLiveness(orchDir, ticket),
+  reapFailedTickets = new Set(),
 } = {}) {
   // CTL-1006 Scenario 1: eligible on a cold start OR a daemon bounce. The old
   // `report.coldStart !== true` gate was a permanent production no-op because
@@ -687,6 +799,8 @@ export function reconcileBootResume({
     onPhaseRegression: ({ ticket, phase, dominantPhase }) =>
       appendRegressionEvent({ phase, ticket, dominantPhase, orchId }),
     sdkSessionHarvest, // CTL-1422 (B): warm candidates are slice-exempt
+    sdkLiveness, // CTL-2192: the SDK arm of the liveness question
+    reapFailedTickets, // CTL-2192: never dispatch beside an unconfirmed orphan
   });
 
   // CTL-1084: planned = total candidates found (before any cap or cooldown filter).
@@ -805,12 +919,45 @@ export function reconcileBootResume({
 // and each scheduler tick so a mid-run approval is honored without a restart.
 // Routes through reviveDispatch → same MAX_REVIVES / storm-breaker guards as
 // the cheap auto path. Clears both sentinels on a successful dispatch.
+//
+// ⚠️ CTL-2192: startDaemon calls this immediately after reconcileBoot has
+// excluded the tickets whose orphan reap could not be confirmed. Dispatching on
+// the two sentinels ALONE therefore walked straight around that exclusion
+// through the adjacent door — an operator approval dropped on a previous boot is
+// not evidence that THIS boot's orphan is gone. The guard has to be applied at
+// both doors or it is applied at neither.
 export function processApprovedResumes({
   orchDir,
   reviveDispatch = defaultReviveDispatch,
   dispatch = defaultDispatch,
   appendEvent = defaultAppendBootResumeEvent,
   orchId = undefined,
+  // CTL-2192 (Phase 4): tickets whose boot-time orphan reap could NOT be
+  // confirmed (reconcileSdkRegistryOnBoot().reapFailed). Same fact, same fail
+  // direction, as reconcileBootResume's parameter of the same name. Defaults to
+  // an empty Set for the per-tick scheduler call, which carries no boot verdict.
+  //
+  // ⛔ That default is NOT the whole guard, and reading it as one was the defect
+  // Codex #3955 round 2 caught. `startScheduler` runs `runTick()` immediately as
+  // its "authoritative initial pass", and that tick calls this function with the
+  // empty default — on the SAME boot whose reap just failed. So the boot call
+  // would correctly retain an approval, and the scheduler's very first tick,
+  // moments later, would dispatch it beside the still-live orphan. The guard was
+  // applied at one door and walked around through the adjacent one, which is
+  // exactly the failure this parameter exists to prevent.
+  reapFailedTickets = new Set(),
+  // CTL-2192 (Codex #3955 round 2 P1): the second half of that guard, and the
+  // half that does not go stale. Rather than freezing the boot verdict and
+  // threading it through startScheduler — where it would describe the fleet less
+  // and less accurately every tick, eventually stranding approvals forever — the
+  // per-tick path RE-DERIVES the answer: is there a live SDK worker for this
+  // ticket right now? A reapFailed orphan keeps its projection, so the oracle
+  // reads `orphan-child-alive` → live, and a child that has since died reads
+  // `orphan-child-dead` → the approval dispatches on the very next tick with no
+  // restart. Same fail direction as every other liveness read in this ticket:
+  // ONLY a definite `live` blocks; `unknown` proceeds (today's behaviour), so a
+  // legacy projection can never strand an operator's approval.
+  sdkLiveness = (ticket) => classifySdkWorkerLiveness(orchDir, ticket),
   // CTL-1443: the stale-gate expiry sweep rides the same every-tick call so no
   // scheduler wiring is needed. Injectable for tests; emitAlert defaults to the
   // real dispatch-alert emitter (lazy import avoided — passed by the caller or
@@ -838,15 +985,57 @@ export function processApprovedResumes({
       .filter((e) => e.isDirectory())
       .map((e) => e.name);
   } catch {
-    return { dispatched: 0, failed: 0 };
+    return { dispatched: 0, failed: 0, reapBlocked: 0 };
   }
 
   let dispatched = 0;
   let failed = 0;
+  let reapBlocked = 0; // CTL-2192: approvals held back by an unconfirmed reap
   for (const ticket of tickets) {
     const pendingPath = bootResumePendingPath(orchDir, ticket);
     const approvedPath = bootResumeApprovedPath(orchDir, ticket);
     if (!existsSync(pendingPath) || !existsSync(approvedPath)) continue;
+
+    // CTL-2192: never dispatch beside an orphan we could not prove is gone.
+    // Checked BEFORE the marker read so an unreadable marker cannot mask it, and
+    // BOTH sentinels are RETAINED — the approval is still valid, it is just not
+    // actionable right now. A later boot or a later tick re-derives the verdict
+    // and dispatches then, so this DEFERS the resume rather than dropping it.
+    //
+    // Two independent sources of the same fact, because neither covers the other:
+    // the boot set is authoritative for the boot pass but carries no information
+    // on a later tick, and the live oracle is self-maintaining but cannot see a
+    // reap failure whose projection was already removed. Either one blocks.
+    if (reapFailedTickets?.has?.(ticket)) {
+      log.warn(
+        { ticket },
+        "processApprovedResumes: orphan reap unconfirmed — approval retained, not dispatching beside a possibly-live worker (CTL-2192)"
+      );
+      reapBlocked++;
+      continue;
+    }
+
+    // CTL-2192 (Codex #3955 round 2 P1): the per-tick half. A throwing oracle is
+    // `unknown`, never a block — a broken liveness read must not strand every
+    // operator approval on the host.
+    let liveVerdict;
+    try {
+      liveVerdict = sdkLiveness(ticket);
+    } catch (err) {
+      liveVerdict = { state: "unknown", reason: "oracle-threw", childPid: null };
+      log.warn(
+        { ticket, err: err?.message },
+        "processApprovedResumes: sdk liveness oracle threw — treating as unknown (CTL-2192)"
+      );
+    }
+    if ((liveVerdict?.state ?? "unknown") === "live") {
+      log.warn(
+        { ticket, reason: liveVerdict?.reason ?? null, childPid: liveVerdict?.childPid ?? null },
+        "processApprovedResumes: an SDK worker is still live for this ticket — approval retained, not dispatching a second generation (CTL-2192)"
+      );
+      reapBlocked++;
+      continue;
+    }
 
     const pending = readPendingMarker(orchDir, ticket);
     if (!pending) {
@@ -876,5 +1065,5 @@ export function processApprovedResumes({
     }
   }
 
-  return { dispatched, failed };
+  return { dispatched, failed, reapBlocked };
 }

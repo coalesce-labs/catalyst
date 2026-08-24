@@ -83,7 +83,7 @@ import {
 } from "./inbox-summary-data";
 // CTL-1569: the conversation surface — the ask summary, the newest-first thread,
 // and the inline reply that posts a real Linear comment as the operator (which is
-// what actually clears `needs-human`, per CTL-1567).
+// what actually clears the escalation hold, per CTL-1567).
 import { Conversation } from "./conversation";
 import type { ReplyOutcome } from "@/board/conversation-client";
 // CTL-1574: the Linear discussion timeline — comment cards interleaved with the
@@ -245,7 +245,7 @@ function WhatsNeededNow({
   const accent = accentFor(row);
   const escalation = escalationExplanationFor(row);
 
-  // CTL-1110: needs-human rows with a structured explanation use the CTA-led card.
+  // CTL-1110: `ask` rows with a structured explanation use the CTA-led card.
   if (escalation != null) {
     const escAccent = escalationAccentFor(row);
     return (
@@ -517,7 +517,7 @@ export function ReadingPane({
             // The RESOLVING reply path is offered only on a true `attention` row.
             // `needsYou` also covers the scheduler's `blocked` and `queued` rows,
             // and a human comment cannot resolve those: the daemon's comment-wake
-            // removes only `needs-human`/`needs-input`, never the admission-gate
+            // removes only the escalation hold / `needs-input`, never the admission-gate
             // labels. Offering it there would optimistically hide the row and then
             // roll it back after the grace window — a worse experience than not
             // offering it. The thread stays READABLE either way; only the reply

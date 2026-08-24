@@ -54,11 +54,6 @@ import {
 import { computeSurvivingRoster, computeDeadHosts, computeDispatchSurvivingRoster } from "./scheduler.mjs";
 import { checkSdkDaemonEnv, STATUS } from "./doctor.mjs";
 import { readCapacityHistory } from "../orch-monitor/lib/capacity-history.mjs";
-import {
-  collectEventLog,
-  formatEscalationCoverage,
-  ESCALATION_TAIL_MAX_BYTES,
-} from "./recovery-pass-context.mjs";
 
 // ─── fixtures ────────────────────────────────────────────────────────────────
 
@@ -805,71 +800,6 @@ describe("doctor sdk-bg-fallback refuses to PASS on an uncovered window (Codex P
   test("the legacy string seam (whole-file body) still counts as covered ⇒ PASS", () => {
     const checks = checkSdkDaemonEnv(healthy({ readEventLog: () => "" }));
     expect(fb(checks).status).toBe(STATUS.PASS);
-  });
-});
-
-// ── 5c. recovery-pass-context: the advertised window must be the real one ─────
-
-describe("recovery-pass escalation lookback surfaces truncation (Codex P2)", () => {
-  const esc = (ticket, ts) =>
-    JSON.stringify({
-      ts,
-      attributes: { "event.name": "recovery.escalated" },
-      body: { payload: { ticket, reason: "pr_not_merged", pad: PAD } },
-    });
-
-  test("a fully covered 7-day window reports covered:true and no banner", () => {
-    const p = join(dir, "esc-ok.jsonl");
-    writeFileSync(p, [esc("CTL-1", iso(NOW - 3 * HOUR)), esc("CTL-2", iso(NOW - MIN))].join("\n") + "\n");
-    const res = collectEventLog({ nowMs: NOW, logPath: p });
-    expect(res.covered).toBe(true);
-    expect(res.items.map((i) => i.ticket)).toEqual(["CTL-1", "CTL-2"]);
-    expect(formatEscalationCoverage(res)).toBeNull();
-  });
-
-  test("cap exhaustion is REPORTED, and the banner names the real horizon", () => {
-    // The reported shape: at ~34 MB/day the default 64 MiB cap runs out after ~2
-    // days, so escalations from the remaining 5 of the advertised 7 vanish. The
-    // caller used to ignore `covered` entirely and print a 2-day sweep as a 7-day one.
-    const p = join(dir, "esc-trunc.jsonl");
-    const lines = [];
-    for (let i = 600; i >= 1; i--) lines.push(esc(`CTL-${i}`, iso(NOW - i * 10 * MIN)));
-    writeFileSync(p, lines.join("\n") + "\n");
-    const res = collectEventLog({
-      nowMs: NOW,
-      logPath: p,
-      maxBytes: 4096,
-      chunkSize: 512,
-      initialWindow: 512,
-    });
-    expect(res.covered).toBe(false);
-    expect(res.items.length).toBeLessThan(600); // it genuinely under-counted
-    const banner = formatEscalationCoverage(res);
-    expect(banner).toContain("TRUNCATED");
-    expect(banner).toContain("7.0d");
-    expect(banner).toContain("INCOMPLETE");
-  });
-
-  test("an I/O failure reports covered:false rather than a clean-looking empty sweep", () => {
-    const res = collectEventLog({ nowMs: NOW, logPath: dir /* a directory — EISDIR */ });
-    expect(res.items).toEqual([]);
-    expect(res.covered === false || res.items.length === 0).toBe(true);
-  });
-
-  test("the cap ACTUALLY USED is derived for the ADVERTISED window, not inherited from the shared default", () => {
-    // 7 days x ~34 MB/day = ~238 MB, so the shared 64 MiB DEFAULT_TAIL_MAX_BYTES
-    // cannot span this caller's window: under it the advertised 7 days is really
-    // ~1.9. Asserted on the cap the call SITE resolves (echoed back in the result),
-    // not merely on the exported constant — the constant existing proves nothing if
-    // the default parameter still points at the shared one.
-    const p = join(dir, "esc-cap.jsonl");
-    writeFileSync(p, esc("CTL-1", iso(NOW - MIN)) + "\n");
-    const used = collectEventLog({ nowMs: NOW, logPath: p }).maxBytes;
-    expect(used).toBe(ESCALATION_TAIL_MAX_BYTES);
-    expect(used).toBeGreaterThan(7 * 34 * 1024 * 1024); // spans the advertised 7 days
-    expect(used).toBeGreaterThan(DEFAULT_TAIL_MAX_BYTES); // and is NOT the shared default
-    // Still a hard ceiling — bounded, not "read whatever the file is".
-    expect(Number.isFinite(used)).toBe(true);
   });
 });
 

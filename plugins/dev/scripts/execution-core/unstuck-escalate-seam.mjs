@@ -19,6 +19,7 @@ import { log as defaultLog } from "./config.mjs";
 import { authorEscalationComment } from "./unstuck-sweep-escalation.mjs";
 import { captureDeepDiveEvidence } from "./unstuck-sweep-evidence.mjs";
 import { labelNeedsHumanUnlessBeliefOwner } from "./label-guard.mjs";
+import { escalationIsHumanFacing } from "./escalation-publish.mjs"; // CTL-2159
 import { postLinearCommentAsSpawnResult } from "./linear-comment-write.mjs"; // CTL-1889 inc 2
 
 function defaultRunGit(args) {
@@ -121,22 +122,30 @@ export function buildUnstuckEscalateSeam(deps = {}) {
   // that labelNeedsHumanUnlessBeliefOwner's boolean return erases. An INJECTED
   // applyNeedsHuman still returns a bare boolean (a stub can't distinguish, so its
   // `false` stays benign — see the belief-owner test) and escalate() handles both.
-  const _applyLabel = applyNeedsHuman ?? ((ticket) => {
+  const _applyLabel = applyNeedsHuman ?? ((ticket, reason = null) => {
     let outcome = { deferred: false, applied: false, ran: false, reason: null };
     labelNeedsHumanUnlessBeliefOwner(orchDir, ticket, writeStatus, {
       env, site: "unstuck-escalate", log,
+      // ⛔ CTL-2159: forward the sweep's reason. It was computed inside escalate()
+      // while this closure was built at seam-construction time, so it was
+      // structurally unreachable — and every unstuck-sweep escalation therefore
+      // classified HELD via the no-reason rule. The closure now takes it as an
+      // argument; an INJECTED applyNeedsHuman that ignores the extra arg is
+      // unaffected.
+      reason,
       onOutcome: (o) => { outcome = o; },
     });
-    if (outcome.applied) return { applied: true };
+    if (outcome.applied) return { applied: true, stallClass: outcome.stallClass ?? null };
     // Attempted (applyLabel ran) but did not confirm, and not a belief-owner deferral →
     // a real failed escalation surface. A marker no-op (ran:false) or deferral is benign.
     if (!outcome.deferred && outcome.ran) {
       return {
         applied: false,
+        stallClass: outcome.stallClass ?? null,
         error: `needs-human label write did not confirm (reason: ${outcome.reason ?? "unknown"})`,
       };
     }
-    return { applied: false };
+    return { applied: false, stallClass: outcome.stallClass ?? null };
   });
 
   const commentHelper = env.CATALYST_COMMENT_POST_HELPER ?? COMMENT_HELPER_DEFAULT;
@@ -178,10 +187,12 @@ export function buildUnstuckEscalateSeam(deps = {}) {
     //    non-confirming write surfaces via `error` so the sweep's escalateFailures counts
     //    it, while benign deferral / already-applied no-ops stay error-free.
     let labelApplied = false;
+    let stallClass = null;
     try {
-      const lr = _applyLabel(ticket);
+      const lr = _applyLabel(ticket, reason);
       if (lr && typeof lr === "object") {
         labelApplied = lr.applied === true;
+        stallClass = lr.stallClass ?? null;
         if (lr.error) errors.push({ sideEffect: "label", err: lr.error });
       } else {
         labelApplied = Boolean(lr);
@@ -201,8 +212,30 @@ export function buildUnstuckEscalateSeam(deps = {}) {
     const workerDir = orchDir && ticket ? join(orchDir, "workers", ticket) : null;
     const markerGuardActive = Boolean(commentMarker && workerDir && existsSync(workerDir));
 
+    // ⛔ CTL-2159 CLASS GATE — the last per-ticket Linear artifact on this path.
+    //
+    // This comment used to post on EVERY escalation, ungated. With the label
+    // deleted it became the surviving contradiction of the epic's central
+    // promise: "SYSTEM → ZERO per-ticket artifacts". A provider outage across N
+    // tickets wrote N authored Linear comments into a 300-writes/day budget, for
+    // a condition the ONE fleet alert (CTL-2156) already names and that resolves
+    // itself.
+    //
+    // FAIL-OPEN, and deliberately narrow: only an EXPLICIT system/moot verdict
+    // suppresses. HELD (a person must look) and ASK still comment — HELD's whole
+    // meaning is visibility, and silencing it ships the plan's named worst
+    // outcome. An unknown/absent class (an injected label stub, a belief-owner
+    // deferral) also still comments: an absence of evidence is not a SYSTEM
+    // verdict, and going quiet on one would be the silent regression.
+    const classSuppressesComment =
+      stallClass != null && !escalationIsHumanFacing(stallClass);
     let commentPosted = false;
-    if (markerGuardActive && existsSync(commentMarker)) {
+    if (classSuppressesComment) {
+      log.info(
+        { ticket, phase, stallClass, reason },
+        "unstuck-escalate: system/moot stall — no per-ticket comment (CTL-2159)"
+      );
+    } else if (markerGuardActive && existsSync(commentMarker)) {
       commentPosted = true; // already delivered this lifetime — no duplicate, no error
     } else {
       try {
@@ -226,6 +259,6 @@ export function buildUnstuckEscalateSeam(deps = {}) {
       }
     }
 
-    return { ticket, phase, labelApplied, commentPosted, errors };
+    return { ticket, phase, labelApplied, commentPosted, stallClass, errors };
   };
 }

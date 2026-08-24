@@ -49,7 +49,7 @@ export const DEFAULT_DAEMON_HEALTHY_WINDOW_MS = 3 * DEFAULT_HEARTBEAT_INTERVAL_M
  * @typedef {object} NavSignal
  * @property {number} workerCount   active execution-core workers (the Workers badge)
  * @property {number} queueDepth    tickets waiting in the queue (the Queue badge)
- * @property {boolean} anomaly      a board anomaly exists — blocked/needs-human or a stuck worker (the Board dot)
+ * @property {boolean} anomaly      a board anomaly exists — a blocked hold, an open ask, or a stuck worker (the Board dot)
  * @property {DaemonHealth} daemon  the local daemon's liveness (the footer health dot)
  * @property {string} generatedAt   the source snapshot's generatedAt (passthrough for cache/debug)
  */
@@ -68,7 +68,7 @@ function daemonFromLiveness(status) {
  *
  * Anomaly discipline (color: amber dot): a board anomaly is a ticket the operator
  * must look at — one held `blocked` (the in-payload representation of a dependency
- * hold / needs-human) OR a stuck worker (config.stuck). A `waiting` hold is NOT an
+ * hold / an open ask) OR a stuck worker (config.stuck). A `waiting` hold is NOT an
  * anomaly: deps are satisfied, it is just awaiting capacity (home-inbox.ts split).
  *
  * @param {import("./board-data.mjs").BoardPayload | null | undefined} board
@@ -85,10 +85,10 @@ export function deriveNavSignal(board, { daemon, liveness } = {}) {
   const stuck = typeof board?.config?.stuck === "number" ? board.config.stuck : 0;
 
   const blocked = tickets.some((t) => t && t.held === "blocked");
-  // CTL-1180: a needs-human ticket (incl. a surfaced failed phase) lights the dot
+  // CTL-1180: an `ask` ticket (incl. a surfaced failed phase) lights the dot
   // even when it carries no admission hold.
-  const needsHuman = tickets.some((t) => t && t.attention === "needs-human");
-  const anomaly = blocked || needsHuman || stuck > 0;
+  const askOpen = tickets.some((t) => t && t.attention === "ask");
+  const anomaly = blocked || askOpen || stuck > 0;
 
   const resolvedDaemon =
     daemon ?? (liveness ? daemonFromLiveness(liveness) : "offline");

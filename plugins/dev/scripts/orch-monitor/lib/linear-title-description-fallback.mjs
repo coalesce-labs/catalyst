@@ -38,10 +38,11 @@
 //     Linear call on a request path").
 //   - NEVER throws.
 //
-// Dependencies: node built-ins + Bun's global `fetch`, plus (CTL-1616 PR3) the
-// shared secret-contract engine for the LINEAR_API_TOKEN/LINEAR_API_KEY
-// resolution below (design §8 PR3 table).
-import { resolveSecret } from "../../lib/secret-contract.mjs";
+// Dependencies: node built-ins + Bun's global `fetch`, plus (CTL-1616 PR3 /
+// CTL-2187) the shared degraded-read credential resolver — the env-alias ladder
+// resolveSecret owns, PLUS the scoped app-actor tier the launchd monitor process
+// actually has. Read the CTL-1612 note in that module before changing tier order.
+import { resolveDegradedLinearAuth } from "./linear-degraded-auth.mjs";
 // CTL-1806: the replica tier + the degraded-path anomaly (D3). This is the read
 // that closes the REAL AC2 gap — the board's title backfill was already
 // replica-aware one layer up (CTL-1372's readReplicaTitles in board-data), but
@@ -176,10 +177,13 @@ const TITLE_DESC_QUERY_FOR_TEAM = `query FallbackTitleDesc($teamKey: String!, $n
   }
 }`;
 
+// CTL-2187: the credential ladder now lives in linear-degraded-auth.mjs so both
+// degraded resolvers agree on it and the CTL-1612 reasoning is stated once. In
+// the launchd monitor process LINEAR_API_TOKEN/LINEAR_API_KEY are deliberately
+// absent, so before that module this returned null on every call and the read
+// was never dispatched.
 function linearAuthHeader() {
-  const token = resolveSecret("linear-api-token").value ?? ""; // CTL-1616 PR3
-  if (!token) return null;
-  return /^lin_oauth/i.test(token) ? `Bearer ${token}` : token;
+  return resolveDegradedLinearAuth()?.header ?? null;
 }
 
 // graphql — one async GraphQL call via Bun's native fetch. Returns the parsed

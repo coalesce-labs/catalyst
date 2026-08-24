@@ -98,7 +98,7 @@ export function readBrokerState(path?: string): BrokerState | null {
     const parsed: unknown = JSON.parse(readFileSync(target, "utf8"));
     if (!parsed || typeof parsed !== "object") return null;
     const obj = parsed as Record<string, unknown>;
-    const kh = (obj.keyHealth ?? null) as BrokerKeyHealth | null;
+    const kh = (obj.keyHealth ?? null);
     const result: BrokerState = { ...(kh ?? {}) };
     if (typeof obj.interestCount === "number") result.interestCount = obj.interestCount;
     if (typeof obj.lastWakeAt === "string" || obj.lastWakeAt === null) {

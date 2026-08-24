@@ -9,6 +9,9 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, readdirSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ASSERTED_BY } from "./assertion-evidence.mjs"; // CTL-1789
+// CTL-2110: the SHIPPED SDK-native liveness probe, exercised against real
+// projections captured off the live fleet (see __fixtures__/sdk-workers-ctl2110/).
+import { isSdkWorkerLiveOnDisk } from "./sdk-worker-registry.mjs";
 import {
   buildEventEnvelope,
   defaultEmitComplete, // CTL-1789: argv contract (--asserted-by)
@@ -383,6 +386,312 @@ describe("defaultStatJob", () => {
     const res = defaultStatJob("job-corrupt");
     expect(res?.exists).toBe(true);
     expect(res?.state).toBeNull();
+  });
+
+  // CTL-2110 — a bg-less signal must classify as "gone", never throw. `join()`
+  // rejects a non-string segment and `typeof null === "object"`, so the pre-fix
+  // code threw `The "paths[1]" property must be of type string, got object`
+  // before reaching the try/catch. The scheduler's CTL-702 per-worker isolation
+  // swallowed it, so a `bg_job_id: null` signal could never be reclaimed and held
+  // its dispatch slot forever (six such signals across the fleet on 2026-08-22,
+  // pinning mini at inFlightCount 5 of 6 with ZERO live claude processes).
+  //
+  // NEGATIVE CONTROL: a string id still stats the filesystem — the guard must
+  // reject only the non-string cases, not short-circuit every call to null.
+  test("CTL-2110: a null/undefined/empty bg_job_id returns null instead of throwing", () => {
+    for (const bad of [null, undefined, "", 0, {}, []]) {
+      expect(() => defaultStatJob(bad)).not.toThrow();
+      expect(defaultStatJob(bad)).toBeNull();
+    }
+    const dir = join(jobsRoot, "job-still-read");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "state.json"), JSON.stringify({ state: "running" }));
+    expect(defaultStatJob("job-still-read")?.state).toBe("running");
+  });
+
+  // A UNIT-level guard only. Codex review on PR #3936 correctly noted that this
+  // calls jobLifecycle directly and so BYPASSES the production classifier — on its
+  // own it cannot tell us whether the fix reaches production. It is kept because
+  // the guard it covers is real, but the load-bearing assertion is the end-to-end
+  // one below ("the shape the fleet actually produces"), which drives
+  // reclaimDeadWorkIfPossible with no seam on the liveness decision at all.
+  test("CTL-2110 (unit): jobLifecycle(null) is dead-gone rather than a throw", () => {
+    expect(jobLifecycle(null)).toBe("dead-gone");
+  });
+});
+
+// --- CTL-2110 — END-TO-END through the production classifier ----------------
+//
+// Answers the Codex P1 on PR #3936 directly: "classifyWorker branches on
+// !live?.value BEFORE it can call jobLifecycle … consequently this change does
+// not alter slot reclamation."
+//
+// That is true for the "unknown" verdict and FALSE for the "dead" one, which is
+// the fleet's case. The hop chain, all in this repo:
+//
+//   scheduler.mjs:6667  hands EVERY in-flight signal to reclaimDeadWork
+//   recovery.mjs:2833   reclaimDeadWorkIfPossible calls classifyWorker itself
+//   recovery.mjs:441    bg-less branch -> classifyDispatchDeadline
+//   recovery.mjs:452    `return verdict.expired ? "dead" : "unknown"`
+//   recovery.mjs:2838   `if (klass === "terminal" || klass === "unknown") return "noop"`
+//                       <- "dead" is NOT caught here; execution continues
+//   recovery.mjs:3358   the liveness decision — where the null id used to throw
+//
+// So being classified dead is exactly what routes a signal INTO the crashing
+// line, not around it. Classification is not reclamation.
+//
+// This test uses NO seam on the liveness decision — no sdkWorkerLive, no
+// statJob, no jobLifecycle override. On clean origin/main it throws
+// `The "paths[1]" property must be of type string, got object`; here it must
+// reach a real reclaim outcome.
+describe("CTL-2110 end-to-end — the shape the fleet actually produces", () => {
+  let dir;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "exec-core-ctl2110-e2e-"));
+    mkdirSync(join(dir, "workers", "CTL-2104"), { recursive: true });
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  test("an expired executor:sdk signal with bg_job_id null is reclaimed, not thrown on", () => {
+    // Boot stamped AFTER the dispatch fires Rule 1 (dispatch-predates-boot,
+    // phase-dispatch-deadline.mjs:243) — an in-process SDK worker cannot survive
+    // its daemon's restart. This is the real CTL-2104/implement shape, down to
+    // generation 11.
+    writeFileSync(
+      join(dir, "daemon-boot.json"),
+      JSON.stringify({ bootedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString() }),
+    );
+    const startedAt = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+    const raw = {
+      ticket: "CTL-2104",
+      phase: "implement",
+      status: "dispatched",
+      executor: "sdk",
+      bg_job_id: null,
+      orchestrator: "CTL-2104",
+      attempt: 1,
+      generation: 11,
+      startedAt,
+      updatedAt: startedAt,
+    };
+    const signalPath = join(dir, "workers", "CTL-2104", "phase-implement.json");
+    writeFileSync(signalPath, JSON.stringify(raw, null, 2));
+    const signal = { ticket: "CTL-2104", phase: "implement", status: "dispatched", signalPath, raw };
+
+    // Pin the premise the whole argument rests on: the production classifier
+    // calls this signal DEAD, so recovery.mjs:2838 does not short-circuit it.
+    const bootedMs = Date.now() - 60 * 60 * 1000;
+    expect(classifyWorker(signal, { bootedMs })).toBe("dead");
+
+    let threw = null;
+    let outcome;
+    try {
+      outcome = reclaimDeadWorkIfPossible(dir, signal, {
+        // Only the SIDE EFFECTS are stubbed. Nothing on the liveness decision.
+        killBgJob: () => true,
+        reviveDispatch: () => true,
+        applyStalledLabel: () => true,
+        appendEscalatedEvent: () => true,
+      });
+    } catch (err) {
+      threw = err;
+    }
+    expect(threw).toBeNull();
+    // Reaching a real outcome IS the slot being freed — "noop" would mean the
+    // signal was skipped again, which is the bug.
+    expect(String(outcome)).not.toBe("noop");
+  });
+});
+
+// --- CTL-2110 — reclaim must use SDK-native liveness for a bg-less signal ----
+//
+// 442 of 443 phase signals on the live fleet (mini + mini-2, measured
+// 2026-08-22) are `executor:"sdk"` with `bg_job_id: null`, because an
+// in-process SDK worker never has a `claude --bg` job. So "no bg id" is the
+// NORMAL shape of a healthy worker, and the two failure modes are opposite:
+//
+//   throw       → the signal is never reclaimed and pins its slot forever
+//                 (the bug: CTL-2104/implement reached generation 11)
+//   "dead-gone" → EVERY in-flight SDK worker is treated as dead every tick,
+//                 re-dispatching on top of running workers (worse than the bug)
+//
+// The reclaim loop hands reclaimDeadWorkIfPossible every in-flight signal
+// without pre-filtering by classifyWorker, so this function must decide it.
+describe("reclaimDeadWorkIfPossible — bg-less (SDK) liveness (CTL-2110)", () => {
+  let dir;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "exec-core-sdk-reclaim-"));
+    mkdirSync(join(dir, "workers", "CTL-2110"), { recursive: true });
+    // A boot instant is REQUIRED to get past classifyWorker. With no
+    // daemon-boot.json, classifyDispatchDeadline returns "boot-unreadable" ⇒ not
+    // expired ⇒ classifyWorker says "unknown" ⇒ reclaimDeadWorkIfPossible
+    // short-circuits to "noop" and the liveness decision under test is never
+    // reached. Stamping the boot AFTER the dispatch fires Rule 1
+    // ("dispatch-predates-boot"), which is the real-world shape: an in-process
+    // SDK worker cannot survive its daemon's restart.
+    writeFileSync(
+      join(dir, "daemon-boot.json"),
+      JSON.stringify({ bootedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString() }),
+    );
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const signal = () => {
+    // Materialize the signal on disk exactly as the dispatcher writes it —
+    // status `dispatched`, executor `sdk`, bg_job_id null, started long enough
+    // ago to be past every dispatch-deadline floor. Without the real file the
+    // function short-circuits to "noop" before it ever reaches the liveness
+    // decision, which would make this test assert nothing.
+    const signalPath = join(dir, "workers", "CTL-2110", "phase-implement.json");
+    const startedAt = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+    const raw = {
+      ticket: "CTL-2110",
+      phase: "implement",
+      status: "dispatched",
+      executor: "sdk",
+      bg_job_id: null,
+      orchestrator: "CTL-2110",
+      attempt: 1,
+      generation: 1,
+      startedAt,
+      updatedAt: startedAt,
+    };
+    writeFileSync(signalPath, JSON.stringify(raw, null, 2));
+    return { ticket: "CTL-2110", phase: "implement", status: "dispatched", signalPath, raw };
+  };
+
+  // THE REGRESSION THIS TICKET IS ABOUT: a live in-process worker, no bg id.
+  // It must NOT be reclaimed, revived, escalated, or stopped.
+  test("a LIVE sdk worker with a null bg_job_id is never reclaimed", () => {
+    const killed = [];
+    const revived = [];
+    const r = reclaimDeadWorkIfPossible(dir, signal(), {
+      sdkWorkerLive: () => true,
+      killBgJob: (id) => {
+        killed.push(id);
+        return true;
+      },
+      reviveDispatch: (...a) => {
+        revived.push(a);
+        return true;
+      },
+      // A throwing statJob is the negative control for the OTHER half: if the
+      // bg-keyed probe is consulted at all for a bg-less signal, this fails loudly
+      // instead of silently taking the dead path.
+      statJob: () => {
+        throw new Error("statJob must not be consulted for a bg-less signal");
+      },
+    });
+    // THE property: a live worker is neither killed nor replaced. (The alive
+    // branch may still ESCALATE — flag for a human — when a long-running worker
+    // shows no committed work; that is the documented alive-path outcome and is
+    // explicitly "never a silent reclaim". What must never happen is a kill or a
+    // duplicate dispatch on top of the running worker.)
+    expect(killed).toEqual([]);
+    expect(revived).toEqual([]);
+    expect(["reclaimed", "revived", "wedged-redispatched", "no-progress-stopped"]).not.toContain(
+      String(r),
+    );
+  });
+
+  // ── The same property, against REAL projections off the live fleet ──────────
+  //
+  // The two tests above drive `sdkWorkerLive` through its seam, so they prove the
+  // branch but say nothing about whether the SHIPPED probe can read what the
+  // daemon actually writes. These read bytes captured verbatim from mini at
+  // 2026-08-22 21:50 CT (see __fixtures__/sdk-workers-ctl2110/README.md) through
+  // the real isSdkWorkerLiveOnDisk.
+  //
+  // The captures pin two details a hand-written fixture would plausibly get
+  // wrong: `pid` is the DAEMON's pid (five live tickets on the host all carried
+  // 22876), and `executor` is null on the wire even when the phase signal says
+  // "sdk". If either assumption were wrong, these fail.
+  test("the SHIPPED disk probe accepts a REAL live projection and rejects a REAL stale one", () => {
+    const fixtures = join(import.meta.dir, "__fixtures__", "sdk-workers-ctl2110");
+    const live = JSON.parse(readFileSync(join(fixtures, "live.json"), "utf8"));
+    const stale = JSON.parse(readFileSync(join(fixtures, "stale.json"), "utf8"));
+
+    mkdirSync(join(dir, ".sdk-workers"), { recursive: true });
+    writeFileSync(join(dir, ".sdk-workers", "CTL-2151.json"), readFileSync(join(fixtures, "live.json")));
+    writeFileSync(join(dir, ".sdk-workers", "CTL-2127.json"), readFileSync(join(fixtures, "stale.json")));
+
+    // Replay each capture at its own capture instant, with the pid-liveness
+    // answer that was TRUE at that instant (22876 was the running daemon; 2775
+    // had been gone ~47h). Both seams stay honest to the recorded reality —
+    // the file bytes are untouched.
+    const pidAlive = (pid) => pid === 22876;
+    const capturedAt = live.updatedAt + 30_000; // 0.5 min later, as captured
+
+    expect(isSdkWorkerLiveOnDisk(dir, "CTL-2151", { pidAlive, now: () => capturedAt })).toBe(true);
+    // Stale on BOTH counts, and either alone is disqualifying: its pid is dead,
+    // and it is ~47h past the 30-minute freshness window.
+    expect(isSdkWorkerLiveOnDisk(dir, "CTL-2127", { pidAlive, now: () => capturedAt })).toBe(false);
+    expect(
+      isSdkWorkerLiveOnDisk(dir, "CTL-2127", { pidAlive: () => true, now: () => capturedAt }),
+    ).toBe(false);
+    expect(capturedAt - stale.updatedAt).toBeGreaterThan(30 * 60 * 1000);
+
+    // A ticket with no projection at all is not live — the absent-file path.
+    expect(isSdkWorkerLiveOnDisk(dir, "CTL-9999", { pidAlive, now: () => capturedAt })).toBe(false);
+  });
+
+  // End-to-end through the DEFAULT sdkWorkerLive (no seam): a real projection on
+  // disk must stop reclaim from touching the worker. Only `pid` is rewritten, to
+  // this test process — the recorded daemon pid cannot be alive here, and the
+  // default probe takes no pidAlive seam. Everything else is the captured bytes.
+  test("a REAL on-disk projection stops reclaim, through the default probe", () => {
+    const fixtures = join(import.meta.dir, "__fixtures__", "sdk-workers-ctl2110");
+    const proj = JSON.parse(readFileSync(join(fixtures, "live.json"), "utf8"));
+    mkdirSync(join(dir, ".sdk-workers"), { recursive: true });
+    writeFileSync(
+      join(dir, ".sdk-workers", "CTL-2110.json"),
+      JSON.stringify({ ...proj, ticket: "CTL-2110", pid: process.pid, updatedAt: Date.now() }),
+    );
+
+    const killed = [];
+    const revived = [];
+    const r = reclaimDeadWorkIfPossible(dir, signal(), {
+      // No sdkWorkerLive override — this exercises the shipped default.
+      killBgJob: (id) => {
+        killed.push(id);
+        return true;
+      },
+      reviveDispatch: (...a) => {
+        revived.push(a);
+        return true;
+      },
+      statJob: () => {
+        throw new Error("statJob must not be consulted for a bg-less signal");
+      },
+    });
+    expect(killed).toEqual([]);
+    expect(revived).toEqual([]);
+    expect(["reclaimed", "revived", "wedged-redispatched", "no-progress-stopped"]).not.toContain(
+      String(r),
+    );
+  });
+
+  // The other side: no live worker ⇒ the signal is genuinely dead and the
+  // reclaim path must engage, which is what frees the slot.
+  test("a DEAD bg-less signal reaches the reclaim path instead of throwing", () => {
+    let threw = null;
+    let r;
+    try {
+      r = reclaimDeadWorkIfPossible(dir, signal(), {
+        sdkWorkerLive: () => false,
+        killBgJob: () => true,
+        reviveDispatch: () => true,
+        applyStalledLabel: () => true,
+        appendEscalatedEvent: () => true,
+        statJob: () => {
+          throw new Error("statJob must not be consulted for a bg-less signal");
+        },
+      });
+    } catch (err) {
+      threw = err;
+    }
+    expect(threw).toBeNull();
+    expect(r).not.toBe("noop");
   });
 });
 
@@ -2727,10 +3036,15 @@ describe("reclaimDeadWorkIfPossible — CTL-638 escalation storm prevention", ()
     // relative path that depends on cwd and silently fails on most systems.
     const s = setupAt(orchDir, { phase: "pr" });
     reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
-    expect(s.opts.applyStalledLabel.calls[0][0]).toEqual({
+    expect(s.opts.applyStalledLabel.calls[0][0]).toMatchObject({
       orchDir: s.orch,
       ticket: "CTL-9",
     });
+    // ⛔ CTL-2159: the seam now also carries the stall REASON. Without it the
+    // CTL-2158 classifier answers HELD for every recovery escalation — the
+    // highest-volume escalation in the system — so the SYSTEM retry path and the
+    // ASK path would both be permanently dark while every test still passed.
+    expect(typeof s.opts.applyStalledLabel.calls[0][0].reason).toBe("string");
   });
 });
 

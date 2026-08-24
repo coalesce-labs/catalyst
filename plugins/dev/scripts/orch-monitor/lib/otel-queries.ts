@@ -1462,7 +1462,7 @@ export function costByWorkType(
   for (const t of tickets) {
     const raw = (t.type ?? "").toLowerCase();
     const key = raw === "" || raw === "task" ? "unknown" : raw;
-    const usd = Number.isFinite(t.costUSD as number) ? (t.costUSD as number) : 0;
+    const usd = Number.isFinite(t.costUSD) ? (t.costUSD as number) : 0;
     out[key] = (out[key] ?? 0) + Math.max(0, usd);
   }
   return out;

@@ -159,9 +159,9 @@ catalyst-execution-core restart
         "models": {
           "triage":         "sonnet",
           "research":       "sonnet",
-          "plan":           "sonnet",
-          "implement":      "opus",
-          "verify":         "sonnet",
+          "plan":           "opus",
+          "implement":      "sonnet",
+          "verify":         "opus",
           "review":         "sonnet",
           "pr":             "sonnet",
           "monitor-merge":  "sonnet",
@@ -179,6 +179,9 @@ catalyst-execution-core restart
           "monitor-merge":  20,
           "monitor-deploy": 20,
           "teardown":       15
+        },
+        "modelOverrides": {
+          "implement": { "CTL-1234": "sonnet" }
         }
       }
     }
@@ -192,6 +195,13 @@ catalyst-execution-core restart
   (triage → research → plan → implement → verify → review → pr → monitor-merge → monitor-deploy → teardown).
 - `"oneshot-legacy"` — runs a single long-lived `claude -p /catalyst-legacy:oneshot` job per ticket.
   Preserved as a fallback; not recommended for new setups.
+
+**`phaseAgents.models` / `modelOverrides`** — `models[<phase>]` is the model every worker for that
+phase runs on; `modelOverrides[<phase>][<ticket>]` is a per-ticket exception. Resolution order in
+`phase-agent-dispatch`: CLI `--model` > `modelOverrides` > `models` > workflow descriptor > the
+script's fallback (`sonnet`). ⚠️ If the whole `phaseAgents` block is absent the fallback applies to
+every phase — which is how the fleet silently ran everything on opus until 2026-08-23. Commit the
+block; do not rely on the fallback.
 
 **`executionCore.eligibleQuery`** is **deprecated** — this field is ignored by the daemon. Use
 the registry instead (see [Registry](#registry) below).

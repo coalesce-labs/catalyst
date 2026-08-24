@@ -38,7 +38,7 @@ export const SETTINGS_BREADCRUMB: string[] = ["Settings"];
 /** The single canonical input-focus guard (CTL-1025) — re-exported from
  *  lib/typing-target so the existing callers (command-palette.ts, sidebar-collapse.ts)
  *  keep compiling unchanged while gaining SELECT + contentEditable coverage. */
-export { isTypingTarget, type TypingTargetLike } from "./typing-target";
+export { isTypingTarget } from "./typing-target";
 
 /**
  * The route-derived shell location (CTL-989). The old surface-mutating + settings

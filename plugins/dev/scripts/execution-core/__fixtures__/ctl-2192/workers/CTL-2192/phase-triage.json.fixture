@@ -1,0 +1,22 @@
+{
+  "ticket": "CTL-2192",
+  "phase": "triage",
+  "orchestrator": "CTL-2192",
+  "model": "opus",
+  "executor": "sdk",
+  "turnCap": 500,
+  "status": "done",
+  "bg_job_id": null,
+  "worktreePath": "%WT%/catalyst-workspace/CTL-2192",
+  "generation": 2,
+  "attempt": 1,
+  "startedAt": "2026-08-23T03:55:16Z",
+  "updatedAt": "2026-08-23T03:59:03Z",
+  "host": {
+    "name": "mini-2",
+    "id": "100aaff3cc33d9f7"
+  },
+  "completedAt": "2026-08-23T03:59:03Z",
+  "assertedBy": "phase-agent-emit-complete",
+  "failureReason": null
+}

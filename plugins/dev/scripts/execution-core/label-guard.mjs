@@ -19,11 +19,20 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { log } from "./config.mjs";
-import { coerceExplanation } from "./escalation-explanation.mjs";
 import { DISPOSITIONS } from "./worker-disposition.mjs";
 import { YIELDED_STATUS } from "../lib/phase-yield.mjs"; // CTL-1854
-import { TERMINAL_LABEL_REASONS } from "./label-failure-class.mjs"; // COORD-236: one owner for the terminal set
+import {
+  TERMINAL_LABEL_REASONS, // COORD-236: one owner for the terminal set
+  isThrottledLabelReason, // CTL-2043 (P2-a): the two NARROW predicates — see the
+  isCloudReason, //          cool-down arm in labelOnce for why not the wide one
+} from "./label-failure-class.mjs";
+// CTL-2043 (P2-a): the shared time-boxed cool-down ledger. It lives in its own leaf
+// precisely so this file can read it — scheduler.mjs imports THIS file, so importing
+// the primitives from there would be a cycle (Decision C).
+import { inLabelCooldown, recordLabelCooldown, clearLabelCooldown } from "./label-cooldown.mjs";
 import { emitEscalationEvent } from "./escalation-event.mjs"; // CTL-2056
+import { publishEscalation } from "./escalation-publish.mjs"; // CTL-2159
+import { freshStallStatus, TERMINAL_STALL_STATUS } from "./stall-class.mjs"; // CTL-2159
 
 // ─── labelOnce — moved from scheduler.mjs (CTL-585, then CTL-638 re-home) ───
 //
@@ -41,10 +50,29 @@ import { emitEscalationEvent } from "./escalation-event.mjs"; // CTL-2056
 //              (create the label / clear the sibling) and deletes this marker to
 //              re-arm the apply.
 //
-// Transient failures (reason:"rate-limited", "transient", undefined) write no
-// marker so the next tick retries — CTL-558's recovery contract. CTL-638 pairs
-// this with the escalation cool-down below to break the per-tick storm even
-// when the transient-failure path keeps re-attempting the write.
+// Transient failures (reason:"transient", undefined) write no marker so the next
+// tick retries — CTL-558's recovery contract. CTL-638 pairs this with the
+// escalation cool-down below to break the per-tick storm even when the
+// transient-failure path keeps re-attempting the write.
+//
+// CTL-2043 (P2-a) adds a THIRD outcome between those two, because the pair above
+// was not exhaustive and the gap was measured: a THROTTLED or CLOUD-authored
+// refusal (`unauthorized`, `budget:*`, `rate-limited`, any `cloud:*`) got NO
+// marker at all, so the operator-escalation path re-issued the write every
+// tick and spent a host write unit each time for as long as the refusal lasted.
+//
+//   .applied         — success. Permanent.
+//   .skipped         — TERMINAL only. Permanent. Can never land this run.
+//   cool-down marker — THROTTLED ∪ CLOUD. TIME-BOXED (LABEL_COOLDOWN_MS), and
+//                      kept OUTSIDE workers/<T>/ so worker-dir GC does not
+//                      resurrect the storm.
+//   (nothing)        — genuinely transient. Retries on the very next tick.
+//
+// ⛔ The cool-down must NEVER be spelled `.skipped`. That marker lives under
+// workers/<T>/ and survives a restart, so it would outlive the credential
+// re-mint / budget roll that clears the refusal, and the escalation label the
+// operator page depends on would be abandoned for the daemon's life — strictly
+// worse than the storm it would be fixing (COORD-236).
 // labelMarkerBase — shared path prefix for the once-marker files used by
 // labelOnce and clearStalledLabel (single source of truth for the marker path).
 export function labelMarkerBase(orchDir, ticket, label) {
@@ -65,6 +93,15 @@ export function labelMarkerBase(orchDir, ticket, label) {
 // paged. The converger uses the WIDER `shouldCoolDownLabel` because its cool-down
 // is time-boxed and self-healing; this marker is not. There is a test pinning the
 // asymmetry.
+//
+// CTL-2043 (P2-a): labelOnce now ALSO arms that time-boxed cool-down — but it still
+// does not import `shouldCoolDownLabel`. It composes the two NARROW predicates
+// (`isThrottledLabelReason || isCloudReason`) instead, which is exactly
+// `shouldCoolDownLabel` MINUS the terminal class. That is not a stylistic choice:
+// the wide predicate INCLUDES terminal, and this file is the one place where the
+// terminal class means "write the permanent marker". Keeping the sets textually
+// distinct is what stops a future edit from routing a throttled reason into
+// `.skipped` — the wiring-guard test asserts the import is absent.
 const UNRECOVERABLE_LABEL_REASONS = TERMINAL_LABEL_REASONS;
 
 // CTL-936: labelOnce now accepts an optional `appendEvent` seam. When provided
@@ -79,15 +116,26 @@ const UNRECOVERABLE_LABEL_REASONS = TERMINAL_LABEL_REASONS;
 // terminal marker (.applied/.skipped) already exists → this call is a no-op;
 // `true` when this call performed the write attempt (the once-application).
 // Existing callers ignore the return value, so this is backward-compatible.
+// CTL-2043 (P2-a): `now` is the injectable clock for the time-boxed cool-down.
+// It DEFAULTS to Date.now — production supplies no seam, and a guard reading an
+// undefined clock would compute NaN, compare false, and never bite: a check that
+// cannot fail, which is the shape this repo keeps getting burned by.
 export function labelOnce(
   orchDir,
   ticket,
   label,
   writeStatus,
-  { appendEvent = null, env = process.env, onApplyResult = null } = {}
+  { appendEvent = null, env = process.env, onApplyResult = null, now = () => Date.now() } = {}
 ) {
   const base = labelMarkerBase(orchDir, ticket, label);
   if (existsSync(`${base}.applied`) || existsSync(`${base}.skipped`)) return false;
+  // CTL-2043 (P2-a): a live cool-down is a no-op of the SAME shape as the
+  // marker-guarded early return above — applyLabel is not called, so `onApplyResult`
+  // correctly does not fire and `false` is returned. The caller
+  // (labelNeedsHumanUnlessBeliefOwner) already gates its side effects on a CONFIRMED
+  // apply, so it needs no change: a cooled-down tick is indistinguishable from the
+  // already-handled "this call performed no once-application" case.
+  if (orchDir && inLabelCooldown(orchDir, ticket, label, now())) return false;
   try {
     const res = writeStatus.applyLabel({ ticket, label });
     // A fake that returns undefined (test stubs) is treated as success so
@@ -103,6 +151,12 @@ export function labelOnce(
     }
     if (applied) {
       writeFileSync(`${base}.applied`, "");
+      // CTL-2043: a success resets the ledger. The stale marker would be harmless to
+      // labelOnce itself (`.applied` early-returns forever after), but the SAME
+      // (ticket, label) ledger carries the attempt counter the converger's CTL-2052
+      // cap gate reads — leaving a spent count behind would bring that cap closer
+      // for a label that just landed.
+      if (orchDir) clearLabelCooldown(orchDir, ticket, label);
     } else if (UNRECOVERABLE_LABEL_REASONS.has(res?.reason)) {
       writeFileSync(`${base}.skipped`, "");
       const reason = res.reason;
@@ -130,6 +184,23 @@ export function labelOnce(
           );
         }
       }
+    } else if (orchDir && (isThrottledLabelReason(res?.reason) || isCloudReason(res?.reason))) {
+      // CTL-2043 (P2-a): arm the TIME-BOXED cool-down. Deliberately NOT `.skipped`
+      // (see the header) — a throttled/cloud refusal clears on its own, and a
+      // permanent marker would outlive the fix. Terminal reasons took the branch
+      // above and early-return on `.skipped` forever, so they never reach here: the
+      // set armed here is exactly `shouldCoolDownLabel` MINUS terminal.
+      //
+      // The AC3 retry CAP is deliberately not applied here (converger-only, CTL-2052):
+      // this path exists to page a human, and a cap that eventually stops re-issuing
+      // could silently abandon that page. The 60 s window alone is what CTL-2043 asks
+      // for; the ledger it writes is nonetheless the shared one, so the spend is
+      // counted once per (ticket, label) across both callers.
+      recordLabelCooldown(orchDir, ticket, label, now());
+      log.warn(
+        { ticket, label, reason: res.reason },
+        "ctl-2043: label apply refused (throttled / cloud) — backing off for the cool-down window; NOT marked skipped, so it retries once the window elapses"
+      );
     }
   } catch (err) {
     log.warn(
@@ -432,8 +503,31 @@ export function inEscalationCooldown(orchDir, ticket, phase, now) {
 // the file this guard protects from being overwritten.
 const LIVE_RECOVERY_PASS_STATUSES = new Set(["dispatched", "running", YIELDED_STATUS]);
 
-function writeExplanationSignal(orchDir, ticket, explanation, { log: logArg = null } = {}) {
-  if (!orchDir || !ticket || !explanation) return;
+// readRecoveryPassSignal — the on-disk half of the classifier's reason fallback.
+// Same path writeExplanationSignal writes. Fail-open: an absent or malformed file
+// is `null`, never a throw, and never blocks the escalation path.
+function readRecoveryPassSignal(orchDir, ticket) {
+  if (!orchDir || !ticket) return null;
+  try {
+    const p = join(orchDir, "workers", ticket, "phase-recovery-pass.json");
+    const sig = JSON.parse(readFileSync(p, "utf8"));
+    return sig && typeof sig === "object" ? sig : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeExplanationSignal(
+  orchDir,
+  ticket,
+  explanation,
+  { log: logArg = null, extraFields = {}, freshStatus = TERMINAL_STALL_STATUS } = {}
+) {
+  // CTL-2159: the signal is now worth writing even with NO explanation — the
+  // stall CLASS is the durable record, and manufacturing an explanation to have
+  // something to write is exactly the defect this epic deletes.
+  if (!orchDir || !ticket) return;
+  if (!explanation && Object.keys(extraFields).length === 0) return;
   try {
     const p = join(orchDir, "workers", ticket, "phase-recovery-pass.json");
     let prior = {};
@@ -469,19 +563,59 @@ function writeExplanationSignal(orchDir, ticket, explanation, { log: logArg = nu
     }
     // No-overwrite guard for the `attempts-exhausted` site (and any future site
     // that pre-writes a rich curated explanation before the label apply).
-    if (prior.explanation && prior.explanation.degraded !== true) return;
+    // CTL-2159: scoped to the case that can actually clobber — a class-only
+    // stamp carries no explanation, so it must not be dropped just because a
+    // curated one is already on disk.
+    //
+    // ⛔ CTL-2159 (verification finding): this used to be an UNCONDITIONAL early
+    // return, which silently swallowed the stall-CLASS stamp too. A caller that
+    // passes a real explanation onto a ticket that already has a curated one
+    // (recovery.mjs's applyStalledLabel, the `attempts-exhausted` sweep) got no
+    // `stallClass` on disk at all — so the durable S/A/M/HELD record, the one
+    // thing this epic replaces the label with, was missing at exactly the sites
+    // that escalate most. Now the CURATED PROSE is still protected (it is simply
+    // not overwritten below), while a stamp carrying anything new still lands.
+    const priorExplanationWins = Boolean(
+      explanation && prior.explanation && prior.explanation.degraded !== true
+    );
+    const stampHasNews = Object.entries(extraFields ?? {}).some(
+      ([k, v]) => prior[k] !== v
+    );
+    if (priorExplanationWins && !stampHasNews) return;
     const nowIso = new Date().toISOString();
     const signal = {
       ...prior,
       ticket,
-      status: "needs-human",
+      // ⛔ CTL-2159: was an unconditional terminal status. It is now THREE things,
+      // and the third is the one a reader will be tempted to "simplify" away:
+      //   1. a PRIOR status is PRESERVED rather than clobbered. The old write only
+      //      ran when the Linear label landed, so the clobber was rare and
+      //      invisible; publishing no longer depends on a Linear call, so an
+      //      unconditional overwrite would newly rewrite `failed` (and the
+      //      yield-expiry sweep's `failureReason` record) on every escalation.
+      //      The escalation's durable contribution is the CLASS, not a status edit.
+      //   2. the fresh-signal value is a spelling every reader already handles.
+      //   3. ⛔ WHICH spelling DERIVES FROM THE STALL CLASS (freshStallStatus).
+      //      A hardcoded `stalled` here is TERMINAL to isTicketInFlight, so the
+      //      escalation that fires at DISPATCH_FAILURE_ESCALATION_THRESHOLD (3)
+      //      silently truncated every retry loop behind it — the circuit breaker's
+      //      8 and getMaxDispatchRetries's 5 both became 3, with nothing in the log
+      //      to say so (CTL-671's own test caught it). A SYSTEM stall is
+      //      retry-with-backoff BY DEFINITION; only ASK/MOOT/HELD stop the work.
+      //      See stall-class.mjs for why the two statuses cannot be one value.
+      status:
+        typeof prior.status === "string" && prior.status !== "" ? prior.status : freshStatus,
+      ...(prior.stalledReason ? {} : { stalledReason: "escalated" }),
+      ...extraFields,
       needsHumanSince:
         typeof prior.needsHumanSince === "string" && prior.needsHumanSince !== ""
           ? prior.needsHumanSince
           : nowIso,
       updatedAt: nowIso,
       phase: "recovery-pass",
-      explanation,
+      // Curated prose on disk beats a caller's thin one — that is the whole point
+      // of the guard above; only the stamp gets through.
+      ...(explanation && !priorExplanationWins ? { explanation } : {}),
     };
     mkdirSync(dirname(p), { recursive: true });
     const tmp = `${p}.tmp.${process.pid}`;
@@ -562,6 +696,21 @@ export function labelNeedsHumanUnlessBeliefOwner(
     site = "unknown",
     log: logArg = null,
     explanation = undefined,
+    // CTL-2159: the stall reason token, handed to the classifier. ⛔ LOAD-BEARING:
+    // with no reason the classifier correctly returns HELD ("I could not look" is
+    // not "nothing is wrong"), so a caller that knows its reason and does not pass
+    // it silently turns every SYSTEM stall into a held one and the retry/alert path
+    // never fires. Every producer that has a reason MUST forward it — the six
+    // routeStuckTicketToDelegate sites do so through delegate-first's labelDirect.
+    reason = null,
+    // CTL-2159 (verification finding): the phase signal, when the caller holds
+    // one. classifyStall falls back `reason ?? signal.stalledReason ?? signal
+    // .failureReason` — but this call site never passed `signal`, so that whole
+    // fallback was DEAD on the only path any producer uses and a caller that
+    // omitted `reason` had no second chance. When neither is supplied we now read
+    // the on-disk signal ourselves (see resolveReasonFallback) rather than
+    // classifying HELD on an absence we could have looked up.
+    signal = null,
     onOutcome = null,
     // CTL-2056: injectable emit seam so tests can record escalation events
     // without real I/O. Defaults to the real emitter (fail-open, never throws).
@@ -589,59 +738,75 @@ export function labelNeedsHumanUnlessBeliefOwner(
     }
     return false;
   }
-  // Enforcement OFF (default): call labelOnce exactly as before. CTL-764 finding C:
-  // return whether the label was CONFIRMED applied, not merely attempted — labelOnce's
-  // boolean is true for any first write attempt (including outcomes where the label never
-  // landed). Capture applyLabel's applied result via onApplyResult; a marker-guarded no-op
-  // (labelOnce early-returns, onApplyResult never fires) correctly stays false.
-  let applied = false;
-  let ran = false;
-  let reason = null;
-  // Snapshot BEFORE labelOnce: it is the marker's pre-existence that tells us the
-  // label was already applied (labelOnce writes `.applied` itself on success).
-  const alreadyApplied =
-    existsSync(`${labelMarkerBase(orchDir, ticket, "needs-human")}.applied`) === true;
-  labelOnce(orchDir, ticket, "needs-human", writeStatus, {
-    onApplyResult: (r) => {
-      ran = true;
-      applied = r.applied === true;
-      reason = r.reason ?? null;
-    },
-  });
-  // CTL-1609 Gap 2: on a confirmed apply, coerce the explanation and persist it to
-  // the board-readable phase-recovery-pass.json so the operator inbox renders a real
-  // "What's needed now" card. Gated on `applied` (CTL-764 finding C) so a failed or
-  // marker-guarded no-op never manufactures a spurious explanation signal.
-  if (applied) {
-    // Use the injected log's warn if available; fall back to the module-level log
-    // so existing callers that only inject { info } don't break (warn is new).
-    const warnFn =
-      typeof logArg?.warn === "function" ? logArg.warn.bind(logArg) : log.warn.bind(log);
-    if (explanation === undefined || explanation === null) {
-      warnFn(
-        { ticket, site, event: "escalation.explanation-absent" },
-        "label-guard: needs-human applied without an explanation — coercing (CTL-1609)"
-      );
-    }
-    const coerced = coerceExplanation(explanation ?? {}, { ticket, canExecute: false });
-    writeExplanationSignal(orchDir, ticket, coerced, { log: logArg });
-    // CTL-2056: emit one ticket.escalated event so the unchanged
-    // catalyst_recovery_escalation_burst PromQL selector counts real escalations.
-    // Fail-open: a throw here must never block the label application.
+  // ⛔ CTL-2159 — THIS NO LONGER WRITES A LINEAR LABEL.
+  //
+  // It used to call `labelOnce(orchDir, ticket, "needs-human", …)`, which is the
+  // single chokepoint every non-belief producer reaches. Deleting the label
+  // therefore means deleting it HERE and nowhere else — which is why the six
+  // producers that route through `routeStuckTicketToDelegate` (invisible to any
+  // grep for `labelOnce(`) are covered too, including scheduler.mjs:9294, the
+  // volume producer.
+  //
+  // What replaces it is `publishEscalation`: the CTL-2158 classifier decides
+  // whether this stall is SYSTEM (retry, zero per-ticket artifacts, the CTL-2156
+  // fleet alert covers it), ASK (ONE ask ticket carrying `blocks`, CTL-2157),
+  // MOOT (close) or HELD (visible, un-dispositioned). The RETURN CONTRACT is
+  // deliberately unchanged — "a disposition was published on THIS call" — because
+  // five retry loops read it as their STOP condition (see escalation-publish.mjs
+  // header note 1). Every existing caller keeps compiling and keeps its retry.
+  //
+  // ⛔ AND NOTHING IS COERCED HERE ANY MORE. The old line was
+  // `coerceExplanation(explanation ?? {}, { ticket, canExecute: false })` with
+  // canExecute HARDCODED false, so an unexplained worker death degraded to a
+  // fabricated "priority call the agent cannot make unilaterally" card. That
+  // template is what turned one provider outage into 37 separate human decisions.
+  // ⛔ THE NO-REASON CLIFF, MADE LOUD. `classifyStall` returns HELD with
+  // rule:"no-reason" when it is handed nothing — correct, because "I could not
+  // look" is not "nothing is wrong". But a producer that KNOWS its reason and
+  // forgets to forward it gets that same silent HELD, and the SYSTEM retry/alert
+  // path never fires. Three verification lenses independently found five such
+  // sites in this repo. So: recover the reason from the signal (given, or read
+  // off disk), and if there is genuinely none, WARN — a site that classifies
+  // HELD for want of a token should be visible in the log, not inferred weeks
+  // later from an absent alert.
+  const resolvedSignal = signal ?? readRecoveryPassSignal(orchDir, ticket);
+  const resolvedReason =
+    reason ?? resolvedSignal?.stalledReason ?? resolvedSignal?.failureReason ?? null;
+  if (resolvedReason == null) {
     try {
-      emitEscalation(ticket, { site, reason: explanation?.problem ?? null });
+      (logArg ?? log).warn(
+        { ticket, site },
+        "escalation: no stall reason available — classifying HELD (CTL-2159)"
+      );
     } catch {
-      /* fail-open: observability must never block the label path */
+      /* logging must never block the escalation path */
     }
   }
-  if (typeof onOutcome === "function") {
-    onOutcome({ deferred: false, applied, ran, reason, alreadyApplied });
-  }
-  // A marker-guarded no-op (ran === false) on a ticket that ALREADY carries the
-  // label means the label is present — which is what the CTL-1568 gate actually
-  // needs to know. Opt-in only; the default keeps CTL-764's strict semantics.
-  if (treatAlreadyAppliedAsLanded && !applied && !ran && alreadyApplied) return true;
-  return applied;
+  const published = publishEscalation(orchDir, ticket, {
+    env,
+    site,
+    reason: resolvedReason,
+    signal: resolvedSignal,
+    log: logArg,
+    explanation: explanation ?? null,
+    markerBase: labelMarkerBase(orchDir, ticket, "needs-human"),
+    emitEscalation,
+    onOutcome,
+    treatAlreadyPublishedAsLanded: treatAlreadyAppliedAsLanded,
+    // The explanation card is written ONLY when the caller supplied a real one;
+    // the stall CLASS is stamped either way, so an unexplained SYSTEM stall
+    // leaves a durable record without manufacturing a human question.
+    writeSignal: ({ fields, klass }) =>
+      writeExplanationSignal(orchDir, ticket, explanation ?? null, {
+        log: logArg,
+        extraFields: fields,
+        // ⛔ The CLASS picks the status. publishEscalation hands us the verdict it
+        // just reached; deriving here (rather than at the classifier) keeps
+        // stall-class.mjs pure and keeps the choice next to the write it governs.
+        freshStatus: freshStallStatus(klass),
+      }),
+  });
+  return published;
 }
 
 // ─── CTL-1605: the worker-status label group (Axis 2) — single source of truth. ───

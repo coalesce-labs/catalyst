@@ -11,7 +11,7 @@ export interface ClusterSignalNode {
   maxParallel?: number;
   inFlightCount?: number;
   /** CTL-1581: running/dispatched subset — the slot-OCCUPANCY count. inFlightCount
-   *  also counts parked (needs-human) dirs, which hold no slot; consumers prefer
+   *  also counts parked (attention) dirs, which hold no slot; consumers prefer
    *  this and fall back to inFlightCount for old-daemon peers. */
   activeCount?: number | null;
   freeSlots?: number;
@@ -50,7 +50,7 @@ export function aggregateClusterCapacity(nodes: ClusterSignalNode[]): ClusterCap
   for (const n of nodes) {
     if (n.status === "offline") continue;
     // CTL-1581: occupancy (activeCount) over ownership (inFlightCount) — a
-    // parked needs-human dir must not count a slot as in use.
+    // a parked attention dir must not count a slot as in use.
     const occ = n.activeCount ?? n.inFlightCount ?? 0;
     maxParallel += n.maxParallel ?? 0;
     inFlight += occ;

@@ -330,7 +330,7 @@ counters) are emitted *directly* to the OTLP metrics pipeline, not log-derived.
 - **Alerting → Grafana.** Alert rules are **file-provisioned** (`provisioning/alerting/*.yaml`) and
   **upsert-only** — a malformed rule file crash-loops the *shared* Grafana, so validate any change
   against a throwaway Grafana before deploying. Active rules cover the scheduler wedge
-  (tick / recovery-pass / liveness-timeout), needs-human pileup, slot starvation, and install/updater
+  (tick / recovery-pass / liveness-timeout), system trouble (CTL-2156), slot starvation, and install/updater
   failures.
 
 **Signal catalog — the data dictionary.** The authoritative, signal-by-signal reference (every
@@ -338,8 +338,7 @@ metric, log/event, trace span, and alert — with dimensions, gotchas, and copy-
 patterns) lives in the sister repo **`catalyst-otel`** at `docs/data-dictionary.md`. **Read it before
 designing telemetry or trusting a query.** That repo (`collector-config.yaml`,
 `grafana-datasources.yml`, `tempo.yaml`, `dashboards/`, `provisioning/alerting/`) is the authoritative
-stack topology. For a copy-paste-runnable diagnose→unstick→file playbook against the live stack, see
-the `sensing-substrate` skill.
+stack topology.
 
 **Endpoints are environment-specific.** Backend addresses are resolved from environment variables —
 `OTEL_EXPORTER_OTLP_ENDPOINT` / `CATALYST_OTLP_ENDPOINT` for the daemons (collector ingest), and

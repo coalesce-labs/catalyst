@@ -3,9 +3,10 @@
 // so every bg-keyed liveness probe (isBgJobAlive, jobLifecycle, `claude agents`)
 // is blind to it; this registry is the SDK-native answer that the watchdog
 // (Phase C), preemption cancel (Phase D), and reclaim/boot-resume (Phases E/F)
-// all consume. LEAF MODULE: node:fs/node:path only — importers must never be
-// imported back from here, or the split-brain this consolidates returns as an
-// import cycle.
+// all consume. NEAR-LEAF MODULE: node:fs/node:path, plus ONE sibling leaf —
+// sdk-child-discovery.mjs (node:child_process only, and it imports nothing from
+// here, so no cycle is constructible). Importers must never be imported back
+// from here, or the split-brain this consolidates returns as an import cycle.
 //
 // Liveness is process-local by design: the daemon's `settleDispatchSync`
 // detaches the query promise onto the SAME event loop, so a Map here IS the
@@ -15,6 +16,12 @@
 
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+
+// CTL-2192: the boot reap SIGNALS a pid. `kill -0` is not identity — it only
+// says SOMETHING answers to that number — so the target is confirmed by the same
+// structured per-pid cwd field the discovery probe uses to attribute it in the
+// first place. Sibling leaf; it imports nothing from this module.
+import { cwdOfPid } from "./sdk-child-discovery.mjs";
 
 // A worker whose projection hasn't been touched in this long is presumed dead
 // even if a same-numbered pid exists (pid reuse). In-memory entries never
@@ -81,6 +88,12 @@ function writeProjection(entry) {
         // OUTLIVE a daemon crash, so its own pid must be durable here to let boot
         // reconcile kill the orphan. null for in-process sdk/bg (never set).
         childPid: entry.childPid ?? null,
+        // CTL-2192 (Phase 2): did we LOOK for a child? Distinguishes "no child"
+        // from "never asked" — the two are byte-identical without this marker,
+        // and classifySdkWorkerLiveness must answer `dead` for the first and
+        // `unknown` for the second (a legacy projection, or a worker parked at
+        // the semaphore before its child exists).
+        childPidResolved: entry.childPidResolved === true,
       }),
     );
     renameSync(tmp, file);
@@ -119,6 +132,7 @@ function publicView(entry) {
     sessionId: entry.sessionId,
     executor: entry.executor, // CTL-1457: which launch verb owns this worker
     childPid: entry.childPid, // CTL-1457 (N2): out-of-process child pid (codex-exec) or null
+    childPidResolved: entry.childPidResolved, // CTL-2192: did we look for a child?
   };
 }
 
@@ -171,7 +185,11 @@ export function registerSdkWorker(
     executor,
     // CTL-1457 (N2): the out-of-process child pid (codex-exec). Unknown at register
     // time (the child spawns later) → null; set via setChildPid after spawn.
+    // CTL-2192 (Phase 2): the SDK runner now populates it too, via a per-pid
+    // ppid+cwd join (sdk-child-discovery.mjs).
     childPid: null,
+    // CTL-2192 (Phase 2): false until setChildPid runs, whatever it discovers.
+    childPidResolved: false,
     now,
   };
   _live.set(ticket, entry);
@@ -215,9 +233,31 @@ export function registerSdkWorker(
     // THIS daemon leaves a durable pointer to any orphaned child on the projection.
     // Written immediately (durability is the point) and token-fenced like touch/
     // setSessionId. A non-integer pid clears it to null. No-op for in-process sdk/bg.
+    // CTL-2192 (Phase 2): stamps childPidResolved: true REGARDLESS of what was
+    // discovered. A null pid here means "we looked and found none" — a fact the
+    // liveness oracle reads as dead; without the stamp it must read `unknown`.
     setChildPid(pid) {
       if (_live.get(ticket)?.token !== entry.token) return;
       entry.childPid = Number.isInteger(pid) && pid > 0 ? pid : null;
+      entry.childPidResolved = true;
+      entry.updatedAt = entry.now();
+      writeProjection(entry);
+    },
+    // CTL-2192 (Codex #3955 P1): return the child record to UNRESOLVED — the state
+    // registerWorker starts in, which classifySdkWorkerLiveness reads as `unknown`
+    // (branch 7), never `dead`. This is NOT setChildPid(null): that one asserts "we
+    // looked and there is no child" and lands in branch 6 (DEAD).
+    //
+    // The caller is the runner's 429/529 retry, where the previous attempt's child
+    // has exited and a replacement is about to spawn. Leaving the dead pid stamped
+    // makes branch 5 answer `orphan-child-dead` for a ticket whose replacement child
+    // is alive, so a daemon bounce mid-retry lets boot reconciliation dispatch a new
+    // generation beside a surviving orphan — the exact concurrent-worker failure this
+    // ticket exists to close. Unknown is the honest verdict for the retry window.
+    clearChildPid() {
+      if (_live.get(ticket)?.token !== entry.token) return;
+      entry.childPid = null;
+      entry.childPidResolved = false;
       entry.updatedAt = entry.now();
       writeProjection(entry);
     },
@@ -307,6 +347,95 @@ function defaultPidAlive(pid) {
   }
 }
 
+// CTL-2192 (Phase 4): confirm a SIGTERM'd orphan actually died. The grace is one
+// tick — deliberately short, because the point is to LEARN whether SDK children
+// honour SIGTERM (the reapFailed path makes that measurable) rather than to
+// guarantee a kill. Escalating to SIGKILL is a follow-up, not a guess made now.
+export const REAP_CONFIRM_GRACE_MS = 2_000;
+
+// The confirm POLLS rather than sleeping the whole grace, so a child that exits
+// promptly (the overwhelmingly common case) costs one poll interval, not the
+// full grace. That matters because the confirm is synchronous inside startDaemon's
+// boot ordering — it runs AFTER the pid file is published, so every liveness
+// consumer reads the frozen process as healthy for as long as it blocks.
+export const REAP_CONFIRM_POLL_MS = 100;
+
+// The CODEX path is a REGRESSION surface, not a new one. Before this ticket an
+// orphaned codex child was SIGTERM'd and its projection removed immediately with
+// no confirmation at all; adding the 2 s confirm means a codex child that
+// flushes and exits at t+3 s is now recorded reapFailed, its projection kept,
+// and boot-resume charges it a slot and refuses to resume it — one boot of lost
+// work for a child that died normally a second later. Because the confirm POLLS,
+// a longer grace costs nothing for a child that exits promptly; it is only paid
+// by one that genuinely lingers, and the shared total budget still bounds it.
+export const REAP_CONFIRM_GRACE_CODEX_MS = 5_000;
+
+// …and the whole reconcile shares ONE deadline, so N surviving orphans cost
+// N-independent time. Without it a host bounced with a saturated board whose
+// children all survive pays N x grace with no aggregate bound at all.
+export const REAP_CONFIRM_TOTAL_BUDGET_MS = 10_000;
+
+function sleepSync(ms) {
+  if (!(ms > 0)) return;
+  // Synchronous by necessity: reconcileSdkRegistryOnBoot runs inside startDaemon's
+  // synchronous boot ordering. Atomics.wait on a throwaway buffer is the portable
+  // sync sleep; a busy-wait would burn a core for the grace (the very incident the
+  // repo's background-process rule exists to prevent).
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  } catch {
+    /* no SAB (locked-down runtime) → return immediately; a false reapFailed is the safe direction */
+  }
+}
+
+function defaultConfirmReap(
+  pid,
+  { pidAlive = defaultPidAlive, graceMs = REAP_CONFIRM_GRACE_MS, pollMs = REAP_CONFIRM_POLL_MS, now = Date.now } = {},
+) {
+  // graceMs <= 0 means the shared budget is spent: probe once and answer on what
+  // we can see NOW. A still-alive pid then reports reapFailed, which keeps the
+  // projection and drops the ticket from candidacy — the safe direction.
+  if (!pidAlive(pid)) return true;
+  if (!(graceMs > 0)) return false;
+  const deadline = now() + graceMs;
+  const step = pollMs > 0 ? pollMs : graceMs;
+  for (;;) {
+    const remaining = deadline - now();
+    if (remaining <= 0) break;
+    sleepSync(Math.min(step, remaining));
+    if (!pidAlive(pid)) return true;
+  }
+  return !pidAlive(pid);
+}
+
+// CTL-2192: `kill -0` proves a pid ANSWERS, not that it is OURS. Before the boot
+// reap signals a recorded childPid, confirm the target is the process the
+// projection describes, by the same structured per-pid cwd field the discovery
+// probe used to attribute it. The repo already holds this discipline for pid
+// files ("matched by process identity, not just kill -0 ... a recycled pid is
+// never a kill target"), and this ticket widened the exposed population from
+// codex-only (~0 on a pure sdk/bg fleet) to EVERY sdk projection.
+//
+// THREE-VALUED, and the caller must treat the three differently:
+//   "ours"          — cwd read and equal to worktreePath → signal it.
+//   "foreign"       — cwd read and different → the pid was REUSED. Never signal;
+//                     our child is gone, so the projection is ordinarily reapable.
+//   "unverifiable"  — cwd unreadable, or no worktreePath to join on. Never signal
+//                     an unidentified pid — and never delete the projection
+//                     either, because something answering to that pid may still
+//                     be our worker. Fail CLOSED to reapFailed.
+function defaultClassifyChildIdentity(childPid, worktreePath, { cwdOf = cwdOfPid } = {}) {
+  if (typeof worktreePath !== "string" || worktreePath === "") return "unverifiable";
+  let cwd;
+  try {
+    cwd = cwdOf(childPid);
+  } catch {
+    return "unverifiable";
+  }
+  if (typeof cwd !== "string" || cwd === "") return "unverifiable";
+  return cwd === worktreePath ? "ours" : "foreign";
+}
+
 // CTL-1457 (N2): best-effort SIGTERM to an orphaned out-of-process child (codex-exec)
 // on boot reconcile. Returns true when the signal was delivered. Never throws.
 function defaultKillChild(pid) {
@@ -344,6 +473,83 @@ export function isSdkWorkerLiveOnDisk(orchDir, ticket, { pidAlive = defaultPidAl
   return now() - updatedAt <= freshMs;
 }
 
+export const SDK_LIVENESS = Object.freeze({ LIVE: "live", DEAD: "dead", UNKNOWN: "unknown" });
+
+/**
+ * CTL-2192: the ONE liveness question the re-dispatch paths (preemption sweep,
+ * boot-resume) may ask about an SDK worker.
+ *
+ * Three-valued ON PURPOSE. A two-valued answer has shipped both failure modes:
+ * collapsing "I could not look" into `dead` re-claims a live worker every ~2
+ * minutes (AC1), and collapsing it into `live` strands a genuinely dead one
+ * (AC2). Measured during planning: 6 projections carried the live daemon's pid
+ * while only 3 SDK children existed — `childPid: null` on a live registration is
+ * NORMAL (registerSdkWorker runs before sem.acquire()), not evidence of death.
+ *
+ * Deliberately NOT a re-point of isSdkWorkerLiveOnDisk: that one's ADVISORY
+ * contract has existing consumers, and promoting it would change them.
+ *
+ * @returns {{state: "live"|"dead"|"unknown", reason: string, childPid: number|null}}
+ */
+export function classifySdkWorkerLiveness(orchDir, ticket, { pidAlive = defaultPidAlive, selfPid = process.pid } = {}) {
+  // 1. Same-daemon authority. The query promise runs on THIS event loop, so the
+  //    Map is ground truth here and beats every disk read — including a missing
+  //    or corrupt projection (a worker registered with no orchDir writes none).
+  if (_live.has(ticket)) return { state: SDK_LIVENESS.LIVE, reason: "in-memory", childPid: _live.get(ticket)?.childPid ?? null };
+
+  let proj;
+  try {
+    proj = JSON.parse(readFileSync(projectionPath(orchDir, ticket), "utf8"));
+  } catch (err) {
+    // 2. Absent and corrupt are DISTINCT reasons: one says the worker was never
+    //    projected, the other says we could not read what was projected. Both
+    //    are `unknown` — neither is evidence of death.
+    return {
+      state: SDK_LIVENESS.UNKNOWN,
+      reason: err?.code === "ENOENT" ? "no-projection" : "corrupt-projection",
+      childPid: null,
+    };
+  }
+
+  try {
+    const childPidRaw = Number(proj?.childPid);
+    const childPid = Number.isInteger(childPidRaw) && childPidRaw > 0 ? childPidRaw : null;
+
+    if (pidAlive(proj?.pid)) {
+      // 3/4. The projection's `pid` is the DAEMON's, never the worker's. A live
+      //      daemon pid that is us means the file outlived its registration
+      //      (deregistered, not yet unlinked) — do not infer death from it. A
+      //      live pid that is NOT us means another daemon owns the answer.
+      return {
+        state: SDK_LIVENESS.UNKNOWN,
+        reason: Number(proj?.pid) === Number(selfPid) ? "self-daemon-not-registered" : "foreign-daemon",
+        childPid,
+      };
+    }
+
+    // 5. Dead daemon + a recorded child: the child's own pid is the only durable
+    //    fact, and it can outlive its daemon as a PID-1 orphan (measured: 14 min).
+    if (childPid != null) {
+      return pidAlive(childPid)
+        ? { state: SDK_LIVENESS.LIVE, reason: "orphan-child-alive", childPid }
+        : { state: SDK_LIVENESS.DEAD, reason: "orphan-child-dead", childPid };
+    }
+
+    // 6. We LOOKED for a child and there was none (Phase 2 stamps the marker
+    //    whatever discovery returns) — with the daemon gone too, that is dead.
+    if (proj?.childPidResolved === true) {
+      return { state: SDK_LIVENESS.DEAD, reason: "no-child-resolved", childPid: null };
+    }
+
+    // 7. Legacy projection written before CTL-2192 Phase 2: no marker means we
+    //    never asked, which is not the same as "no child". The rollout
+    //    population drains as workers cycle — see the plan's Migration Notes.
+    return { state: SDK_LIVENESS.UNKNOWN, reason: "legacy-projection-no-child-record", childPid: null };
+  } catch {
+    return { state: SDK_LIVENESS.UNKNOWN, reason: "threw", childPid: null };
+  }
+}
+
 /**
  * Boot reconcile: no in-process worker survives a daemon restart, so any
  * projection whose pid is dead (or that is unreadable) is a leftover from the
@@ -353,7 +559,21 @@ export function isSdkWorkerLiveOnDisk(orchDir, ticket, { pidAlive = defaultPidAl
  * not a resumable in-process SDK session) and (b) if its recorded childPid is still
  * alive, SIGTERM'd BEFORE the projection is deleted — so the signal-based boot-resume
  * cold re-dispatches the phase exactly once instead of racing a surviving orphan.
- * @returns {{removed: string[], kept: string[], harvested: object[], killedChildren: object[]}}
+ * CTL-2192 (Phase 4): the reap arm now covers SDK projections too — an SDK child
+ * can outlive its daemon as a PID-1 orphan exactly like a codex one (measured: 14
+ * minutes on `mini`), and boot-resume then manufactures a fresh generation beside
+ * it. The reap is also CONFIRMED: a child still alive after the grace is reported
+ * as `reapFailed`, its projection is KEPT, and it is NOT harvested — deleting the
+ * file would erase the only durable pointer to a live orphan and let a second
+ * generation into the same worktree. Fail closed.
+ * CTL-2192 (remediation): the reap now confirms the target's IDENTITY before
+ * signalling (a recycled pid is never a kill target), draws every confirm from
+ * ONE shared deadline so a saturated bounce cannot stall boot per-orphan, and
+ * covers the stale-projection-with-a-live-child hole that used to delete the
+ * only pointer to a running worker. `reapFailed` entries carry a `reason`:
+ * `survived-sigterm` | `signal-failed` | `identity-unverifiable` |
+ * `stale-projection-child-alive`.
+ * @returns {{removed: string[], kept: string[], harvested: object[], killedChildren: object[], reapFailed: object[]}}
  */
 // CTL-1422: harvested sessions older than this are orphans, not resume
 // candidates — the lookback window that stops an ancient never-stopped
@@ -362,10 +582,29 @@ export const WARM_HARVEST_MAX_AGE_MS = 48 * 60 * 60 * 1000;
 
 export function reconcileSdkRegistryOnBoot(
   orchDir,
-  { pidAlive = defaultPidAlive, now = Date.now, killChild = defaultKillChild } = {},
+  {
+    pidAlive = defaultPidAlive,
+    now = Date.now,
+    killChild = defaultKillChild,
+    // CTL-2192 (Phase 4): re-probe after the SIGTERM. Injectable so the tests
+    // never sleep; production waits one bounded grace and re-reads the pid.
+    // Set to one tick deliberately — if an SDK child routinely ignores SIGTERM
+    // the reapFailed path will SHOW it, and escalating to SIGKILL is a
+    // follow-up rather than a guess made now.
+    confirmReap = defaultConfirmReap,
+    // CTL-2192 (remediation): identity before signal. See
+    // defaultClassifyChildIdentity — a recycled pid is never a kill target.
+    classifyChildIdentity = defaultClassifyChildIdentity,
+    // The ONE deadline every confirm in this reconcile draws from.
+    confirmTotalBudgetMs = REAP_CONFIRM_TOTAL_BUDGET_MS,
+    confirmGraceMs = REAP_CONFIRM_GRACE_MS,
+    confirmGraceCodexMs = REAP_CONFIRM_GRACE_CODEX_MS,
+  } = {},
 ) {
   const removed = [];
   const kept = [];
+  // CTL-2192: { ticket, childPid } for each orphan that survived its SIGTERM.
+  const reapFailed = [];
   // CTL-1457 (N2): { ticket, childPid } for each orphaned codex child SIGTERM'd here.
   // Empty on a pure sdk/bg fleet (childPid is only ever set by the codex runner).
   const killedChildren = [];
@@ -379,11 +618,14 @@ export function reconcileSdkRegistryOnBoot(
   // WARM_HARVEST_MAX_AGE_MS. Only unharvestable dead projections (corrupt, no
   // session, stale) are deleted.
   const harvested = [];
+  // Shared confirm budget for the whole pass (see REAP_CONFIRM_TOTAL_BUDGET_MS).
+  // Anchored on the injected clock so a test never sleeps for real.
+  let confirmBudgetLeftMs = Number.isFinite(confirmTotalBudgetMs) ? confirmTotalBudgetMs : REAP_CONFIRM_TOTAL_BUDGET_MS;
   let files;
   try {
     files = readdirSync(projectionDir(orchDir)).filter((f) => f.endsWith(".json"));
   } catch {
-    return { removed, kept, harvested, killedChildren };
+    return { removed, kept, harvested, killedChildren, reapFailed };
   }
   for (const f of files) {
     const ticket = f.slice(0, -".json".length);
@@ -405,6 +647,92 @@ export function reconcileSdkRegistryOnBoot(
     // session. It always falls through to the reap branch below (where a surviving
     // orphan is killed), so the signal-based boot-resume re-dispatches the phase once.
     const isCodex = proj?.executor === "codex-exec";
+
+    // CTL-1457 (N2) + CTL-2192 (Phase 4): kill a still-alive orphaned child
+    // BEFORE deciding anything else about this projection. Gated on freshness +
+    // pidAlive so a long-dead projection (whose childPid may have been reused) is
+    // never signalled — best-effort orphan cleanup, not a guaranteed kill. The
+    // gate is NOT widened beyond that: no childPid, or no freshness evidence,
+    // means no signal.
+    //
+    // ⚠️ ORDER IS LOAD-BEARING and this block must stay ABOVE the warm-harvest
+    // branch. Warm-resuming a session whose process is still running would put
+    // two live generations in one worktree — the exact harm this ticket is about.
+    const childPid = Number(proj?.childPid);
+    let reapFailedHere = false;
+    let reapFailedReason = null;
+    if (Number.isInteger(childPid) && childPid > 0 && fresh && pidAlive(childPid)) {
+      // ⛔ IDENTITY FIRST. `fresh` is the 48h warm-harvest window, which is a
+      // weak pid-reuse guard and NOT a freshness assertion about the child; and
+      // this pid is re-probed on every boot for as long as the projection lives.
+      // Signalling on `kill -0` alone would SIGTERM whatever unrelated process
+      // inherited the number. (Deliberately NOT narrowed to SDK_WORKER_FRESH_MS
+      // instead: the plan forbids re-pointing that constant — CTL-2193 owns it —
+      // and 30 minutes would also miss the real orphans of a long-down daemon,
+      // which are precisely what this reap exists for.)
+      const identity = classifyChildIdentity(childPid, proj?.worktreePath);
+      if (identity === "ours") {
+        if (killChild(childPid)) {
+          // CONFIRM it. An assumed kill is not a kill: without the re-probe a
+          // surviving orphan's projection is deleted and boot-resume dispatches a
+          // second generation into its worktree.
+          const perOrphanGrace = isCodex ? confirmGraceCodexMs : confirmGraceMs;
+          const graceMs = Math.max(0, Math.min(perOrphanGrace, confirmBudgetLeftMs));
+          const startedAt = now();
+          const confirmed = confirmReap(childPid, { pidAlive, graceMs });
+          confirmBudgetLeftMs -= Math.max(0, now() - startedAt);
+          if (confirmed) {
+            killedChildren.push({ ticket, childPid });
+          } else {
+            reapFailedHere = true;
+            reapFailedReason = "survived-sigterm";
+          }
+        } else {
+          reapFailedHere = true;
+          reapFailedReason = "signal-failed";
+        }
+      } else if (identity === "unverifiable") {
+        // We could not prove the pid is ours, so we must not signal it — and we
+        // must not conclude our child is gone either. Fail CLOSED.
+        reapFailedHere = true;
+        reapFailedReason = "identity-unverifiable";
+      }
+      // identity === "foreign": the pid was reused by an unrelated process. Our
+      // child is gone; leave the stranger alone and let the projection take the
+      // ordinary harvest/removal path below.
+    } else if (Number.isInteger(childPid) && childPid > 0 && !fresh && pidAlive(childPid)) {
+      // ⚠️ The STALE-projection hole. `fresh` gates BOTH the reap and the
+      // harvest, and the fall-through is rmSync. A projection older than
+      // WARM_HARVEST_MAX_AGE_MS whose child is still running was therefore
+      // DELETED with no signal and no reapFailed entry — after which the oracle
+      // answers no-projection/unknown and boot-resume cold-dispatches a second
+      // generation into a worktree that still has a live worker.
+      //
+      // The projection is the only durable pointer to that worker, so keep it
+      // and exclude the ticket. Deliberately NO signal: the plan's rule is "no
+      // freshness evidence means no signal", and this branch self-clears — once
+      // the child exits, the next boot takes the ordinary removal path.
+      //
+      // ONLY on a CONFIRMED identity. At >48h the pid-reuse prior dominates, so
+      // an unverifiable identity here falls through to the pre-existing deletion
+      // rather than stranding the ticket on a pid we cannot attribute.
+      if (classifyChildIdentity(childPid, proj?.worktreePath) === "ours") {
+        reapFailedHere = true;
+        reapFailedReason = "stale-projection-child-alive";
+      }
+    }
+    if (reapFailedHere) {
+      // Fail CLOSED: keep the file (it is the only durable pointer to the live
+      // orphan), do not harvest, do not mark removed. reconcileBootResume and
+      // processApprovedResumes both drop these tickets from candidacy.
+      reapFailed.push({ ticket, childPid, reason: reapFailedReason });
+      continue;
+    }
+
+    // CTL-1457 (N2): a codex-exec projection is NEVER a warm-resume candidate — its
+    // worker is an out-of-process `codex exec` child, not a resumable in-process SDK
+    // session. It always falls through to the removal below, so the signal-based
+    // boot-resume re-dispatches the phase once.
     if (!isCodex && proj && typeof proj.sessionId === "string" && proj.sessionId && fresh) {
       harvested.push({
         ticket,
@@ -415,14 +743,6 @@ export function reconcileSdkRegistryOnBoot(
       });
       continue; // keep the file — it is the durable copy of the UUID
     }
-    // CTL-1457 (N2): kill a still-alive orphaned codex child BEFORE deleting its
-    // projection. Gated on isCodex + freshness + pidAlive so a long-dead projection
-    // (whose childPid may have been reused) is never signalled — best-effort orphan
-    // cleanup, not a guaranteed kill. bg/sdk projections carry no childPid → no-op.
-    const childPid = Number(proj?.childPid);
-    if (isCodex && Number.isInteger(childPid) && childPid > 0 && fresh && pidAlive(childPid)) {
-      if (killChild(childPid)) killedChildren.push({ ticket, childPid });
-    }
     try {
       rmSync(file, { force: true });
     } catch {
@@ -430,7 +750,7 @@ export function reconcileSdkRegistryOnBoot(
     }
     removed.push(ticket);
   }
-  return { removed, kept, harvested, killedChildren };
+  return { removed, kept, harvested, killedChildren, reapFailed };
 }
 
 /** Test seam: clear all in-memory state (projections are per-test tmp dirs). */

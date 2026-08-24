@@ -28,6 +28,9 @@ import {
   runPrelaunch,
 } from "./sdk-run-phase-agent.mjs";
 import { ASSERTED_BY } from "./assertion-evidence.mjs"; // CTL-1789: terminal-writer attribution
+// CTL-2192 (review): the REAL preemption canceller — a fake would have passed
+// against the very wiring gap this covers.
+import { cancelSdkRun, abortSdkWorker } from "./sdk-worker-registry.mjs";
 
 // ── Fakes ───────────────────────────────────────────────────────────────────
 
@@ -772,9 +775,23 @@ describe("sdkRunPhaseAgent — 429/529 backoff", () => {
     expect(events.filter(([n]) => n === "execution-core.sdk.phase-turns")).toHaveLength(1);
     expect(
       events.every(([n]) =>
-        n === "execution-core.sdk.overloaded" || n === "execution-core.sdk.phase-turns",
+        n === "execution-core.sdk.overloaded" ||
+        n === "execution-core.sdk.phase-turns" ||
+        // CTL-2192: this test injects no process-table probes, so the real ones
+        // run against the bun test process and the child-pid scan may legitimately
+        // conclude nothing. At most ONE such breadcrumb per ATTEMPT (the discovery
+        // is one-shot per attempt, re-armed on each 429/529 retry), asserted below.
+        n === "execution-core.sdk.child-pid-inconclusive",
       ),
     ).toBe(true);
+    // CTL-2192 (Codex #3955 P1): the bound is per-ATTEMPT, not per-run. Discovery
+    // is deliberately re-armed on every retry — a replacement subprocess needs its
+    // own scan — so 3 attempts may produce up to 3 breadcrumbs. What must still
+    // hold is that it never fires per streamed message: `attempt` is the number of
+    // query() launches, so this bound fails the moment discovery re-runs inside one.
+    expect(
+      events.filter(([n]) => n === "execution-core.sdk.child-pid-inconclusive").length,
+    ).toBeLessThanOrEqual(attempt);
     expect(backstops.length).toBe(0); // success → no backstop
   });
 
@@ -2380,5 +2397,451 @@ describe("CTL-1814 — the fallback terminal event carries its orchestrator", ()
     expect(importBlock).not.toBeNull();
     expect(importBlock[1]).toContain("defaultEmitBackstop");
     expect(importBlock[1]).toContain("flipSignalAbandonedOnUndeclaredExit");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CTL-2192 Phase 2 — the runner records its own child pid.
+//
+// The projection's `pid` is the DAEMON's for every worker, so after a bounce it
+// is dead by construction and an on-disk liveness read has nothing to probe.
+// The child's pid is the one durable fact — and an SDK child can outlive its
+// daemon as a PID-1 orphan (measured: 14 min). Discovery is a ONE-SHOT at the
+// first streamed message, and the marker is stamped whatever it returns.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// CTL-2192 (review) — a PREEMPTION abort must not clobber the scheduler's park.
+//
+// cancelSdkRun aborts the live controller with the PREEMPTION_ABORT_REASON
+// sentinel and the scheduler then parks the signal `preempted` in the SAME
+// synchronous block. The rejection lands a turn later, so before this fix it fell
+// to `thrown && !result` → emitBackstop(failed) → defaultWriteSignalStalled, whose
+// clobber guard covers SIGNAL_TERMINAL_STATUSES only — "preempted" is NOT in that
+// set. The park became "stalled" + a phase.*.failed terminal, so the resume sweep
+// (gated on PREEMPTED_STATUS) never resumed the victim and the terminal sweep
+// escalated it: preemption destroying the work it exists to defer.
+//
+// These use the REAL registry + REAL cancelSdkRun on purpose. The bug was that the
+// sentinel had no consumer on the runner side, so a test against a fake canceller
+// would have passed while production stayed broken.
+// ---------------------------------------------------------------------------
+describe("sdkRunPhaseAgent — CTL-2192 preemption abort", () => {
+  const setup = () => {
+    const orchDir = mkdtempSync(join(tmpdir(), "sdk-preempt-"));
+    const wdir = join(orchDir, "workers", "CTL-100");
+    mkdirSync(wdir, { recursive: true });
+    const signalFile = join(wdir, "phase-implement.json");
+    writeFileSync(signalFile, JSON.stringify({
+      status: "dispatched", bg_job_id: null, ticket: "CTL-100", phase: "implement", generation: 2,
+    }));
+    return { orchDir, signalFile };
+  };
+
+  // The scheduler's exact sequence: cancelSdkRun(...) then, synchronously, park.
+  const preemptThenPark = (signalFile, generation) => {
+    const res = cancelSdkRun({ ticket: "CTL-100", generation });
+    const sig = JSON.parse(readFileSync(signalFile, "utf8"));
+    writeFileSync(signalFile, JSON.stringify({
+      ...sig, status: "preempted", parkedFrom: "implement", attentionReason: "preempted-by-priority",
+    }));
+    return res;
+  };
+
+  test("the park SURVIVES — no stalled clobber, no terminal event, aborted:true", async () => {
+    const { orchDir, signalFile } = setup();
+    const spec = makeSpec({ signalFile, generation: 2 });
+    const { spawn, calls } = spawnReturningSpec({ spec, signalFile });
+    let cancelRes = null;
+    // Yield one message (the run is underway and the controller is registered),
+    // then do what the scheduler does, then surface the abort as the SDK would.
+    const runQuery = () =>
+      (async function* () {
+        yield { type: "assistant", message: {} };
+        cancelRes = preemptThenPark(signalFile, 2);
+        throw Object.assign(new Error("aborted"), { name: "AbortError" });
+      })();
+
+    const r = await sdkRunPhaseAgent(
+      { orchDir, ticket: "CTL-100", phase: "implement", worktreePath: "/wt/CTL-100", generation: 2 },
+      { ...GOOD_AUTH, spawn, runQuery },
+    );
+
+    // The cancel really reached a live registered controller (positive control:
+    // a no-op cancel would report found:false and prove nothing below).
+    expect(cancelRes).toEqual({ found: true, stale: false, aborted: true });
+    expect(r.aborted).toBe(true);
+    // ⛔ THE REGRESSION: this read "stalled" before the fix.
+    const after = JSON.parse(readFileSync(signalFile, "utf8"));
+    expect(after.status).toBe("preempted");
+    expect(after.parkedFrom).toBe("implement");
+    expect(after.assertedBy).toBeUndefined(); // no infrastructure terminal was asserted
+    // ...and no phase.<phase>.failed.<TICKET> terminal was emitted. The backstop
+    // emits by spawning phase-agent-emit-complete; assert nothing was spawned for it.
+    const emitCalls = calls.filter((c) => String(c.bin).endsWith("phase-agent-emit-complete"));
+    expect(emitCalls).toEqual([]);
+    rmSync(orchDir, { recursive: true, force: true });
+  });
+
+  test("a NON-preemption abort still backstops (the branch is not a blanket abort swallow)", async () => {
+    const { orchDir, signalFile } = setup();
+    const spec = makeSpec({ signalFile, generation: 2 });
+    const { spawn } = spawnReturningSpec({ spec, signalFile });
+    const runQuery = () =>
+      (async function* () {
+        yield { type: "assistant", message: {} };
+        // A genuine failure abort — NOT the preemption sentinel.
+        abortSdkWorker("CTL-100", "watchdog-kill");
+        throw Object.assign(new Error("aborted"), { name: "AbortError" });
+      })();
+    const r = await sdkRunPhaseAgent(
+      { orchDir, ticket: "CTL-100", phase: "implement", worktreePath: "/wt/CTL-100", generation: 2 },
+      { ...GOOD_AUTH, spawn, runQuery },
+    );
+    expect(r.aborted).toBeUndefined();
+    expect(r.code).toBe(1);
+    expect(JSON.parse(readFileSync(signalFile, "utf8")).status).toBe("stalled");
+    rmSync(orchDir, { recursive: true, force: true });
+  });
+});
+
+describe("sdkRunPhaseAgent — CTL-2192 child-pid discovery", () => {
+  const childPidRegistry = () => {
+    const state = { registered: [], childPids: [], resolvedCalls: 0, clears: 0 };
+    const registerWorker = (entry) => {
+      state.registered.push(entry);
+      return {
+        setAbortController() {},
+        touch() {},
+        setSessionId() {},
+        setChildPid(pid) {
+          state.childPids.push(pid);
+          state.resolvedCalls += 1;
+        },
+        // CTL-2192 (Codex #3955 P1): the retry re-arm calls this before the
+        // replacement child spawns.
+        clearChildPid() {
+          state.clears += 1;
+        },
+        deregister() {},
+      };
+    };
+    return { registerWorker, state };
+  };
+
+  test("calls setChildPid EXACTLY ONCE per run, with the discovered pid", async () => {
+    const { spawn } = spawnReturningSpec();
+    const { registerWorker, state } = childPidRegistry();
+    const runQuery = () =>
+      (async function* () {
+        yield { type: "assistant", message: {} };
+        yield { type: "assistant", message: {} };
+        yield { type: "assistant", message: {} };
+        yield resultMsg();
+      })();
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH,
+      spawn,
+      runQuery,
+      registerWorker,
+      // Injected process table: pid 4242 is new after launch and its cwd is the
+      // worktree — the (ppid == daemon) ∧ (cwd == worktreePath) join.
+      listChildPids: (() => {
+        let n = 0;
+        return () => (n++ === 0 ? [11] : [11, 4242]);
+      })(),
+      cwdOfPid: (pid) => (pid === 4242 ? "/wt/CTL-100" : "/elsewhere"),
+    });
+    expect(r.code).toBe(0);
+    expect(state.resolvedCalls).toBe(1); // ONE-SHOT, not per streamed message
+    expect(state.childPids).toEqual([4242]);
+  });
+
+  test("stamps the resolution even when discovery finds NOTHING (setChildPid(null))", async () => {
+    // "We looked and there was no child" is the fact that makes a later verdict
+    // `dead` instead of `unknown`. Skipping the call would leave the projection
+    // legacy-shaped forever.
+    const { spawn } = spawnReturningSpec();
+    const { registerWorker, state } = childPidRegistry();
+    const runQuery = () =>
+      (async function* () {
+        yield { type: "assistant", message: {} };
+        yield resultMsg();
+      })();
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH,
+      spawn,
+      runQuery,
+      registerWorker,
+      listChildPids: () => [11], // no new child at all
+      cwdOfPid: () => "/elsewhere",
+    });
+    expect(r.code).toBe(0);
+    expect(state.resolvedCalls).toBe(1);
+    expect(state.childPids).toEqual([null]);
+  });
+
+  test("a THROWING enumerator is swallowed — the query still runs to completion", async () => {
+    // A liveness nicety must never take down a dispatch.
+    const { spawn } = spawnReturningSpec();
+    const { registerWorker, state } = childPidRegistry();
+    const runQuery = () =>
+      (async function* () {
+        yield { type: "assistant", message: {} };
+        yield resultMsg();
+      })();
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH,
+      spawn,
+      runQuery,
+      registerWorker,
+      listChildPids: () => {
+        throw new Error("ps exploded");
+      },
+      cwdOfPid: () => "/wt/CTL-100",
+    });
+    expect(r.code).toBe(0); // the run completed
+    expect(state.registered).toHaveLength(1);
+  });
+
+  test("a registry handle with NO setChildPid (older fake) does not break the run", async () => {
+    const { spawn } = spawnReturningSpec();
+    const registerWorker = () => ({
+      setAbortController() {},
+      touch() {},
+      deregister() {},
+    });
+    const runQuery = () =>
+      (async function* () {
+        yield { type: "assistant", message: {} };
+        yield resultMsg();
+      })();
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH,
+      spawn,
+      runQuery,
+      registerWorker,
+      listChildPids: () => [11, 4242],
+      cwdOfPid: () => "/wt/CTL-100",
+    });
+    expect(r.code).toBe(0);
+  });
+
+  // CTL-2192 (Codex #3955 P1). This pair replaces an earlier test that asserted
+  // discovery does NOT re-run across a retry — that was the defect, not the
+  // contract. A 429/529 retry spawns a REPLACEMENT subprocess, so the previous
+  // attempt's pid is dead; leaving it stamped makes classifySdkWorkerLiveness
+  // answer `orphan-child-dead` (branch 5) for a ticket whose child is alive, and
+  // boot reconciliation then dispatches a new generation beside a live orphan.
+  test("discovery RE-RUNS across a 429 retry and stamps the replacement child's pid", async () => {
+    const { spawn } = spawnReturningSpec();
+    const { registerWorker, state } = childPidRegistry();
+    let attempt = 0;
+    const runQuery = () => {
+      const i = attempt++;
+      return (async function* () {
+        yield { type: "assistant", message: {} };
+        // Same 529 shape the neighbouring overload-retry tests use.
+        yield i === 0 ? resultMsg({ subtype: "error", is_error: true, api_error_status: 529 }) : resultMsg();
+      })();
+    };
+    // Four snapshots, in call order: attempt-0 before, attempt-0 after,
+    // attempt-1 before (4242 has exited), attempt-1 after (5353 is the
+    // replacement). 4242 must NOT be re-attributed to attempt 1.
+    const snapshots = [[11], [11, 4242], [11], [11, 5353]];
+    let n = 0;
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH,
+      spawn,
+      runQuery,
+      registerWorker,
+      sleep: async () => {},
+      backoff: { baseMs: 1, capMs: 2 },
+      listChildPids: () => snapshots[n++] ?? [11],
+      cwdOfPid: (pid) => (pid === 4242 || pid === 5353 ? "/wt/CTL-100" : "/elsewhere"),
+    });
+    expect(r.code).toBe(0);
+    // ONE stamp per ATTEMPT (still not per streamed message), and the second
+    // names the replacement — never the exited first attempt's pid.
+    expect(state.resolvedCalls).toBe(2);
+    expect(state.childPids).toEqual([4242, 5353]);
+    // The stale pid was invalidated BEFORE the replacement was discovered, so the
+    // retry window reads `unknown` rather than a confidently-wrong dead pid.
+    expect(state.clears).toBe(1);
+  });
+
+  test("a retry whose discovery is INCONCLUSIVE still clears the previous attempt's stale pid", async () => {
+    // The fail direction that matters: we could not identify the replacement, so
+    // nothing is stamped — but the dead pid from attempt 0 must not survive as a
+    // `dead` verdict. Clear-then-discover leaves the record UNRESOLVED (unknown).
+    const { spawn } = spawnReturningSpec();
+    const { registerWorker, state } = childPidRegistry();
+    let attempt = 0;
+    const runQuery = () => {
+      const i = attempt++;
+      return (async function* () {
+        yield { type: "assistant", message: {} };
+        yield i === 0 ? resultMsg({ subtype: "error", is_error: true, api_error_status: 529 }) : resultMsg();
+      })();
+    };
+    // attempt-1's BEFORE snapshot returns null — `ps` failed, which
+    // discoverSdkChildPid reports as the inconclusive `before-unavailable`.
+    const snapshots = [[11], [11, 4242], null, [11, 5353]];
+    let n = 0;
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH,
+      spawn,
+      runQuery,
+      registerWorker,
+      sleep: async () => {},
+      backoff: { baseMs: 1, capMs: 2 },
+      listChildPids: () => (n < snapshots.length ? snapshots[n++] : [11]),
+      cwdOfPid: (pid) => (pid === 4242 || pid === 5353 ? "/wt/CTL-100" : "/elsewhere"),
+    });
+    expect(r.code).toBe(0);
+    expect(state.clears).toBe(1);
+    // Only attempt 0 stamped; the inconclusive retry deliberately did not.
+    expect(state.childPids).toEqual([4242]);
+  });
+
+  test("a registry handle with NO clearChildPid (older fake) survives a retry", async () => {
+    // Same optional-chaining contract setChildPid already carries: an older test
+    // double must not turn a retry into a crash.
+    const { spawn } = spawnReturningSpec();
+    const registerWorker = () => ({
+      setAbortController() {},
+      touch() {},
+      setSessionId() {},
+      setChildPid() {},
+      deregister() {},
+    });
+    let attempt = 0;
+    const runQuery = () => {
+      const i = attempt++;
+      return (async function* () {
+        yield { type: "assistant", message: {} };
+        yield i === 0 ? resultMsg({ subtype: "error", is_error: true, api_error_status: 529 }) : resultMsg();
+      })();
+    };
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH,
+      spawn,
+      runQuery,
+      registerWorker,
+      sleep: async () => {},
+      backoff: { baseMs: 1, capMs: 2 },
+      listChildPids: () => [11],
+      cwdOfPid: () => "/wt/CTL-100",
+    });
+    expect(r.code).toBe(0);
+  });
+});
+
+describe("sdkRunPhaseAgent — CTL-2192 inconclusive child-pid discovery", () => {
+  const spyReg = () => {
+    const state = { childPids: [], calls: 0 };
+    const registerWorker = () => ({
+      setAbortController() {},
+      touch() {},
+      setSessionId() {},
+      setChildPid(pid) {
+        state.childPids.push(pid);
+        state.calls += 1;
+      },
+      deregister() {},
+    });
+    return { registerWorker, state };
+  };
+
+  const oneMessageRun = () =>
+    (async function* () {
+      yield { type: "assistant", message: {} };
+      yield resultMsg();
+    })();
+
+  test("⛔ an UNUSABLE process table does NOT stamp the projection", async () => {
+    // `setChildPid(null)` records "we looked and there is no child", which the
+    // liveness oracle reads as DEAD. Stamping that when we could not look would
+    // mark every live worker on such a host reapable — the exact false-clean the
+    // three-valued design exists to prevent.
+    const { spawn } = spawnReturningSpec();
+    const { registerWorker, state } = spyReg();
+    const events = [];
+    const r = await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH,
+      spawn,
+      runQuery: oneMessageRun,
+      registerWorker,
+      emitEvent: (n, p) => events.push([n, p]),
+      listChildPids: () => null, // ps unusable
+      cwdOfPid: () => "/wt/CTL-100",
+    });
+    expect(r.code).toBe(0);
+    expect(state.calls).toBe(0); // NOT stamped
+    const bc = events.filter(([n]) => n === "execution-core.sdk.child-pid-inconclusive");
+    expect(bc).toHaveLength(1);
+    expect(bc[0][1].reason).toBe("enumerator-unusable");
+  });
+
+  test("⛔ UNREADABLE cwds do NOT stamp the projection (the no-lsof host)", async () => {
+    const { spawn } = spawnReturningSpec();
+    const { registerWorker, state } = spyReg();
+    const events = [];
+    await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH,
+      spawn,
+      runQuery: oneMessageRun,
+      registerWorker,
+      emitEvent: (n, p) => events.push([n, p]),
+      listChildPids: (() => {
+        let n = 0;
+        return () => (n++ === 0 ? [11] : [11, 4242]);
+      })(),
+      cwdOfPid: () => null, // every cwd probe fails
+    });
+    expect(state.calls).toBe(0);
+    expect(events.find(([n]) => n === "execution-core.sdk.child-pid-inconclusive")[1].reason).toBe("cwd-unreadable");
+  });
+
+  test("⛔ TWO generations sharing the worktree do NOT stamp the projection", async () => {
+    const { spawn } = spawnReturningSpec();
+    const { registerWorker, state } = spyReg();
+    const events = [];
+    await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH,
+      spawn,
+      runQuery: oneMessageRun,
+      registerWorker,
+      emitEvent: (n, p) => events.push([n, p]),
+      listChildPids: (() => {
+        let n = 0;
+        return () => (n++ === 0 ? [11] : [11, 4242, 4243]);
+      })(),
+      cwdOfPid: () => "/wt/CTL-100", // both new children in the same worktree
+    });
+    expect(state.calls).toBe(0);
+    expect(events.find(([n]) => n === "execution-core.sdk.child-pid-inconclusive")[1].reason).toBe(
+      "ambiguous-multiple-matches",
+    );
+  });
+
+  test("a CONCLUSIVE 'no child' DOES stamp (null pid) — that is the case the marker is for", async () => {
+    const { spawn } = spawnReturningSpec();
+    const { registerWorker, state } = spyReg();
+    const events = [];
+    await sdkRunPhaseAgent(ARGS, {
+      ...GOOD_AUTH,
+      spawn,
+      runQuery: oneMessageRun,
+      registerWorker,
+      emitEvent: (n, p) => events.push([n, p]),
+      listChildPids: (() => {
+        let n = 0;
+        return () => (n++ === 0 ? [11] : [11, 4242]);
+      })(),
+      cwdOfPid: () => "/some/other/worktree", // readable, just not ours
+    });
+    expect(state.childPids).toEqual([null]);
+    expect(events.filter(([n]) => n === "execution-core.sdk.child-pid-inconclusive")).toHaveLength(0);
   });
 });

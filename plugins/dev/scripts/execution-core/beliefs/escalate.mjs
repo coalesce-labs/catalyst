@@ -52,7 +52,8 @@
 
 import { readFileSync, writeFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
-import { labelOnce } from "../label-guard.mjs";
+import { labelMarkerBase } from "../label-guard.mjs";
+import { publishEscalation } from "../escalation-publish.mjs"; // CTL-2159
 import { log } from "../config.mjs";
 import { buildExplanation, coerceExplanation, tierProducer } from "../escalation-explanation.mjs";
 
@@ -60,6 +61,28 @@ function firstLine(s) {
   return String(s ?? "")
     .split(/\r?\n/)[0]
     .slice(0, 200);
+}
+
+// defaultPublishEscalationOnce — CTL-2159. The belief engine's publish seam.
+//
+// The belief engine is the SINGLE owner of escalation under
+// CATALYST_INTENTS_ENFORCE=1, so this call site is the one that survives when
+// every other producer defers. It used to be `labelOnce(orchDir, ticket,
+// "needs-human", …)` — the ONE producer the plan's `labelOnce(` grep found here
+// and the one an audit sweep keyed on `labelNeedsHumanUnlessBeliefOwner` would
+// have missed entirely.
+//
+// `why` is the belief's own diagnosis, so it is REAL evidence and is handed to
+// the classifier as the reason. Signature and return value match labelOnce
+// exactly (`false` ⇔ marker-guarded no-op) — see the parameter note above.
+function defaultPublishEscalationOnce(orchDir, ticket, label, writeStatus, opts = {}) {
+  return publishEscalation(orchDir, ticket, {
+    env: opts.env ?? process.env,
+    site: "beliefs-escalate",
+    reason: opts.reason ?? null,
+    explanation: opts.explanation ?? null,
+    markerBase: labelMarkerBase(orchDir, ticket, label),
+  });
 }
 
 // ── executeEscalations — per-tick executor for R12 escalate_human beliefs.
@@ -72,7 +95,17 @@ function firstLine(s) {
 //     writeStatus : { applyLabel, ... }            (the Linear write seam)
 //     appendEvent : (evt) => void | null           (operator-event seam)
 //     enforce     : boolean                         (CATALYST_INTENTS_ENFORCE=1)
-//     labelOnceFn : (orchDir,ticket,label,writeStatus,opts) => void  (injectable)
+//     labelOnceFn : (orchDir,ticket,label,writeStatus,opts) => boolean (injectable)
+//                   ⛔ CTL-2159 — the NAME is legacy, the BEHAVIOUR is not: the
+//                   default no longer writes a Linear label. It publishes the
+//                   escalation through the CTL-2158 classifier (SYSTEM → retry +
+//                   the one fleet alert, ASK → one ask ticket, MOOT → close,
+//                   HELD → visible), keeping labelOnce's exact return contract
+//                   (`false` ⇔ marker-guarded no-op) so the `paged` counter and
+//                   the operator event stay bound to the FIRST publish. The
+//                   parameter keeps its name so every injected test fake still
+//                   binds; it is renamed with the marker files in the consumer
+//                   phase.
 //     env         : Record<string,string>          (process.env in production)
 //   }
 //
@@ -86,7 +119,7 @@ export function executeEscalations(
     writeStatus,
     appendEvent = null,
     enforce = false,
-    labelOnceFn = labelOnce,
+    labelOnceFn = defaultPublishEscalationOnce,
     env = process.env,
     evidenceBySubject = {},
   } = {}
@@ -148,7 +181,15 @@ export function executeEscalations(
       // once-semantics stay testable.
       let firstPage = false;
       if (ticket) {
-        const r = labelOnceFn(orchDir, ticket, "needs-human", writeStatus, { appendEvent, env });
+        const r = labelOnceFn(orchDir, ticket, "needs-human", writeStatus, {
+          appendEvent,
+          env,
+          // CTL-2159: hand the belief's own diagnosis to the classifier. Without
+          // it every belief escalation classifies HELD on "no-reason", which is
+          // the correct default for an unexplained stall but wrong here — the
+          // belief engine DID explain itself.
+          reason: why,
+        });
         firstPage = r !== false;
       }
 

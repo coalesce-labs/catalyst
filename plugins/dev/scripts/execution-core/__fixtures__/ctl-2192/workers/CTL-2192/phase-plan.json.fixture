@@ -1,0 +1,23 @@
+{
+  "ticket": "CTL-2192",
+  "phase": "plan",
+  "orchestrator": "CTL-2192",
+  "model": "opus",
+  "executor": "sdk",
+  "turnCap": 500,
+  "status": "done",
+  "bg_job_id": null,
+  "worktreePath": "%WT%/catalyst-workspace/CTL-2192",
+  "generation": 1,
+  "attempt": 1,
+  "startedAt": "2026-08-23T07:19:15Z",
+  "updatedAt": "2026-08-23T07:24:18Z",
+  "host": {
+    "name": "mini-2",
+    "id": "100aaff3cc33d9f7"
+  },
+  "catalystSessionId": "sess_20260823T071951_7d26684f",
+  "completedAt": "2026-08-23T07:24:18Z",
+  "assertedBy": "recovery-reclaim",
+  "failureReason": null
+}

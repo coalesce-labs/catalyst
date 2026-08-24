@@ -33,7 +33,7 @@ jobs:
         if: steps.changed.outputs.docs == 'false'
         run: echo "No docs-relevant changes — docs build not required for this PR."
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         if: steps.changed.outputs.docs == 'true'
         with:
           node-version: 20

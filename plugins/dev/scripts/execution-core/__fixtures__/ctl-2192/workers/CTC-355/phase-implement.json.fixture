@@ -1,0 +1,56 @@
+{
+  "ticket": "CTC-355",
+  "phase": "implement",
+  "orchestrator": "CTC-355",
+  "model": "opus",
+  "executor": "sdk",
+  "turnCap": 500,
+  "status": "stalled",
+  "bg_job_id": null,
+  "worktreePath": "%WT%/catalyst-cloud/CTC-355",
+  "generation": 4,
+  "attempt": 1,
+  "startedAt": "2026-08-22T01:27:26Z",
+  "updatedAt": "2026-08-22T01:27:26Z",
+  "host": {
+    "name": "mini-2",
+    "id": "100aaff3cc33d9f7"
+  },
+  "failureReason": "rebase_refused_dirty_tree",
+  "dirtyFiles": [
+    "apps/mirror/src/do/fleet-activity.ts",
+    "apps/mirror/src/do/fleet-liveness-store.ts",
+    "apps/mirror/test/fleet-activity.test.ts",
+    "apps/mirror/test/fleet-liveness-store.test.ts"
+  ],
+  "explanation": {
+    "escalation_type": "decision",
+    "problem": "rebase conflict (rc=2) parking CTC-355/implement",
+    "call_to_action": "resolve the conflict for CTC-355/implement by hand and re-run, or discard the local change?",
+    "options": [
+      {
+        "label": "retry",
+        "tradeoff": "may hit the same failure again"
+      },
+      {
+        "label": "cancel / re-scope",
+        "tradeoff": "loses partial progress"
+      }
+    ],
+    "why_you": "priority call the agent cannot make unilaterally for CTC-355 implement phase",
+    "observed": {
+      "rebaseRc": 2,
+      "stallReason": "rebase_refused_dirty_tree",
+      "dirtyFiles": [
+        "apps/mirror/src/do/fleet-activity.ts",
+        "apps/mirror/src/do/fleet-liveness-store.ts",
+        "apps/mirror/test/fleet-activity.test.ts",
+        "apps/mirror/test/fleet-liveness-store.test.ts"
+      ]
+    },
+    "degraded": true
+  },
+  "phaseTimestamps": {
+    "stalled": "2026-08-22T01:27:26Z"
+  }
+}

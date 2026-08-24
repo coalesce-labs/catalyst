@@ -29,7 +29,7 @@ function makeTicket(overrides: Partial<BoardTicket> = {}): BoardTicket {
     phaseSummary: [],
     pr: null,
     updatedAt: "2026-06-14T00:00:00Z",
-    attention: "needs-human",
+    attention: "ask",
     ...overrides,
   };
 }

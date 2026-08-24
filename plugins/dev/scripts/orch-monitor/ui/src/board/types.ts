@@ -19,10 +19,10 @@ export type BoardActiveState = "active" | "stuck" | "dead" | null;
 
 // CTL-729: the single "needs attention" bucket (operator-approved 2026-06-11) —
 // the ONE yellow board accent + Inbox "Needs you" reason. 'waiting-on-you' (a live
-// worker's bg job is blocked, paused for a human prompt) | 'needs-human' (a
-// watchdog/phase escalation via a needs-human/needs-input label or the host-local
-// marker) | null. needs-human wins. DISTINCT from `held` (admission-gate pair).
-export type BoardAttention = "waiting-on-you" | "needs-human" | null;
+// worker's bg job is blocked, paused for a human prompt) | 'ask' (an open human
+// question — an ask ticket label, needs-input, a stuck PR or a failed phase;
+// CTL-2161) | null. `ask` wins. DISTINCT from `held` (admission-gate pair).
+export type BoardAttention = "waiting-on-you" | "ask" | null;
 
 /** CTL-1158: GitHub PR merge state; mirrors lib/board-data.d.mts PrMergeStateStatus. */
 export type PrMergeStateStatus =
@@ -141,8 +141,8 @@ export interface BoardTicket {
   /** Dependency ids a `blocked` hold is waiting on (only meaningful when held === "blocked"). */
   blockers?: string[];
   /** CTL-764 Phase 8: raw Linear labels (board-data.mjs passthrough) — the ONLY
-   *  place a needs-input vs needs-human disposition survives for a not-in-flight
-   *  ticket, since board-data hardcodes attention:"needs-human" for these inbox
+   *  place a needs-input vs ask disposition survives for a not-in-flight
+   *  ticket, since board-data hardcodes attention:"ask" for these inbox
    *  cards. Empty/absent when the board payload carried none. */
   labels?: string[];
   /** CTL-901 (HOME3): ISO applied-at of the held labels (durable ticket_state
@@ -156,16 +156,16 @@ export interface BoardTicket {
   currentPhaseSince?: string | null;
   /** CTL-1130: typed-union call_to_action from the most-recent stalled/failed
    *  signal's explanation.call_to_action. Used by home-inbox attentionSubLabel as
-   *  the sub-label for needs-human rows. null when absent (back-compat). */
+   *  the sub-label for `ask` rows. null when absent (back-compat). */
   humanQuestion?: string | null;
   /** CTL-729: the single needs-attention bucket — 'waiting-on-you' (live worker's
-   *  bg job blocked, paused for a human prompt) | 'needs-human' (a watchdog/phase
-   *  escalation via a needs-human/needs-input label or the host-local marker) |
-   *  null. needs-human wins. Drives the ONE yellow board accent + the Inbox
+   *  bg job blocked, paused for a human prompt) | 'ask' (an ask / needs-input
+   *  label, a stuck PR or a failed phase — CTL-2161) |
+   *  null. `ask` wins. Drives the ONE yellow board accent + the Inbox
    *  "Needs you" section. DISTINCT from `held` (the admission-gate pair). */
   attention?: BoardAttention;
   /** CTL-729: ISO timestamp the attention started — the worker's current-phase
-   *  start for waiting-on-you; null for needs-human. The Inbox row anchors its
+   *  start for waiting-on-you; null for `ask`. The Inbox row anchors its
    *  duration to attentionSince ?? heldSince; null is rendered unavailable. */
   attentionSince?: string | null;
   /** CTL-922 (BFF10): the node owning this ticket (BOARD3 host swimlanes), from
@@ -178,8 +178,8 @@ export interface BoardTicket {
   /** CTL-1066: reason a stalled/failed phase gave up; drives the "Stalled — gave
    *  up" holding bucket copy. null/absent unless status is stalled/failed. */
   failureReason?: string | null;
-  /** CTL-1110: extended escalation explanation for the needs-human detail-pane
-   *  card. null/absent unless attention is needs-human and a signal carried the
+  /** CTL-1110: extended escalation explanation for the `ask` detail-pane
+   *  card. null/absent unless attention is `ask` and a signal carried the
    *  extended fields. */
   explanation?: BoardEscalationExplanation | null;
   /** CTL-1220: true when this ticket was auto-fixed by the recovery sweep. */
@@ -263,10 +263,10 @@ export interface BoardQueueItem {
    *  null when not cooling down. expiresAt is epoch ms; consecutiveFailures is the attempt count. */
   dispatchCooldown?: { expiresAt: number; consecutiveFailures: number } | null;
   /** CTL-1588: the human-hold keeping this eligible ticket from actually
-   *  dispatching ("needs-human" | "needs-input"), stamped from the parked
+   *  dispatching ("ask" | "needs-input"), stamped from the parked
    *  descriptor set. The queue renders these in a separate held tail, never
    *  tinted as an imminent dispatch. null/absent = genuinely dispatchable. */
-  humanHold?: "needs-human" | "needs-input" | null;
+  humanHold?: "ask" | "needs-input" | null;
 }
 
 export interface BoardConfig {
@@ -285,7 +285,8 @@ export interface BoardConfig {
   queued?: number;
   blocked?: number;
   needsInput?: number;
-  needsHuman?: number;
+  /** CTL-2161: was `needsHuman`. The Needs-You section IS the ask section. */
+  ask?: number;
 }
 
 /** CTL-1050 §3.2: one current service outage decorated onto the board payload —
@@ -311,6 +312,22 @@ export interface BoardPayload {
   queue: BoardQueueItem[];
   /** CTL-1050: server-decorated current service outages (down only). */
   serviceHealth?: BoardServiceHealth;
+  /** ⛔ CTL-2161: the FLEET alert strip. SYSTEM trouble (provider overload, a spent
+   *  budget, no capacity, a system-class stall) is ONE fleet-scoped row for the
+   *  whole condition, NEVER a per-ticket card — that per-ticket shape is what this
+   *  epic deleted. Absent/[] when nothing is raised. */
+  fleetAlerts?: FleetAlert[];
+}
+
+/** CTL-2161: one currently-raised fleet alert (broker/alert-emit.mjs kinds). */
+export interface FleetAlert {
+  kind: string;
+  title: string;
+  reason?: string | null;
+  /** How many distinct tickets/accounts/nodes are in trouble — the LEVEL. */
+  count?: number | null;
+  /** ISO of the FIRST raise; a re-raise at a higher level does not reset it. */
+  raisedAt?: string | null;
 }
 
 // ── SharedWorker ⇄ client message protocol (CTL-733 PR-2b) ──────────────────

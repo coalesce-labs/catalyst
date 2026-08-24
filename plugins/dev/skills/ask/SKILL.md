@@ -19,9 +19,9 @@ never a status paragraph.
 
 ## 2. Creating one (the raising agent)
 
-**Then use the verb** — it builds the exact body, files the ticket, reads it BACK out of Linear, and
-proves the decision trigger can parse the options. It exits **2** rather than leaving you a ticket
-that can never be answered:
+**Then use the verb** — it builds the body, files the ticket, reads it BACK out of Linear, and proves
+the decision trigger can parse the options AND that every `--blocks` relation landed. It exits **2**
+rather than leaving you an ask that can never be answered, or that answers into the void:
 
 ```bash
 node "$CLAUDE_PLUGIN_ROOT/scripts/ask.mjs" create \
@@ -29,22 +29,23 @@ node "$CLAUDE_PLUGIN_ROOT/scripts/ask.mjs" create \
   --title "ASK: <one line>" \
   --why "<what it unblocks>" \
   --option "<option A>" --option "<option B>" \
-  --default "<what happens if silent>" \
-  --blocks CTL-NNNN
+  --default "<what happens if silent>" --blocks CTL-NNNN
 #   --dry-run   print the body and the parsed options without writing
 ```
 
-⛔ **Why a verb, not a documented snippet:** documenting the shape was not enough. CTC-653 measured that
-EVERY ask filed by hand on 2026-08-17 wrote its options inline rather than bulleted. Those parsed to
-**zero** options, so no reply could ever match — structurally undecidable, while looking normal.
+⛔ **`--option` (≥2), `--default` and `--blocks` are REQUIRED** (CTL-2157) — the verb refuses without
+them. `--blocks` is the load-bearing one: an ask that blocks nothing answers into the void (§3).
 
-Full field-by-field detail, the raw `linearis` form, and the exact body grammar:
-**[`references/creating.md`](references/creating.md)**.
+Why a verb rather than a documented snippet, field-by-field detail, the raw `linearis` form, and the
+exact body grammar: **[`references/creating.md`](references/creating.md)**.
 
 ## 3. Answering (the human)
 
 A comment on the ticket — top-level or a threaded reply — reaches the monitor. One word is enough
 ("A", "yes", "flip now"). Deciding by moving state without a comment is only seen on the next sweep.
+
+**The comment also WAKES the work** (CTL-2157): the daemon fans it out along the ask's `blocks`
+relations and unparks each agent waiting on them. Only a human's comment does this.
 
 ## 4. Replying (any agent) — the form
 
@@ -54,7 +55,7 @@ in one place: **[`references/threading.md`](references/threading.md)** — one-l
 what a reply must contain. Read it before your first reply.
 
 ```bash
-direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" CTL-NNNN --as <ROLE> --body "<markdown>"
+direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" CTL-NNNN --as <ROLE> --body-file <path>
 ```
 
 ## 5. Closing (the raising agent)
@@ -64,17 +65,16 @@ permission), then:
 
 ```bash
 node "$CLAUDE_PLUGIN_ROOT/scripts/ask.mjs" accept CTL-NNNN --as <ROLE> --body "accepted — …"
+#   --body-file <path>  for anything longer than a one-line body; --body REFUSES a path (CTL-2204)
 ```
 
-It replies in-thread as the app actor and moves the ticket to Done. Two deliberate refusals, the manual
-equivalent, and what to do when the human's action surfaces a defect:
-**[`references/closing.md`](references/closing.md)**.
+It replies in-thread as the app actor and moves the ticket to Done. The two deliberate refusals, the
+manual equivalent, and the defect case: **[`references/closing.md`](references/closing.md)**.
 
 ## 6. Where things live
 
 - **Reporting to the human:** rank by blast radius (work held × priority), not age — [`references/triage.md`](references/triage.md), `scripts/ask-triage.sh`.
 - Ask view **My decisions — what needs me** (a decided item leaves it); the board is a summary, not the record.
 - Related skills: `catalyst-dev:linearis`, `catalyst-dev:create-handoff`, `catalyst-dev:steward`.
-- Measured Linear facts this SOP rests on: threads are one level deep (CTL-1891) and the app actor cannot
-  create states/labels/views (CTC-626) — see [`references/threading.md`](references/threading.md) and
-  [`references/creating.md`](references/creating.md) (which also carries the write-path gotchas).
+- Measured Linear facts this SOP rests on (one-level threads CTL-1891; the app actor cannot create
+  states/labels/views CTC-626): `references/threading.md` and `references/creating.md`.

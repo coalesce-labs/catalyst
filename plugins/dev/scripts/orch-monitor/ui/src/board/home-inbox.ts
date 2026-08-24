@@ -25,7 +25,7 @@
 import type { BoardPayload, BoardServiceOutage, BoardTicket } from "./types";
 
 /** The kind of inbox section a row belongs to. CTL-729: 'attention' is the single
- *  needs-attention bucket (waiting-on-you ∪ needs-human), at the HEAD of the order.
+ *  needs-attention bucket (waiting-on-you ∪ ask), at the HEAD of the order.
  *  CTL-1050: 'awareness' is the running-degraded service-outage bucket — between
  *  'running' and 'done', NOT a needs-you section (no action required). */
 export type InboxSectionKind =
@@ -109,7 +109,7 @@ export interface InboxModel {
 
 /** Per-section counts the calm header + section chips read. */
 export interface InboxCounts {
-  /** CTL-729: the single needs-attention bucket (waiting-on-you ∪ needs-human). */
+  /** CTL-729: the single needs-attention bucket (waiting-on-you ∪ ask). */
   attention: number;
   blocked: number;
   waiting: number;
@@ -170,32 +170,32 @@ function isDone(t: BoardTicket): boolean {
  * Classify ONE ticket into its inbox section. Order matters (CTL-729):
  *   done → attention → blocked → waiting → running.
  * A done ticket is done even if it still carries a stale attention/held flag;
- * otherwise the single needs-attention bucket (waiting-on-you ∪ needs-human) is
+ * otherwise the single needs-attention bucket (waiting-on-you ∪ ask) is
  * the MOST urgent operator-action case — it outranks the admission-gate held
  * (blocked/waiting) pair, which in turn outranks the running reassurance set.
  */
 export function classifyTicket(t: BoardTicket): InboxSectionKind {
   if (isDone(t)) return "done";
-  if (t.attention === "waiting-on-you" || t.attention === "needs-human") return "attention";
+  if (t.attention === "waiting-on-you" || t.attention === "ask") return "attention";
   if (t.held === HELD_BLOCKED) return "blocked";
   if (t.held === HELD_WAITING || t.held === HELD_WAITING_LEGACY) return "waiting";
   return "running";
 }
 
 /** CTL-729/CTL-1130: the muted human sub-label for an attention row, in plain
- *  language — naming WHY it needs you. For needs-human rows, uses the structured
+ *  language — naming WHY it needs you. For `ask` rows, uses the structured
  *  explanation's call_to_action when present; falls back to the generic phrase. */
 function attentionSubLabel(t: BoardTicket): string {
-  if (t.attention === "needs-human") {
+  if (t.attention === "ask") {
     return t.humanQuestion && t.humanQuestion.trim() !== ""
       ? t.humanQuestion
-      : "escalated — needs human";
+      : "an answer is needed";
   }
   return "waiting on your answer";
 }
 
 /** The muted human sub-label per section — plain language, never jargon
- *  (Direction A: "waiting on your answer", not "phase-blocked needs-human").
+ *  (Direction A: "waiting on your answer", not "phase-blocked escalation").
  *  CTL-729: the 'attention' sub-label is reason-specific (see attentionSubLabel),
  *  so it is resolved in toRow from the ticket, not from the kind alone. */
 function subLabelFor(kind: InboxSectionKind): string {

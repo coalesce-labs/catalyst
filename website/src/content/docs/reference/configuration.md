@@ -128,9 +128,42 @@ The `orchestration.dispatchMode` key picks how Catalyst runs each ticket:
 }
 ```
 
+### Push remote (`catalyst.pr.pushRemote`, CAT-60)
+
+The push remote is machine-local routing, so its canonical home is Layer 2 at
+`~/.config/catalyst/config.json`, not the repository's committed Layer-1 file. Keeping it outside
+the git tree means a rebase cannot rewrite the setting that selects where the branch is published.
+
+Resolution is `CATALYST_PUSH_REMOTE` → `catalyst.pr.pushRemote` → the branch's configured upstream
+remote → `origin`. The value must name an existing, safe git remote. It controls branch publication
+and remote-branch discovery when a worker resumes. It does **not** change the rebase or diff base:
+those continue to use `origin/<base>`. The operator-facing branch listing in `cli/branches.mjs` is
+still an `origin`-only surface and does not determine dispatch or publication behavior.
+
+```json
+{ "catalyst": { "pr": { "pushRemote": "fork" } } }
+```
+
+### Publish-capability preflight (`catalyst.orchestration.publishPreflight.mode`, CAT-60)
+
+Before dispatch, execution-core asks GitHub whether the active identity has push permission for the
+repository behind the resolved push remote. `CATALYST_PUBLISH_PREFLIGHT` overrides the Layer-2
+`catalyst.orchestration.publishPreflight.mode`; the default is `shadow`:
+
+- `off` does not probe.
+- `shadow` emits `publish.preflight.would-block` for denial but still dispatches.
+- `enforce` emits `publish.preflight.blocked` and stops that dispatch on definitive denial.
+
+Verdicts are `allowed`, `denied`, or `unknown`. An inconclusive `unknown` (missing `gh`, timeout,
+transient API failure, or unparseable remote) never blocks. Results are cached per repository,
+remote, and GitHub identity for a bounded TTL so scheduler ticks conserve GitHub API quota.
+`catalyst doctor` reports the same capability independently: denied is advisory in `shadow` and a
+failure in `enforce`.
+
 | Key                                                           | Default                      | What it does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | ------------------------------------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `orchestration.dispatchMode`                                  | `oneshot-legacy`             | Which run mode to use (above)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `catalyst.orchestration.publishPreflight.mode` _(Layer-2)_    | `shadow`                     | Before dispatch, verify that the resolved GitHub identity can push to the configured push remote. `off` skips the probe; `shadow` reports denied capability but still dispatches; `enforce` blocks dispatch only on a definitive denied verdict. `CATALYST_PUBLISH_PREFLIGHT` overrides this value. Unknown values fall back to `shadow`. |
 | `orchestration.executor`                                      | `bg`                         | Which substrate runs a phase worker: `bg` (a `claude --bg` background job, today's behavior), `oneshot-legacy`, or `sdk` (the in-process Claude Agent SDK — **not yet implemented; falls back to `bg`**, CTL-1365b). Resolution: `CATALYST_EXECUTOR` env → this key → node-class default (all classes → `bg` today). Distinct from `dispatchMode`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `orchestration.maxParallel`                                   | `3`                          | How many tickets run at once                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `orchestration.worktreeDir`                                   | `~/catalyst/wt/<projectKey>` | Where worktrees are created                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
@@ -150,9 +183,9 @@ The `orchestration.dispatchMode` key picks how Catalyst runs each ticket:
 | `orchestration.orphanPrSweep.intervalSeconds`                 | `600`                        | How often the orphan-PR sweep ticks (seconds).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `orchestration.orphanPrSweep.stableSeconds`                   | `300`                        | How long an orphan must hold a blocker state before a Needs-You row is raised.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `orchestration.orphanPrSweep.repo`                            | _(auto-detected)_            | The `org/repo` slug to pass to `gh pr list`. Falls back to top-level `.catalyst/config.json` repo fields, then `gh repo view`. Set this explicitly when auto-detection is unreliable.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `orchestration.stalledPrSweep.enabled`                        | `false`                      | Periodically sweep all in-flight worker PRs for review-latency, CI-health, and no-push signals independent of worker liveness (CTL-1608). **Default-off** — enable only after validating thresholds on the live board. When enabled the timer writes `workers/<TICKET>/stalled-pr.json`; board-health reads those stamps via `getStalledPrState` and emits `nudge-stalled-pr` moves.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `orchestration.stalledPrSweep.intervalSeconds`                | `900`                        | How often the stalled-PR sweep ticks (seconds). Configurable per the `CATALYST_BH_STALLED_PR_*` env thresholds below.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `orchestration.githubQuotaSweep.enabled`                      | `true`                       | Sample the host's GitHub core REST quota and atomically publish it to `<orchDir>/github-quota.json`. Set `false` to disable the timer; a previous snapshot may remain on disk but becomes stale and cannot arm board-health.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `orchestration.stalledPrSweep.enabled`                        | `false`                      | Periodically sweep all in-flight worker PRs for review-latency, CI-health, and no-push signals independent of worker liveness (CTL-1608). **Default-off** — enable only after validating thresholds on the live board. When enabled the timer writes `workers/<TICKET>/stalled-pr.json` via `getStalledPrState`. CTL-2141 deleted this stamp's only reader (board-health's `nudge-stalled-pr` move); the timer still runs and writes the stamps, but nothing currently acts on them.                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `orchestration.stalledPrSweep.intervalSeconds`                | `900`                        | How often the stalled-PR sweep ticks (seconds).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `orchestration.githubQuotaSweep.enabled`                      | `true`                       | Sample the host's GitHub core REST quota and atomically publish it to `<orchDir>/github-quota.json`. Set `false` to disable the timer. CTL-2141 deleted this snapshot's only consumer (board-health's rate-limit-cliff gate); the sampler still runs and publishes the snapshot, but nothing currently acts on it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `orchestration.githubQuotaSweep.intervalSeconds`              | `300`                        | How often the daemon runs the quota sampler (seconds). The sampler calls the quota-reporting endpoint, which does not consume the core quota it reports.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `responder.intervalSeconds`                                   | `180`                        | How often the daemon-health responder launchd sweep runs (seconds, clamped 60–900). The responder (`health-responder.sh`, CTL-1509) detects a dead/stale cloud-sync replica writer and issues bounded `launchctl kickstart`s, escalating after the attempt cap. Baked into the launchd plist at install time (`install-health-responder.sh`); re-run `catalyst-stack install-services` after changing it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `CATALYST_CLAUDE_UPDATE_MIN_INTERVAL_MS` _(env var)_          | `21600000`                   | Minimum gap between `claude update` invocations (milliseconds; default 6 hours). The `claude-selfupdate.sh` LaunchAgent installed by `catalyst-stack install-services` honours this via a durable marker at `~/catalyst/.claude-selfupdate.last`. Reduce to `0` to force a run on the next LaunchAgent tick; increase to spread out update checks on resource-constrained hosts. The LaunchAgent itself fires every 6 hours (`StartInterval: 21600`) and is installed on all node classes. (CTL-2085) |
@@ -561,6 +594,61 @@ written to the marker `~/catalyst/otel-forward-drops.json`; a discard rate that 
 
 A malformed or out-of-range override is **ignored** (the surface keeps measuring at its previous
 value) rather than silently disabling the counter.
+
+#### `forward_failed` diagnostic attributes (CTL-2084)
+
+A `catalyst.observability.forward_failed` event is emitted once per host after the full retry window
+(`maxRetryElapsedMs`, 60 s) exhausts on a retryable delivery failure. Its diagnostic fields used to
+live only in `body.payload`, which the OTLP mapper strips before export — so fleet-wide the event
+reached Loki carrying nothing but `host_name`/`severityText`, and the actual error class was
+unreachable without ssh-ing to each host's `~/catalyst/otel-forward.log`. It now promotes the cause
+to **attributes** (Loki structured metadata, not stream labels — no label-cardinality cost),
+mirroring `forward_dropped`'s `drop_reason`:
+
+| Attribute                                 | Present   | Value                                                                                                            |
+| ----------------------------------------- | --------- | ---------------------------------------------------------------------------------------------------------------- |
+| `catalyst.observability.failure_category` | always    | Bounded class: `http_429`, `http_5xx`, `timeout` (per-request `AbortSignal.timeout`, **or** a connect/socket `ETIMEDOUT`), `aborted`, `connection_refused`, `dns`, `network`, or `other`. |
+| `catalyst.observability.forward_err`      | always    | The raw error message (for reading the concrete cause).                                                          |
+| `catalyst.observability.http_status`      | HTTP only | The numeric status, present only when the failure was an `HttpError` (`429`/`5xx`).                              |
+
+Only _retryable_ causes reach `forward_failed` — terminal `4xx` (auth `401`/`403`, bad payload
+`400`) routes to `forward_dropped` (`terminal_4xx`), never here — so `failure_category` is
+intentionally never an auth/payload class. Group per host by category with:
+
+```logql
+sum by (host_name, catalyst_observability_failure_category) (
+  count_over_time(
+    {service_name="catalyst.otel-forward"}
+    | event_name="catalyst.observability.forward_failed" [1h]
+  )
+)
+```
+
+> **Runtime caveat — `connection_refused` vs `dns` under Bun.** The daemon runs under Bun, and
+> Bun reports *both* a refused connection and an unresolvable host as `code: "ConnectionRefused"`
+> with the message `Unable to connect. Is the computer able to access the url?` (measured, bun
+> 1.3.5). The two are genuinely indistinguishable there, so both classify as **`network`** rather
+> than claiming a precision the runtime does not provide. The finer `connection_refused` / `dns`
+> split applies to the Node-shaped `cause.code` errors. If you see a `network` spike, check
+> collector reachability **and** resolution.
+
+Note the two spellings: the attribute is emitted as `event.name` /
+`catalyst.observability.failure_category`, but Loki exposes structured metadata with dots replaced
+by underscores — so the **query** filters on `event_name` and groups by
+`catalyst_observability_failure_category`. Same filter shape as the replica-degradation queries in
+`docs/linear-replica.md`.
+
+> **Rollout gap.** Events already in the log before this shipped carry no `failure_category`; a
+> per-host distribution shows a `<none>` bucket for that pre-deploy tail — un-upgraded history, not
+> "no failures".
+
+**Alerting decision (CTL-2084 AC2).** ~820 `forward_failed`/4h fleet-wide is a **meaningful,
+near-continuous forwarding failure, not retry-succeeds noise** — a success emits nothing, and the
+event fires at most once per 60 s retry-window per host, so ~0.85/min/host means the window is
+exhausting almost continuously. Keep it as an alert; the follow-up is to **refine severity by
+`failure_category`** (split `http_429` backpressure from `http_5xx`/`network` reachability). That
+rule is file-provisioned in the sibling `catalyst-otel` repo (`provisioning/alerting/*.yaml`), out
+of this repo's scope, and is tracked as a separate follow-up ticket (CTL-2136).
 
 PostHog and Cloudflare AE keys mirror the JSON above; see the developer reference for their delivery
 semantics.
@@ -1125,6 +1213,51 @@ Observable events (LogQL
 - `lease.claim.would-grant.<TICKET>` — shadow hit; the lease **would** have granted (attachment still authoritative)
 - `lease.claim.would-refuse.<TICKET>` — shadow hit; the lease **would** have refused
 
+## Codex executor (`catalyst.orchestration.codex.*`, CTL-2072)
+
+Layer-1 keys read by `codexConfig()` (`execution-core/config.mjs`). Every key has an
+environment override that **outranks** it, and every key falls back to a default:
+
+| Key | Env override | Default | Meaning |
+|-----|--------------|---------|---------|
+| `codexHome` | `CATALYST_CODEX_HOME` | `${catalystDir()}/codex-home` | The `CODEX_HOME` each `codex exec` child runs under. ⚠️ See the pin warning below. |
+| `bin` | `CATALYST_CODEX_BIN` | `codex` | The Codex CLI binary. |
+| `model` | `CATALYST_CODEX_MODEL` | *(unset)* | Model override passed to the executor. |
+| `writableRoots` | — | `[catalystDir()]` | Sandbox roots the Codex child may write to. Non-string and empty entries are dropped; an empty result falls back to the default. |
+| `pluginRoot` | `CATALYST_CODEX_PLUGIN_ROOT` | *(unset)* | Plugin root exposed to the Codex child. |
+
+### ⚠️ Setting `codexHome` PINS the account and disables `codex-account switch`
+
+This is the answer to "why did my switch refuse?".
+
+`codexHome` resolves as `CATALYST_CODEX_HOME` → Layer-1 `catalyst.orchestration.codex.codexHome`
+→ `${catalystDir()}/codex-home`. That third rung is the fleet **selector symlink**, and
+repointing it is how [`catalyst-stack codex-account switch`](/reference/catalyst-stack/) moves
+the fleet between accounts — with no restart, because the path is re-resolved on every dispatch.
+
+If either pin is set, the resolver never reaches the symlink. A switch would repoint a link
+nothing reads and report success for a change that did not happen, so `switch` and `sync`
+**refuse and name the pin instead**:
+
+```
+[catalyst-stack] WARN: CATALYST_CODEX_HOME is set (/some/pinned/home) — it OVERRIDES the
+codex-home selector symlink, so a switch would not take effect. Unset it, then retry.
+```
+
+To switch this host, unset `CATALYST_CODEX_HOME` or remove the Layer-1 `codexHome` key. Leaving
+the pin in place is a supported configuration — the host simply keeps using the pinned account
+and opts out of fleet switching.
+
+### Credentials are node-local, never in config or SOPS
+
+No Codex credential appears in either config layer or in the cluster SOPS bundle. Codex
+subscription `auth.json` files are rotation-bound (a copy goes stale the moment the original
+refreshes), so each host runs `codex login` per account into its own `CODEX_HOME`. The bundle's
+`codex-account.env` entry carries only the selector's **handle name**, which is why it has no
+`SECRET_REGISTRY` row — every delivery type that would fit is boot-captured, and a row would
+make each account switch emit a fleet-wide restart-required signal for a change that provably
+needs no restart.
+
 ## Deployment mode (`catalyst.deployment.mode`, CTL-1617)
 
 `catalyst.deployment.mode` is the ONE declared answer to a question the system otherwise infers from
@@ -1300,7 +1433,7 @@ The 11 seed rows:
 | `github-token`              | `bare-file`        | `re-armable` / `timer`  | —            | aliases `GH_TOKEN`, `GITHUB_TOKEN`                                            |
 | `webhook-secret`            | `bare-file`        | `boot-only`             | —            | env alias `CATALYST_WEBHOOK_SECRET`                                           |
 | `linear-webhook-secret`     | `bare-file-family` | `boot-only`             | —            | `familyPrefix: "linear-webhook-secret-"`; a predicate, not a scalar           |
-| `claude-accounts.env`       | `env-file`         | `boot-only`             | —            | presence-only (a whole sourced env file, not one value)                       |
+| `claude-accounts.env`       | `env-file`         | `re-armable` / `timer`  | —            | presence-only (a whole sourced env file, not one value)                       |
 | `execution-core.env`        | `env-file`         | `boot-only`             | —            | same shape as `claude-accounts.env`                                           |
 | `linear-api-token`          | `env-alias`        | `re-armable` / `on-401` | —            | aliases `LINEAR_API_TOKEN`, `LINEAR_API_KEY`                                  |
 | `linear-orchestrator-actor` | `config-json`      | `re-armable` / `on-401` | —            | `catalyst.linear.bot.orchestrator` — kept separate from worker-actor          |
@@ -1508,6 +1641,65 @@ outage can never quarantine a healthy, resolvable, in-flight ticket.
 `SCHEDULER_CIRCUIT_BREAKER_THRESHOLD` is the Linear-independent backstop; the runaway knobs are
 observability only.
 
+### Preemption lap budget (CTL-2192)
+
+The scheduler's preemption sweep clears its in-memory hysteresis key after each successful
+preemption, so the same (preemptor, victim) pair restarts a fresh 30 s clock forever — a *correct*
+preempt→resume pair, repeated without end at roughly a two-minute cadence. That in-memory key is
+also module state, so a daemon bounce erases even the within-lap memory. The lap budget is the
+durable cross-lap bound. Both knobs are env vars on the `catalyst-execution-core` process:
+
+- `SCHEDULER_PREEMPT_MAX_LAPS` (default `3`) — how many times one victim may be preempted inside the
+  window before it becomes temporarily non-preemptable. **Chosen, not derived**: research measured
+  10 claims in ~30 min for one ticket and 8 in ~17 min for another, so 3 sits well below the
+  observed pathology while leaving genuine priority preemption room.
+- `SCHEDULER_PREEMPT_BUDGET_WINDOW_MS` (default `1800000`, 30 min) — the window the count is scoped
+  to. Expiry is what makes this **damping rather than a permanent exemption**: past the window the
+  victim is preemptable again.
+
+The victim ledger lives at `workers/<ticket>/.preempt-budget.json`, so it is GC'd with the ticket
+(the same placement as `.triage-dispatch-counts/` and `.runaway-alerts/`).
+
+**The victim budget alone bounds one victim, not the storm.** The sweep scans in-flight tickets
+worst-ranked-first and only stops when the queued ticket no longer out-ranks the candidate, so an
+exhausted victim hands the preemption to the next, *better*-ranked in-flight worker. Under the
+preempt-never-launch shape this fleet has hit repeatedly (CTC-829, CTL-1550, CTL-1681) a preemptor
+that wins the ranking but can never dispatch would burn victim A's laps, then B's, then C's —
+evicting progressively more valuable work. So there is a second, symmetric bound:
+
+- `SCHEDULER_PREEMPTOR_MAX_LAPS` (default: whatever `SCHEDULER_PREEMPT_MAX_LAPS` resolves to) — how
+  many preemptions **one preemptor** may win inside the window before it stops preempting at all.
+  Together with the victim cap this turns the bound from `maxLaps x |victims|` into `maxLaps`. It is
+  a good proxy for "won the eviction and still never took the slot": a preemptor that actually
+  launched acquires a `workers/<ticket>/` dir and stops being a queued candidate, so it stops
+  accruing laps. One that keeps accruing is, by construction, one that keeps evicting without ever
+  running.
+
+The preemptor ledger canNOT live under `workers/<ticket>/` — a preemptor is by definition a ticket
+with **no** worker dir, and creating one would make the dispatcher read it as in-flight. It lives at
+`<orchDir>/.preempt-budget/<TICKET>.json` and **self-prunes** on write (entries older than twice the
+window), since it has no worker dir to be GC'd with.
+
+Exhausting either budget emits one `phase.scheduler.preempt-budget-exhausted.<TICKET>` per window —
+the `scheduler` phase slot is an allowed namespace exception and the action is not in the terminal
+set, so it is pure audit with no wake side effect. Both sides share that one event name, so
+`body.payload.scope` (`"victim"` | `"preemptor"`) is what says which side it is about.
+
+⚠️ **Window boundary — a documented cost, not an oversight.** The window is anchored at the *first*
+lap and never slides, so laps clustered at the end of one window plus laps at the start of the next
+can reach up to **2x `maxLaps`** within minutes (e.g. L1 at t0, L2 at t0+29m, L3 at t0+29m30s
+exhausts the window; L4 at t0+30m01s opens a fresh one and L5/L6 follow at the 30 s hysteresis
+interval). A *sliding* window would be reset by every lap and so could never expire under a
+sustained lap — which is exactly when the bound has to be reachable. If the boundary matters for
+your fleet, shorten `SCHEDULER_PREEMPT_BUDGET_WINDOW_MS` rather than expecting a hard per-hour cap.
+
+⚠️ **Fail direction is toward today's behaviour.** This is a damper on a working mechanism, not a
+safety interlock: an unreadable or unwritable ledger still allows the preemption, because failing
+closed would let one corrupt file freeze genuine priority preemption for a ticket indefinitely. A
+non-durable write is **announced** rather than swallowed — the scheduler logs one edge-triggered
+warning per ticket (`preemption lap NOT persisted`) and a matching `info` when the ledger becomes
+writable again, because a silently-disarmed damper is indistinguishable from one that is working.
+
 ### Label-write retry cap (CTL-2052)
 
 The disposition/held-label convergers cool down a failed `applyLabel` (CTL-834/COORD-236). A
@@ -1632,78 +1824,33 @@ label write) records a pointer at its anchor under `<orchDir>/.escalation-correl
 so its retry on a later tick stays a pointer instead of becoming a second operator decision. The
 pointer expires with `CATALYST_RECOVERY_CORRELATION_WINDOW_MIN`.
 
-### Board-health delegate (CTL-1290)
+### Steward escalation routing (CTL-2000 / CTL-2129)
 
-On a low-frequency cadence the scheduler runs a **whole-board health scan**: a read-only pass that
-evaluates board-level invariants the per-item signals never surface — a silently-held dispatch (open
-slots + a waiting queue + no recent dispatch), a worker idling far past its phase-normal age, a
-ticket blocked by a dead blocker chain, a project gone silent, a rate-limit cliff, a node that owns
-work but whose reconcile is failing. It emits one **`recovery.board-scan`** event per cadence (the
-numbers ride out as chartable OTel attributes via CTL-1291) and proposes tiered remediation moves.
-In `shadow` (the default) it takes **no action**; in `enforce` (CTL-1300) a proceeding scan
-dispatches **one holistic recovery-pass delegate** — see the `enforce` row below.
+When an instrument (today: the stalled-PR sweep, `stale-pr-rescue`) can no longer make progress on an
+item, it must page the **steward whose scope contains that item** — never drop a `needs-human` label
+into a human's queue. The ladder is `instrument → steward → concierge → human (as an ask)`; the router
+(`escalation-router.mjs`) resolves the steward rung, and the human is reachable **only** as an ask, so
+no instrument can page a human directly.
 
-Mode resolves from the env var (a single operator knob) over Layer-2 over the default. Unlike the
-rest of the recovery family (which ships `off`), the board-health delegate **defaults to `shadow`**:
-shadow is itself a dark state — it emits the scan and mutates nothing (the no-mutation guarantee is
-structural, not configured), so the telemetry that is the feature's whole point ships on.
+The router matches an item's **scope key** — its Linear **project id** — against each supervised role's
+`manifest.scopeKeys`:
 
-| Key                                             | Default                   | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| ----------------------------------------------- | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CATALYST_BOARD_HEALTH` _(env var)_             | `shadow`                  | `off` / `0` (kill-switch — strict no-op), `shadow` (scan + emit `recovery.board-scan`, take no action), `enforce` (CTL-1300 — on a proceeding scan, dispatch **one holistic recovery-pass delegate** anchored to a flagged ticket and carrying the whole-board context; reuses the capped + cooldown'd recovery-pass actuator. **Operator-gated — never auto-enabled**). Garbage values fall back to `shadow`. Overrides Layer-2.                                                                                                                                                                                                                                                                                                                                                             |
-| `catalyst.boardHealth.mode` _(Layer-2)_         | `shadow`                  | Same three values; honored when the env var is unset.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `CATALYST_BH_GH_QUOTA` _(env var)_              | `shadow`                  | GitHub core REST quota invariant mode: `off` skips the snapshot read, `shadow` publishes quota state but keeps the invariant unobservable, and `enforce` lets a fresh low/exhausted snapshot trip Gate 3 with `rate-limit-cliff`. Garbage values fall back to `shadow`. Overrides Layer-2.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `catalyst.boardHealth.githubQuota` _(Layer-2)_  | `shadow`                  | Same three values; honored when `CATALYST_BH_GH_QUOTA` is unset.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `CATALYST_BH_GH_CORE_PCT`                       | `10`                      | Remaining core REST percentage at or below which the quota state is `low`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `CATALYST_BH_GH_QUOTA_STALE_MS`                 | `900000` (15 min)         | Maximum snapshot age. A missing or older snapshot is unknown and unobservable, even in `enforce`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `CATALYST_BH_PRODUCTIVITY` _(env var)_          | `shadow`                  | Per-host productivity invariant mode: `off` skips the peer-heartbeat read, `shadow` publishes productivity status but keeps the invariant unobservable, and `enforce` reports a live peer that owns work but has not advanced past a phase boundary within the configured window. The resulting move is escalate-only and cannot dispatch a recovery delegate. Garbage values fall back to `shadow`. Overrides Layer-2.                                                                                                                                                                                                                                                                                                                                                                       |
-| `catalyst.boardHealth.productivity` _(Layer-2)_ | `shadow`                  | Same three values; honored when `CATALYST_BH_PRODUCTIVITY` is unset.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `CATALYST_BH_UNPRODUCTIVE_MS`                   | `86400000` (24 h)         | Maximum age of a live owning peer's last phase-boundary advance before the productivity invariant reports it as unproductive.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `CATALYST_BH_INTERVAL_MS`                       | `300000` (5 min)          | Cadence floor — the scan runs at most once per interval per host.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `CATALYST_BH_DISPATCH_STALL_MS`                 | `600000` (10 min)         | Dispatch-liveness threshold: free slots + a queue + no dispatch within this window flags a wedge.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `CATALYST_BH_WORKER_AGE_MS`                     | `14400000` (4 h)          | Fallback worker-age threshold (per-phase normals override it).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `CATALYST_BH_PROJECT_SILENCE_MS`                | `86400000` (24 h)         | Project-silence threshold (no ticket movement in the project past this window).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `CATALYST_BH_UNOWNED_INFLIGHT_MS`               | `86400000` (24 h)         | Stale-unowned threshold (CTL-1475). A Linear state like `Implement` is a **claim** that a worker is on the ticket, not a label — and nothing takes the claim back when the worker dies. Past this age with **no live worker signal and no confirmed-open PR**, the ticket is flagged `unownedInFlight` and proposed as a **tier2 (anchorable)** `recover-unowned-in-flight` move, so the delegate dispatches a recovery pass rather than merely reporting it. Such tickets are invisible to every other path: admission only pulls `Todo`, and the recovery census scans worker dirs they have no entry in. Deliberately conservative — any evidence of ownership spares the ticket, since a false negative costs one more scan while a false positive re-dispatches work a human is holding. |
-| `CATALYST_BH_STALLED_PR_REVIEW_MS`              | `259200000` (72 h / 3 d)  | CTL-1608. How long a PR may sit without a review-request being responded to before board-health emits a `nudge-stalled-pr` move. Requires `orchestration.stalledPrSweep.enabled: true`. The stalled-PR timer stamps `reviewRequestedAt` in `workers/<TICKET>/stalled-pr.json`; board-health compares `now - reviewRequestedAt` against this threshold.                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `CATALYST_BH_STALLED_PR_CI_MS`                  | `172800000` (48 h / 2 d)  | CTL-1608. How long a PR may have a continuously-failing CI check before it is flagged stalled. The timer stamps `ciFirstFailedAt` on first CI failure detection.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `CATALYST_BH_STALLED_PR_NOPUSH_MS`              | `432000000` (120 h / 5 d) | CTL-1608. How long a PR may go without a push (no new commits) while still open before it is flagged stalled. The timer stamps `lastPushAt` on each push detected.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| Field / key                          | Where                                                  | Notes                                                                                                                                                                                                                                             |
+| ------------------------------------ | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `scopeKeys` _(role manifest field)_  | `~/catalyst/roles/<role>/manifest.json`                | Array of Linear **project ids** the steward owns. Populated at scaffold time by `role-supervisor/install.sh --scope-keys "<projectId>[,<id>...]"` (→ `cli.mjs set-scope-keys` → `state.mjs setScopeKeys`, an atomic merge-into-existing). `resolveSteward` returns this role for any item whose project id is in the array. A role with no `scopeKeys` — the default — never matches, so its items fall through to the concierge (the correct backstop). |
+| `CATALYST_STEWARD_ESCALATION` _(env)_ | escalation gate                                        | `off` / `shadow` (default) / `enforce`. `shadow` is byte-identical to the pre-CTL-2000 path plus a `delegate.would-route` (`phase.rescue.would-route-steward`) log; `enforce` routes through the ladder and applies **no** `needs-human`. Overrides Layer-2. |
+| `catalyst.stewardEscalation.mode` _(Layer-2)_ | `.catalyst/config.json`                         | Same three values; honored when the env var is absent or unrecognised. Default `shadow`.                                                                                                                                                          |
 
-The productivity signal requires peers to publish `last_advance_at` in their heartbeat records.
-During a mixed-version fleet rollout, a peer without that field is treated as unknown and is not
-flagged; the invariant begins observing that peer only after the upgraded publisher supplies it.
+CTL-2129 is what makes `enforce` actually reach a steward: it populates the `scopeKeys` registry, maps
+a ticket to its project id (`scopeForTicket` via the replica's `issues.project_id`), and counts pages
+**per item** so the same flagged item paged twice without a steward turn escalates inward to the
+concierge. No new flag — the wiring rides the existing `stewardEscalation` gate at its `shadow`
+default, so no host changes live behavior until an operator flips `enforce`. Roles without `scopeKeys`
+continue to resolve to the concierge, so a partial rollout (some stewards registered, some not) is safe.
 
-### Delegate-first escalation routing (CTL-1609 / CTL-1774)
-
-When a ticket is about to be labelled `needs-human`, the delegate-first seam can route it to the
-delegate runner instead. `CATALYST_DELEGATE_FIRST=shadow` is the safe dry-run: it emits a
-`delegate.would-route` event on the unified event log (with the ticket, site, and reason) and still
-labels `needs-human` — so an operator can prove the seam works before committing to `enforce`. In
-`enforce`, the label is suppressed and the ticket is enqueued to the delegate runner (with a
-fail-safe fallback to labelling if the runner is not enabled).
-
-Mode resolves from the env var over Layer-2 over the safe default of `off`. The `0` kill-switch and
-any unset/garbage value resolve to `off`.
-
-| Key                                       | Default | Notes                                                                                                                                                                                                                                                                                                                                                          |
-| ----------------------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CATALYST_DELEGATE_FIRST` _(env var)_     | `off`   | `off` / `0` (kill-switch — strict no-op, byte-identical to not setting the flag), `shadow` (emit `delegate.would-route` on the event log; still labels `needs-human`), `enforce` (enqueue to the delegate runner instead of labelling; fail-safe: falls back to labelling if the runner is not enabled). Garbage values fall back to `off`. Overrides Layer-2. |
-| `catalyst.delegateFirst.mode` _(Layer-2)_ | `off`   | Same three values; honored when the env var is absent or unrecognised.                                                                                                                                                                                                                                                                                         |
-
-**Fail-safe gate.** `enforce` silences `needs-human` only when the delegate runner is confirmed
-enabled (via `CATALYST_BOARD_HEALTH`/`CATALYST_RECOVERY_PASS`). Lighting only
-`CATALYST_DELEGATE_FIRST=enforce` without a live runner would enqueue intents that drain never, with
-the label suppressed — a silent black hole. The gate catches this: if no runner is on, it emits
-`delegate.route-fallback` with `reason:"runner-disabled"` and falls back to labelling immediately.
-
-**Observable shadow events.** With shadow mode active, every `routeStuckTicketToDelegate` call emits
-one of three `delegate.*` events:
-
-- `delegate.would-route` — shadow hit (ticket + site + reason)
-- `delegate.routed` — enforce hit, successfully enqueued
-- `delegate.route-fallback` — enforce hit, fell back to label (reason attached)
-
-All three are safe for LogQL/Loki filters:
-`{job="catalyst-events"} | json | attributes["event.name"] =~ "delegate\\..*"`
+Observable on the event log (`delegate.routed` with a `phase.rescue.routed-to-{steward,concierge}`
+type discriminator):
+`{job="catalyst-events"} | json | attributes["event.name"] = "delegate.routed"`
 
 ### Monitor reply-route trusted origins (CTL-1573)
 
@@ -1842,14 +1989,58 @@ daemon. These knobs are env vars on the `catalyst-broker` process:
   `catalyst.ingestion.stale` (currently `catalyst.monitor` — a dead monitor). It rides that
   already-debounced recency edge, so it has no thresholds of its own; raised on stale, cleared on
   recovered.
-- The **`needs_human_pileup`** alert is a level signal: how many **active, non-terminal** tickets
-  carry a `needs-human`/`needs-input` label in the broker's `filter-state.db` (Done/Canceled and
-  removed tickets are excluded so a stale cached label can't pin the count). Knobs:
-  - `FILTER_PILEUP_THRESHOLD` (default `3`) — minimum labelled-ticket count to alert.
-  - `FILTER_PILEUP_PERSISTENCE_MS` (default `300000`) — the count must stay at/above the threshold
-    this long before one alert fires (spike guard).
-  - `FILTER_PILEUP_COOLDOWN_MS` (default `3600000`) — minimum gap after a clear before it can
-    re-fire (flap guard).
+- The three **system-trouble** alerts (CTL-2156) are level signals over *distinct affected things*
+  inside a trailing window. They are fleet-scoped and auto-clearing by design: a provider outage
+  touching forty tickets raises **one** alert and writes **zero** per-ticket artifacts, and the
+  alert clears itself when the condition ends — either because a producer retracts (capacity
+  restored, account no longer rejected) or because every affected key ages out of the window.
+  They replace the retired `needs_human_pileup` alert and its `FILTER_PILEUP_*` knobs, which
+  counted `needs-human` labels — the per-ticket escalation artifact — rather than the condition.
+
+  | kind | level = distinct… | fed by |
+  | --- | --- | --- |
+  | `provider_degraded` | tickets hit by a 429/529 | `execution-core.sdk.overloaded` |
+  | `rate_limit_exhausted` | spent budgets (accounts, Linear) | `account.status.changed`, `account.ratelimit.{sampled,unsampled}`, `linear.write.proxy.budget-exhausted`, `linear.label.retry-exhausted` (only `reason` = `rate-limited` / `budget:day-exhausted`) |
+  | `capacity_unavailable` | nodes with no execution slots | `node.capacity.changed` (`new_maxParallel <= 0`) — see the reachability note below |
+
+  Each kind has four knobs, `FILTER_<KIND>_{THRESHOLD,WINDOW_MS,PERSISTENCE_MS,COOLDOWN_MS}`,
+  where `<KIND>` is `PROVIDER_DEGRADED`, `RATE_LIMIT` or `CAPACITY`:
+  - `…_THRESHOLD` — how many distinct affected things before one alert fires. Defaults: `2` for
+    `provider_degraded` (one unlucky ticket is not an outage), `1` for the other two (one exhausted
+    account or one slotless node *is* the fact).
+  - `…_WINDOW_MS` — how long one observation keeps its key "in trouble" with no further news, and
+    therefore the auto-clear backstop for producers that only ever report trouble. Defaults:
+    `600000` (provider), `1800000` (rate limit), `3600000` (capacity).
+  - `…_PERSISTENCE_MS` — how long the level must hold before raising. Defaults: `0` for provider
+    and rate limit (the window is already the debounce), `120000` for capacity, so a node that is
+    momentarily slotless while autotune re-settles does not page anyone.
+  - `…_COOLDOWN_MS` (default `1800000` for all three) — minimum gap after a clear before a re-raise
+    (flap guard).
+- `FILTER_ACCOUNT_EXHAUSTED_PCT` (default `100`) — the 5-hour usage percentage at or above which an
+  `account.ratelimit.sampled` reading counts as an exhausted budget. Below it the observation
+  *retracts*, clearing the alert on the edge rather than waiting out the window.
+
+  :::caution[`capacity_unavailable` cannot fire while `minParallel >= 1`]
+  Every autotune result is passed through `clampToBounds`, which **raises** it to
+  `executionCore.minParallel`. With the shipped `minParallel: 1`, `new_maxParallel` is floored at 1
+  and the `<= 0` test is unreachable — measured 2026-08-21, all 22 `node.capacity.changed` events
+  that month carried `1`, `4` or `6`, never `0`. The bounds "bite only when present" (CTL-665), so
+  the rule *is* reachable on a host that leaves `minParallel` unset, and it is kept at `<= 0`
+  because that is the honest statement of "no slots". Treat this kind as **armed but unproven** on a
+  `minParallel >= 1` fleet rather than as capacity coverage, and do not relax the test to
+  `<= minParallel`: a node clamped to 1 under memory pressure is still running work, and paging on
+  it would have fired 11 times that month for the system behaving correctly.
+  :::
+
+  :::caution[Not every `linear.label.retry-exhausted` is a quota]
+  That producer fires whenever a label write gives up, and most give-ups are **not** a rate limit:
+  all 75 occurrences in the month of 2026-08 carried `reason` `budget:ticket-cap` (47, this host's
+  own per-ticket write guard) or `cloud:label-rejected` (28, a deterministic cloud rejection) —
+  none carried a quota reason. Since `FILTER_RATE_LIMIT_THRESHOLD` is `1` and its persistence is
+  `0`, an ungated rule raised a fleet-wide alert on the next tick for a per-ticket guard doing its
+  job. The rule is therefore gated on `reason ∈ {rate-limited, budget:day-exhausted}`; any other
+  reason is *no opinion* — it neither raises nor retracts.
+  :::
 
 ### Broker-degraded detector (CTL-1523)
 

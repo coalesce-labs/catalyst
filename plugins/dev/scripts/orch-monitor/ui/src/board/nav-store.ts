@@ -26,9 +26,9 @@ import { pushRecent, RECENTLY_VIEWED_KEY } from "./recents";
 import { REPO_SCOPE_ALL, type RepoScope } from "../lib/repo-scope";
 import { freshEntryState, type DetailEntryState } from "./detail-entry-state";
 
-// Re-export the recents constants/helper so consumers of the store have one
-// import surface; the testable logic itself lives in the jotai-free recents.ts.
-export { pushRecent, RECENTLY_VIEWED_KEY, RECENTLY_VIEWED_CAP } from "./recents";
+// The storage key remains available from the store; the testable recency logic
+// itself lives in the jotai-free recents.ts.
+export { RECENTLY_VIEWED_KEY } from "./recents";
 
 // ── workspace scope (CTL-897 / SHELL7) ──────────────────────────────────────
 /**

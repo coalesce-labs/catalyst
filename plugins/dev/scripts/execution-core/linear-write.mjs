@@ -78,6 +78,17 @@ export {
 // preserved so AC2's "surfaced WITH the reason" carries the cloud's own detail verbatim.
 // Only the label route and only these two deterministic reasons are touched; a success,
 // a null verdict, and every other reason pass through by identity (===).
+//
+// ⚠️ CTL-2043 CHANGED WHAT THIS STEP IS FOR — read this before deleting or extending it.
+// The classifier now cools down the WHOLE `cloud:*` family by prefix, so the raw
+// `cloud:failed`/`cloud:rejected` back off on their own and STORM-PREVENTION NO LONGER
+// DEPENDS ON THIS FUNCTION (it did under CTL-2052 — dropping the normalization then
+// re-opened the per-tick storm). What normalization is still load-bearing for is
+// operator-log FIDELITY: it is what routes these two DETERMINISTIC reasons to the
+// "cloud rejection" message instead of the generic cloud-family one (CTL-2052 AC2).
+// Conversely, do NOT add `cloud:exhausted` here: it is a budget exhaustion, not a
+// deterministic rejection: it already cools down via the family prefix, and normalizing
+// it would make the operator log claim a determinism it does not have.
 const DETERMINISTIC_LABEL_PROXY_REASONS = new Set(["cloud:failed", "cloud:rejected"]);
 export function normalizeLabelProxyVerdict(verdict, routeId) {
   if (routeId !== "label" || !verdict || verdict.applied !== false) return verdict;

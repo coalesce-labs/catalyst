@@ -259,13 +259,14 @@ linearis issues update ENG-123 --project-milestone "Milestone Name"
 > ⛔ **`linearis issues discuss` posts AS THE HUMAN.** It authenticates with the personal
 > `lin_api_…` token, so the comment carries Ryan's identity — and the ask-resolution gate
 > (CTL-1567) reads a human-identity comment as *the human deciding* and clears
-> `needs-human`. An agent commenting this way can silently look like his decision.
+> the escalation hold. An agent commenting this way can silently look like his decision.
 >
 > **Every machine reply goes through the app actor instead** — `Catalyst Cloud`, tagged
 > with the agent via `createAsUser`:
 >
 > ```bash
-> direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" CTL-123 --as <AGENT> --body "…"
+> direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" CTL-123 --as <AGENT> --body-file <path>
+> #   --body-file <path>  for anything longer than a one-line body; --body REFUSES a path (CTL-2204)
 > ```
 >
 > Use `linearis issues discuss` only when you genuinely intend the comment to be the
@@ -279,7 +280,8 @@ discussion commands").
 ```bash
 # An AGENT starting a comment / discussion thread — go through linear-reply.mjs, NOT `discuss`
 # (the ⛔ callout above; `discuss` posts under the human's own identity):
-direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" ENG-123 --as <AGENT> --body "…" --top
+direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" ENG-123 --as <AGENT> --body-file <path> --top
+#   --body-file <path>  for anything longer than a one-line body; --body REFUSES a path (CTL-2204)
 
 # `linearis issues discuss` — ONLY when the comment is genuinely meant to be the human's own:
 linearis issues discuss ENG-123 --body "Starting work on this"
@@ -557,6 +559,7 @@ linearis issues update ENG-123 --status "Done"
 # With comment — an AGENT posting the "Merged" note goes through linear-reply.mjs, not `discuss`
 linearis issues update ENG-123 --status "Done"
 direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" ENG-123 --as <AGENT> --body "Merged: PR #456" --top
+#   --body-file <path>  for anything longer than a one-line body; --body REFUSES a path (CTL-2204)
 ```
 
 ### UUID-based calls (CTL-207)

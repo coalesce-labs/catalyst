@@ -29,15 +29,11 @@ import { classifyEventStream } from "../../lib/event-stream-class.mjs";
 
 export {
   type Severity,
-  SEVERITY_NUMBERS,
-  sha256Hex,
   severityNumber,
   deriveTraceId,
   deriveSpanId,
   generateEventId,
   synthesizeEventId,
-  hostName,
-  hostId,
 } from "./canonical-event-shared";
 
 export interface Resource {
@@ -210,7 +206,7 @@ export function pluginVersion(): string {
         typeof parsed === "object" &&
         parsed !== null &&
         "version" in parsed &&
-        typeof (parsed as { version: unknown }).version === "string"
+        typeof (parsed).version === "string"
       ) {
         cachedVersion = (parsed as { version: string }).version;
         return cachedVersion;

@@ -555,11 +555,21 @@ run "post-upsert verification surfaces the missing-team in stderr" \
 run "worker_status_group_name is 'worker-status'" \
 	bash -c "source '$SCRIPT'; [ \"\$(worker_status_group_name)\" = 'worker-status' ]"
 
-run "worker_status_members: valid JSON array with exactly 4 entries" \
-	bash -c "source '$SCRIPT'; worker_status_members | jq -e 'length == 4'"
+run "worker_status_members: valid JSON array with exactly 3 entries" \
+	bash -c "source '$SCRIPT'; worker_status_members | jq -e 'length == 3'"
 
-run "worker_status_members: lists queued blocked needs-input needs-human (no waiting)" \
-	bash -c "source '$SCRIPT'; names=\$(worker_status_members | jq -r '.[].name' | sort | tr '\n' ' '); [ \"\$names\" = 'blocked needs-human needs-input queued ' ]"
+run "worker_status_members: lists queued blocked needs-input (no waiting)" \
+	bash -c "source '$SCRIPT'; names=\$(worker_status_members | jq -r '.[].name' | sort | tr '\n' ' '); [ \"\$names\" = 'blocked needs-input queued ' ]"
+
+# ⛔ CTL-2159 — the producer sweep is worthless if enrolment recreates the label.
+# This is the assertion that makes the deletion survive a fresh install.
+run "worker_status_members: does NOT contain 'needs-human' (CTL-2159)" \
+	bash -c "source '$SCRIPT'; worker_status_members | jq -e '[.[].name] | index(\"needs-human\") == null'"
+
+# Positive control for the assertion above: the same instrument must FIND a
+# member that IS present. A guard whose negative case cannot fire is not a guard.
+run "worker_status_members: positive control — the same probe FINDS 'queued'" \
+	bash -c "source '$SCRIPT'; worker_status_members | jq -e '[.[].name] | index(\"queued\") != null'"
 
 run "worker_status_members: does not contain 'waiting'" \
 	bash -c "source '$SCRIPT'; worker_status_members | jq -e '[.[].name] | index(\"waiting\") == null'"
@@ -644,7 +654,8 @@ SCRIPT
 	chmod +x "${bin_dir}/curl"
 }
 
-# Test 1: fresh workspace (empty) → 1 group create + 4 child creates = 5 issueLabelCreate
+# Test 1: fresh workspace (empty) → 1 group create + 3 child creates = 4 issueLabelCreate
+# CTL-2159: was 4 children; `needs-human` is no longer created at enrolment.
 WS_T1_BIN="${SCRATCH}/ws-t1/bin"
 WS_T1_LOG="${SCRATCH}/ws-t1/req.log"
 mkdir -p "${SCRATCH}/ws-t1"
@@ -658,13 +669,22 @@ make_label_curl "$WS_T1_BIN" "empty" "true" "$WS_T1_LOG"
 	reconcile_worker_status_labels "fake-token"
 ) >"${SCRATCH}/ws-t1-out" 2>&1
 
-run "fresh workspace: issues exactly 5 issueLabelCreate calls (1 group + 4 children)" \
-	bash -c "count=\$(grep -c 'issueLabelCreate' '$WS_T1_LOG' 2>/dev/null || echo 0); [ \"\$count\" = '5' ]"
+run "fresh workspace: issues exactly 4 issueLabelCreate calls (1 group + 3 children)" \
+	bash -c "count=\$(grep -c 'issueLabelCreate' '$WS_T1_LOG' 2>/dev/null || echo 0); [ \"\$count\" = '4' ]"
+
+# ⛔ CTL-2159 — the enrolment half of the deletion. A fresh workspace must not be
+# handed the label back. Positive control follows so this zero cannot be an
+# artifact of the instrument.
+run "fresh workspace: NO needs-human child is created (CTL-2159)" \
+	bash -c "! grep 'issueLabelCreate' '$WS_T1_LOG' | grep -q 'needs-human'"
+
+run "fresh workspace: positive control — the same probe FINDS needs-input" \
+	bash -c "grep 'issueLabelCreate' '$WS_T1_LOG' | grep -q 'needs-input'"
 
 run "fresh workspace: returns 0" \
 	bash -c "source '$SCRIPT'; PATH='$WS_T1_BIN:\$PATH' dry_run=0 reconcile_worker_status_labels 'fake-token'"
 
-# Test 2: idempotent (full group + all 4 children present) → 0 issueLabelCreate calls
+# Test 2: idempotent (full group + every expected child present) → 0 issueLabelCreate calls
 WS_T2_BIN="${SCRATCH}/ws-t2/bin"
 WS_T2_LOG="${SCRATCH}/ws-t2/req.log"
 mkdir -p "${SCRATCH}/ws-t2"
@@ -762,8 +782,8 @@ make_label_curl "$WS_T6_BIN" "group_only_plain" "true" "$WS_T6_LOG"
 	reconcile_worker_status_labels "fake-token"
 ) >"${SCRATCH}/ws-t6-out" 2>&1
 
-run "plain-label parent: found by name+parent==null, creates the 4 children (4 issueLabelCreate)" \
-	bash -c "count=\$(grep -c 'issueLabelCreate' '$WS_T6_LOG' 2>/dev/null || echo 0); [ \"\$count\" = '4' ]"
+run "plain-label parent: found by name+parent==null, creates the 3 children (3 issueLabelCreate)" \
+	bash -c "count=\$(grep -c 'issueLabelCreate' '$WS_T6_LOG' 2>/dev/null || echo 0); [ \"\$count\" = '3' ]"
 
 run "plain-label parent: never re-creates the group (every create carries parentId)" \
 	bash -c "! grep 'issueLabelCreate' '$WS_T6_LOG' | grep -qv 'parentId'"
@@ -804,13 +824,13 @@ WS_T9_RC=$?
 run "WS plain-parent upgrade: issues exactly one issueLabelUpdate with isGroup" \
 	bash -c "count=\$(grep -c 'issueLabelUpdate' '$WS_T9_LOG' 2>/dev/null || echo 0); [ \"\$count\" = '1' ] && grep 'issueLabelUpdate' '$WS_T9_LOG' | grep -q 'isGroup'"
 
-run "WS plain-parent upgrade: 4 child creates still attempted after the upgrade" \
-	bash -c "count=\$(grep -c 'issueLabelCreate' '$WS_T9_LOG' 2>/dev/null || echo 0); [ \"\$count\" = '4' ]"
+run "WS plain-parent upgrade: 3 child creates still attempted after the upgrade" \
+	bash -c "count=\$(grep -c 'issueLabelCreate' '$WS_T9_LOG' 2>/dev/null || echo 0); [ \"\$count\" = '3' ]"
 
 run "WS plain-parent upgrade: returns 0" bash -c "[ '$WS_T9_RC' = '0' ]"
 
 # Test 10 (CTL-1483): an API generation that REJECTS the isGroup input field gets the
-# plain-create fallback — mirrors WH_T10, but 4 children vs 1.
+# plain-create fallback — mirrors WH_T10, but 3 children vs 1.
 WS_T10_BIN="${SCRATCH}/ws-t10/bin"
 WS_T10_LOG="${SCRATCH}/ws-t10/req.log"
 mkdir -p "${SCRATCH}/ws-t10" "$WS_T10_BIN"
@@ -838,8 +858,8 @@ chmod +x "${WS_T10_BIN}/curl"
 ) >"${SCRATCH}/ws-t10-out" 2>&1
 WS_T10_RC=$?
 
-run "WS isGroup-rejected fallback: 6 issueLabelCreate calls (isGroup attempt + plain retry + 4 children)" \
-	bash -c "count=\$(grep -c 'issueLabelCreate' '$WS_T10_LOG' 2>/dev/null || echo 0); [ \"\$count\" = '6' ]"
+run "WS isGroup-rejected fallback: 5 issueLabelCreate calls (isGroup attempt + plain retry + 3 children)" \
+	bash -c "count=\$(grep -c 'issueLabelCreate' '$WS_T10_LOG' 2>/dev/null || echo 0); [ \"\$count\" = '5' ]"
 
 run "WS isGroup-rejected fallback: a child create lands (queued)" \
 	bash -c "grep 'issueLabelCreate' '$WS_T10_LOG' | grep -q 'queued'"

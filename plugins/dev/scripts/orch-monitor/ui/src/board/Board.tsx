@@ -112,6 +112,7 @@ import { useResolvedRepoColors } from "@/hooks/use-resolved-repo-colors";
 import { BoardList } from "./BoardList";
 import { EntityMarker } from "./entity-marker";
 import { ControlTower } from "../components/queue/control-tower";
+import { FleetAlertStrip } from "../components/fleet-alert-strip";
 import type { GroupBy } from "./board-grouping";
 import type { Ordering } from "./list-order";
 import type {
@@ -163,11 +164,9 @@ const HELD_LABEL_WAITING = "queued";
 // phase render (which would let the Board and List drift). They stay module-local
 // to Board.tsx (the single source of truth); BOARD4 imports the named exports.
 // CTL-1153: ColorBy / accentFor / PHASE_C live in board-accent.ts (pure, no React)
-// so unit tests and the phase-drift guard import without pulling React. Re-exported
-// here for backward-compat with list-columns.tsx and other callers. PHASE_C is also
+// so unit tests and the phase-drift guard import without pulling React. PHASE_C is also
 // imported for direct use in PhaseStrip — the drift guard reads it from board-accent.ts
 // but the board renders it via this import.
-export type { ColorBy } from "./board-accent";
 import { PHASE_C, accentFor, type ColorBy } from "./board-accent";
 export { accentFor };
 // CTL-909 / SURF1: a stable per-node accent so the "group by Node" columns +
@@ -486,21 +485,20 @@ export function HeldBadge({
 }
 // CTL-729: the single "needs attention" badge (operator-approved 2026-06-11). ONE
 // yellow accent merges the live "waiting on you" (a blocked bg job) and the
-// watchdog/needs-human escalation into one operator-action signal, with small
-// sub-text saying WHY: "waiting on your answer" vs "escalated — needs human". This
+// escalation/ask into one operator-action signal, with small
+// sub-text saying WHY: "waiting on your answer" vs "an answer is needed". This
 // is DISTINCT from HeldBadge (the admission-gate blocked/waiting pair). The ONLY
 // new color is the single yellow accent (Linear-calm: color reserved for meaning).
 export function AttentionBadge({
   attention,
 }: {
-  attention?: "waiting-on-you" | "needs-human" | null;
+  attention?: "waiting-on-you" | "ask" | null;
 }) {
-  if (attention !== "waiting-on-you" && attention !== "needs-human") return null;
-  const label =
-    attention === "needs-human" ? "⚑ escalated — needs human" : "⏸ waiting on your answer";
+  if (attention !== "waiting-on-you" && attention !== "ask") return null;
+  const label = attention === "ask" ? "⚑ an answer is needed" : "⏸ waiting on your answer";
   const tip =
-    attention === "needs-human"
-      ? "Escalated to you — a human must act (watchdog / needs-human)"
+    attention === "ask"
+      ? "An ask is open on this ticket — only a person can answer it"
       : "Paused waiting for your answer (a permission grant or prompt)";
   return (
     <Tooltip>
@@ -712,9 +710,9 @@ function TicketCard({
   const stuck = t.activeState === "stuck";
   const dim = t.activeState == null;
   // CTL-729: the single needs-attention signal — ONE yellow accent for either
-  // 'waiting-on-you' or 'needs-human'. A left inset rule tints the card like the
+  // 'waiting-on-you' or 'ask'. A left inset rule tints the card like the
   // existing waitingOnUser yellow; stuck (red) still wins the border treatment.
-  const attention = t.attention === "waiting-on-you" || t.attention === "needs-human";
+  const attention = t.attention === "waiting-on-you" || t.attention === "ask";
   const compact = density === "compact";
   const reduced = useReducedMotion();
   const variants = reduced ? enterVariantsReduced : enterVariants;
@@ -926,10 +924,10 @@ function WorkerCard({
   const stuck = w.activeState === "stuck";
   // CTL-729: the worker's needs-attention signal — the ONE yellow treatment,
   // keyed off the SAME concept as the ticket card. A worker's own bg-job
-  // waitingOnUser flag and its ticket's needs-human escalation fold into one
-  // attention value (needs-human wins). The card mirrors the ticket's yellow rule.
-  const attentionState: "waiting-on-you" | "needs-human" | null =
-    info?.attention === "needs-human" || info?.attention === "waiting-on-you"
+  // waitingOnUser flag and its ticket's ask fold into one attention value
+  // (`ask` wins). The card mirrors the ticket's yellow rule.
+  const attentionState: "waiting-on-you" | "ask" | null =
+    info?.attention === "ask" || info?.attention === "waiting-on-you"
       ? info.attention
       : w.waitingOnUser
         ? "waiting-on-you"
@@ -1626,6 +1624,11 @@ export function Board({
             space below the columns). `minHeight:0` lets it shrink inside the flex
             parent; `display:flex` is the load-bearing addition. */}
         <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+          {/* ⛔ CTL-2161: the FLEET alert strip, above every lens. SYSTEM trouble is
+              ONE row for the whole condition — the replacement for the per-ticket
+              `needs-human` escalation this epic deletes. Renders nothing when the
+              fleet is healthy. */}
+          {data && <FleetAlertStrip alerts={data.fleetAlerts} />}
           {!data && (
             <div style={{ color: C.fgMuted, padding: 24 }}>Connecting to execution-core…</div>
           )}

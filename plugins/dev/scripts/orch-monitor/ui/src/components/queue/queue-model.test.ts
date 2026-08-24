@@ -327,7 +327,7 @@ describe("deadWorkers", () => {
 });
 
 // CTL-764 Phase 8: disposition buckets in groupHoldingBuckets
-describe("groupHoldingBuckets — queued/needsInput/needsHuman (CTL-764 Phase 8)", () => {
+describe("groupHoldingBuckets — queued/needsInput/ask (CTL-764 Phase 8)", () => {
   it("ticket with workerStatus='queued' → queued bucket (HoldingBuckets has queued, no waiting)", () => {
     const tickets = [t({ id: "CTL-1", workerStatus: "queued" })];
     const b = groupHoldingBuckets(tickets, [], 4);
@@ -343,18 +343,18 @@ describe("groupHoldingBuckets — queued/needsInput/needsHuman (CTL-764 Phase 8)
     ]);
   });
 
-  it("workerStatus='needs-human' → needsHuman bucket (separate from needs-you)", () => {
-    const tickets = [t({ id: "CTL-3", workerStatus: "needs-human" })];
+  it("workerStatus='ask' → ask bucket (separate from needs-you)", () => {
+    const tickets = [t({ id: "CTL-3", workerStatus: "ask" })];
     const b = groupHoldingBuckets(tickets, [], 4);
-    expect(b.needsHuman.items.map((i) => (i.kind === "ticket" ? i.ticket.id : ""))).toEqual([
+    expect(b.ask.items.map((i) => (i.kind === "ticket" ? i.ticket.id : ""))).toEqual([
       "CTL-3",
     ]);
   });
 
-  it("needs-human wins over blocked (single-valued precedence)", () => {
-    const tickets = [t({ id: "CTL-4", workerStatus: "needs-human", held: "blocked" })];
+  it("ask wins over blocked (single-valued precedence)", () => {
+    const tickets = [t({ id: "CTL-4", workerStatus: "ask", held: "blocked" })];
     const b = groupHoldingBuckets(tickets, [], 4);
-    expect(b.needsHuman.items).toHaveLength(1);
+    expect(b.ask.items).toHaveLength(1);
     expect(b.blocked.items).toHaveLength(0);
   });
 
@@ -369,15 +369,15 @@ describe("groupHoldingBuckets — queued/needsInput/needsHuman (CTL-764 Phase 8)
     const b = groupHoldingBuckets([], workers, 4);
     expect(b.needsYou.items).toHaveLength(1);
     expect(b.queued.items).toHaveLength(0);
-    expect(b.needsHuman.items).toHaveLength(0);
+    expect(b.ask.items).toHaveLength(0);
   });
 
-  // CTL-764 Phase 8 (Codex finding 3): board-data hardcodes attention:"needs-human"
+  // CTL-764 Phase 8 (Codex finding 3): board-data hardcodes attention:"ask"
   // for a parked ticket's inbox card even when its real disposition is needs-input —
   // the label is the only place the distinction survives. The label check must run
-  // BEFORE the generic needs-human branch or this card collapses into "Needs you".
-  it("a needs-input LABEL (attention hardcoded to needs-human) routes to needsInput, not needsYou", () => {
-    const tickets = [t({ id: "CTL-20", attention: "needs-human", labels: ["needs-input"] })];
+  // BEFORE the generic ask branch or this card collapses into "Needs you".
+  it("a needs-input LABEL (attention hardcoded to ask) routes to needsInput, not needsYou", () => {
+    const tickets = [t({ id: "CTL-20", attention: "ask", labels: ["needs-input"] })];
     const b = groupHoldingBuckets(tickets, [], 4);
     expect(b.needsInput.items.map((i) => (i.kind === "ticket" ? i.ticket.id : ""))).toEqual([
       "CTL-20",
@@ -385,20 +385,20 @@ describe("groupHoldingBuckets — queued/needsInput/needsHuman (CTL-764 Phase 8)
     expect(b.needsYou.items).toHaveLength(0);
   });
 
-  it("needs-human LABEL wins over needs-input LABEL when both present (precedence)", () => {
+  it("ask LABEL wins over needs-input LABEL when both present (precedence)", () => {
     const tickets = [
-      t({ id: "CTL-21", attention: "needs-human", labels: ["needs-input", "needs-human"] }),
+      t({ id: "CTL-21", attention: "ask", labels: ["needs-input", "catalyst-ask"] }),
     ];
     const b = groupHoldingBuckets(tickets, [], 4);
     expect(b.needsYou.items).toHaveLength(1);
     expect(b.needsInput.items).toHaveLength(0);
   });
 
-  it("holdingTicketIds includes queued/needsInput/needsHuman bucket ids", () => {
+  it("holdingTicketIds includes queued/needsInput/ask bucket ids", () => {
     const tickets = [
       t({ id: "CTL-10", workerStatus: "queued" }),
       t({ id: "CTL-11", workerStatus: "needs-input" }),
-      t({ id: "CTL-12", workerStatus: "needs-human" }),
+      t({ id: "CTL-12", workerStatus: "ask" }),
     ];
     const b = groupHoldingBuckets(tickets, [], 4);
     const ids = holdingTicketIds(b);
@@ -409,12 +409,12 @@ describe("groupHoldingBuckets — queued/needsInput/needsHuman (CTL-764 Phase 8)
 });
 
 describe("partitionHumanHeld (CTL-1588)", () => {
-  const q = (id: string, humanHold: "needs-human" | "needs-input" | null = null) => ({ id, humanHold });
+  const q = (id: string, humanHold: "ask" | "needs-input" | null = null) => ({ id, humanHold });
 
   it("splits held rows out of the dispatchable queue, preserving order in both halves", () => {
     const { dispatchQueue, heldQueue } = partitionHumanHeld([
       q("CTL-1557"),
-      q("CRM-1", "needs-human"),
+      q("CRM-1", "ask"),
       q("CTL-1417"),
       q("CRM-5", "needs-input"),
     ]);
@@ -423,7 +423,7 @@ describe("partitionHumanHeld (CTL-1588)", () => {
   });
 
   it("treats absent/null humanHold as dispatchable", () => {
-    const items: Array<{ id: string; humanHold?: "needs-human" | "needs-input" | null }> = [
+    const items: Array<{ id: string; humanHold?: "ask" | "needs-input" | null }> = [
       { id: "A" },
       q("B", null),
     ];

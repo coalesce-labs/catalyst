@@ -1,0 +1,20 @@
+{
+  "ticket": "CTC-166",
+  "classification": "bug",
+  "estimated_scope": "small",
+  "acronyms_expanded": [
+    {
+      "acronym": "PR",
+      "expansion": "Pull Request"
+    },
+    {
+      "acronym": "CLI",
+      "expansion": "Command-Line Interface"
+    }
+  ],
+  "dependencies": [],
+  "summary": "Codex review follow-up from PR #137 (thread resolved as non-blocking): `catalyst-index wiki`'s default account/project do not match the account the engine serves (`tenant-0`), so a wiki generated with defaults 404s in the web app unless the operator passes `--account`/`--project` explicitly.",
+  "generated_at": "2026-08-19T11:00:52Z",
+  "estimate": 1,
+  "estimateMethod": "fibonacci"
+}

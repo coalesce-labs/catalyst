@@ -128,7 +128,7 @@ import { hostName } from "./lib/canonical-event-shared.ts";
 import { stopWorker, type StopWorkerResult } from "./lib/stop-worker.mjs";
 // CTL-924 (BFF12): the read-model's SECOND write endpoint (HOME5's Answer /
 // Unblock verb) — POST /api/ticket/<ticket>/respond records the operator's
-// response, clears the needs-human marker, and emits the resume event that
+// response, clears the escalation marker, and emits the resume event that
 // drives CTL-876's loop (the daemon re-dispatches the parked worker). Shares
 // BFF8's typed-confirm + fence-aware scaffolding (single-host no-op pass;
 // multi-host rejects a stale/partitioned generation). Optimistic rollback is a
@@ -141,7 +141,7 @@ import {
 // CTL-1569: the inbox conversation surface. Two routes, deliberately split by
 // posture — GET /thread is a pure REPLICA read (zero Linear API calls, so it is
 // safe on a hover-speed path), POST /reply is the one write that posts a REAL,
-// human-authored Linear comment (the mechanism that actually clears `needs-human`
+// human-authored Linear comment (the mechanism that actually wakes the parked worker
 // via CTL-1567). The reply path is a SIBLING of /respond, not a replacement: see
 // lib/reply-ticket.mjs for why /respond's synthetic null-author event and its
 // hard held-run requirement make it unusable for this surface.
@@ -2251,7 +2251,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     return {
       ...board,
       serviceHealth: { generatedAt: snap.generatedAt, outages },
-    } as BoardPayload;
+    };
   };
 
   const unsubscribers: Array<() => void> = [];
@@ -4387,7 +4387,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
 
         // CTL-924 (BFF12): the read-model's SECOND write endpoint — HOME5's Inbox
         // `Answer / Unblock` verb. POST /api/ticket/<ticket>/respond records the
-        // operator's answer/unblock note, clears the `.linear-label-needs-human`
+        // operator's answer/unblock note, clears the escalation once-marker
         // marker, and emits ONE `linear.comment.created` event into the unified
         // log — the daemon's handleCommentWake (CTL-549) consumes it, strips the
         // held label, and re-dispatches the parked worker (CTL-876's resume loop).
@@ -4506,7 +4506,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
         // POST /api/ticket/<ticket>/reply — post the operator's reply to Linear as a
         // REAL human-authored comment. This is the resolution mechanism: once the
         // comment lands, Linear's webhook drives the daemon's comment-wake, which
-        // clears `needs-human` unconditionally and first (CTL-1567, ~4s end to end).
+        // clears the escalation hold unconditionally and first (CTL-1567, ~4s end to end).
         //
         // Deliberately UNLIKE /respond:
         //   • NO typed-confirm. The typed gate exists for destructive verbs (stop a
@@ -5911,7 +5911,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
       }
     }
     return originalStop(closeActiveConnections);
-  }) as typeof server.stop;
+  });
 
   // CTL-1224: undocumented `__`-prefixed debug seams used ONLY by the
   // server-activity test suite to assert the shared-ring fan-out + leak
