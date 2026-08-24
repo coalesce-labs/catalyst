@@ -1,6 +1,6 @@
 ---
 name: phase-teardown
-description: Phase agent for the 10th/terminal step of the pipeline (CTL-703). Performs all terminal wrap-up after monitor-deploy — verifies the PR merged, posts a final Linear comment with per-phase timings, transitions Linear to Done (the sole Done writer now), archives the worker dir to ~/catalyst/archives/<TICKET>/, removes the local worktree + branch, then emits phase.teardown.complete.<TICKET>. Reads phase-monitor-deploy.json as its prior-phase artifact. Dispatched via phase-agent-dispatch as a slash command — user-invocable: true.
+description: "Phase agent for the 10th/terminal step of the pipeline (CTL-703). Performs all terminal wrap-up after monitor-deploy — verifies the PR merged, posts a final Linear comment with per-phase timings, transitions Linear to Done (the sole Done writer now), archives the worker dir to ~/catalyst/archives/<TICKET>/, removes the local worktree + branch, then emits phase.teardown.complete.<TICKET>. Reads phase-monitor-deploy.json as its prior-phase artifact. Dispatched via phase-agent-dispatch as a slash command — user-invocable: true."
 user-invocable: true
 disable-model-invocation: false
 allowed-tools: Bash, Read, Write

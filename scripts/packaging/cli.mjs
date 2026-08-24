@@ -1,0 +1,98 @@
+#!/usr/bin/env bun
+// cli.mjs — the packaging pipeline entrypoint (CTL-1463).
+//
+// The ONE file outside providers/local-provisional.mjs itself that may import
+// it — enforced by packaging-seam.test.mjs's countProviderImporters() check.
+// Subcommands grow phase by phase: Phase 2 ships `render --dry-run` (a census,
+// no writes); Phase 3 adds loss reporting; Phase 4 adds `--target`/`--write`;
+// Phase 6 adds `extraction-readiness`.
+
+import { readFileSync, existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
+
+import { validateRenderedPack } from "./core/contract.mjs";
+import { renderPluginPack, listPluginRelPaths } from "./providers/local-provisional.mjs";
+
+export const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
+
+function readPackId(repoRootPath, pluginRelPath) {
+  const plugin = JSON.parse(
+    readFileSync(resolve(repoRootPath, pluginRelPath, ".claude-plugin/plugin.json"), "utf8")
+  );
+  return plugin.name;
+}
+
+function readSkillNeutralOverrides(repoRootPath, pluginRelPath) {
+  const packJsonPath = resolve(repoRootPath, pluginRelPath, "pack.json");
+  if (!existsSync(packJsonPath)) return {};
+  const pack = JSON.parse(readFileSync(packJsonPath, "utf8"));
+  return pack.skills ?? {};
+}
+
+/**
+ * renderAllPacks(repoRootPath) → [{ pluginRelPath, packId, pack, validation }]
+ *
+ * Renders every real plugin directory through the provisional provider and
+ * validates each against the contract. Never writes anything to disk.
+ */
+export function renderAllPacks(repoRootPath = repoRoot) {
+  return listPluginRelPaths(repoRootPath).map((pluginRelPath) => {
+    const packId = readPackId(repoRootPath, pluginRelPath);
+    const pack = renderPluginPack({
+      repoRoot: repoRootPath,
+      pluginRelPath,
+      packId,
+      skillNeutralOverrides: readSkillNeutralOverrides(repoRootPath, pluginRelPath),
+    });
+    return { pluginRelPath, packId, pack, validation: validateRenderedPack(pack) };
+  });
+}
+
+function cmdRender(args) {
+  const dryRun = args.includes("--dry-run");
+  const results = renderAllPacks(repoRoot);
+
+  let totalSkills = 0;
+  let totalAgents = 0;
+  let invalid = 0;
+
+  for (const { pluginRelPath, packId, pack, validation } of results) {
+    totalSkills += pack.skills.length;
+    totalAgents += pack.agents.length;
+    const status = validation.ok ? "OK" : "INVALID";
+    if (!validation.ok) invalid += 1;
+    console.log(
+      `${status}  ${packId}  (${pluginRelPath})  skills=${pack.skills.length}  agents=${pack.agents.length}  hooks=${pack.hooks.present ? pack.hooks.entryCount : 0}`
+    );
+    for (const err of validation.errors) {
+      console.log(`       ERROR: ${err}`);
+    }
+  }
+
+  console.log("");
+  console.log(`TOTAL  plugins=${results.length}  skills=${totalSkills}  agents=${totalAgents}`);
+
+  if (invalid > 0) {
+    console.log(`FAILED: ${invalid} plugin(s) failed contract validation`);
+    if (!dryRun) process.exit(1);
+  }
+
+  return { results, totalSkills, totalAgents, invalid };
+}
+
+function main() {
+  const [command, ...args] = process.argv.slice(2);
+  switch (command) {
+    case "render":
+      cmdRender(args);
+      break;
+    default:
+      console.error(`Unknown command: ${command ?? "(none)"}. Usage: cli.mjs render [--dry-run]`);
+      process.exit(1);
+  }
+}
+
+if (import.meta.main) {
+  main();
+}

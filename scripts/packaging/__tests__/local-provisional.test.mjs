@@ -1,0 +1,169 @@
+// local-provisional.test.mjs — CTL-1463 Phase 2.
+//
+// Run: bun test scripts/packaging/__tests__/local-provisional.test.mjs
+
+import { describe, test, expect, afterEach } from "bun:test";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync, statSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { resolve, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { validateRenderedPack } from "../core/contract.mjs";
+import { renderPluginPack, listPluginRelPaths, splitFrontmatter } from "../providers/local-provisional.mjs";
+
+const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
+
+let _tmpDirs = [];
+function fixtureDir() {
+  const dir = mkdtempSync(resolve(tmpdir(), "local-provisional-test-"));
+  _tmpDirs.push(dir);
+  return dir;
+}
+function writeFile(dir, relPath, contents) {
+  const path = resolve(dir, relPath);
+  mkdirSync(resolve(path, ".."), { recursive: true });
+  writeFileSync(path, contents);
+  return path;
+}
+afterEach(() => {
+  for (const dir of _tmpDirs) rmSync(dir, { recursive: true, force: true });
+  _tmpDirs = [];
+});
+
+// --- ground truth, computed independently of the provider under test -------
+// Deliberately NOT hardcoded to the plan's illustrative "115 skills" figure:
+// this ticket ships the pipeline, not a fixed skill census (a __tests__/ dir
+// with no SKILL.md is not a skill; a README.md with no frontmatter is not an
+// agent). The count this asserts against is whatever is really on disk right
+// now, computed the same principled way the provider computes it — "has a
+// SKILL.md" / "has a frontmatter block" — so a provider that silently skips a
+// real directory still fails even though the target number moves over time.
+function realSkillDirCount(pluginAbsPath) {
+  const skillsDir = join(pluginAbsPath, "skills");
+  if (!existsSync(skillsDir)) return 0;
+  return readdirSync(skillsDir).filter(
+    (name) => statSync(join(skillsDir, name)).isDirectory() && existsSync(join(skillsDir, name, "SKILL.md"))
+  ).length;
+}
+function realAgentFileCount(pluginAbsPath) {
+  const agentsDir = join(pluginAbsPath, "agents");
+  if (!existsSync(agentsDir)) return 0;
+  return readdirSync(agentsDir).filter((name) => {
+    if (!name.endsWith(".md")) return false;
+    const contents = require("node:fs").readFileSync(join(agentsDir, name), "utf8");
+    return splitFrontmatter(contents) !== null;
+  }).length;
+}
+
+describe("renderPluginPack — round-trip against every real plugin", () => {
+  const pluginRelPaths = listPluginRelPaths(repoRoot);
+
+  test("discovers exactly 10 plugin directories", () => {
+    expect(pluginRelPaths.length).toBe(10);
+  });
+
+  for (const pluginRelPath of listPluginRelPaths(repoRoot)) {
+    test(`${pluginRelPath}: provider output validates against the contract, and counts match a live filesystem count`, () => {
+      const plugin = JSON.parse(
+        require("node:fs").readFileSync(resolve(repoRoot, pluginRelPath, ".claude-plugin/plugin.json"), "utf8")
+      );
+      const pack = renderPluginPack({ repoRoot, pluginRelPath, packId: plugin.name });
+      const result = validateRenderedPack(pack);
+      expect(result.errors).toEqual([]);
+      expect(result.ok).toBe(true);
+
+      const pluginAbsPath = resolve(repoRoot, pluginRelPath);
+      expect(pack.skills.length).toBe(realSkillDirCount(pluginAbsPath));
+      expect(pack.agents.length).toBe(realAgentFileCount(pluginAbsPath));
+    });
+  }
+
+  test("sum of per-plugin skill counts across all 10 plugins is a positive, live-computed total (not hardcoded)", () => {
+    let total = 0;
+    for (const pluginRelPath of pluginRelPaths) {
+      total += renderPluginPack({ repoRoot, pluginRelPath, packId: pluginRelPath }).skills.length;
+    }
+    expect(total).toBeGreaterThan(0);
+    // Ground truth cross-check, computed the same way, independently of renderPluginPack.
+    const independentTotal = pluginRelPaths.reduce(
+      (sum, p) => sum + realSkillDirCount(resolve(repoRoot, p)),
+      0
+    );
+    expect(total).toBe(independentTotal);
+  });
+});
+
+describe("hooks detection — positive/negative control pair", () => {
+  test("plugins/dev reports hooks.present === true (positive control)", () => {
+    const pack = renderPluginPack({ repoRoot, pluginRelPath: "plugins/dev", packId: "catalyst-dev" });
+    expect(pack.hooks.present).toBe(true);
+    expect(pack.hooks.entryCount).toBeGreaterThan(0);
+  });
+
+  test("every other real plugin reports hooks.present === false (negative control — a detector returning true for everything would pass the positive test alone)", () => {
+    const others = listPluginRelPaths(repoRoot).filter((p) => p !== "plugins/dev");
+    expect(others.length).toBeGreaterThan(0);
+    for (const pluginRelPath of others) {
+      const pack = renderPluginPack({ repoRoot, pluginRelPath, packId: pluginRelPath });
+      expect(pack.hooks.present).toBe(false);
+      expect(pack.hooks.entryCount).toBe(0);
+    }
+  });
+});
+
+describe("unrecognized frontmatter key — fail closed", () => {
+  test("a fixture skill with an unknown frontmatter key throws, naming the key and the file", () => {
+    const dir = fixtureDir();
+    writeFile(
+      dir,
+      "plugins/x/skills/bogus/SKILL.md",
+      `---\nname: bogus\ndescription: a bogus skill\ncategory: nope\n---\n\nbody\n`
+    );
+    expect(() => renderPluginPack({ repoRoot: dir, pluginRelPath: "plugins/x", packId: "x" })).toThrow(
+      /category/
+    );
+    try {
+      renderPluginPack({ repoRoot: dir, pluginRelPath: "plugins/x", packId: "x" });
+    } catch (err) {
+      expect(String(err.message)).toContain("SKILL.md");
+      expect(String(err.message)).toContain("category");
+    }
+  });
+});
+
+describe("gnarly YAML round-trip fixture", () => {
+  test("a multi-line folded description and a Bash(...)-style tools value with a colon and an asterisk round-trip exactly", () => {
+    const dir = fixtureDir();
+    writeFile(
+      dir,
+      "plugins/x/skills/gnarly/SKILL.md",
+      [
+        "---",
+        "name: gnarly",
+        "description:",
+        '  "Reference doc: query the replica by direct SQL, or call `linear_read_ticket <ID>`.',
+        '  Never shell out for a routine read."',
+        "allowed-tools: Bash(ls *), Bash(git log *), mcp__serena__find_symbol",
+        "---",
+        "",
+        "# Gnarly",
+        "",
+        "Body text.",
+        "",
+      ].join("\n")
+    );
+    const pack = renderPluginPack({ repoRoot: dir, pluginRelPath: "plugins/x", packId: "x" });
+    const skill = pack.skills[0];
+    expect(skill.description).toBe(
+      "Reference doc: query the replica by direct SQL, or call `linear_read_ticket <ID>`. Never shell out for a routine read."
+    );
+    expect(skill.claudeOnly["allowed-tools"]).toBe("Bash(ls *), Bash(git log *), mcp__serena__find_symbol");
+    expect(validateRenderedPack(pack).ok).toBe(true);
+  });
+});
+
+describe("splitFrontmatter", () => {
+  test("returns null for a file with no frontmatter block (e.g. a plain README)", () => {
+    expect(splitFrontmatter("# Just a README\n\nNo frontmatter here.\n")).toBeNull();
+  });
+});
