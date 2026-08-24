@@ -25,6 +25,11 @@ import { schemaCompat } from "./config-schema.mjs";
 // consulted by getLayer2ConfigPath's dual-read shadow-diff below (design §8 PR6).
 import { resolveCloudTokenName, resolveLayer2Path } from "../lib/secret-contract.mjs";
 
+// CTL-2116: the fleet executor-routing policy reader — a dependency-light leaf
+// (readFileSync + node:crypto only) consulted by readExecutorByPhaseLayer1 below
+// as the new top precedence tier. See executor-policy.mjs for the shape.
+import { readExecutorPolicy } from "./executor-policy.mjs";
+
 // --- Logger (CTL-578) ---
 // Pino is the daemon's runtime logger. A worktree checkout that hasn't run
 // `bun install` cannot resolve it — and any module graph that includes
@@ -936,11 +941,27 @@ export function getExecutor(configPath) {
 // --- CTL-1457: per-phase executor routing + codex-exec runtime settings ---
 
 // readExecutorByPhaseLayer1 — resolve the executorByPhase (phase→executor) map.
-// Precedence: env CATALYST_EXECUTOR_BY_PHASE (a JSON map) OVER Layer-1
+// Precedence (CTL-2116 adds the first rung): fleet cluster-repo POLICY (read live,
+// via `readPolicy` — cluster.json.executorPolicy.routes) OVER env
+// CATALYST_EXECUTOR_BY_PHASE (a JSON map) OVER Layer-1
 // catalyst.orchestration.executorByPhase — mirroring resolveExecutor's
-// env-over-Layer-1 precedence. Returns {} for a null/missing/unparseable file or an
-// absent/non-object key so callers fall back to the daemon executor. Never throws —
-// mirrors readFleetHealthConfigLayer1's ENOENT-tolerant shape.
+// env-over-Layer-1 precedence at the bottom two rungs. Returns {} for a
+// null/missing/unparseable file or an absent/non-object key so callers fall back to
+// the daemon executor. Never throws — mirrors readFleetHealthConfigLayer1's
+// ENOENT-tolerant shape.
+//
+// CTL-2116: the fleet policy is the actuator's one-command, audited home
+// (`catalyst cluster route …`) — see executor-policy.mjs. It outranks the env pin
+// BY DESIGN: the pin is per-host and hand-set, and a per-host pin that silently
+// outranks a fleet decision is the CTL-2046 incident shape this ticket exists to
+// end. `CATALYST_EXECUTOR_POLICY=off` is the documented per-host escape hatch that
+// disables this tier entirely (falls through to the env/Layer-1 ladder below,
+// unchanged). An EMPTY policy routes map ({}) is a REAL policy — "route nothing" —
+// not "absent"; treating it as absent would let `route all bg` followed by
+// `route clear` resurrect a stale env/plist pin, a silent regression to pre-ticket
+// behavior. A malformed policy (readExecutorPolicy already normalizes any
+// unreadable/partial shape to null) falls through to the env/Layer-1 ladder and
+// warns, exactly like the env branch's own malformed-value handling below.
 //
 // CTL-1457 follow-up (Gap 1): the env override is the DURABLE, clobber-safe home for
 // a routing pin. On worker nodes the per-node Layer-1 .catalyst/config.json is
@@ -950,7 +971,45 @@ export function getExecutor(configPath) {
 // malformed (invalid JSON, or JSON that is not a plain object) it WARN-logs actionably
 // and FALLS THROUGH to the Layer-1 file — a routing pin never silently vanishes AND a
 // typo never silently routes. Example: {"triage":"codex-exec"}.
-export function readExecutorByPhaseLayer1(configPath, env = process.env) {
+const _warnedPolicyOverride = new Set();
+
+export function readExecutorByPhaseLayer1(configPath, env = process.env, deps = {}) {
+  const { readPolicy = () => readExecutorPolicy(getClusterRepoDir()) } = deps;
+  const policyDisabled =
+    String(env?.CATALYST_EXECUTOR_POLICY ?? "")
+      .trim()
+      .toLowerCase() === "off";
+  if (!policyDisabled) {
+    let policy = null;
+    try {
+      policy = readPolicy();
+    } catch {
+      policy = null; // never let a policy-read failure break dispatch
+    }
+    if (policy && policy.routes && typeof policy.routes === "object" && !Array.isArray(policy.routes)) {
+      const pinned =
+        typeof env?.CATALYST_EXECUTOR_BY_PHASE === "string" &&
+        env.CATALYST_EXECUTOR_BY_PHASE.trim() !== "";
+      if (pinned) {
+        // CTL-1817 count-every/warn-sparsely discipline: warn once per (configPath)
+        // so a hot loop of resolveExecutorForPhase calls doesn't flood the log —
+        // this is an operator-facing "your env pin is being ignored" notice, not a
+        // per-dispatch diagnostic.
+        const key = configPath ?? "(no configPath)";
+        if (!_warnedPolicyOverride.has(key)) {
+          _warnedPolicyOverride.add(key);
+          log.warn(
+            { policyRoutes: policy.routes, envPin: env.CATALYST_EXECUTOR_BY_PHASE },
+            "executorByPhase: a fleet cluster policy overrides the CATALYST_EXECUTOR_BY_PHASE env pin — " +
+              "set CATALYST_EXECUTOR_POLICY=off on this host to keep using the env pin"
+          );
+        }
+      }
+      // Full replace, mirroring the env-over-Layer-1 semantics below — an empty
+      // routes map ({}) is a real policy (routes nothing), not "absent".
+      return policy.routes;
+    }
+  }
   const rawEnv = env?.CATALYST_EXECUTOR_BY_PHASE;
   if (typeof rawEnv === "string" && rawEnv.trim() !== "") {
     let parsedEnv;
@@ -1014,8 +1073,8 @@ export function readExecutorByPhaseLayer1(configPath, env = process.env) {
 // threaded into readExecutorByPhaseLayer1 so the CTL-1457-followup env override
 // (CATALYST_EXECUTOR_BY_PHASE, env-over-Layer-1) is honored here too — a phase routed
 // via the durable env map resolves exactly as one routed via the Layer-1 file.
-export function resolveExecutorForPhase(phase, { configPath, env = process.env } = {}) {
-  const map = readExecutorByPhaseLayer1(configPath, env);
+export function resolveExecutorForPhase(phase, { configPath, env = process.env, readPolicy } = {}) {
+  const map = readExecutorByPhaseLayer1(configPath, env, readPolicy ? { readPolicy } : {});
   const raw = phase != null ? map[phase] : undefined;
   if (typeof raw === "string" && raw.trim() !== "") {
     const normalized = raw.trim().toLowerCase();
