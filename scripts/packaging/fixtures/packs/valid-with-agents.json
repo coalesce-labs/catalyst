@@ -1,0 +1,17 @@
+{
+  "contractVersion": 1,
+  "packId": "catalyst-pm",
+  "sourceRoot": "plugins/playground/pm",
+  "skills": [],
+  "agents": [
+    {
+      "id": "linear-research",
+      "name": "linear-research",
+      "description": "Research Linear tickets, cycles, projects, and milestones.",
+      "body": "# linear-research\n\nAgent body.\n",
+      "claudeOnly": { "model": null, "color": null, "tools": "Bash(linearis *), Read" }
+    }
+  ],
+  "hooks": { "present": false, "entryCount": 0 },
+  "mcpServers": null
+}

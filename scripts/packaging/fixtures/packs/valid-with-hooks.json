@@ -1,0 +1,9 @@
+{
+  "contractVersion": 1,
+  "packId": "catalyst-dev",
+  "sourceRoot": "plugins/dev",
+  "skills": [],
+  "agents": [],
+  "hooks": { "present": true, "entryCount": 11 },
+  "mcpServers": null
+}

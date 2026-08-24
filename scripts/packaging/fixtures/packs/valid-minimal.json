@@ -1,0 +1,9 @@
+{
+  "contractVersion": 1,
+  "packId": "catalyst-minimal",
+  "sourceRoot": "plugins/minimal",
+  "skills": [],
+  "agents": [],
+  "hooks": { "present": false, "entryCount": 0 },
+  "mcpServers": null
+}

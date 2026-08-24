@@ -1,0 +1,20 @@
+{
+  "contractVersion": 1,
+  "packId": "catalyst-unknown-key",
+  "sourceRoot": "plugins/unknown-key",
+  "skills": [
+    {
+      "id": "commit",
+      "name": "commit",
+      "description": "Create git commits.",
+      "body": "# commit\n",
+      "files": [{ "relPath": "SKILL.md", "bytesRef": "sha256:cafebabe" }],
+      "neutral": null,
+      "claudeOnly": {},
+      "bogusSkillField": "nope"
+    }
+  ],
+  "agents": [],
+  "hooks": { "present": false, "entryCount": 0 },
+  "mcpServers": null
+}

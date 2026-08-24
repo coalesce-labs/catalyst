@@ -1,0 +1,19 @@
+{
+  "contractVersion": 1,
+  "packId": "catalyst-half-classified",
+  "sourceRoot": "plugins/half-classified",
+  "skills": [
+    {
+      "id": "commit",
+      "name": "commit",
+      "description": "Create git commits.",
+      "body": "# commit\n",
+      "files": [{ "relPath": "SKILL.md", "bytesRef": "sha256:cafebabe" }],
+      "neutral": { "effects": [] },
+      "claudeOnly": { "allowedTools": "Bash(git *)" }
+    }
+  ],
+  "agents": [],
+  "hooks": { "present": false, "entryCount": 0 },
+  "mcpServers": null
+}

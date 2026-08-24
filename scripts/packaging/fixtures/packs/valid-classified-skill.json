@@ -1,0 +1,19 @@
+{
+  "contractVersion": 1,
+  "packId": "catalyst-classified",
+  "sourceRoot": "plugins/classified",
+  "skills": [
+    {
+      "id": "linearis",
+      "name": "linearis",
+      "description": "Linear access rule + Linearis CLI reference.",
+      "body": "# Linearis\n\nReference doc body.\n",
+      "files": [{ "relPath": "SKILL.md", "bytesRef": "sha256:deadbeef" }],
+      "neutral": { "effects": [], "invocation": "explicit", "exposure": ["catalog"] },
+      "claudeOnly": { "allowedTools": "Read, Grep", "disableModelInvocation": true }
+    }
+  ],
+  "agents": [],
+  "hooks": { "present": false, "entryCount": 0 },
+  "mcpServers": null
+}
