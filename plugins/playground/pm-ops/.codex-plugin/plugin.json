@@ -17,5 +17,19 @@
     "cadence",
     "operations"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "interface": {
+    "displayName": "Catalyst Pm Ops",
+    "shortDescription": "Linear cycle/backlog/PR ops, daily and weekly cadence, status updates, and team comms — extracted from catalyst-pm",
+    "longDescription": "Linear cycle/backlog/PR ops, daily and weekly cadence, status updates, and team comms — extracted from catalyst-pm",
+    "developerName": "Coalesce Labs",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Linear cycle/backlog/PR ops, daily and weekly cadence, status updates, and team comms — extracted from catalyst-pm"
+    ]
+  }
 }

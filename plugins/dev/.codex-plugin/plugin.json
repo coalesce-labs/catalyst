@@ -21,5 +21,19 @@
     "typescript",
     "quality"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "interface": {
+    "displayName": "Catalyst Dev",
+    "shortDescription": "Complete development workflow: research → plan → implement → validate → ship.",
+    "longDescription": "Complete development workflow: research → plan → implement → validate → ship. Includes research agents, planning tools, handoff system, Linear integration, and PM commands.",
+    "developerName": "Coalesce Labs",
+    "category": "Development",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Complete development workflow: research → plan → implement → validate → ship."
+    ]
+  }
 }

@@ -17,7 +17,18 @@
     "diagnostics"
   ],
   "license": "MIT",
-  "dependencies": [
-    "catalyst-dev"
-  ]
+  "interface": {
+    "displayName": "Catalyst Foundry",
+    "shortDescription": "Setup, maintenance, and compounding upkeep of the Catalyst framework and the thoughts/ knowledge base: framework diagnostics/re…",
+    "longDescription": "Setup, maintenance, and compounding upkeep of the Catalyst framework and the thoughts/ knowledge base: framework diagnostics/repair (setup-catalyst), terminal launcher config (setup-warp), and research-doc curation (research-curate). Future home for the compound-engineering retro/learning loop.",
+    "developerName": "Coalesce Labs",
+    "category": "Development",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Setup, maintenance, and compounding upkeep of the Catalyst framework and the thoughts/ knowledge base: framework diagnostics/re…"
+    ]
+  }
 }

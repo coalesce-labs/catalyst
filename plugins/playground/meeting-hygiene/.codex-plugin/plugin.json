@@ -16,5 +16,19 @@
     "transcripts",
     "productivity"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "interface": {
+    "displayName": "Catalyst Meeting Hygiene",
+    "shortDescription": "Meeting workflow skills: agenda creation, transcript processing, end-of-day batch cleanup, and effectiveness retros — extracted…",
+    "longDescription": "Meeting workflow skills: agenda creation, transcript processing, end-of-day batch cleanup, and effectiveness retros — extracted from catalyst-pm",
+    "developerName": "Coalesce Labs",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Meeting workflow skills: agenda creation, transcript processing, end-of-day batch cleanup, and effectiveness retros — extracted…"
+    ]
+  }
 }

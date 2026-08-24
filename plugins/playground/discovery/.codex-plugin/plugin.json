@@ -19,5 +19,19 @@
     "analytics",
     "pm"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "interface": {
+    "displayName": "Catalyst Discovery",
+    "shortDescription": "User research, metrics, experimentation, and prototyping skills — the discovery/research companion to catalyst-pm",
+    "longDescription": "User research, metrics, experimentation, and prototyping skills — the discovery/research companion to catalyst-pm",
+    "developerName": "Coalesce Labs",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "User research, metrics, experimentation, and prototyping skills — the discovery/research companion to catalyst-pm"
+    ]
+  }
 }

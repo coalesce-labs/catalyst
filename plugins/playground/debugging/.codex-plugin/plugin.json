@@ -18,5 +18,19 @@
     "stack-traces",
     "production"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "interface": {
+    "displayName": "Catalyst Debugging",
+    "shortDescription": "Production error monitoring with Sentry MCP integration.",
+    "longDescription": "Production error monitoring with Sentry MCP integration. Enable when debugging errors, analyzing stack traces, and investigating incidents. ~20k context tokens when enabled.",
+    "developerName": "Coalesce Labs",
+    "category": "Debugging",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Production error monitoring with Sentry MCP integration."
+    ]
+  }
 }

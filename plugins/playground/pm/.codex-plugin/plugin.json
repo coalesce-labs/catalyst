@@ -19,5 +19,19 @@
     "launch",
     "release"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "interface": {
+    "displayName": "Catalyst Pm",
+    "shortDescription": "Product strategy toolkit — PRDs, strategy docs, priorities, and release planning",
+    "longDescription": "Product strategy toolkit — PRDs, strategy docs, priorities, and release planning",
+    "developerName": "Coalesce Labs",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Product strategy toolkit — PRDs, strategy docs, priorities, and release planning"
+    ]
+  }
 }

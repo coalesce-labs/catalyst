@@ -18,5 +18,19 @@
     "conversion",
     "funnel"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "interface": {
+    "displayName": "Catalyst Analytics",
+    "shortDescription": "Product analytics with PostHog MCP integration.",
+    "longDescription": "Product analytics with PostHog MCP integration. Enable when analyzing user behavior, conversion metrics, and product usage. ~40k context tokens when enabled.",
+    "developerName": "Coalesce Labs",
+    "category": "Analytics",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Product analytics with PostHog MCP integration."
+    ]
+  }
 }

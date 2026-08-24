@@ -8,7 +8,14 @@
   "plugins": [
     {
       "name": "catalyst-dev",
-      "source": "./plugins/dev",
+      "source": {
+        "source": "local",
+        "path": "./plugins/dev"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
       "description": "Complete development workflow: research → plan → implement → validate → ship. Includes research agents, planning tools, handoff system, Linear integration, and PM commands.",
       "author": {
         "name": "Coalesce Labs",
@@ -30,7 +37,14 @@
     },
     {
       "name": "catalyst-pm",
-      "source": "./plugins/playground/pm",
+      "source": {
+        "source": "local",
+        "path": "./plugins/playground/pm"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
       "description": "Product strategy toolkit — PRDs, strategy docs, priorities, and release planning",
       "author": {
         "name": "Coalesce Labs",
@@ -52,7 +66,14 @@
     },
     {
       "name": "catalyst-analytics",
-      "source": "./plugins/playground/analytics",
+      "source": {
+        "source": "local",
+        "path": "./plugins/playground/analytics"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
       "description": "Product analytics with PostHog MCP integration. Enable when analyzing user behavior, conversion metrics, and product usage. ~40k context tokens when enabled.",
       "author": {
         "name": "Coalesce Labs",
@@ -73,7 +94,14 @@
     },
     {
       "name": "catalyst-debugging",
-      "source": "./plugins/playground/debugging",
+      "source": {
+        "source": "local",
+        "path": "./plugins/playground/debugging"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
       "description": "Production error monitoring with Sentry MCP integration. Enable when debugging errors, analyzing stack traces, and investigating incidents. ~20k context tokens when enabled.",
       "author": {
         "name": "Coalesce Labs",
@@ -94,7 +122,14 @@
     },
     {
       "name": "catalyst-meta",
-      "source": "./plugins/meta",
+      "source": {
+        "source": "local",
+        "path": "./plugins/meta"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
       "description": "Workflow discovery, creation, reorganization, and audit tools: learn from community patterns, extend Catalyst with new workflows, safely reorganize directory structures, and audit plugin health.",
       "author": {
         "name": "Coalesce Labs",
@@ -113,7 +148,14 @@
     },
     {
       "name": "catalyst-pm-ops",
-      "source": "./plugins/playground/pm-ops",
+      "source": {
+        "source": "local",
+        "path": "./plugins/playground/pm-ops"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
       "description": "Linear cycle/backlog/PR ops, daily and weekly cadence, status updates, and team comms — extracted from catalyst-pm",
       "author": {
         "name": "Coalesce Labs",
@@ -134,7 +176,14 @@
     },
     {
       "name": "catalyst-meeting-hygiene",
-      "source": "./plugins/playground/meeting-hygiene",
+      "source": {
+        "source": "local",
+        "path": "./plugins/playground/meeting-hygiene"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
       "description": "Meeting workflow skills: agenda creation, transcript processing, end-of-day batch cleanup, and effectiveness retros — extracted from catalyst-pm",
       "author": {
         "name": "Coalesce Labs",
@@ -154,7 +203,14 @@
     },
     {
       "name": "catalyst-discovery",
-      "source": "./plugins/playground/discovery",
+      "source": {
+        "source": "local",
+        "path": "./plugins/playground/discovery"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
       "description": "User research, metrics, experimentation, and prototyping skills — the discovery/research companion to catalyst-pm",
       "author": {
         "name": "Coalesce Labs",
@@ -177,7 +233,14 @@
     },
     {
       "name": "catalyst-legacy",
-      "source": "./plugins/legacy",
+      "source": {
+        "source": "local",
+        "path": "./plugins/legacy"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
       "description": "Pre-phase-agent (wave-based) orchestration workflow preserved as a documented fallback: oneshot, orchestrate, god, setup-orchestrate. Superseded by catalyst-dev's execution-core/phase-agent pipeline. Requires catalyst-dev (shared backing scripts).",
       "author": {
         "name": "Coalesce Labs",
@@ -197,7 +260,14 @@
     },
     {
       "name": "catalyst-foundry",
-      "source": "./plugins/foundry",
+      "source": {
+        "source": "local",
+        "path": "./plugins/foundry"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
       "description": "Setup, maintenance, and compounding upkeep of the Catalyst framework and the thoughts/ knowledge base: framework diagnostics/repair (setup-catalyst), terminal launcher config (setup-warp), and research-doc curation (research-curate). Future home for the compound-engineering retro/learning loop.",
       "author": {
         "name": "Coalesce Labs",

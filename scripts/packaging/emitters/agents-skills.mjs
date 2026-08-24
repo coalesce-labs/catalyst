@@ -25,6 +25,9 @@ import { createHash } from "node:crypto";
 
 const PORTABLE_AUX_DIRS = new Set(["scripts", "references", "assets"]);
 
+/** GENERATED_MARKER_FILENAME — the per-skill marker cli.mjs's stale-prune pass keys off of; exported so both sides never drift on the literal. */
+export const GENERATED_MARKER_FILENAME = ".generated-by-catalyst-packaging";
+
 function assertSafeSegment(value, label) {
   if (typeof value !== "string" || value.length === 0 || value === "." || value === ".." || /[\\/]/.test(value)) {
     throw new Error(`agents-skills emitter: ${label} ${JSON.stringify(value)} is not a safe path segment`);
@@ -102,7 +105,7 @@ export function planAgentsSkillsBundle(entries) {
 
       files.push({
         flatName,
-        relPath: `${flatName}/.generated-by-catalyst-packaging`,
+        relPath: `${flatName}/${GENERATED_MARKER_FILENAME}`,
         text:
           formatJson(
             {

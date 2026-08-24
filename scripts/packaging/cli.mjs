@@ -7,7 +7,7 @@
 // no writes); Phase 3 adds loss reporting; Phase 4 adds `--target`/`--write`;
 // Phase 6 adds `extraction-readiness`.
 
-import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, writeFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 
@@ -17,7 +17,7 @@ import { renderPluginPack, listPluginRelPaths } from "./providers/local-provisio
 import { buildLossReport, hasUnacknowledgedLosses, lossCounts, renderLossReportMarkdown } from "./core/loss.mjs";
 import { renderPluginJson, renderMarketplaceJson, readExistingVersion } from "./emitters/claude.mjs";
 import { resolveCodexVersion, renderCodexPluginJson, renderCodexCatalog } from "./emitters/codex.mjs";
-import { planAgentsSkillsBundle } from "./emitters/agents-skills.mjs";
+import { planAgentsSkillsBundle, GENERATED_MARKER_FILENAME } from "./emitters/agents-skills.mjs";
 import { checkExtractionReadiness } from "./core/extraction-readiness.mjs";
 
 export const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -136,21 +136,55 @@ function writeCodexTarget(repoRootPath, results, { write }) {
   return { pluginJsonPaths, catalogPath };
 }
 
-/** writeAgentsSkillsTarget(repoRootPath, results, { write }) → { emittedFlatNames, fileCount } */
-function writeAgentsSkillsTarget(repoRootPath, results, { write }) {
+/**
+ * pruneStaleAgentsSkillsDirs(agentsSkillsRoot, emittedFlatNames) → the flat
+ * names actually removed.
+ *
+ * A regeneration only ADDS/OVERWRITES files (the loop in
+ * writeAgentsSkillsTarget below) — a skill that was removed, renamed, lost
+ * its neutral opt-in, or whose pack gained a safety hook no longer appears in
+ * `emittedFlatNames`, but its old directory would otherwise sit there
+ * forever, out of sync with the current classification (Codex #3978 P1: the
+ * coordinator hit exactly this by hand with catalyst-dev-linearis).
+ *
+ * Only removes a directory that BOTH (a) is absent from the current emit
+ * plan and (b) carries this pipeline's own GENERATED_MARKER_FILENAME — never
+ * touches a directory without that marker, so nothing hand-placed under
+ * .agents/skills/ is ever at risk of this sweep.
+ */
+export function pruneStaleAgentsSkillsDirs(agentsSkillsRoot, emittedFlatNames) {
+  if (!existsSync(agentsSkillsRoot)) return [];
+  const emitted = new Set(emittedFlatNames);
+  const pruned = [];
+  for (const name of readdirSync(agentsSkillsRoot)) {
+    const dirPath = resolve(agentsSkillsRoot, name);
+    if (!statSync(dirPath).isDirectory()) continue;
+    if (emitted.has(name)) continue;
+    if (!existsSync(resolve(dirPath, GENERATED_MARKER_FILENAME))) continue;
+    rmSync(dirPath, { recursive: true, force: true });
+    pruned.push(name);
+  }
+  return pruned;
+}
+
+/** writeAgentsSkillsTarget(repoRootPath, results, { write }) → { emittedFlatNames, fileCount, prunedNames } */
+export function writeAgentsSkillsTarget(repoRootPath, results, { write }) {
   const eligible = results.filter((r) => r.packManifest.distribution.agentsSkills?.enabled === true);
   const entries = eligible.map((r) => ({ packId: r.packId, pack: r.pack }));
   const { files, emittedFlatNames } = planAgentsSkillsBundle(entries);
+  const agentsSkillsRoot = resolve(repoRootPath, ".agents/skills");
 
+  let prunedNames = [];
   if (write) {
+    prunedNames = pruneStaleAgentsSkillsDirs(agentsSkillsRoot, emittedFlatNames);
     for (const f of files) {
-      const absPath = resolve(repoRootPath, ".agents/skills", f.relPath);
+      const absPath = resolve(agentsSkillsRoot, f.relPath);
       const contents = f.text !== undefined ? f.text : Buffer.from(f.base64, "base64");
       writeFileEnsuringDir(absPath, contents);
     }
   }
 
-  return { emittedFlatNames, fileCount: files.length };
+  return { emittedFlatNames, fileCount: files.length, prunedNames };
 }
 
 const TARGET_WRITERS = {
@@ -225,11 +259,17 @@ function cmdRender(args) {
     targetOutcome = writer(repoRoot, results, { write });
     console.log("");
     console.log(`TARGET ${target}: ${write ? "wrote" : "planned (pass --write to persist)"}`);
+    if (targetOutcome.prunedNames?.length > 0) {
+      console.log(`  pruned stale generated dir(s): ${targetOutcome.prunedNames.join(", ")}`);
+    }
   } else if (write) {
     targetOutcome = {};
     for (const [name, writer] of Object.entries(TARGET_WRITERS)) {
       targetOutcome[name] = writer(repoRoot, results, { write });
       console.log(`TARGET ${name}: wrote output`);
+      if (targetOutcome[name].prunedNames?.length > 0) {
+        console.log(`  pruned stale generated dir(s): ${targetOutcome[name].prunedNames.join(", ")}`);
+      }
     }
   }
 
