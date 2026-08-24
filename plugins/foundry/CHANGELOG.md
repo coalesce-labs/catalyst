@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.5.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-foundry-v2.4.0...catalyst-foundry-v2.5.0) (2026-08-24)
+
+
+### Features
+
+* **packaging:** CTL-1463 — installable plugin packages for Codex + open-spec agents ([#3978](https://github.com/coalesce-labs/catalyst/issues/3978)) ([3b80357](https://github.com/coalesce-labs/catalyst/commit/3b803576f1f801278ebf6ac92da68026d289d6dd))
+
 ## [2.4.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-foundry-v2.3.0...catalyst-foundry-v2.4.0) (2026-08-04)
 
 

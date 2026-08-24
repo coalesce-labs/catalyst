@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.7.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v7.6.0...catalyst-pm-v7.7.0) (2026-08-24)
+
+
+### Features
+
+* **packaging:** CTL-1463 — installable plugin packages for Codex + open-spec agents ([#3978](https://github.com/coalesce-labs/catalyst/issues/3978)) ([3b80357](https://github.com/coalesce-labs/catalyst/commit/3b803576f1f801278ebf6ac92da68026d289d6dd))
+
 ## [7.6.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v7.5.0...catalyst-pm-v7.6.0) (2026-08-04)
 
 
