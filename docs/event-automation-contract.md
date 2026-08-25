@@ -2,25 +2,13 @@
 
 ## 1. What this is
 
-The binding contract between **events** and **actions** in the Catalyst fleet: which events the
-coordination plane needs, what exactly one bounded automation does when each lands, and — for every
-one of them — which component **refuses the second delivery**. A phase is a goal-loop: it is given a
-goal and a bounded context, it works until the goal is met, and it posts one thing, its outcome.
-That posting _is_ the event. It does not advance the ticket, does not write Linear, does not
-dispatch the next phase. Everything that happens next is a separate subscriber. This document is the
-list of those subscribers. Ratified as **ADR-029**; the measured evidence behind every claim is in
-`thoughts/shared/research/2026-08-13-event-automation-catalog.md`.
+The binding contract between **events** and **actions** in the Catalyst fleet: which events the coordination plane needs, what exactly one bounded automation does when each lands, and — for every one of them — which component **refuses the second delivery**. A phase is a goal-loop: it is given a goal and a bounded context, it works until the goal is met, and it posts one thing, its outcome. That posting _is_ the event. It does not advance the ticket, does not write Linear, does not dispatch the next phase. Everything that happens next is a separate subscriber. This document is the list of those subscribers. Ratified as **ADR-029**; the measured evidence behind every claim is in `thoughts/shared/research/2026-08-13-event-automation-catalog.md`.
 
 ## 2. Reading this document — "Who says no?"
 
-Every automation row answers one question in plain language: **when the same trigger is delivered
-twice, which component refuses the second attempt?**
+Every automation row answers one question in plain language: **when the same trigger is delivered twice, which component refuses the second attempt?**
 
-This is not a hypothetical. The event log is read through a byte cursor, and a process that crashes
-between acting and advancing its cursor **re-reads the same event on restart** — the reaper does
-exactly this on every boot (`execution-core/reaper.mjs:938-989 bootReplay`). Redelivery is normal
-operation, not an incident. So every subscriber must be safe when its trigger arrives twice, and the
-thing that makes it safe has to be a component that can _say no_.
+This is not a hypothetical. The event log is read through a byte cursor, and a process that crashes between acting and advancing its cursor **re-reads the same event on restart** — the reaper does exactly this on every boot (`execution-core/reaper.mjs:938-989 bootReplay`). Redelivery is normal operation, not an incident. So every subscriber must be safe when its trigger arrives twice, and the thing that makes it safe has to be a component that can _say no_.
 
 Not everything can. The distinction is mechanical:
 
@@ -34,23 +22,15 @@ Not everything can. The distinction is mechanical:
 
 Three phrases recur in the tables and mean specific things:
 
-- **⚠ HOST-LOCAL** — the refusing component exists, but only on one machine (a marker file, an
-  in-memory `Set`). It is correct for a single host and is a correctness hole the moment a second
-  worker node receives the same webhook.
-- **a guard we wrote** — an `if` statement in our own code. It is advisory. It refuses a duplicate
-  only when both attempts run in the same process, in a known order. Per ADR-0027 §I3, naming a
-  guard here is the same as naming nothing.
-- **convergent** — the action has no second effect worth refusing (removing an already-removed
-  worktree, fetching an already-current checkout). Correctly, nothing needs to say no.
+- **⚠ HOST-LOCAL** — the refusing component exists, but only on one machine (a marker file, an in-memory `Set`). It is correct for a single host and is a correctness hole the moment a second worker node receives the same webhook.
+- **a guard we wrote** — an `if` statement in our own code. It is advisory. It refuses a duplicate only when both attempts run in the same process, in a known order. Per ADR-0027 §I3, naming a guard here is the same as naming nothing.
+- **convergent** — the action has no second effect worth refusing (removing an already-removed worktree, fetching an already-current checkout). Correctly, nothing needs to say no.
 
-The phrase **"exclusion store"** is deliberately not used anywhere in this document. It obscured the
-question. Ask "who says no?" instead.
+The phrase **"exclusion store"** is deliberately not used anywhere in this document. It obscured the question. Ask "who says no?" instead.
 
 ## 2a. Notation — what `<P>` and `<T>` mean
 
-Event names in this document are written as **templates**. Angle-bracket segments are placeholders
-substituted at emit time; everything else is literal. `phase.<P>.complete.<T>` is not an event name
-— it is the shape of a family of them.
+Event names in this document are written as **templates**. Angle-bracket segments are placeholders substituted at emit time; everything else is literal. `phase.<P>.complete.<T>` is not an event name — it is the shape of a family of them.
 
 | placeholder           | stands for                     | substituted with                                                                 | example     |
 | --------------------- | ------------------------------ | -------------------------------------------------------------------------------- | ----------- |
@@ -63,20 +43,13 @@ substituted at emit time; everything else is literal. `phase.<P>.complete.<T>` i
 | `<check_suite_id>`    | GitHub check-suite id          | an integer                                                                       | `48219…`    |
 | `<target>`            | the phase being dispatched TO  | a phase name; rides `payload.target_phase`, **not** the event name               | `research`  |
 
-**Legacy spellings.** Earlier sections and sibling docs use `<TICKET>` for `<T>`, `<phase>`/`<name>`
-for `<P>`, and `<suite_id>` for `<check_suite_id>`. They mean the same thing; `<P>`/`<T>` are the
-form to use in new writing.
+**Legacy spellings.** Earlier sections and sibling docs use `<TICKET>` for `<T>`, `<phase>`/`<name>` for `<P>`, and `<suite_id>` for `<check_suite_id>`. They mean the same thing; `<P>`/`<T>` are the form to use in new writing.
 
-**`<P>` is not always a real phase.** Three names occupy the phase slot without being pipeline
-phases — `dispatch`, `scheduler`, and `advance` (`namespace-contract.mjs`
-`INTENTIONAL_PHASE_SLOT_EXCEPTIONS`). `phase.advance.applied.<T>` is an _audit_ record about the
-FSM, not a phase named "advance". Only `dispatch` produces a name matching the routing pattern, and
-its real phase rides `payload.target_phase`.
+**`<P>` is not always a real phase.** Three names occupy the phase slot without being pipeline phases — `dispatch`, `scheduler`, and `advance` (`namespace-contract.mjs` `INTENTIONAL_PHASE_SLOT_EXCEPTIONS`). `phase.advance.applied.<T>` is an _audit_ record about the FSM, not a phase named "advance". Only `dispatch` produces a name matching the routing pattern, and its real phase rides `payload.target_phase`.
 
 ### A real event, annotated
 
-Taken verbatim from `mini:~/catalyst/events/2026-08.jsonl` — this is the substitution of
-`phase.<P>.complete.<T>` with `<P>` = `plan` and `<T>` = `CTC-324`:
+Taken verbatim from `mini:~/catalyst/events/2026-08.jsonl` — this is the substitution of `phase.<P>.complete.<T>` with `<P>` = `plan` and `<T>` = `CTC-324`:
 
 ```jsonc
 {
@@ -105,9 +78,7 @@ Taken verbatim from `mini:~/catalyst/events/2026-08.jsonl` — this is the subst
 }
 ```
 
-⛔ **Match on the parsed name, never a substring grep of the log.** A bare `grep` for a name also
-matches commit messages and Linear descriptions that merely quote it — measured: 46 raw matches for
-`phase.advance.applied`, of which **all 46 were false positives**. Parse the JSON.
+⛔ **Match on the parsed name, never a substring grep of the log.** A bare `grep` for a name also matches commit messages and Linear descriptions that merely quote it — measured: 46 raw matches for `phase.advance.applied`, of which **all 46 were false positives**. Parse the JSON.
 
 ⛔ **And read the name through the shared boundary — never hand-roll the ladder:**
 
@@ -116,18 +87,11 @@ import { getEventName } from "../lib/event-name.mjs"; // CTL-1834: THE boundary
 const name = getEventName(event); // v1 `event` -> v2 attributes["event.name"] -> v3 `name`
 ```
 
-A hand-rolled two-key read (`attributes?.["event.name"] ?? event`) misses **v3** entirely and
-returns the wrong value for an empty-string key. That is exactly the drift CTL-1834 removed by
-folding every read point onto one resolver, so a fourth envelope shape is a one-line change in one
-file instead of a hunt across five.
+A hand-rolled two-key read (`attributes?.["event.name"] ?? event`) misses **v3** entirely and returns the wrong value for an empty-string key. That is exactly the drift CTL-1834 removed by folding every read point onto one resolver, so a fourth envelope shape is a one-line change in one file instead of a hunt across five.
 
-An `attributes`-only reader misses every v1 event — **19,914 of them in 2026-08 on mini**, including
-the whole `reap-requested` family, which is the fleet's most active actuator (§4.1). This is the
-single easiest way to produce a confident, wrong zero.
+An `attributes`-only reader misses every v1 event — **19,914 of them in 2026-08 on mini**, including the whole `reap-requested` family, which is the fleet's most active actuator (§4.1). This is the single easiest way to produce a confident, wrong zero.
 
-`body.payload` is **stripped off-machine** by `otel-forward`, so anything a remote consumer needs
-must be promoted to an attribute — and v1 events have no attributes at all, so they carry nothing
-off-host but their name and timestamp.
+`body.payload` is **stripped off-machine** by `otel-forward`, so anything a remote consumer needs must be promoted to an attribute — and v1 events have no attributes at all, so they carry nothing off-host but their name and timestamp.
 
 ## 3. The principles
 
@@ -146,20 +110,12 @@ off-host but their name and timestamp.
 
 **The two lease traps.** Both recorded 2026-08-12, both load-bearing:
 
-1. **A LEASE IS NOT A HEARTBEAT.** "Still alive" is precisely the inference being removed. Renew on
-   **visible progress** — a commit count, a turn count, a phase artifact — so a wedged agent loses
-   its claim while its process is perfectly healthy. Renew on time and you have rebuilt `kill -0`
-   with extra steps.
-2. **A LEASE NEEDS SOMETHING THAT CAN REFUSE.** An append-only log cannot reject a write, so "the
-   claim is just an event" reproduces the bug in a new place.
+1. **A LEASE IS NOT A HEARTBEAT.** "Still alive" is precisely the inference being removed. Renew on **visible progress** — a commit count, a turn count, a phase artifact — so a wedged agent loses its claim while its process is perfectly healthy. Renew on time and you have rebuilt `kill -0` with extra steps.
+2. **A LEASE NEEDS SOMETHING THAT CAN REFUSE.** An append-only log cannot reject a write, so "the claim is just an event" reproduces the bug in a new place.
 
-**THE LOG DECLARES; IT CANNOT EXCLUDE.** Those two roles are kept separate in every row below: the
-log carries the declaration, and a different component says no.
+**THE LOG DECLARES; IT CANNOT EXCLUDE.** Those two roles are kept separate in every row below: the log carries the declaration, and a different component says no.
 
-**Governing invariants** —
-`catalyst-cloud/docs/adr/0027-reliability-initiative-invariants-and-acceptance.md` (accepted
-2026-08-12; **a different repository's numbering** — this repo's `docs/adrs.md` ADR-027 is "Browser
-automation stays local", unrelated; always cite the cloud ADR by repo + path):
+**Governing invariants** — `catalyst-cloud/docs/adr/0027-reliability-initiative-invariants-and-acceptance.md` (accepted 2026-08-12; **a different repository's numbering** — this repo's `docs/adrs.md` ADR-027 is "Browser automation stays local", unrelated; always cite the cloud ADR by repo + path):
 
 | #       | Invariant                                                                                           |
 | ------- | --------------------------------------------------------------------------------------------------- |
@@ -181,30 +137,19 @@ automation stays local", unrelated; always cite the cloud ADR by repo + path):
 
 > "linear as the trigger not the lock sounds correct to me"
 
-The Linear stage change **starts** an automation. The **lease** is what refuses a duplicate. Linear
-is never asked to refuse anything, and no design may propose it as the refusal point. The direct
-consequence — worked through, not around — is §6.3: two hosts receiving the same stage-change
-webhook both pass the trigger, so the lease is acquired **after** the trigger and **before** any
-side effect, and exactly one wins.
+The Linear stage change **starts** an automation. The **lease** is what refuses a duplicate. Linear is never asked to refuse anything, and no design may propose it as the refusal point. The direct consequence — worked through, not around — is §6.3: two hosts receiving the same stage-change webhook both pass the trigger, so the lease is acquired **after** the trigger and **before** any side effect, and exactly one wins.
 
 ## 4. The event catalog — the coordination set
 
-The full census is 117 rows over 304 distinct event names, of which **63 have no subscriber at all**
-(`thoughts/shared/research/2026-08-13-event-automation-catalog.md` §3). This section lists only the
-**coordination set**: events some component acts on, or must act on in the target design. Everything
-else is telemetry — its loss costs visibility, never correctness.
+The full census is 117 rows over 304 distinct event names, of which **63 have no subscriber at all** (`thoughts/shared/research/2026-08-13-event-automation-catalog.md` §3). This section lists only the **coordination set**: events some component acts on, or must act on in the target design. Everything else is telemetry — its loss costs visibility, never correctness.
 
-Volume context: two telemetry names (`catalyst.linear.read` 833,499 and `recovery.tick` 557,069) are
-**56% of all traffic**; seven names are 71%. Exactly one of those seven is coordination. The log is
-overwhelmingly a telemetry firehose with a thin coordination lane threaded through it.
+Volume context: two telemetry names (`catalyst.linear.read` 833,499 and `recovery.tick` 557,069) are **56% of all traffic**; seven names are 71%. Exactly one of those seven is coordination. The log is overwhelmingly a telemetry firehose with a thin coordination lane threaded through it.
 
 ### 4.1 Phase declarations — the holder speaks
 
-Emitted by `phase-agent-emit-complete:315` (name) / `:402-427` (append), called from every
-`plugins/dev/skills/phase-*/SKILL.md` terminal block.
+Emitted by `phase-agent-emit-complete:315` (name) / `:402-427` (append), called from every `plugins/dev/skills/phase-*/SKILL.md` terminal block.
 
-Every name below is a **template** — see §2a. `<P>` is the phase, `<T>` is the ticket. The example
-column shows a real name observed in `mini:~/catalyst/events/2026-08.jsonl`, not an invented one.
+Every name below is a **template** — see §2a. `<P>` is the phase, `<T>` is the ticket. The example column shows a real name observed in `mini:~/catalyst/events/2026-08.jsonl`, not an invented one.
 
 | event (template)                             | example (real, from the log)           | meaning                                                                                                                                                                                                                                                                    | drives anything today?                                                                                                                                                                                                              |
 | -------------------------------------------- | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -220,8 +165,7 @@ column shows a real name observed in `mini:~/catalyst/events/2026-08.jsonl`, not
 
 ### ⚠ Observed while sampling: the reap echoes are almost all failures
 
-Measured on mini, 2026-08, all `reap-complete` / `reap-failed` echoes — **330 events, 5 distinct
-names**:
+Measured on mini, 2026-08, all `reap-complete` / `reap-failed` echoes — **330 events, 5 distinct names**:
 
 | name                              | count |
 | --------------------------------- | ----: |
@@ -231,52 +175,29 @@ names**:
 | `phase.abort.reap-complete`       |     2 |
 | `phase.predecessor.reap-complete` |     1 |
 
-**The abort path reports failure 320 times and success twice**, against 14,568 `terminal`
-reap-requests that produce only 4 completes. Two readings are possible and this sample cannot
-separate them: the reaper is genuinely failing to abort, or the echo is emitted on a benign
-already-gone condition. Either way it is unexamined — nothing consumes `reap-failed`, so a 99%
-failure rate on an actuator path has been accumulating silently. Recorded as an observation with its
-numbers, **not** as a diagnosis; it needs its own ticket.
+**The abort path reports failure 320 times and success twice**, against 14,568 `terminal` reap-requests that produce only 4 completes. Two readings are possible and this sample cannot separate them: the reaper is genuinely failing to abort, or the echo is emitted on a benign already-gone condition. Either way it is unexamined — nothing consumes `reap-failed`, so a 99% failure rate on an actuator path has been accumulating silently. Recorded as an observation with its numbers, **not** as a diagnosis; it needs its own ticket.
 
 ### ⛔ Two envelope shapes coexist, and the reap family is the impoverished one
 
-**Do not assume every event has attributes.** Measured on mini, 2026-08, over all `reap-requested`
-events: **19,914 are v1 and 12 are v2.** A v1 event is literally two keys —
+**Do not assume every event has attributes.** Measured on mini, 2026-08, over all `reap-requested` events: **19,914 are v1 and 12 are v2.** A v1 event is literally two keys —
 
 ```json
 { "ts": "2026-08-01T00:04:42Z", "event": "phase.reconcile.reap-requested" }
 ```
 
-— no `attributes`, no `resource`, no `body`, **and no ticket anywhere**. Verified: **zero**
-`reap-requested` names carry a ticket suffix.
+— no `attributes`, no `resource`, no `body`, **and no ticket anywhere**. Verified: **zero** `reap-requested` names carry a ticket suffix.
 
 Three consequences, all load-bearing:
 
-1. **A consumer matching only on `attributes["event.name"]` silently sees none of them.** That is
-   19,914 events — including the single most active actuator in the fleet — invisible to an
-   attribute-only subscriber. Any filter must resolve the name through the shared boundary
-   (`lib/event-name.mjs`'s `getEventName`, CTL-1834) — not a hand-rolled two-key read, which
-   misses v3.
-2. **`<T>` is genuinely absent here**, so the reaper cannot learn the ticket from the event. It
-   doesn't try: the event is a **contentless wake**, and the reaper then makes its own authoritative
-   read of the worker directories. That is "let the event wake the scan" working correctly in
-   production — and it is why this row is the reference implementation.
-3. The declaration families (`phase.<P>.complete.<T>` and siblings) **are** v2 and do carry
-   `event.entity`, `event.action`, and `linear.issue.identifier` as attributes, so for those a
-   subscriber matches on attributes and never splits the name. The rule is per-family, not global.
+1. **A consumer matching only on `attributes["event.name"]` silently sees none of them.** That is 19,914 events — including the single most active actuator in the fleet — invisible to an attribute-only subscriber. Any filter must resolve the name through the shared boundary (`lib/event-name.mjs`'s `getEventName`, CTL-1834) — not a hand-rolled two-key read, which misses v3.
+2. **`<T>` is genuinely absent here**, so the reaper cannot learn the ticket from the event. It doesn't try: the event is a **contentless wake**, and the reaper then makes its own authoritative read of the worker directories. That is "let the event wake the scan" working correctly in production — and it is why this row is the reference implementation.
+3. The declaration families (`phase.<P>.complete.<T>` and siblings) **are** v2 and do carry `event.entity`, `event.action`, and `linear.issue.identifier` as attributes, so for those a subscriber matches on attributes and never splits the name. The rule is per-family, not global.
 
 ### 4.1a ⛔ Where does the ticket live? Three conventions, one log
 
-The `<T>` in `phase.<P>.complete.<T>` is **in the event name**. The ticket in
-`linear.issue.state_changed` is **not** — it rides `attributes["linear.issue.identifier"]`. Both are
-our choices, and they disagree.
+The `<T>` in `phase.<P>.complete.<T>` is **in the event name**. The ticket in `linear.issue.state_changed` is **not** — it rides `attributes["linear.issue.identifier"]`. Both are our choices, and they disagree.
 
-**Correcting a natural assumption:** `linear.issue.state_changed` is **not** Linear's format passed
-through. Linear sends `{action:"update", type:"Issue", data:{…}, updatedFrom:{…}}` and has no such
-event name. We synthesise it — `linear-webhook-events.ts:181` derives `state_changed` by testing
-`updatedFromKeys.includes("stateId")`, with siblings at `:182-183` for priority and assignee. So we
-are not preserving a provider shape we do not control; we picked this shape, and we picked a
-different one for phases.
+**Correcting a natural assumption:** `linear.issue.state_changed` is **not** Linear's format passed through. Linear sends `{action:"update", type:"Issue", data:{…}, updatedFrom:{…}}` and has no such event name. We synthesise it — `linear-webhook-events.ts:181` derives `state_changed` by testing `updatedFromKeys.includes("stateId")`, with siblings at `:182-183` for priority and assignee. So we are not preserving a provider shape we do not control; we picked this shape, and we picked a different one for phases.
 
 **The cost, measured on mini, 2026-08:**
 
@@ -286,10 +207,7 @@ different one for phases.
 | distinct names with `<T>` collapsed    |   **242** |
 | names that are purely ticket-inflation | **1,225** |
 
-**84% of this log's name cardinality is ticket identifiers.** Five families embed them — `phase`
-1,066 · `worker` 110 · `fence` 57 · `linear` 51 · `ticket` 25 — so the inconsistency is not
-Catalyst-vs-provider, it is _inside_ the Linear family too: `linear.issue.state_changed` is clean
-while `linear.state.write.<T>` is inflated.
+**84% of this log's name cardinality is ticket identifiers.** Five families embed them — `phase` 1,066 · `worker` 110 · `fence` 57 · `linear` 51 · `ticket` 25 — so the inconsistency is not Catalyst-vs-provider, it is _inside_ the Linear family too: `linear.issue.state_changed` is clean while `linear.state.write.<T>` is inflated.
 
 Three conventions therefore coexist, and a consumer must handle all three:
 
@@ -299,27 +217,15 @@ Three conventions therefore coexist, and a consumer must handle all three:
 | **in an attribute** | `linear.issue.state_changed`    | `linear.issue.identifier`             |
 | **absent entirely** | `phase.terminal.reap-requested` | nowhere — the consumer re-reads state |
 
-**Target: the ticket is a field, never a name segment.** A name should be low-cardinality so it can
-be a metric dimension and a stable subscription key; an identifier belongs in an attribute. The
-attribute already exists on every v2 event, so for those families this is a subtraction, not an
-addition.
+**Target: the ticket is a field, never a name segment.** A name should be low-cardinality so it can be a metric dimension and a stable subscription key; an identifier belongs in an attribute. The attribute already exists on every v2 event, so for those families this is a subtraction, not an addition.
 
-⚠ **It is load-bearing today, not cosmetic.** `PHASE_EVENT_PATTERN`
-(`broker/namespace-contract.mjs:85`) matches `phase.<name>.<status>.<TICKET>` and the broker's phase
-routing depends on that suffix — as does `filter.wake.<ORCH_NAME>`. The mitigating fact is that this
-routing is **inert** (zero interests exist under execution-core, §6.4), so the migration cost is far
-lower than the coupling suggests. Sequence it with the subscription work rather than alone.
+⚠ **It is load-bearing today, not cosmetic.** `PHASE_EVENT_PATTERN` (`broker/namespace-contract.mjs:85`) matches `phase.<name>.<status>.<TICKET>` and the broker's phase routing depends on that suffix — as does `filter.wake.<ORCH_NAME>`. The mitigating fact is that this routing is **inert** (zero interests exist under execution-core, §6.4), so the migration cost is far lower than the coupling suggests. Sequence it with the subscription work rather than alone.
 
 ### 4.1b ⛔ The redundancy is near-total — and the 531-event exception is live data loss
 
-§4.1a's census read the name as `attributes["event.name"] ?? event`. That is a **two-key read, and
-there are three envelope shapes.** The third is `defaultEmit` at
-`execution-core/stale-pr-rescue-timer.mjs:444-447`, which writes
-`JSON.stringify({ name, ...payload, ts })` — key `name`, **no `attributes` object at all.**
+§4.1a's census read the name as `attributes["event.name"] ?? event`. That is a **two-key read, and there are three envelope shapes.** The third is `defaultEmit` at `execution-core/stale-pr-rescue-timer.mjs:444-447`, which writes `JSON.stringify({ name, ...payload, ts })` — key `name`, **no `attributes` object at all.**
 
-Re-measured on mini (`2026-08.jsonl`, 1,117,131 lines) reading
-`attributes["event.name"] ?? event ?? name`. Positive control on the same pass: `recovery.tick` =
-**326,940**, so a zero below is absence, not a broken instrument.
+Re-measured on mini (`2026-08.jsonl`, 1,117,131 lines) reading `attributes["event.name"] ?? event ?? name`. Positive control on the same pass: `recovery.tick` = **326,940**, so a zero below is absence, not a broken instrument.
 
 | envelope | name key                   |         count | producer shape                                     |
 | -------- | -------------------------- | ------------: | -------------------------------------------------- |
@@ -327,8 +233,7 @@ Re-measured on mini (`2026-08.jsonl`, 1,117,131 lines) reading
 | v1       | `event`                    |    **25,013** | bash `catalyst-state.sh event` — `{ts,event}` only |
 | v3       | `name`                     |       **532** | flat `{name,...payload,ts}` — **no attributes**    |
 
-The corrected cardinality is materially the same as §4.1a's — the v3 shape adds 9 names — so **that
-table stands.** What changes is the redundancy claim.
+The corrected cardinality is materially the same as §4.1a's — the v3 shape adds 9 names — so **that table stands.** What changes is the redundancy claim.
 
 | metric                                 | §4.1a (2-key) | corrected (3-key) |
 | -------------------------------------- | ------------: | ----------------: |
@@ -347,74 +252,30 @@ table stands.** What changes is the redundancy claim.
 | `ticket.*` |                **73** |                          73 |                           0 |
 | **total**  |            **16,346** |                  **15,815** |                     **531** |
 
-**96.8% of the strip is a pure subtraction.** §4.1a's per-family `phase` count of 2,953 was the
-attribute-carrying _subset_, not the family total.
+**96.8% of the strip is a pure subtraction.** §4.1a's per-family `phase` count of 2,953 was the attribute-carrying _subset_, not the family total.
 
-⛔ **The 531 are being destroyed off-machine today, before any migration.** They are
-`phase.rescue.escalated.<T>` (523), `.dispatched.<T>` (5), `.dispatch-failed.<T>` (3).
-⚠ **Mechanism corrected 2026-08-13 (CTL-1817, PR #3325 round-1 review).** An earlier revision of
-this paragraph said a v3 event "forwards with an empty body and an empty attribute set", reasoning
-from the OTLP mapper (`otel-forward/lib/destinations/otlp.ts`), which builds the body from
-`ev.body?.message ?? ev.attributes?.["event.name"] ?? ""` and the attributes from
-`ev.attributes ?? {}` — neither of which a v3 event satisfies. **That is not what happens: a v3 event
-never reaches the mapper.**
+⛔ **The 531 are being destroyed off-machine today, before any migration.** They are `phase.rescue.escalated.<T>` (523), `.dispatched.<T>` (5), `.dispatch-failed.<T>` (3). ⚠ **Mechanism corrected 2026-08-13 (CTL-1817, PR #3325 round-1 review).** An earlier revision of this paragraph said a v3 event "forwards with an empty body and an empty attribute set", reasoning from the OTLP mapper (`otel-forward/lib/destinations/otlp.ts`), which builds the body from `ev.body?.message ?? ev.attributes?.["event.name"] ?? ""` and the attributes from `ev.attributes ?? {}` — neither of which a v3 event satisfies. **That is not what happens: a v3 event never reaches the mapper.**
 
-**One gate accounts for all 531:** `otel-forward/lib/tail.ts` `shouldForward` accepts only
-`attributes` | a string `event` | pino (numeric `level` + string `msg`). A v3 line matches none, so
-`readNewLines` never hands it to `processLine` — it is filtered out **at the tailer** and never read
-into the pipeline at all.
+**One gate accounts for all 531:** `otel-forward/lib/tail.ts` `shouldForward` accepts only `attributes` | a string `event` | pino (numeric `level` + string `msg`). A v3 line matches none, so `readNewLines` never hands it to `processLine` — it is filtered out **at the tailer** and never read into the pipeline at all.
 
-(A *second*, independent guard exists downstream — `otel-forward/index.ts` `processLine` drops any
-record with no `attributes` — but it is **unreachable for v3** and discards none of the 531. It
-governs only records that already passed the tailer. It is named here because it is the other place
-a record can vanish without a trace, **not** because it is a second step in this loss.)
+(A *second*, independent guard exists downstream — `otel-forward/index.ts` `processLine` drops any record with no `attributes` — but it is **unreachable for v3** and discards none of the 531. It governs only records that already passed the tailer. It is named here because it is the other place a record can vanish without a trace, **not** because it is a second step in this loss.)
 
-So the 531 do not arrive off-machine degraded — **they never leave the host.** The loss is total, and
-it was invisible because an unrecognized line is indistinguishable from no line, which is why a month
-of it looked like silence rather than like corruption. This is a standing bug the migration merely
-surfaced, not a migration cost to be weighed — and it is worse than the original text claimed.
+So the 531 do not arrive off-machine degraded — **they never leave the host.** The loss is total, and it was invisible because an unrecognized line is indistinguishable from no line, which is why a month of it looked like silence rather than like corruption. This is a standing bug the migration merely surfaced, not a migration cost to be weighed — and it is worse than the original text claimed.
 
-The lesson generalizes past this one shape: **reasoning from the mapper alone skips the filters in
-front of it.** A detector placed at the mapper cannot observe what a filter already threw away —
-which is exactly the mistake the first fix made.
+The lesson generalizes past this one shape: **reasoning from the mapper alone skips the filters in front of it.** A detector placed at the mapper cannot observe what a filter already threw away — which is exactly the mistake the first fix made.
 
-✅ **Status of the fix: both gates now record their drops** (CTL-1817, PR #3325, merged 2026-08-13).
-`noteUnrecognizedLine` reports at the tailer and a `skippedNoAttributes` counter reports at
-`processLine`; both count every occurrence and warn sparsely (once per distinct event name, then on
-exponentially-spaced totals), on the pino `~/catalyst/otel-forward.log` that Alloy ships
-**independently of otel-forward's own OTLP egress** — an alarm riding the pipe it measures reads
-clean during exactly the outage it exists to detect. Both producers of the v3 shape were fixed in the
-same PR, so the counters should sit at zero; any non-zero value is itself the alarm.
+✅ **Status of the fix: both gates now record their drops** (CTL-1817, PR #3325, merged 2026-08-13). `noteUnrecognizedLine` reports at the tailer and a `skippedNoAttributes` counter reports at `processLine`; both count every occurrence and warn sparsely (once per distinct event name, then on exponentially-spaced totals), on the pino `~/catalyst/otel-forward.log` that Alloy ships **independently of otel-forward's own OTLP egress** — an alarm riding the pipe it measures reads clean during exactly the outage it exists to detect. Both producers of the v3 shape were fixed in the same PR, so the counters should sit at zero; any non-zero value is itself the alarm.
 
-✅ **The one caveat that remained is now closed** (CTL-1823, merged 2026-08-13). What it said, and
-what changed:
+✅ **The one caveat that remained is now closed** (CTL-1823, merged 2026-08-13). What it said, and what changed:
 
-- **The defect, as recorded here on 2026-08-13:** the separate *mapper*-level degenerate counter
-  (`degenerateRecordTotal`) was incremented inside `buildOtlpPayload`, which runs once per send
-  **attempt** — so under OTLP retries or a DLQ replay it counted the same record more than once.
-  It was an attempt count, not a record count, precisely when the backend was in trouble.
-- **The fix:** counting moved out of the serializer entirely — `buildOtlpPayload` is now pure
-  mapping and does no accounting at all. The count is taken once per batch at `OtlpSender.flush`
-  entry, via `noteDegenerateRecords` (`otel-forward/lib/destinations/otlp.ts`). That is the one
-  point on the path at which each record is seen exactly once: `index.ts`'s `flushDest` hands
-  `buffer.splice(0)` to a single `flush()`, and both the retry loop and the DLQ drain sit
-  downstream of it.
-- **Current semantics — RECORDS, not attempts:** `degenerateRecordTotal()` counts degenerate
-  records **this process accepted for forwarding**, one increment per record. It includes records
-  subsequently aged out or terminally dropped (the call is deliberately ahead of the age
-  partition), and it excludes a DLQ entry written by a previous process and drained by this one —
-  that record was counted by the process that accepted it. Undercounting a prior process's backlog
-  is the deliberate fail direction for a detector whose job is to sit at zero; the failure being
-  fixed was inflation.
-- **Unchanged:** the two **gate** counters above sit on the tail path, run once per line, and never
-  had this defect. That asymmetry is intended and was not touched.
+- **The defect, as recorded here on 2026-08-13:** the separate *mapper*-level degenerate counter (`degenerateRecordTotal`) was incremented inside `buildOtlpPayload`, which runs once per send **attempt** — so under OTLP retries or a DLQ replay it counted the same record more than once. It was an attempt count, not a record count, precisely when the backend was in trouble.
+- **The fix:** counting moved out of the serializer entirely — `buildOtlpPayload` is now pure mapping and does no accounting at all. The count is taken once per batch at `OtlpSender.flush` entry, via `noteDegenerateRecords` (`otel-forward/lib/destinations/otlp.ts`). That is the one point on the path at which each record is seen exactly once: `index.ts`'s `flushDest` hands `buffer.splice(0)` to a single `flush()`, and both the retry loop and the DLQ drain sit downstream of it.
+- **Current semantics — RECORDS, not attempts:** `degenerateRecordTotal()` counts degenerate records **this process accepted for forwarding**, one increment per record. It includes records subsequently aged out or terminally dropped (the call is deliberately ahead of the age partition), and it excludes a DLQ entry written by a previous process and drained by this one — that record was counted by the process that accepted it. Undercounting a prior process's backlog is the deliberate fail direction for a detector whose job is to sit at zero; the failure being fixed was inflation.
+- **Unchanged:** the two **gate** counters above sit on the tail path, run once per line, and never had this defect. That asymmetry is intended and was not touched.
 
-The same change routed the degenerate warning through the shared count-every/warn-sparsely gate
-(`otel-forward/lib/sparse-warn.ts`) with its own key budget, so a flood of degenerate shapes cannot
-exhaust the budget the two gate alarms above depend on.
+The same change routed the degenerate warning through the shared count-every/warn-sparsely gate (`otel-forward/lib/sparse-warn.ts`) with its own key budget, so a flood of degenerate shapes cannot exhaust the budget the two gate alarms above depend on.
 
-**Four producers put an identifier in the name and nowhere else.** All four must gain an attribute
-**before** any suffix is stripped, or the migration destroys information:
+**Four producers put an identifier in the name and nowhere else.** All four must gain an attribute **before** any suffix is stripped, or the migration destroys information:
 
 | producer                     | file:line                           | identifier     | live 2026-08       |
 | ---------------------------- | ----------------------------------- | -------------- | ------------------ |
@@ -423,14 +284,9 @@ exhaust the budget the two gate alarms above depend on.
 | `defaultAppendOperatorEvent` | `recovery.mjs:1512-1514`            | ticket         | 0 (source-present) |
 | `thoughts-sync-gate`         | `lib/thoughts-sync-gate.sh:102-106` | phase + ticket | 0 (source-present) |
 
-`defaultAppendOperatorEvent` sets `attributes: { "event.name": name }` and nothing else, so
-`escalation.label-unconfirmed.<T>` (`recovery.mjs:2717`) is name-only by construction. It is a
-generic seam shared with `beliefs.*` and `intent.ineffective` — the fix is a ticket/label parameter
-on the seam, not a special case at the call site. `thoughts-sync-gate.sh:104-106` passes only
-`--ts --severity --service --event-name`, so both identifiers exist exclusively in the name.
+`defaultAppendOperatorEvent` sets `attributes: { "event.name": name }` and nothing else, so `escalation.label-unconfirmed.<T>` (`recovery.mjs:2717`) is name-only by construction. It is a generic seam shared with `beliefs.*` and `intent.ineffective` — the fix is a ticket/label parameter on the seam, not a special case at the call site. `thoughts-sync-gate.sh:104-106` passes only `--ts --severity --service --event-name`, so both identifiers exist exclusively in the name.
 
-**Three inflation vectors the five-family census structurally could not see**, because they do not
-match `[A-Za-z]+-\d+`:
+**Three inflation vectors the five-family census structurally could not see**, because they do not match `[A-Za-z]+-\d+`:
 
 | vector       | name                                | file:line                             | already in an attribute                                  |
 | ------------ | ----------------------------------- | ------------------------------------- | -------------------------------------------------------- |
@@ -439,15 +295,11 @@ match `[A-Za-z]+-\d+`:
 | **date**     | `briefing.followup.complete.<DATE>` | `briefing-followup/writeback.sh:244`  | `event.label` (`:272`)                                   |
 | **mid-name** | `phase.<TICKET>.auto-rebased.clean` | `worktree-refresh-timer.mjs:116,:120` | ⛔ never fires — `daemon.mjs:2000-2006` passes no `emit` |
 
-Live team-key names on mini: `monitor.reconcile.failing.{ADV,SLI,CTC,CRM}`, one event each. The date
-vector is the worse defect of the two: it mints **one new name per day, forever**. The mid-name
-ticket is the one a suffix-stripping migration would silently survive — it must be fixed as part of
-the standard, not after it.
+Live team-key names on mini: `monitor.reconcile.failing.{ADV,SLI,CTC,CRM}`, one event each. The date vector is the worse defect of the two: it mints **one new name per day, forever**. The mid-name ticket is the one a suffix-stripping migration would silently survive — it must be fixed as part of the standard, not after it.
 
 ### 4.1c The target grammar — closed vocabulary in the name, identifiers in attributes
 
-**`<entity>.<subject>.<action>[.<qualifier>]` — every segment drawn from a closed set, never
-interpolated from data.**
+**`<entity>.<subject>.<action>[.<qualifier>]` — every segment drawn from a closed set, never interpolated from data.**
 
 | slot                   | rule                                                                                                                                                       |
 | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -455,8 +307,7 @@ interpolated from data.**
 | `<subject>`/`<action>` | closed, lowercase-hyphen. **Never** a ticket, team, host, PR number, date, session id, or orch id                                                          |
 | identifier             | **never a name segment.** Always an attribute                                                                                                              |
 
-**The identifier attribute contract** — every row but one is already emitted today, which is why
-this is a subtraction:
+**The identifier attribute contract** — every row but one is already emitted today, which is why this is a subtraction:
 
 | identifier           | attribute                                    | already emitted at                                                                                                         |
 | -------------------- | -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
@@ -491,30 +342,16 @@ ticket = attributes["linear.issue.identifier"]
       ?? <legacy: trailing name segment>                     // fallback, dated
 ```
 
-Never a regex on the name to obtain an identifier. `references/event-schema.md:777` already
-documents this shape for `filter.wake` (`event.name == "filter.wake" and event.label == "${id}"`) —
-the target was designed and the emitter simply never stamped `event.label`.
+Never a regex on the name to obtain an identifier. `references/event-schema.md:777` already documents this shape for `filter.wake` (`event.name == "filter.wake" and event.label == "${id}"`) — the target was designed and the emitter simply never stamped `event.label`.
 
 ### 4.1d The decision — **yes, but only Steps 0–1 are committed**
 
-**The governing property, stated first, because it is what killed the last migration of this
-shape.** ADR-018 Phase 1 died at 1-of-7 writers and left the tree carrying a shadow mechanism with
-one consumer, a verification CLI. **Every prefix of this plan must leave the system strictly better
-than today.** Step 0 and Step 1 satisfy that trivially — they are bug fixes and drift-deletion with
-zero wire changes and zero routing risk. Everything after them is a 1–6-line PR that is
-independently safe and independently abandonable.
+**The governing property, stated first, because it is what killed the last migration of this shape.** ADR-018 Phase 1 died at 1-of-7 writers and left the tree carrying a shadow mechanism with one consumer, a verification CLI. **Every prefix of this plan must leave the system strictly better than today.** Step 0 and Step 1 satisfy that trivially — they are bug fixes and drift-deletion with zero wire changes and zero routing risk. Everything after them is a 1–6-line PR that is independently safe and independently abandonable.
 
-**The argument that is not cardinality.** `event.name` is Loki _structured metadata_, not a stream
-label — 1,476 names cost zero index cardinality and zero Prometheus series. If the case rested on
-name count, the honest answer would be "don't bother." It does not. It rests on three measured
-facts:
+**The argument that is not cardinality.** `event.name` is Loki _structured metadata_, not a stream label — 1,476 names cost zero index cardinality and zero Prometheus series. If the case rested on name count, the honest answer would be "don't bother." It does not. It rests on three measured facts:
 
-1. **Live data loss** — 531 events/month **discarded before they leave the host**, all of them at
-   `tail.ts`'s `shouldForward` filter (see §4.1b — NOT forwarded degenerately at `otlp.ts`, the
-   original and corrected reading, and NOT at `index.ts`'s no-attributes drop, which these records
-   never reach). Fixed by Step 0 alone.
-2. **Proven grammar drift** — the phase grammar exists in **four** hand-copies, and one of them has
-   _already_ silently diverged in production:
+1. **Live data loss** — 531 events/month **discarded before they leave the host**, all of them at `tail.ts`'s `shouldForward` filter (see §4.1b — NOT forwarded degenerately at `otlp.ts`, the original and corrected reading, and NOT at `index.ts`'s no-attributes drop, which these records never reach). Fixed by Step 0 alone.
+2. **Proven grammar drift** — the phase grammar exists in **four** hand-copies, and one of them has _already_ silently diverged in production:
 
    | copy                         | file:line                             | status                                                                                                                                     |
    | ---------------------------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -523,19 +360,11 @@ facts:
    | `WORKFLOW_SUBSTEP_PATTERN`   | `broker/router.mjs:2100-2101`         | separate family, same ticket-suffix grammar re-typed                                                                                       |
    | `MONITOR_MERGE_COMPLETE_RE`  | `broker/plugin-refresh.mjs:457`       | fourth copy; found by only one of three audit lenses                                                                                       |
 
-   That comment is in-repo proof the duplication is a live defect **independent of the migration**.
-   Folding all four onto `namespace-contract` exports is worth doing even if nothing else ships.
+That comment is in-repo proof the duplication is a live defect **independent of the migration**. Folding all four onto `namespace-contract` exports is worth doing even if nothing else ships.
 
-3. **Unbounded growth** — dates and tickets mint names forever, and every _future_ name-keyed
-   surface inherits the defect at higher cost than closing the vocabulary now.
+3. **Unbounded growth** — dates and tickets mint names forever, and every _future_ name-keyed surface inherits the defect at higher cost than closing the vocabulary now.
 
-**The coupling, and why it is cheaper than §4.1a's warning implies.** `PHASE_EVENT_PATTERN`'s third
-capture group is `$`-anchored, so the ticket suffix is **mandatory for the match to occur at all**
-(`namespace-contract.mjs:86`); `phaseSlotOf` returns `null` without it (`:99-101`).
-`tryPhaseLifecycleRoute` then reads the ticket **only** from that capture (`router.mjs:2064`) and
-matches `reg.ticket !== ticket` (`:2070`) — but the same envelope has carried the ticket in
-`attributes` for 15,815 of 16,346 events all along. **The regex reads the name by historical
-accident, not by necessity.**
+**The coupling, and why it is cheaper than §4.1a's warning implies.** `PHASE_EVENT_PATTERN`'s third capture group is `$`-anchored, so the ticket suffix is **mandatory for the match to occur at all** (`namespace-contract.mjs:86`); `phaseSlotOf` returns `null` without it (`:99-101`). `tryPhaseLifecycleRoute` then reads the ticket **only** from that capture (`router.mjs:2064`) and matches `reg.ticket !== ticket` (`:2070`) — but the same envelope has carried the ticket in `attributes` for 15,815 of 16,346 events all along. **The regex reads the name by historical accident, not by necessity.**
 
 | fact                                                                                     | file:line                                                                                                           |
 | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
@@ -545,28 +374,15 @@ accident, not by necessity.**
 | Producers of the routable phase name — the complete set, must move in lockstep           | `recovery.mjs:482`, `sdk-run-phase-agent.mjs:616`, `phase-agent-emit-complete:315`, `lib/phase-emit-complete.sh:69` |
 | 59 `phase-agent-emit-complete` invocations across 10 SKILL.md files need **zero** edits  | they pass `--phase`/`--ticket`, never a name                                                                        |
 
-The real cost is not the 38 producer sites — they funnel into a handful of builders. It is the ~10
-consumers that reconstruct or parse the name (`event-scan.mjs:67,:244,:265,:291`,
-`recovery.mjs:4394,:4403`, `orch-monitor/lib/journey.mjs:35`,
-`orch-monitor/cli/lib/format.ts:523,:527,:541`, `orch-monitor/lib/otel-queries.ts:1471`) and the ~10
-SKILL.md `wait-for` filters pinned to the exact `filter.wake.<id>` string.
+The real cost is not the 38 producer sites — they funnel into a handful of builders. It is the ~10 consumers that reconstruct or parse the name (`event-scan.mjs:67,:244,:265,:291`, `recovery.mjs:4394,:4403`, `orch-monitor/lib/journey.mjs:35`, `orch-monitor/cli/lib/format.ts:523,:527,:541`, `orch-monitor/lib/otel-queries.ts:1471`) and the ~10 SKILL.md `wait-for` filters pinned to the exact `filter.wake.<id>` string.
 
-**Exit dates live in code, not in a review meeting.** `LEGACY_SUFFIX_DEADLINES` is frozen in
-`namespace-contract.mjs` and read by `catalyst doctor`: **INFO** before the date, **FAIL** after it.
-A dated table in a spec is what ADR-018 had. The deadline **forces the review**; deletion of the
-name-suffix fallback additionally requires its instrumented counter to read **zero** over a full
-retention window — because replay tooling over pre-migration months is exactly the false negative a
-calendar-only delete produces (tickets silently resolve to `null`, and a null ticket looks like a
-clean scan). **Deadline-forced, evidence-approved.**
+**Exit dates live in code, not in a review meeting.** `LEGACY_SUFFIX_DEADLINES` is frozen in `namespace-contract.mjs` and read by `catalyst doctor`: **INFO** before the date, **FAIL** after it. A dated table in a spec is what ADR-018 had. The deadline **forces the review**; deletion of the name-suffix fallback additionally requires its instrumented counter to read **zero** over a full retention window — because replay tooling over pre-migration months is exactly the false negative a calendar-only delete produces (tickets silently resolve to `null`, and a null ticket looks like a clean scan). **Deadline-forced, evidence-approved.**
 
-**The trigger that upgrades this from "worth it" to "urgent":** anyone proposing a name-keyed
-metric, alert, dashboard group-by, or routing surface. They should find the vocabulary already
-closed. Until then, Steps 0–1 are committed and the producer flips are opportunistic.
+**The trigger that upgrades this from "worth it" to "urgent":** anyone proposing a name-keyed metric, alert, dashboard group-by, or routing surface. They should find the vocabulary already closed. Until then, Steps 0–1 are committed and the producer flips are opportunistic.
 
 ### 4.1e Immutable history and out-of-repo dashboards
 
-**The log is append-only and is never rewritten.** Every past month keeps the old grammar forever,
-so "migrated" can only ever mean _producers emit the new form and consumers accept both._
+**The log is append-only and is never rewritten.** Every past month keeps the old grammar forever, so "migrated" can only ever mean _producers emit the new form and consumers accept both._
 
 | surface                                      | what the flip does to it                                                      | required mitigation                                                                                                             |
 | -------------------------------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
@@ -576,19 +392,9 @@ so "migrated" can only ever mean _producers emit the new form and consumers acce
 | `catalyst-otel/provisioning/alerting/*.yaml` | ⛔ **upsert-only; a malformed rule crash-loops the SHARED Grafana**           | validate every change against a throwaway Grafana first (AGENTS.md house rule). Needs a named owner before the phase flip       |
 | `catalyst-otel/dashboards/*`                 | name-keyed panels silently go flat                                            | `grep` over `dashboards/ provisioning/ docs/data-dictionary.md`, with a positive control that returns non-zero on the same pass |
 
-⚠ **The failure mode here is silence, not error.** An alert whose selector matches only the old
-name does not error when the new name arrives — **it goes quiet, and quiet reads as healthy.** That
-is the "stale copy reports healthy" pattern this fleet has hit four times. Every alert and connector
-touched must be shown to **fire on a synthetic new-form event** before the flip; "it did not error"
-is not evidence.
+⚠ **The failure mode here is silence, not error.** An alert whose selector matches only the old name does not error when the new name arrives — **it goes quiet, and quiet reads as healthy.** That is the "stale copy reports healthy" pattern this fleet has hit four times. Every alert and connector touched must be shown to **fire on a synthetic new-form event** before the flip; "it did not error" is not evidence.
 
-**What is out of scope, and why.** The reap family is v1 `{ts,event}` with **no ticket anywhere** —
-25,013 events on mini, zero of them ticket-suffixed. There is no suffix to strip. It is in scope for
-any _consumer_ rewrite (an attributes-only reader cannot see it at all — hence the three-key read
-above), and its v2 upgrade is a separate, optional piece of scope with real observability payoff and
-no relevance to name stripping. Likewise the ingest families are already correct:
-`webhook-handler.ts:172-418` and `linear-webhook-handler.ts:166-273` interpolate only the
-**action**, and `linear-webhook-events.ts:178-187` returns fixed strings.
+**What is out of scope, and why.** The reap family is v1 `{ts,event}` with **no ticket anywhere** — 25,013 events on mini, zero of them ticket-suffixed. There is no suffix to strip. It is in scope for any _consumer_ rewrite (an attributes-only reader cannot see it at all — hence the three-key read above), and its v2 upgrade is a separate, optional piece of scope with real observability payoff and no relevance to name stripping. Likewise the ingest families are already correct: `webhook-handler.ts:172-418` and `linear-webhook-handler.ts:166-273` interpolate only the **action**, and `linear-webhook-events.ts:178-187` returns fixed strings.
 
 ### 4.2 GitHub ingest — provider reality
 
@@ -632,10 +438,7 @@ Emitted by `orch-monitor/lib/webhook-events.ts` / `webhook-handler.ts:328`.
 
 ## 5. The automation table
 
-One row per subscriber. Rows **1–12** are carried over verbatim in intent from
-`thoughts/shared/research/2026-08-13-event-automation-catalog.md` §4 (numbering preserved so the
-carry-over is checkable); rows **13–18** are the Linear stage-transition subscribers Ryan identified
-as missing.
+One row per subscriber. Rows **1–12** are carried over verbatim in intent from `thoughts/shared/research/2026-08-13-event-automation-catalog.md` §4 (numbering preserved so the carry-over is checkable); rows **13–18** are the Linear stage-transition subscribers Ryan identified as missing.
 
 > ### ⭐ Rows 1 and 5 are NOT a duplicate
 >
@@ -672,31 +475,21 @@ as missing.
 
 **Two rules fall out of this table.**
 
-- **Rows 2, 3, 5, 9, 11, 14, 15 have no cross-host refusal today.** They are blocked on the lease
-  work, not on event-substrate work. Row 18 is the one Linear-writing row and needs no refusal at
-  all, which is the ruling made structural.
-- **The event log appears in exactly zero "who says no?" cells.** That is deliberate, and it is
-  trap 2. The log declares; something else excludes.
+- **Rows 2, 3, 5, 9, 11, 14, 15 have no cross-host refusal today.** They are blocked on the lease work, not on event-substrate work. Row 18 is the one Linear-writing row and needs no refusal at all, which is the ruling made structural.
+- **The event log appears in exactly zero "who says no?" cells.** That is deliberate, and it is trap 2. The log declares; something else excludes.
 
-**Row 18 is a move, not new code.** `applyPhaseStatus` is called inline today from the scheduler's
-advancement sweep (`scheduler.mjs:7315`, `:7456`, `:7993`) — and the source comment there already
-reads _"CTL-558: write the dispatched phase's mapped Linear status. Idempotent … never aborts the
-tick."_ Linear is **already** written last, as a projection. Row 18 names the fact and gives
-`phase.advance.applied` its first consumer.
+**Row 18 is a move, not new code.** `applyPhaseStatus` is called inline today from the scheduler's advancement sweep (`scheduler.mjs:7315`, `:7456`, `:7993`) — and the source comment there already reads _"CTL-558: write the dispatched phase's mapped Linear status. Idempotent … never aborts the tick."_ Linear is **already** written last, as a projection. Row 18 names the fact and gives `phase.advance.applied` its first consumer.
 
 ## 6. The stage-transition lookup table
 
 Two keying schemes, because the pipeline and the humans do not speak the same language.
 
-- **Machine edges** are keyed on `(declaration, phase)` — the holder's own assertion, delivered on
-  the local append-only log. This is I2, and it is the transport that is measured lossless.
-- **Human / foreign-agent intent** is keyed on `(class, to_state)` from the
-  `linear.issue.state_changed` webhook. Measured ~100% delivered for human authors.
+- **Machine edges** are keyed on `(declaration, phase)` — the holder's own assertion, delivered on the local append-only log. This is I2, and it is the transport that is measured lossless.
+- **Human / foreign-agent intent** is keyed on `(class, to_state)` from the `linear.issue.state_changed` webhook. Measured ~100% delivered for human authors.
 
 ### 6.1 Machine edges — trigger `phase.<P>.<status>.<T>`
 
-**TODAY** names what refuses now; **TARGET** is the cross-host lease. The advance-ledger's key is
-lease-shaped, so the swap changes no row.
+**TODAY** names what refuses now; **TARGET** is the cross-host lease. The advance-ledger's key is lease-shaped, so the swap changes no row.
 
 | #       | declaration                                                     | phase          | dispatch next                                                                               | Linear reflection                                                                         | who says no?                                                                                                                                      |
 | ------- | --------------------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -722,20 +515,13 @@ lease-shaped, so the swap changes no row.
 | **D19** | `needs-input`                                                   | any            | park                                                                                        | none                                                                                      | write-gated `removeLabel` on the human reply (daemon comment-wake)                                                                                |
 | **D20** | **lease expiry** (the store's own alarm — does not exist today) | any            | the ticket becomes claimable; re-dispatch the same phase. No probe, no `kill -0`.           | none                                                                                      | **the store itself**                                                                                                                              |
 
-**Defaults, so the table is a total function.** A declaration from a phase _behind_ the ticket's
-current phase → **discard**, emitting `phase.advance.held` with reason `stale-declaration` (a dead
-nonce cannot acquire). A declaration on a **terminal** ticket → discard; this subsumes the CTL-758
-backward-write guard (`linear-write.mjs:103-119`) as a table property rather than a special case. An
-**unknown** declaration status → freeze and go loud; never guess.
+**Defaults, so the table is a total function.** A declaration from a phase _behind_ the ticket's current phase → **discard**, emitting `phase.advance.held` with reason `stale-declaration` (a dead nonce cannot acquire). A declaration on a **terminal** ticket → discard; this subsumes the CTL-758 backward-write guard (`linear-write.mjs:103-119`) as a table property rather than a special case. An **unknown** declaration status → freeze and go loud; never guess.
 
-The scheduler's tick-scan **remains** as the convergence backstop, emitting
-`phase.advance.reconciled` — never `applied` — so that `reconciled / (applied + reconciled)` is the
-bus's own loss metric.
+The scheduler's tick-scan **remains** as the convergence backstop, emitting `phase.advance.reconciled` — never `applied` — so that `reconciled / (applied + reconciled)` is the bus's own loss metric.
 
 ### 6.2 PR-stage in-stage subscribers — no stage change occurs
 
-The `pr` / `monitor-merge` / `monitor-deploy` / `teardown` phases all sit at Linear state **PR**
-(§7). Everything that happens during that window is triggered by GitHub, not by a stage change.
+The `pr` / `monitor-merge` / `monitor-deploy` / `teardown` phases all sit at Linear state **PR** (§7). Everything that happens during that window is triggered by GitHub, not by a stage change.
 
 | #      | trigger                                                                                                                    | action (the whole automation)                                                                | who says no?                                                                                                                              |
 | ------ | -------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
@@ -746,24 +532,19 @@ The `pr` / `monitor-merge` / `monitor-deploy` / `teardown` phases all sit at Lin
 | **P5** | `github.pr.merged`                                                                                                         | **keep checkouts current** (§5 row 1)                                                        | idempotent fetch — convergent                                                                                                             |
 | **P6** | `github.pr.closed` unmerged                                                                                                | publish an escalation (review), release, no auto-dispatch                                        | the label-guard                                                                                                                           |
 
-**P4 and P5 are the §5 row-1/row-5 pair, restated at the PR altitude.** Two subscribers, one event,
-one job each.
+**P4 and P5 are the §5 row-1/row-5 pair, restated at the PR altitude.** Two subscribers, one event, one job each.
 
 ### 6.3 Human / foreign-agent intent — trigger `linear.issue.state_changed`
 
 Every intent gets **HONOUR**, **REWIND**, or **REFUSE-AND-EXPLAIN**. Never silence — rule 5.
 
-State classification is **declared configuration**, not inferred, and matches the measured write-set
-split (the pipeline wrote zero INTENT states in a full month):
+State classification is **declared configuration**, not inferred, and matches the measured write-set split (the pipeline wrote zero INTENT states in a full month):
 
-- **INTENT** = {Backlog, Todo, Triage, Canceled, Duplicate, Ready} — a human telling the system what
-  to do. Inbound changes here are **commands**.
-- **PROGRESS** = {Research, Plan, Implement, Validate, Remediate, PR} — the pipeline's own mirror.
-  Inbound changes here are either **our echo** or a **human rewind**.
+- **INTENT** = {Backlog, Todo, Triage, Canceled, Duplicate, Ready} — a human telling the system what to do. Inbound changes here are **commands**.
+- **PROGRESS** = {Research, Plan, Implement, Validate, Remediate, PR} — the pipeline's own mirror. Inbound changes here are either **our echo** or a **human rewind**.
 - **SHARED** = {Done}.
 - Anything else → H12, freeze and go loud.
-- `Ready` is **archived** (§7a.1 R3) and leaves the INTENT set once the archive lands; until then H1
-  treats it as Todo-equivalent, **loudly**.
+- `Ready` is **archived** (§7a.1 R3) and leaves the INTENT set once the archive lands; until then H1 treats it as Todo-equivalent, **loudly**.
 
 > ### ⭐ 2026-08-13 — PREEMPT is the uniform answer for every in-flight row (§7a.7 R1)
 >
@@ -800,42 +581,19 @@ split (the pipeline wrote zero INTENT states in a full month):
 | **H12** | any state not in the declared partition                           | —          | **freeze + go loud**            | no action; emit `linear.state.unclassified`; label `unknown-state` and raise an ask                                                                          | never guess                                                                                  |
 | **H13** | (human comment on a `needs-input` ticket)                         | yes        | HONOUR                          | clear the label, redispatch (daemon comment-wake, CTL-768)                                                                                              | write-gated removal + `clearDispositionEmit`                                                 |
 
-\*`Ready` is **archived** (R3). Measured: **21** `issue_history.to_state` rows workspace-wide — CTL
-14 (all 2026-05-25) + ADV 7 (all 2026-05-27) — and **zero** issues currently occupy it (positive
-control on the same query: `PR` = 15 live), so the archive strands nothing. Until it lands, H1
-treats it as Todo-equivalent, **loudly**.
+\*`Ready` is **archived** (R3). Measured: **21** `issue_history.to_state` rows workspace-wide — CTL 14 (all 2026-05-25) + ADV 7 (all 2026-05-27) — and **zero** issues currently occupy it (positive control on the same query: `PR` = 15 live), so the archive strands nothing. Until it lands, H1 treats it as Todo-equivalent, **loudly**.
 
-**Every `yes` row's first act is the same, and it is not in the row.** PREEMPT (§7a.7) runs before
-any destination logic: latch `O_EXCL`, inbox + SDK interrupt, ack within `ackGraceMs` 120 s, wrap up
-within `wrapUpBudgetMs` 600 s, push WIP, closure comment, `phase.<P>.abandoned.<T>`. Only then does
-the row fire. A **wedged** worker is killed **by its claim-time `bg_job_id`, never by ticket**, and
-the closure comment is then **infrastructure-authored and attributed as such** — infrastructure
-never speaks as the worker (I2). Failure modes in full: §7a.7.
+**Every `yes` row's first act is the same, and it is not in the row.** PREEMPT (§7a.7) runs before any destination logic: latch `O_EXCL`, inbox + SDK interrupt, ack within `ackGraceMs` 120 s, wrap up within `wrapUpBudgetMs` 600 s, push WIP, closure comment, `phase.<P>.abandoned.<T>`. Only then does the row fire. A **wedged** worker is killed **by its claim-time `bg_job_id`, never by ticket**, and the closure comment is then **infrastructure-authored and attributed as such** — infrastructure never speaks as the worker (I2). Failure modes in full: §7a.7.
 
-**Cancel / reopen, explicitly.** Cancel is H4/H5 — Canceled and Duplicate are INTENT-kill, honoured
-whether or not a worker is live, and the abort is bound to the recorded job id. Reopen is the same
-table read in the other direction: Canceled→Todo is H1 (idle) or H2 (live, rewind-to-start);
-Done→Todo is H2; Done→a PROGRESS stage is H6 (rewind) when the ticket is idle, because a Done ticket
-by definition holds no lease. There is no separate reopen rule.
+**Cancel / reopen, explicitly.** Cancel is H4/H5 — Canceled and Duplicate are INTENT-kill, honoured whether or not a worker is live, and the abort is bound to the recorded job id. Reopen is the same table read in the other direction: Canceled→Todo is H1 (idle) or H2 (live, rewind-to-start); Done→Todo is H2; Done→a PROGRESS stage is H6 (rewind) when the ticket is idle, because a Done ticket by definition holds no lease. There is no separate reopen rule.
 
 ### 6.4 The trigger is not a state machine — name the reconciler
 
-Ryan's own constraint: _"a trigger is not a state machine. If Linear is only the trigger, then
-losing the webhook must not lose the work."_
+Ryan's own constraint: _"a trigger is not a state machine. If Linear is only the trigger, then losing the webhook must not lose the work."_
 
-**Measured, and it is severe for exactly the stages an automation would key on.** The replica
-records **323** CTL state transitions for 2026-08-01→13; mini's event log carries **116** CTL
-`state_changed` events for the same window. The skew is not uniform: Done 62→53 and PR 50→18, but
-Research 37→1, Triage 35→2, Validate 39→1, Plan 39→2, Implement 42→7. Ticket-scoped proof on
-CTL-1774 (a full clean pipeline run, 2026-08-12): the replica shows 8 transitions; the event log
-carries **four** `linear.issue.*` events for that ticket in its entire life — created,
-`state_changed(Todo)`, `assignee_changed`, `state_changed(Done)`. The six intermediate
-daemon-written transitions produced no inbound event of any kind, and they were not misclassified as
-`linear.issue.updated` (there are none for that ticket). CTL-1680 has the identical shape.
+**Measured, and it is severe for exactly the stages an automation would key on.** The replica records **323** CTL state transitions for 2026-08-01→13; mini's event log carries **116** CTL `state_changed` events for the same window. The skew is not uniform: Done 62→53 and PR 50→18, but Research 37→1, Triage 35→2, Validate 39→1, Plan 39→2, Implement 42→7. Ticket-scoped proof on CTL-1774 (a full clean pipeline run, 2026-08-12): the replica shows 8 transitions; the event log carries **four** `linear.issue.*` events for that ticket in its entire life — created, `state_changed(Todo)`, `assignee_changed`, `state_changed(Done)`. The six intermediate daemon-written transitions produced no inbound event of any kind, and they were not misclassified as `linear.issue.updated` (there are none for that ticket). CTL-1680 has the identical shape.
 
-So the intermediate-stage trigger is **~2–5% delivered**, and Done and PR are the only reliably
-delivered ones. This is the direct justification for keying machine edges on the local declaration
-(§6.1) rather than on the Linear echo.
+So the intermediate-stage trigger is **~2–5% delivered**, and Done and PR are the only reliably delivered ones. This is the direct justification for keying machine edges on the local declaration (§6.1) rather than on the Linear echo.
 
 **Which reconcilers exist:**
 
@@ -846,15 +604,11 @@ delivered ones. This is the direct justification for keying machine edges on the
 | **an INTENT command is lost** (a kill that never arrives leaves a worker burning) | a bounded replica-side sweep: "tickets in an INTENT state holding a live claim, and tickets claim-held whose board state is INTENT"                                                                                                    | ⛔ **NO. Must ship with §6.3.** `linear-reconcile-timer.mjs` covers only the projection direction (local phase → Linear), never intent ingestion.                                                                                               |
 | **"in a build stage with no live lease holder"**                                  | —                                                                                                                                                                                                                                      | ⛔ **NO — there is no lease.** The nearest analogues are the scheduler's Pass 0a phantom-worker sweep and the CTL-624 cool-down/circuit-breaker markers, and both reason about worker **directories**, not about a claim anything could refuse. |
 
-**Loss behaviour, both halves.** PROGRESS loss converges via D17/D20 (no scan needed once the lease
-exists; the tick-scan is the backstop until then). **INTENT loss does not converge on its own** — a
-lost kill leaves a worker burning until a human notices.
+**Loss behaviour, both halves.** PROGRESS loss converges via D17/D20 (no scan needed once the lease exists; the tick-scan is the backstop until then). **INTENT loss does not converge on its own** — a lost kill leaves a worker burning until a human notices.
 
 ### 6.5 The trigger→lease→act→mirror sequence, and the two-host race
 
-Because Linear cannot refuse, both hosts receiving the same stage-change webhook **both pass the
-trigger**. That is expected and fine. The lease is acquired after the trigger and before any side
-effect, and exactly one wins.
+Because Linear cannot refuse, both hosts receiving the same stage-change webhook **both pass the trigger**. That is expected and fine. The lease is acquired after the trigger and before any side effect, and exactly one wins.
 
 ```mermaid
 sequenceDiagram
@@ -877,32 +631,14 @@ sequenceDiagram
   Note over L: Linear is written LAST and is never consulted for exclusion
 ```
 
-Read the diagram against the ruling: Linear appears at the top as the trigger and at the bottom as
-the mirror, and **never in the middle**. A design that moves it into the middle is disqualified.
+Read the diagram against the ruling: Linear appears at the top as the trigger and at the bottom as the mirror, and **never in the middle**. A design that moves it into the middle is disqualified.
 
-**The self-echo discriminator.** The bottom arrow is what creates the loop risk once intermediate
-delivery is fixed. Two facts, both verified in source:
+**The self-echo discriminator.** The bottom arrow is what creates the loop risk once intermediate delivery is fixed. Two facts, both verified in source:
 
-1. **The current guard already discriminates on "our own echo", not on "is a bot".**
-   `readLinearBotUserIds` (`daemon.mjs:264-288`) builds a `Set` of exactly three of **our own**
-   app-actor UUIDs — Layer-2 `catalyst.linear.bot.worker.botUserId`, Layer-2
-   `catalyst.linear.bot.orchestrator.botUserId`, and legacy Layer-1
-   `catalyst.monitor.linear.botUserId`. `orch-monitor`'s mirror `loadLinearBotUserIds`
-   (`webhook-config.ts:400-426`) builds the identical set. There is **no** generic is-this-a-bot
-   test anywhere in either path; `actorId` comes straight from `payload.actor.id`
-   (`linear-webhook-events.ts:204`). A third-party agent's app actor (Codex, observed authoring a
-   comment) is not in the set and is not filtered. **The cross-agent-messaging-over-Linear-comments
-   direction is therefore compatible with the guard as written — no re-expression is needed.**
-2. **It nevertheless must be demoted to defence-in-depth**, because it fails **open** on an unknown
-   actor id, and a workspace migration or credential rotation changes those ids silently. The
-   load-bearing discriminator becomes an **echo record**: after each reflection write, record
-   `last_reflected_state` / `last_reflected_at` (on the lease row later; in the worker signal
-   directory now). An inbound `state_changed` matching that record inside a 60s window is our echo
-   (H11/§5 row 16).
+1. **The current guard already discriminates on "our own echo", not on "is a bot".** `readLinearBotUserIds` (`daemon.mjs:264-288`) builds a `Set` of exactly three of **our own** app-actor UUIDs — Layer-2 `catalyst.linear.bot.worker.botUserId`, Layer-2 `catalyst.linear.bot.orchestrator.botUserId`, and legacy Layer-1 `catalyst.monitor.linear.botUserId`. `orch-monitor`'s mirror `loadLinearBotUserIds` (`webhook-config.ts:400-426`) builds the identical set. There is **no** generic is-this-a-bot test anywhere in either path; `actorId` comes straight from `payload.actor.id` (`linear-webhook-events.ts:204`). A third-party agent's app actor (Codex, observed authoring a comment) is not in the set and is not filtered. **The cross-agent-messaging-over-Linear-comments direction is therefore compatible with the guard as written — no re-expression is needed.**
+2. **It nevertheless must be demoted to defence-in-depth**, because it fails **open** on an unknown actor id, and a workspace migration or credential rotation changes those ids silently. The load-bearing discriminator becomes an **echo record**: after each reflection write, record `last_reflected_state` / `last_reflected_at` (on the lease row later; in the worker signal directory now). An inbound `state_changed` matching that record inside a 60s window is our echo (H11/§5 row 16).
 
-Note the guard's scope: `linear-webhook-handler.ts:386-397` suppresses on `kind === "issue"`, which
-**includes** `state_changed` and **excludes** comments — which is exactly why bot comments still
-reach the log and are filtered later, and exactly what the comments-as-messaging direction needs.
+Note the guard's scope: `linear-webhook-handler.ts:386-397` suppresses on `kind === "issue"`, which **includes** `state_changed` and **excludes** comments — which is exactly why bot comments still reach the log and are filtered later, and exactly what the comments-as-messaging direction needs.
 
 > **INCONCLUSIVE, and stated as such.** Whether that guard actually _fires_ on our own state writes
 > could not be separated from Linear never delivering an OAuth app's own mutations back to that app.
@@ -924,19 +660,9 @@ reach the log and are filtered later, and exactly what the comments-as-messaging
 
 ## 7. The many-to-one collapse
 
-**Stated plainly: the phase→Linear-state map is many-to-one, and a `(from_state, to_state)` tuple
-therefore cannot identify a phase edge.** Four of the ten pipeline advances produce no observable
-Linear state change at all.
+**Stated plainly: the phase→Linear-state map is many-to-one, and a `(from_state, to_state)` tuple therefore cannot identify a phase edge.** Four of the ten pipeline advances produce no observable Linear state change at all.
 
-The chain is four hops through one bash chokepoint. Phase→key is declared as data in
-`plugins/dev/scripts/lib/workflow.default.json` (each step's `linearKey`), derived into
-`PHASE_LINEAR_KEY` by `lib/workflow-descriptor.mjs:44-46`, re-exported by `lib/phase-fsm.mjs:25-32`,
-and accessed via `linearKeyForPhase()` (`phase-fsm.mjs:84-89`, which **throws** on an unknown phase
-rather than silently no-opping). Key→write is
-`execution-core/linear-write.mjs:163-167 applyPhaseStatus`. Key→state-name is
-`plugins/dev/scripts/linear-transition.sh:112-144` (note: **not** under `lib/`), precedence
-`--state` > per-project stateMap > `catalyst.linear.stateMap` > registry `triageStatus` > built-in
-default.
+The chain is four hops through one bash chokepoint. Phase→key is declared as data in `plugins/dev/scripts/lib/workflow.default.json` (each step's `linearKey`), derived into `PHASE_LINEAR_KEY` by `lib/workflow-descriptor.mjs:44-46`, re-exported by `lib/phase-fsm.mjs:25-32`, and accessed via `linearKeyForPhase()` (`phase-fsm.mjs:84-89`, which **throws** on an unknown phase rather than silently no-opping). Key→write is `execution-core/linear-write.mjs:163-167 applyPhaseStatus`. Key→state-name is `plugins/dev/scripts/linear-transition.sh:112-144` (note: **not** under `lib/`), precedence `--state` > per-project stateMap > `catalyst.linear.stateMap` > registry `triageStatus` > built-in default.
 
 | #     | phase                 | stateMap key | CTL state    | collapse                                                                                                                                                                                             |
 | ----- | --------------------- | ------------ | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -963,64 +689,32 @@ default.
 > regression. **The lossy projection §7 defends on board-design grounds turns out to be the enabling
 > property for deleting the tail.** COLLAPSE A (verify/review → Validate) is untouched.
 
-**Measured on mini, 2026-08** (structured JSON parse of `attributes["event.name"]` matching prefix
-`linear.state.write.`, comparing `from_state` vs `to_state` — never substring-grepped):
+**Measured on mini, 2026-08** (structured JSON parse of `attributes["event.name"]` matching prefix `linear.state.write.`, comparing `from_state` vs `to_state` — never substring-grepped):
 
 - `review`: **48 of 49** writes were Validate→Validate no-ops.
 - `monitor-merge`: **44 of 47** were PR→PR no-ops.
 - `monitor-deploy`: 46 of 66 PR→PR no-ops, 19 more refused by the backward-write guard.
 - `teardown`: 47 no-ops (28 PR→PR, 19 Done→Done), 12 guard-refused, 10 genuine PR→Done.
-- The 1:1 phases moved as expected: verify Implement→Validate 48, pr Validate→PR 46, plan
-  Research→Plan 45, implement Plan→Implement 45, research Triage→Research 41, remediate
-  Validate→Remediate 13.
+- The 1:1 phases moved as expected: verify Implement→Validate 48, pr Validate→PR 46, plan Research→Plan 45, implement Plan→Implement 45, research Triage→Research 41, remediate Validate→Remediate 13.
 
 **185 no-op writes in one month**, each a bash subprocess round-trip that changes nothing.
 
 **Two traps in the current telemetry, both load-bearing for anyone keying off it:**
 
-1. **`applied: true` does not mean the state moved.** `linear-transition.sh:217-220` emits
-   `action="skipped"` and exits 0 for an already-in-target write, and `linear-write.mjs:144`
-   computes `applied = code === 0 && action !== "update-failed"`. **The only reliable no-op
-   discriminator in the emitted event is `from_state === to_state`.**
-2. **`phase-fsm.mjs:68-69`'s comment is stale.** It says the terminal Done is written "on
-   monitor-deploy completion"; CTL-703 moved `TERMINAL_PHASE` to **teardown**
-   (`workflow.default.json:7 "terminalStep": "teardown"`). `scheduler.mjs:8085-8087` flags the
-   correction in-code; the fsm comment was never updated.
+1. **`applied: true` does not mean the state moved.** `linear-transition.sh:217-220` emits `action="skipped"` and exits 0 for an already-in-target write, and `linear-write.mjs:144` computes `applied = code === 0 && action !== "update-failed"`. **The only reliable no-op discriminator in the emitted event is `from_state === to_state`.**
+2. **`phase-fsm.mjs:68-69`'s comment is stale.** It says the terminal Done is written "on monitor-deploy completion"; CTL-703 moved `TERMINAL_PHASE` to **teardown** (`workflow.default.json:7 "terminalStep": "teardown"`). `scheduler.mjs:8085-8087` flags the correction in-code; the fsm comment was never updated.
 
 ### The resolution
 
-**Key machine edges on the declaration, not on the tuple.** `(declaration, phase)` — §6.1 — is
-unique by construction, so there is nothing to disambiguate. The four invisible edges (D5, D11, D12,
-D13) become **stated** empty-reflection rows rather than a discovery someone makes at 2 a.m. The
-daemon _already emits_ the exact phase-keyed discriminator this needs and nothing reads it:
-`linear.state.write.<T>` carries `{phase, transition_key, from_state, to_state, applied, source}`
-(`linear-state-write-event.mjs:75-99`), and `phase.advance.applied.<T>` carries
-`{from, to, evidence, evidence_reason, asserted_by}`.
+**Key machine edges on the declaration, not on the tuple.** `(declaration, phase)` — §6.1 — is unique by construction, so there is nothing to disambiguate. The four invisible edges (D5, D11, D12, D13) become **stated** empty-reflection rows rather than a discovery someone makes at 2 a.m. The daemon _already emits_ the exact phase-keyed discriminator this needs and nothing reads it: `linear.state.write.<T>` carries `{phase, transition_key, from_state, to_state, applied, source}` (`linear-state-write-event.mjs:75-99`), and `phase.advance.applied.<T>` carries `{from, to, evidence, evidence_reason, asserted_by}`.
 
-**The collapse is kept.** It is a deliberate lossy projection of a value that is authoritative
-elsewhere — the board shows a human where the ticket is, at board granularity; the pipeline knows
-where it is, at pipeline granularity. Adding `Review` and `Deploy` states would re-couple board
-granularity to the pipeline and touch every saved view across 9 registered teams. If sub-phase
-visibility inside Validate/PR is wanted, the cheap options are a single-valued `phase:<name>` Linear
-label group (ADR-026's mechanism) or a link to the orch-monitor journey view — see §9.3.
+**The collapse is kept.** It is a deliberate lossy projection of a value that is authoritative elsewhere — the board shows a human where the ticket is, at board granularity; the pipeline knows where it is, at pipeline granularity. Adding `Review` and `Deploy` states would re-couple board granularity to the pipeline and touch every saved view across 9 registered teams. If sub-phase visibility inside Validate/PR is wanted, the cheap options are a single-valued `phase:<name>` Linear label group (ADR-026's mechanism) or a link to the orch-monitor journey view — see §9.3.
 
-**A correction to a premise that circulated with this finding.** "Triage / Research / Plan / Todo
-appear in the map but are not in live use" is **false**; the current-snapshot zero is a throughput
-artifact (tickets pass through in minutes), not absence. Transitions _into_ each state on CTL over
-the last 14 days: Done 78, PR 60, Implement 52, **Plan 42**, Validate 41, **Research 40**, **Triage
-37**, **Todo 11**, Remediate 5, Canceled 3, Backlog 3. The right instrument is
-`issue_history.to_state` in the replica (9,907 populated rows), not `DISTINCT issues.state` — the
-replica has **no** `workflow_states` table (verified: `.tables` lists 19, none of them states).
-All-time `to_state` also reveals two states the stateMap does not name: **Ready** (14 transitions,
-all 2026-05-25) and **Duplicate** (4 live issues, present in `monitor.mjs:166 DRAG_OUT_STATES` and
-`linear-transition.sh:52` but with no stateMap key). The actual CTL state set is 13; the stateMap
-names 12.
+**A correction to a premise that circulated with this finding.** "Triage / Research / Plan / Todo appear in the map but are not in live use" is **false**; the current-snapshot zero is a throughput artifact (tickets pass through in minutes), not absence. Transitions _into_ each state on CTL over the last 14 days: Done 78, PR 60, Implement 52, **Plan 42**, Validate 41, **Research 40**, **Triage 37**, **Todo 11**, Remediate 5, Canceled 3, Backlog 3. The right instrument is `issue_history.to_state` in the replica (9,907 populated rows), not `DISTINCT issues.state` — the replica has **no** `workflow_states` table (verified: `.tables` lists 19, none of them states). All-time `to_state` also reveals two states the stateMap does not name: **Ready** (14 transitions, all 2026-05-25) and **Duplicate** (4 live issues, present in `monitor.mjs:166 DRAG_OUT_STATES` and `linear-transition.sh:52` but with no stateMap key). The actual CTL state set is 13; the stateMap names 12.
 
 ## 7a. The pipeline tail becomes subscribers (2026-08-13 decisions)
 
-Ryan ruled on the pipeline tail on 2026-08-13. The rulings are recorded here as **data, not
-proposals**. They supersede §6.1 rows **D11–D14**, absorb §6.2 rows **P1–P6** as the implementation
-rather than as a companion to a phase, and close §9.1, the first half of §9.2, §9.4 and §9.6.
+Ryan ruled on the pipeline tail on 2026-08-13. The rulings are recorded here as **data, not proposals**. They supersede §6.1 rows **D11–D14**, absorb §6.2 rows **P1–P6** as the implementation rather than as a companion to a phase, and close §9.1, the first half of §9.2, §9.4 and §9.6.
 
 ### 7a.1 The seven rulings
 
@@ -1034,16 +728,11 @@ rather than as a companion to a phase, and close §9.1, the first half of §9.2,
 | **R6** | **`monitor-deploy` stops being a phase agent** → an async subscriber. Conditional, verbatim: _"not everything will have a cloud deploy … We'd have to figure out and plan for cases in which there is no deployment step."_                                                                                             | §7a.6                                                                                           |
 | **R7** | **`teardown` is durable-host-only** → an optional step.                                                                                                                                                                                                                                                                 | ⛔ **not optional as written** — teardown is the sole originating authority for Done. See §7a.5 |
 
-**Measured, for R3.** `Ready` has **21** `issue_history.to_state` rows workspace-wide — **CTL 14**
-(all 2026-05-25) and **ADV 7** (all 2026-05-27). §7's "14 transitions" is the CTL-scoped count and
-is not wrong; the workspace-scoped count is 21, and archiving the state touches a **second team**.
-**Zero issues currently sit in `Ready`** (positive control on the same query: `PR` = 15 live), so no
-ticket is stranded by the archive.
+**Measured, for R3.** `Ready` has **21** `issue_history.to_state` rows workspace-wide — **CTL 14** (all 2026-05-25) and **ADV 7** (all 2026-05-27). §7's "14 transitions" is the CTL-scoped count and is not wrong; the workspace-scoped count is 21, and archiving the state touches a **second team**. **Zero issues currently sit in `Ready`** (positive control on the same query: `PR` = 15 live), so no ticket is stranded by the archive.
 
 ### 7a.2 The structural fact that makes R5/R6/R7 cheap — verified first-hand, not inherited
 
-All four tail phases map to **one** Linear state, so deleting three of them costs **zero** board
-granularity: the ticket sits in `PR` from the `pr` phase until `Done` either way.
+All four tail phases map to **one** Linear state, so deleting three of them costs **zero** board granularity: the ticket sits in `PR` from the `pr` phase until `Done` either way.
 
 | descriptor row                                                                           | `linearKey` | CTL state |
 | ---------------------------------------------------------------------------------------- | ----------- | --------- |
@@ -1052,14 +741,9 @@ granularity: the ticket sits in `PR` from the `pr` phase until `Done` either way
 | `workflow.default.json:67` `{"id":"monitor-deploy","rank":9,"preemptable":false,…}`      | `inReview`  | **PR**    |
 | `workflow.default.json:68` `{"id":"teardown","rank":10,"preemptable":false,"next":null}` | `inReview`  | **PR**    |
 
-Resolution chain, unchanged from §7: `linear-write.mjs:163-167 applyPhaseStatus` →
-`linearKeyForPhase()` (`phase-fsm.mjs:84-89`) → `PHASE_LINEAR_KEY` (`workflow-descriptor.mjs:44-46`)
-→ `linear-transition.sh:112-144` resolves `inReview` against `.catalyst.linear.stateMap` → `"PR"`.
-`phase-fsm.mjs:68-69` already says it in prose.
+Resolution chain, unchanged from §7: `linear-write.mjs:163-167 applyPhaseStatus` → `linearKeyForPhase()` (`phase-fsm.mjs:84-89`) → `PHASE_LINEAR_KEY` (`workflow-descriptor.mjs:44-46`) → `linear-transition.sh:112-144` resolves `inReview` against `.catalyst.linear.stateMap` → `"PR"`. `phase-fsm.mjs:68-69` already says it in prose.
 
-**R4 is what makes R5/R6/R7 free.** Had the board been widened with `Review`/`Merge` states — R4's
-rejected alternative — every deleted phase would have been a visible board regression. The collapse
-ADR-029 kept is precisely the property that makes deleting the tail cost nothing.
+**R4 is what makes R5/R6/R7 free.** Had the board been widened with `Review`/`Merge` states — R4's rejected alternative — every deleted phase would have been a visible board regression. The collapse ADR-029 kept is precisely the property that makes deleting the tail cost nothing.
 
 ### 7a.3 The phase list — before → after
 
@@ -1076,28 +760,15 @@ ADR-029 kept is precisely the property that makes deleting the tail cost nothing
 | 9   | monitor-deploy | — **deleted**     | R6 → deploy-watcher, registered per repo (§7a.6)                                                                                                                                                                   |
 | 10  | teardown       | — **deleted**     | R7 → done-writer + the already-shipped reaper (§7a.5)                                                                                                                                                              |
 
-**Descriptor edits:** delete `workflow.default.json:66-68`; set `:65` `"next": null`; move
-`"terminalStep"` (`:8`) from `teardown` to `pr`. `KNOWN_PHASES` (`namespace-contract.mjs:36-47`)
-goes 10 → 7, enforced in the same PR across all three parity surfaces
-(`broker/namespace-parity.test.mjs`, `orch-monitor/__tests__/namespace-parity.test.ts`,
-`execution-core/assertion-evidence-parity.test.mjs`).
+**Descriptor edits:** delete `workflow.default.json:66-68`; set `:65` `"next": null`; move `"terminalStep"` (`:8`) from `teardown` to `pr`. `KNOWN_PHASES` (`namespace-contract.mjs:36-47`) goes 10 → 7, enforced in the same PR across all three parity surfaces (`broker/namespace-parity.test.mjs`, `orch-monitor/__tests__/namespace-parity.test.ts`, `execution-core/assertion-evidence-parity.test.mjs`).
 
-⛔ **`terminalStep` is not a rename.** `scheduler.mjs:8092` gates the Done write on
-`signals[TERMINAL_PHASE] === "done"`. Repointing `TERMINAL_PHASE` at `pr` without §7a.5 would make
-Done fire when the PR **opens**. Done must be re-homed **before** the descriptor moves, not with it.
+⛔ **`terminalStep` is not a rename.** `scheduler.mjs:8092` gates the Done write on `signals[TERMINAL_PHASE] === "done"`. Repointing `TERMINAL_PHASE` at `pr` without §7a.5 would make Done fire when the PR **opens**. Done must be re-homed **before** the descriptor moves, not with it.
 
-⚠ **`NON_PREEMPTABLE_PHASES` shrinks 3 → 1.** It is derived from `preemptable:false`
-(`workflow-descriptor.mjs:59-61`) and today holds `{triage, monitor-deploy, teardown}`. Deleting two
-of them leaves `{triage}`. Consumers: `scheduler.mjs:7014` (slot preemption),
-`fsm-descriptor.mjs:25`, and a contract test that deep-equals the orch-monitor endpoint's
-`nonPreemptable` array (`orch-monitor/__tests__/governance-fsm-descriptor.contract.test.ts:97-100`)
-— all three must move together.
+⚠ **`NON_PREEMPTABLE_PHASES` shrinks 3 → 1.** It is derived from `preemptable:false` (`workflow-descriptor.mjs:59-61`) and today holds `{triage, monitor-deploy, teardown}`. Deleting two of them leaves `{triage}`. Consumers: `scheduler.mjs:7014` (slot preemption), `fsm-descriptor.mjs:25`, and a contract test that deep-equals the orch-monitor endpoint's `nonPreemptable` array (`orch-monitor/__tests__/governance-fsm-descriptor.contract.test.ts:97-100`) — all three must move together.
 
 ### 7a.4 The re-homing table
 
-Every responsibility that lives in the three deleted skills, and where it goes. **Nothing on this
-list is dropped**; the ones with no owner today are marked ⛔ and are the reason the collapse ships
-_with_ its subscribers, not before them.
+Every responsibility that lives in the three deleted skills, and where it goes. **Nothing on this list is dropped**; the ones with no owner today are marked ⛔ and are the reason the collapse ships _with_ its subscribers, not before them.
 
 | responsibility                                                                                                                                                                                                                         | subscriber                                                                                                                                                                                                   | trigger                                                                                                                                      | who says no?                                                                                                                                        | what goes loud                                                                                                                                                                  |
 | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -1119,18 +790,11 @@ _with_ its subscribers, not before them.
 | **Deploy watch, canary, preview-URL comment** (`phase-monitor-deploy/SKILL.md:319-360`)                                                                                                                                                | **deploy-watcher**, only where a repo registers a deploy (§7a.6); canary **rebuilt, not ported**                                                                                                             | `github.deployment_status.*` matched on `(mergeSHA, env)`                                                                                    | per-`(sha, env)` dedupe                                                                                                                             | `deploy.overdue`; `catalyst doctor` WARNs **both** directions (declared-but-silent, emitting-but-undeclared)                                                                    |
 | **The level-triggered backstop** (§6.4's missing reconciler, at the PR altitude)                                                                                                                                                       | **reconciler sweep** (extends `linear-reconcile-cli.mjs` / the daemon tick)                                                                                                                                  | timer — the one deliberate, bounded poll                                                                                                     | it **is** the refusal of silence                                                                                                                    | its four gauges: mergeable-unmerged, BEHIND-age, merged-without-Done, failing-check-without-attempt                                                                             |
 
-**Why a reconciler is not optional here.** Machine-written Linear transitions deliver at 3–36%
-(§6.4) and provider→log ingest is single-homed at-most-once smee with three recorded loss incidents.
-An edge-triggered-only tail dies **silently**, which is exactly how monitor-merge's broker-interest
-path already died (§4/§6.2: `router.mjs:2831 if (!interests.size) return;`, zero `filter.*` events
-in 2026-08). Subscribers everywhere, **plus exactly one authoritative reconciler per external source
-of truth**.
+**Why a reconciler is not optional here.** Machine-written Linear transitions deliver at 3–36% (§6.4) and provider→log ingest is single-homed at-most-once smee with three recorded loss incidents. An edge-triggered-only tail dies **silently**, which is exactly how monitor-merge's broker-interest path already died (§4/§6.2: `router.mjs:2831 if (!interests.size) return;`, zero `filter.*` events in 2026-08). Subscribers everywhere, **plus exactly one authoritative reconciler per external source of truth**.
 
 ### 7a.5 Who writes Done, and on what evidence (I6)
 
-**Today teardown is the sole originating authority for Done, and every automated Done writer is
-downstream of its declaration.** The four writers, enumerated by `applyTerminalDone` call sites plus
-the skill's own transition:
+**Today teardown is the sole originating authority for Done, and every automated Done writer is downstream of its declaration.** The four writers, enumerated by `applyTerminalDone` call sites plus the skill's own transition:
 
 | writer                                                                       | gate                                                                                                        |
 | ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
@@ -1139,17 +803,9 @@ the skill's own transition:
 | `scheduler.mjs:3816 reconcileTerminalBackstop`                               | drift only, behind the CTL-863 stale-fence guard (`:3810`)                                                  |
 | `linear-reconcile-cli.mjs:263-268` (`kind === "done"`)                       | the correction `linear-reconcile.mjs` proposes from the **local phase signals** — teardown's signal again   |
 
-**Making teardown "optional" (R7) without re-homing `phase-teardown/SKILL.md:332-335` makes Done
-optional.** That is the one place the rulings must be read as a re-homing instruction rather than a
-deletion instruction.
+**Making teardown "optional" (R7) without re-homing `phase-teardown/SKILL.md:332-335` makes Done optional.** That is the one place the rulings must be read as a re-homing instruction rather than a deletion instruction.
 
-⛔ **One inherited claim corrected.** It was reported that `linear-reconcile-cli.mjs:268` consumes a
-`.teardown-complete` marker dropped at `SKILL.md:382`. It does not. The marker is written at
-`phase-teardown/SKILL.md:585-586` and its only consumer is
-`reconstruct-ticket-state.mjs:103 ARCHIVE_TERMINAL_MARKER` (positive control: `grep` finds 7 other
-`teardown` hits in `linear-reconcile-cli.mjs`, so the instrument was not blind). **The collapse must
-therefore re-home two independent things, not one:** the Done write _and_ the archive terminal
-marker that cross-host reconstruction reads.
+⛔ **One inherited claim corrected.** It was reported that `linear-reconcile-cli.mjs:268` consumes a `.teardown-complete` marker dropped at `SKILL.md:382`. It does not. The marker is written at `phase-teardown/SKILL.md:585-586` and its only consumer is `reconstruct-ticket-state.mjs:103 ARCHIVE_TERMINAL_MARKER` (positive control: `grep` finds 7 other `teardown` hits in `linear-reconcile-cli.mjs`, so the instrument was not blind). **The collapse must therefore re-home two independent things, not one:** the Done write _and_ the archive terminal marker that cross-host reconstruction reads.
 
 **The done-writer, in order. Each step can refuse; none is inferred.**
 
@@ -1161,67 +817,28 @@ marker that cross-host reconstruction reads.
 | 4    | **Write** — `applyTerminalDone` (`linear-write.mjs:173`) via `linear-transition.sh`, then the CTL-1371 completion declaration                | `phase-teardown/SKILL.md:332-335`                           | reconciler re-fires                                                                                |
 | 5    | **Emit `ticket.done.<T>`** — the fan-out point for the scribe and cleanup                                                                    | new                                                         | scribe never runs → gauge                                                                          |
 
-**The open-PR enumerator stays alarm-not-block.** `defaultCheckOpenPrs` supplies facts for the
-`recovery.done-applied-with-open-pr` alarm; it is **not** a refuse-gate — `scheduler.mjs:155` says
-so in-code ("NOT a refuse-gate (THE REVERSAL)", CTL-1157). Step 2 is the refusal; step 2 is I6.
-`terminalDoneOnce` survives as the drift backstop, re-keyed from `signals[TERMINAL_PHASE]` to the
-merge-evidence marker.
+**The open-PR enumerator stays alarm-not-block.** `defaultCheckOpenPrs` supplies facts for the `recovery.done-applied-with-open-pr` alarm; it is **not** a refuse-gate — `scheduler.mjs:155` says so in-code ("NOT a refuse-gate (THE REVERSAL)", CTL-1157). Step 2 is the refusal; step 2 is I6. `terminalDoneOnce` survives as the drift backstop, re-keyed from `signals[TERMINAL_PHASE]` to the merge-evidence marker.
 
-**I6 read the other way:** a prematurely-Done ticket is **re-admissible**. A post-Done deploy or
-canary failure is a new bounded remediation against a Done ticket, not a silent revert — see
-§7a.9(3).
+**I6 read the other way:** a prematurely-Done ticket is **re-admissible**. A post-Done deploy or canary failure is a new bounded remediation against a Done ticket, not a silent revert — see §7a.9(3).
 
 ### 7a.6 The no-deploy rule (R6's conditional)
 
-**"No deployment step" is not an edge case — it is the measured majority.** Across all 85 archived
-`phase-monitor-deploy.json` on mini: `skipped` **47**, `success` **4**, absent 34. Mini's entire
-2026-08 event log — **1,117,980 events** on 2026-08-13, parsed as JSON per line with the name read
-as `attributes["event.name"] ?? event`, never substring-grepped — contains **ZERO**
-`github.deployment_status.success`. **Positive controls on the same pass:**
-`github.deployment_status.failure` = 4, `.in_progress` = 4, `github.deployment.created` = 4 (the
-instrument sees deployment events when they exist) and `recovery.tick` = 326,940 (the parse reached
-the whole file).
+**"No deployment step" is not an edge case — it is the measured majority.** Across all 85 archived `phase-monitor-deploy.json` on mini: `skipped` **47**, `success` **4**, absent 34. Mini's entire 2026-08 event log — **1,117,980 events** on 2026-08-13, parsed as JSON per line with the name read as `attributes["event.name"] ?? event`, never substring-grepped — contains **ZERO** `github.deployment_status.success`. **Positive controls on the same pass:** `github.deployment_status.failure` = 4, `.in_progress` = 4, `github.deployment.created` = 4 (the instrument sees deployment events when they exist) and `recovery.tick` = 326,940 (the parse reached the whole file).
 
 **The rule.** Deployment is **declared, never waited for.**
 
-- A repo either **registers a deploy** in its config (`catalyst.deploy = {environment, verifier}`,
-  reached through the D9 `registry.mjs` seam) or it does not.
-- **Not registered** → `catalyst.merge.resolved.<T>` fans out to done-writer, scribe and cleanup,
-  and **no deploy subscriber exists**. The honest encoding is "no deploy subscriber registered for
-  this repo" — **not a 1,800 s wait that expires** (`phase-monitor-deploy/SKILL.md:115`,`:155-166`).
-- **Registered** → the deploy-watcher stays subscribed on `(mergeSHA, environment)` until a
-  **terminal** `deployment_status` arrives. This deletes a known-wrong shortcut for free: the
-  current non-terminal branch (`SKILL.md:264-271`) treats `pending`/`in_progress` as **failed**,
-  self-described as "mainly defensive … future work can re-enter the wait loop instead" — a one-shot
-  agent cannot re-subscribe; a subscriber never had to.
-- **`catalyst doctor` grades both directions**: declared-but-silent (registered, no
-  `deployment_status` in N days) → WARN; emitting-but-undeclared (deployment events for an
-  unregistered repo) → WARN. Neither can be a `count == 0` Loki rule — §8.
+- A repo either **registers a deploy** in its config (`catalyst.deploy = {environment, verifier}`, reached through the D9 `registry.mjs` seam) or it does not.
+- **Not registered** → `catalyst.merge.resolved.<T>` fans out to done-writer, scribe and cleanup, and **no deploy subscriber exists**. The honest encoding is "no deploy subscriber registered for this repo" — **not a 1,800 s wait that expires** (`phase-monitor-deploy/SKILL.md:115`,`:155-166`).
+- **Registered** → the deploy-watcher stays subscribed on `(mergeSHA, environment)` until a **terminal** `deployment_status` arrives. This deletes a known-wrong shortcut for free: the current non-terminal branch (`SKILL.md:264-271`) treats `pending`/`in_progress` as **failed**, self-described as "mainly defensive … future work can re-enter the wait loop instead" — a one-shot agent cannot re-subscribe; a subscriber never had to.
+- **`catalyst doctor` grades both directions**: declared-but-silent (registered, no `deployment_status` in N days) → WARN; emitting-but-undeclared (deployment events for an unregistered repo) → WARN. Neither can be a `count == 0` Loki rule — §8.
 
-**Canary is unbuilt (I11), and is rebuilt rather than ported.** The default `CANARY_CMD`
-(`SKILL.md:117`,`:274-293`) targets a skill that **cannot run**:
-`~/.claude/skills/gstack/canary/SKILL.md:664-679` hard-requires
-`$HOME/.claude/skills/gstack/browse/dist/browse`, and that directory is **absent** (positive
-control: siblings `gstack/canary` and `gstack/review` both resolve; the global CLAUDE.md records the
-`browse` skill deleted 2026-08-03 and names `canary` among the skills that will not run). Exactly
-**3** `canary-output.json` files exist anywhere under `~/catalyst` on mini, all agent-hand-authored
-HTTP/health probes — one literally records
-`"method": "direct-verification (no github deployment_status; wrangler deploy on push-to-main)"`,
-which proves it did **not** come from the deterministic body. Post-deploy verification is worth
-keeping **as a concept**; nothing in the current implementation is worth preserving.
+**Canary is unbuilt (I11), and is rebuilt rather than ported.** The default `CANARY_CMD` (`SKILL.md:117`,`:274-293`) targets a skill that **cannot run**: `~/.claude/skills/gstack/canary/SKILL.md:664-679` hard-requires `$HOME/.claude/skills/gstack/browse/dist/browse`, and that directory is **absent** (positive control: siblings `gstack/canary` and `gstack/review` both resolve; the global CLAUDE.md records the `browse` skill deleted 2026-08-03 and names `canary` among the skills that will not run). Exactly **3** `canary-output.json` files exist anywhere under `~/catalyst` on mini, all agent-hand-authored HTTP/health probes — one literally records `"method": "direct-verification (no github deployment_status; wrangler deploy on push-to-main)"`, which proves it did **not** come from the deterministic body. Post-deploy verification is worth keeping **as a concept**; nothing in the current implementation is worth preserving.
 
 ### 7a.7 PREEMPT — the uniform answer to human intent on a live worker (R1)
 
-R1 generalizes §9.1's single question into a protocol that applies to **every** state, and it
-resolves the §6.3 in-flight rows uniformly: **preempt the worker, then let the destination state
-decide.** The departing worker's only job is to stop cleanly and say what it did.
+R1 generalizes §9.1's single question into a protocol that applies to **every** state, and it resolves the §6.3 in-flight rows uniformly: **preempt the worker, then let the destination state decide.** The departing worker's only job is to stop cleanly and say what it did.
 
-⚠ **NAME COLLISION, and it is real.** CTL-705 already ships a **slot** preemption that emits
-`phase.<P>.preempted.<T>` and `phase.<P>.resumed-after-preemption.<T>` (`recovery.mjs:1184-1216`,
-gated at `scheduler.mjs:7014`), where `preempted_by` is _the ticket that took the slot_ and the
-worker is **resumable**. Human-intent preemption is **terminal** and has a different actor. The two
-must not share a name. This protocol uses `worker.preempt.*` for its own lifecycle and reuses the
-shipped terminal for the exit.
+⚠ **NAME COLLISION, and it is real.** CTL-705 already ships a **slot** preemption that emits `phase.<P>.preempted.<T>` and `phase.<P>.resumed-after-preemption.<T>` (`recovery.mjs:1184-1216`, gated at `scheduler.mjs:7014`), where `preempted_by` is _the ticket that took the slot_ and the worker is **resumable**. Human-intent preemption is **terminal** and has a different actor. The two must not share a name. This protocol uses `worker.preempt.*` for its own lifecycle and reuses the shipped terminal for the exit.
 
 **The protocol.**
 
@@ -1292,90 +909,42 @@ shipped terminal for the exit.
 | Dead thoughts rows               | 2 `THOUGHTS_DIRS` entries (`reconstruct-ticket-state.mjs:29-30`) + the tail thoughts-doc writes — measured **2 / 3 / 4** files for monitor-merge / monitor-deploy / pr against a **697 / 636** positive control (research / plans). Reconstruction re-keys on `ticket.done.<T>` + the merge evidence.              |
 | Per-agent envelopes              | ×3 (comms join/send, `catalyst-session.sh start` — whose `session_metrics`/`session_tools` writers measure **0 rows** on this dispatch path anyway, per `docs/architecture.md`)                                                                                                                                    |
 
-⛔ **One deletion that is actually a move.** Idempotency markers currently live in the worker
-directory, which the reaper destroys shortly after merge. Every post-merge marker
-(`.linear-mirror-*`, compound-log, retro) must relocate to `~/catalyst/archives/<T>/` **before** the
-worker dir becomes reapable, or a replayed `github.pr.merged` double-posts.
+⛔ **One deletion that is actually a move.** Idempotency markers currently live in the worker directory, which the reaper destroys shortly after merge. Every post-merge marker (`.linear-mirror-*`, compound-log, retro) must relocate to `~/catalyst/archives/<T>/` **before** the worker dir becomes reapable, or a replayed `github.pr.merged` double-posts.
 
 ### 7a.9 What these rulings do NOT settle
 
-1. **Per-repo `doneGate:"deploy"`.** Done-at-merge is the ratified default. Does any repo get to
-   gate Done on `deployment_status.success` — an event with **zero** measured occurrences?
-2. **Preempt budgets.** `ackGraceMs` 120 s / `wrapUpBudgetMs` 600 s are proposed defaults. Per-phase
-   overrides in the descriptor?
-3. **Re-admission after a post-Done deploy/canary failure.** Auto re-admit (I6's "prematurely-Done
-   is re-admissible") or file a fresh linked ticket? New machinery either way.
+1. **Per-repo `doneGate:"deploy"`.** Done-at-merge is the ratified default. Does any repo get to gate Done on `deployment_status.success` — an event with **zero** measured occurrences?
+2. **Preempt budgets.** `ackGraceMs` 120 s / `wrapUpBudgetMs` 600 s are proposed defaults. Per-phase overrides in the descriptor?
+3. **Re-admission after a post-Done deploy/canary failure.** Auto re-admit (I6's "prematurely-Done is re-admissible") or file a fresh linked ticket? New machinery either way.
 4. **The scribe's model tier and batching.** One `claude --bg` job per merge, or per N merges?
-5. **The reviewer-arrival window (300 s today)** once it is event-driven: keep it as the
-   reconciler's `no-verdict-on-head` threshold, or drop it and rely on the unresolved-thread gate
-   alone?
-6. **Reconciler cadence and authority** — gauge-only forever, or allowed to re-fire missing edges
-   (proposed), and the T threshold per gauge.
+5. **The reviewer-arrival window (300 s today)** once it is event-driven: keep it as the reconciler's `no-verdict-on-head` threshold, or drop it and rely on the unresolved-thread gate alone?
+6. **Reconciler cadence and authority** — gauge-only forever, or allowed to re-fire missing edges (proposed), and the T threshold per gauge.
 
 ## 8. What is NOT automated, and why
 
-**If it needs a decision, it is not this automation.** Every row above is a bounded action with a
-deterministic path and a loud refusal. The following are deliberately excluded, and each exclusion
-is a rule, not an omission:
+**If it needs a decision, it is not this automation.** Every row above is a bounded action with a deterministic path and a loud refusal. The following are deliberately excluded, and each exclusion is a rule, not an omission:
 
-- **Anything whose deterministic path is not genuinely deterministic** (rule 3). The checkout
-  fast-forward automates exactly one shape — clean, on the default branch, upstream resolvable — and
-  refuses seven named others rather than guessing. A "usually works" path is not a deterministic
-  path.
-- **Product-scope judgement.** Whether a ticket should exist, what it should say, whether a finding
-  is worth fixing at all. The delegate denylist is the mechanism: remediate everything by default,
-  route to a human only for product-scope calls and significant cost.
-- **Advancing on anything other than the holder's declaration** (I2). A clean process exit is not a
-  declaration — CTL-1790 shipped `flipSignalAbandonedOnUndeclaredExit`
-  (`sdk-run-phase-agent.mjs:521`, called `:1269`) and `assertion-evidence.mjs:104` now marks the old
-  `SDK_SUCCESS_FLIP` writer "historical (CTL-1790 removed the writer)". `abandoned` never advances.
-- **Any side effect whose refusal is only "a guard we wrote"** (I3/I4), until the lease exists.
-  Shipping those rows in enforce mode before there is something that can say no would mean two hosts
-  double-advancing on one declaration.
-- **Detectors whose unique failure nobody can name** (I10). A detector that duplicates another's
-  coverage is deleted, not kept just in case.
-- **Mechanisms that have never produced an output** (I11).
-  `delegate.{would-route,routed,route-fallback}` and `escalation.explanation-absent` are at **0**
-  occurrences. Their next ticket is either "make it emit" or "delete it" — and a shadow mode is a
-  stage with an exit date, never a resting state.
-- **Reacting to "a bot did this".** The discriminator is always **our own echo**, never bot-vs-human
-  — other agents' Linear comments and state changes must remain deliverable to us. See §6.5.
-- **Absence alerting via a Loki `count == 0` rule.** Loki cannot assert absent, and the metric path
-  hits the `metric_expiration: 15m` trap;
-  `catalyst-otel/provisioning/alerting/read-path-alerts.yaml:786-793` rules the shape out and
-  assigns ownership to Gatus active probes plus the catalyst-survivability `system_down` rule. Name
-  that owner; do not cite a rule nobody wrote.
+- **Anything whose deterministic path is not genuinely deterministic** (rule 3). The checkout fast-forward automates exactly one shape — clean, on the default branch, upstream resolvable — and refuses seven named others rather than guessing. A "usually works" path is not a deterministic path.
+- **Product-scope judgement.** Whether a ticket should exist, what it should say, whether a finding is worth fixing at all. The delegate denylist is the mechanism: remediate everything by default, route to a human only for product-scope calls and significant cost.
+- **Advancing on anything other than the holder's declaration** (I2). A clean process exit is not a declaration — CTL-1790 shipped `flipSignalAbandonedOnUndeclaredExit` (`sdk-run-phase-agent.mjs:521`, called `:1269`) and `assertion-evidence.mjs:104` now marks the old `SDK_SUCCESS_FLIP` writer "historical (CTL-1790 removed the writer)". `abandoned` never advances.
+- **Any side effect whose refusal is only "a guard we wrote"** (I3/I4), until the lease exists. Shipping those rows in enforce mode before there is something that can say no would mean two hosts double-advancing on one declaration.
+- **Detectors whose unique failure nobody can name** (I10). A detector that duplicates another's coverage is deleted, not kept just in case.
+- **Mechanisms that have never produced an output** (I11). `delegate.{would-route,routed,route-fallback}` and `escalation.explanation-absent` are at **0** occurrences. Their next ticket is either "make it emit" or "delete it" — and a shadow mode is a stage with an exit date, never a resting state.
+- **Reacting to "a bot did this".** The discriminator is always **our own echo**, never bot-vs-human — other agents' Linear comments and state changes must remain deliverable to us. See §6.5.
+- **Absence alerting via a Loki `count == 0` rule.** Loki cannot assert absent, and the metric path hits the `metric_expiration: 15m` trap; `catalyst-otel/provisioning/alerting/read-path-alerts.yaml:786-793` rules the shape out and assigns ownership to Gatus active probes plus the catalyst-survivability `system_down` rule. Name that owner; do not cite a rule nobody wrote.
 
 ## 9. Open decisions — Ryan's, not engineering's
 
-**Five of these were decided on 2026-08-13 (§7a) and are kept here, struck, so the record shows what
-was asked and what was answered. Do not re-litigate them.**
+**Five of these were decided on 2026-08-13 (§7a) and are kept here, struck, so the record shows what was asked and what was answered. Do not re-litigate them.**
 
-1. ~~**A human sets Done on a ticket with a live worker (H10).**~~ **CLOSED — R1.** Neither
-   "honour-as-kill" nor "refuse-and-revert": **PREEMPT**, and then the done-writer's I6 gate decides
-   (§7a.5, §7a.7). The question generalized past Done — _any_ state move on a live worker preempts.
-2. ~~**`Ready`**~~ **CLOSED — R3: archive it** (21 workspace transitions, zero live occupants).
-   **`Duplicate` remains open**: give it a stateMap key, or keep it kill-only via `DRAG_OUT_STATES`?
-3. **Sub-phase visibility during Validate/PR.** ~~A single-valued `phase:<name>` Linear label
-   group~~ **rejected — R2.** What remains open is only whether to link the orch-monitor journey
-   view from the ticket. Pure operator-UX preference.
-4. ~~**Board granularity long-term.**~~ **CLOSED — R4: stay many-to-one.** Ryan proposed adding
-   `Review`/`Merge` states and reversed on §7's rationale. The reversal is load-bearing, not
-   cosmetic — the collapse is what makes §7a's tail deletion free.
-5. **Shadow exit dates.** I11 says shadow is a stage with an exit date, and the date is an operator
-   commitment — needed for the ledger's shadow→enforce step, the trigger-inversion step, **and the
-   done-writer's shadow→enforce flip (§7a.5)**.
-6. ~~**Phase subtraction.**~~ **CLOSED — R5/R6/R7, and larger than proposed:** `monitor-merge`,
-   `monitor-deploy` **and** `teardown` all go, 10 phases → **7** (not 8), with `pr` as the terminal.
-   §7a is the design; §7a.9 lists the six sub-decisions it did **not** settle.
-7. **Cross-agent messaging over Linear comments.** Directional for a follow-up design. It constrains
-   this contract in exactly one way, already honoured: the self-echo discriminator is scoped to our
-   own actor, never to "is a bot" (§6.5). The follow-up should adopt the echo-record discriminator
-   from day one rather than inheriting the actor-id set.
+1. ~~**A human sets Done on a ticket with a live worker (H10).**~~ **CLOSED — R1.** Neither "honour-as-kill" nor "refuse-and-revert": **PREEMPT**, and then the done-writer's I6 gate decides (§7a.5, §7a.7). The question generalized past Done — _any_ state move on a live worker preempts.
+2. ~~**`Ready`**~~ **CLOSED — R3: archive it** (21 workspace transitions, zero live occupants). **`Duplicate` remains open**: give it a stateMap key, or keep it kill-only via `DRAG_OUT_STATES`?
+3. **Sub-phase visibility during Validate/PR.** ~~A single-valued `phase:<name>` Linear label group~~ **rejected — R2.** What remains open is only whether to link the orch-monitor journey view from the ticket. Pure operator-UX preference.
+4. ~~**Board granularity long-term.**~~ **CLOSED — R4: stay many-to-one.** Ryan proposed adding `Review`/`Merge` states and reversed on §7's rationale. The reversal is load-bearing, not cosmetic — the collapse is what makes §7a's tail deletion free.
+5. **Shadow exit dates.** I11 says shadow is a stage with an exit date, and the date is an operator commitment — needed for the ledger's shadow→enforce step, the trigger-inversion step, **and the done-writer's shadow→enforce flip (§7a.5)**.
+6. ~~**Phase subtraction.**~~ **CLOSED — R5/R6/R7, and larger than proposed:** `monitor-merge`, `monitor-deploy` **and** `teardown` all go, 10 phases → **7** (not 8), with `pr` as the terminal. §7a is the design; §7a.9 lists the six sub-decisions it did **not** settle.
+7. **Cross-agent messaging over Linear comments.** Directional for a follow-up design. It constrains this contract in exactly one way, already honoured: the self-echo discriminator is scoped to our own actor, never to "is a bot" (§6.5). The follow-up should adopt the echo-record discriminator from day one rather than inheriting the actor-id set.
 
 ---
 
-**Provenance.** Measured evidence, the full 117-row event census, the cut list, and the review
-record are in `thoughts/shared/research/2026-08-13-event-automation-catalog.md`. Invariants:
-`catalyst-cloud/docs/adr/0027-reliability-initiative-invariants-and-acceptance.md` (a **different
-repo's** ADR numbering — see §3). Ratified by ADR-029 in `docs/adrs.md`.
+**Provenance.** Measured evidence, the full 117-row event census, the cut list, and the review record are in `thoughts/shared/research/2026-08-13-event-automation-catalog.md`. Invariants: `catalyst-cloud/docs/adr/0027-reliability-initiative-invariants-and-acceptance.md` (a **different repo's** ADR numbering — see §3). Ratified by ADR-029 in `docs/adrs.md`.

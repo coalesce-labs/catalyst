@@ -1,55 +1,30 @@
 <!-- CTL tracer bullet: 2026-05-25 — verifies execution-core pickup -->
 # Orchestrator Overview
 
-How a Catalyst orchestrator runs today (post-CTL-452, post-2026-05-17 ship). This doc
-describes what exists in `origin/main` — it is not a roadmap.
+How a Catalyst orchestrator runs today (post-CTL-452, post-2026-05-17 ship). This doc describes what exists in `origin/main` — it is not a roadmap.
 
 ## Why this exists
 
-Catalyst orchestrates AI engineering work under the constraints of LLM agents. Every
-design choice — phases, background dispatch, broker interests, the immutable event
-log — is in service of these:
+Catalyst orchestrates AI engineering work under the constraints of LLM agents. Every design choice — phases, background dispatch, broker interests, the immutable event log — is in service of these:
 
-- **Context engineering.** Per-turn cost compounds, and long contexts hit diminishing
-  then negative returns as attention degrades ("context rot"). Breaking ticket-sized
-  work into bounded phases (research → plan → implement → verify → review → ship)
-  keeps each agent in a focused context where sharp decisions stay cheap.
+- **Context engineering.** Per-turn cost compounds, and long contexts hit diminishing then negative returns as attention degrades ("context rot"). Breaking ticket-sized work into bounded phases (research → plan → implement → verify → review → ship) keeps each agent in a focused context where sharp decisions stay cheap.
 
-- **Background continuity.** Agents should keep working while the operator is away
-  from the keyboard. Phase workers run as `claude --bg` jobs and emit events when
-  they finish; the orchestrator wakes on those events and dispatches the next phase
-  asynchronously. Work does not stop when the human stops looking.
+- **Background continuity.** Agents should keep working while the operator is away from the keyboard. Phase workers run as `claude --bg` jobs and emit events when they finish; the orchestrator wakes on those events and dispatches the next phase asynchronously. Work does not stop when the human stops looking.
 
-- **Human-in-the-loop oversight.** When something stalls, needs a design call, or
-  surfaces a finding, observability — HUD, web dashboard, comms channel, event tail
-  — makes worker state visible without forcing the operator to reconstruct context
-  from raw logs.
+- **Human-in-the-loop oversight.** When something stalls, needs a design call, or surfaces a finding, observability — HUD, web dashboard, comms channel, event tail — makes worker state visible without forcing the operator to reconstruct context from raw logs.
 
-- **Cost-aware parallelism.** Running tickets in parallel waves multiplies throughput,
-  and it also multiplies the risk of conflicts, rework, and tokens spent on doomed
-  work. Wave scheduling lets unblocked work advance independently; revive budgets,
-  healthchecks, and turn caps cap the blast radius of any single stuck worker.
+- **Cost-aware parallelism.** Running tickets in parallel waves multiplies throughput, and it also multiplies the risk of conflicts, rework, and tokens spent on doomed work. Wave scheduling lets unblocked work advance independently; revive budgets, healthchecks, and turn caps cap the blast radius of any single stuck worker.
 
-- **Signal-routed IPC.** Background agents share no memory. They communicate by
-  appending to an immutable event log (`~/catalyst/events/YYYY-MM.jsonl`) and
-  registering broker interests that describe which subset of events should wake
-  them. Each agent's context loads only signals relevant to its task — no inbox
-  sweeping, no low-value polling, no spam.
+- **Signal-routed IPC.** Background agents share no memory. They communicate by appending to an immutable event log (`~/catalyst/events/YYYY-MM.jsonl`) and registering broker interests that describe which subset of events should wake them. Each agent's context loads only signals relevant to its task — no inbox sweeping, no low-value polling, no spam.
 
 ## TL;DR
 
-A single operator command (`/catalyst-legacy:orchestrate …`) launches an interactive
-Claude Code session that schedules tickets into waves and dispatches **phase-agent
-workers** (or legacy `oneshot` workers, depending on `dispatchMode`) into one git
-worktree per ticket.
+A single operator command (`/catalyst-legacy:orchestrate …`) launches an interactive Claude Code session that schedules tickets into waves and dispatches **phase-agent workers** (or legacy `oneshot` workers, depending on `dispatchMode`) into one git worktree per ticket.
 
 > **Note (v11.0.0, CTL-726):** The wave-based orchestration skills (`orchestrate`, `oneshot`, etc.)
 > moved to the `catalyst-legacy` plugin. The *current* multi-ticket model is the execution-core
 > daemon — see [architecture.md](architecture.md) for the end-to-end phase-agent pipeline. Phase-agent workers run as `claude --bg` jobs and walk a
-**10-phase pipeline** — one `--bg` job per phase — emitting `phase.<name>.complete.<TICKET>`
-events the orchestrator wakes on via the broker. The orchestrator advances each
-ticket through the pipeline, opens a PR, waits for CI and merge, runs teardown,
-and archives the run.
+**10-phase pipeline** — one `--bg` job per phase — emitting `phase.<name>.complete.<TICKET>` events the orchestrator wakes on via the broker. The orchestrator advances each ticket through the pipeline, opens a PR, waits for CI and merge, runs teardown, and archives the run.
 
 ## User flow
 
@@ -69,8 +44,7 @@ flowchart TD
   I --> J[~/catalyst/archives/&lt;orchId&gt;/<br/>+ catalyst.db rows]
 ```
 
-The orchestrator itself runs as a normal Claude Code session — there is no `--bg`
-flag on the `orchestrate` skill. Only its workers are backgrounded.
+The orchestrator itself runs as a normal Claude Code session — there is no `--bg` flag on the `orchestrate` skill. Only its workers are backgrounded.
 
 ## Dispatch mode
 
@@ -81,58 +55,26 @@ Selected by `.catalyst/config.json → catalyst.orchestration.dispatchMode`:
 | `"phase-agents"` | `claude --bg --resume /catalyst-dev:phase-<name> <TICKET> --orch-dir <ORCH_DIR>` via `phase-agent-dispatch` | Template default. One `--bg` job per phase. State at `~/.claude/jobs/<bg_job_id>/state.json`. |
 | `"oneshot-legacy"` | `claude -p /catalyst-legacy:oneshot <TICKET> --auto-merge` (long-lived, streaming JSON) | Runtime default when key missing. Pre-CTL-452 model. |
 
-Dispatch-mode resolution lives in `plugins/dev/scripts/orchestrate-dispatch-next`.
-Without `--config <path>`, the dispatcher always uses `oneshot-legacy`; the
-`orchestrate` skill passes `--config "${REPO_ROOT}/.catalyst/config.json"` so the
-project config wins.
+Dispatch-mode resolution lives in `plugins/dev/scripts/orchestrate-dispatch-next`. Without `--config <path>`, the dispatcher always uses `oneshot-legacy`; the `orchestrate` skill passes `--config "${REPO_ROOT}/.catalyst/config.json"` so the project config wins.
 
 ### Config drift detection (CTL-489)
 
-When `plugins/dev/templates/config.template.json` gains a new key (e.g. CTL-452's
-`orchestration.dispatchMode`), existing projects' `.catalyst/config.json` files do not
-automatically receive it. To prevent the silent-fallback class of bug (CTL-487 — catalyst itself
-ran in `oneshot-legacy` mode for two months because the new key was absent),
-`plugins/dev/scripts/check-config-drift.sh` walks the template and emits one warning per missing
-leaf key. The drift script is wired into `check-project-setup.sh`, so every workflow that runs
-the prereq check (`/orchestrate`, `/oneshot`, `/research-codebase`, etc.) prints drift warnings
-until the user runs `/catalyst-foundry:setup-catalyst`, which offers a `jq` deep-merge that adds the
-missing keys while preserving every existing user value (jq's `*` recursive merge with project
-on the right). Allow-listed roots (`projectKey`, `project.ticketPrefix`, `linear.teamKey`,
-`linear.stateMap`, `linear.stateIds`) are suppressed to avoid double-warning — those are already
-checked individually by `check-project-setup.sh`.
+When `plugins/dev/templates/config.template.json` gains a new key (e.g. CTL-452's `orchestration.dispatchMode`), existing projects' `.catalyst/config.json` files do not automatically receive it. To prevent the silent-fallback class of bug (CTL-487 — catalyst itself ran in `oneshot-legacy` mode for two months because the new key was absent), `plugins/dev/scripts/check-config-drift.sh` walks the template and emits one warning per missing leaf key. The drift script is wired into `check-project-setup.sh`, so every workflow that runs the prereq check (`/orchestrate`, `/oneshot`, `/research-codebase`, etc.) prints drift warnings until the user runs `/catalyst-foundry:setup-catalyst`, which offers a `jq` deep-merge that adds the missing keys while preserving every existing user value (jq's `*` recursive merge with project on the right). Allow-listed roots (`projectKey`, `project.ticketPrefix`, `linear.teamKey`, `linear.stateMap`, `linear.stateIds`) are suppressed to avoid double-warning — those are already checked individually by `check-project-setup.sh`.
 
 ### Execution-core entry triggers (two-state monitor)
 
-In `execution-core` dispatch mode the daemon's monitor reacts to Linear
-`state_changed` events:
+In `execution-core` dispatch mode the daemon's monitor reacts to Linear `state_changed` events:
 
-- **`→Triage`** one-shot-dispatches the triage phase agent (the ticket is not
-  scheduler-pulled).
-- **`→Todo`** is the scheduler-eligible entry. New work enters the pipeline at
-  the `research` phase on the contract that a Todo ticket has already been
-  triaged.
+- **`→Triage`** one-shot-dispatches the triage phase agent (the ticket is not scheduler-pulled).
+- **`→Todo`** is the scheduler-eligible entry. New work enters the pipeline at the `research` phase on the contract that a Todo ticket has already been triaged.
 
-A user may move a ticket **Backlog → Todo directly**, skipping `→Triage`
-(an intentional human shortcut). When this happens and no `triage.json` exists
-for the ticket, the monitor **auto-dispatches the triage phase agent** rather
-than reconciling the ticket into the eligible set — triage then runs and its
-completion advances the ticket to `research` normally. This makes "Todo" a
-valid manual entry point: the system transparently runs the missing triage
-instead of dead-locking the research prior-artifact gate. (CTL-625)
+A user may move a ticket **Backlog → Todo directly**, skipping `→Triage` (an intentional human shortcut). When this happens and no `triage.json` exists for the ticket, the monitor **auto-dispatches the triage phase agent** rather than reconciling the ticket into the eligible set — triage then runs and its completion advances the ticket to `research` normally. This makes "Todo" a valid manual entry point: the system transparently runs the missing triage instead of dead-locking the research prior-artifact gate. (CTL-625)
 
-**Linear app-actor self-echo guard.** `catalyst.monitor.linear.botUserId` (Layer-1
-`.catalyst/config.json`, the Linear user UUID of the Catalyst app-actor) is the
-self-echo guard the daemon uses to tell the agent's *own* mirror comments from a
-human reply, so bot-authored issue events don't feed back as a false "human
-replied" signal or a write loop. Required for the Linear app-actor comms channel —
-i.e. when the daemon mirrors phase-agent output to Linear and wakes on human
-replies (CTL-550 / CTL-549 / CTL-749). Set it via `/catalyst-foundry:setup-catalyst`;
-distributed templates ship `null`.
+**Linear app-actor self-echo guard.** `catalyst.monitor.linear.botUserId` (Layer-1 `.catalyst/config.json`, the Linear user UUID of the Catalyst app-actor) is the self-echo guard the daemon uses to tell the agent's *own* mirror comments from a human reply, so bot-authored issue events don't feed back as a false "human replied" signal or a write loop. Required for the Linear app-actor comms channel — i.e. when the daemon mirrors phase-agent output to Linear and wakes on human replies (CTL-550 / CTL-549 / CTL-749). Set it via `/catalyst-foundry:setup-catalyst`; distributed templates ship `null`.
 
 ## The 10-phase pipeline (phase-agents mode)
 
-Canonical sequence is defined in `plugins/dev/scripts/orchestrate-phase-advance`
-and mirrored in the orchestrate skill's pipeline reference table.
+Canonical sequence is defined in `plugins/dev/scripts/orchestrate-phase-advance` and mirrored in the orchestrate skill's pipeline reference table.
 
 | # | Phase | Sub-skill / agent | Linear state | Signal file | Default model | Turn cap |
 |---|---|---|---|---|---|---|
@@ -147,64 +89,27 @@ and mirrored in the orchestrate skill's pipeline reference table.
 | 9 | `monitor-deploy` | `/canary` (gstack) | — | `phase-monitor-deploy.json` | Haiku | 30 |
 | 10 | `teardown` | `/catalyst-dev:teardown` | `done` | `phase-teardown.json` | Sonnet | 15 |
 
-**Teardown is the terminal phase.** It owns all end-of-ticket housekeeping that
-previously had no clear owner:
+**Teardown is the terminal phase.** It owns all end-of-ticket housekeeping that previously had no clear owner:
 
 - Posts the final Linear comment summarising the completed run.
 - Transitions the Linear ticket to `Done`.
-- Removes the git worktree (non-force `git worktree remove`, gated on a
-  merge-confirmation check + worktree presweep liveness check).
-- Deletes the local branch (`git branch -D`; the remote branch was already
-  deleted by monitor-merge's `gh pr merge --delete-branch`).
+- Removes the git worktree (non-force `git worktree remove`, gated on a merge-confirmation check + worktree presweep liveness check).
+- Deletes the local branch (`git branch -D`; the remote branch was already deleted by monitor-merge's `gh pr merge --delete-branch`).
 - Archives the worker directory under `~/catalyst/archives/<TICKET>/`.
 
-**monitor-merge no longer writes Done or removes the worktree.** It merges the PR
-and emits `phase.monitor-merge.complete`, then hands off to monitor-deploy and
-subsequently teardown for all cleanup.
+**monitor-merge no longer writes Done or removes the worktree.** It merges the PR and emits `phase.monitor-merge.complete`, then hands off to monitor-deploy and subsequently teardown for all cleanup.
 
-**Ancillary phase — `remediate` (CTL-653).** Not a member of the linear
-sequence: it is a *router-orchestrated conditional detour* the scheduler takes
-when `verify` produces a verdict-fail (`verify.json.regression_risk ≥ 5` OR any
-`severity:"high"` finding). It reads `verify.json.findings[]` as its brief, fixes
-the code, commits, emits `phase.remediate.complete`, and the router cycles back
-to a fresh `verify`. The loop repeats up to **3** times (a counter distinct from
-the revive budget, event-counted via `phase.remediate.complete.<ticket>`); only a
-verdict-fail *after* the budget is spent escalates to `stalled` → the escalation guard.
+**Ancillary phase — `remediate` (CTL-653).** Not a member of the linear sequence: it is a *router-orchestrated conditional detour* the scheduler takes when `verify` produces a verdict-fail (`verify.json.regression_risk ≥ 5` OR any `severity:"high"` finding). It reads `verify.json.findings[]` as its brief, fixes the code, commits, emits `phase.remediate.complete`, and the router cycles back to a fresh `verify`. The loop repeats up to **3** times (a counter distinct from the revive budget, event-counted via `phase.remediate.complete.<ticket>`); only a verdict-fail *after* the budget is spent escalates to `stalled` → the escalation guard.
 
 | Phase | Sub-skill / agent | Linear state | Prior artifact | Default model | Turn cap |
 |---|---|---|---|---|---|
 | `remediate` | (none — fixes findings inline via Edit/Write) | `remediating` (→ Remediate) | `verify.json` | Opus | 40 |
 
-The conditional routing lives entirely in `deriveAdvancement`
-(`execution-core/scheduler.mjs`); the pure FSM (`lib/phase-fsm.mjs`) keeps
-`verify → review` as its single happy-path edge, so `remediate` is added only as
-a *known ancillary phase* (`isKnownPhase`, `ANCILLARY_PHASES`,
-`REMEDIATE_CYCLE_CAP = 3`). Re-entry past the `next.phase in sig` guard is done by
-deleting the verify+remediate cycle signals (`maybeResetForRemediateCycle`); the
-cap escalation stalls the verify signal (`maybeEscalateRemediateExhausted`).
+The conditional routing lives entirely in `deriveAdvancement` (`execution-core/scheduler.mjs`); the pure FSM (`lib/phase-fsm.mjs`) keeps `verify → review` as its single happy-path edge, so `remediate` is added only as a *known ancillary phase* (`isKnownPhase`, `ANCILLARY_PHASES`, `REMEDIATE_CYCLE_CAP = 3`). Re-entry past the `next.phase in sig` guard is done by deleting the verify+remediate cycle signals (`maybeResetForRemediateCycle`); the cap escalation stalls the verify signal (`maybeEscalateRemediateExhausted`).
 
-Each phase writes its signal file at
-`~/catalyst/runs/<orchId>/workers/<TICKET>/phase-<name>.json`. Per-phase turn-cap
-defaults live in `plugins/dev/scripts/phase-agent-dispatch` (functions
-`phase_default_turn_cap` and `resolve_turn_cap`, which honors a CLI flag override
-and the `catalyst.orchestration.phaseAgents.turnCaps[<phase>]` config key in that
-order). The prior-artifact gate — which file must already exist before a phase
-launches — sits alongside in the same script.
+Each phase writes its signal file at `~/catalyst/runs/<orchId>/workers/<TICKET>/phase-<name>.json`. Per-phase turn-cap defaults live in `plugins/dev/scripts/phase-agent-dispatch` (functions `phase_default_turn_cap` and `resolve_turn_cap`, which honors a CLI flag override and the `catalyst.orchestration.phaseAgents.turnCaps[<phase>]` config key in that order). The prior-artifact gate — which file must already exist before a phase launches — sits alongside in the same script.
 
-**Dispatch-time rebase (CTL-667).** On a **fresh** dispatch of a **build** phase
-(`research`, `plan`, `implement`, `verify`, `review`), `phase-agent-dispatch`
-rebases the ticket's worktree onto current `origin/main` *before* launching the
-worker, so each build phase starts current with merged sibling work and a
-divergence surfaces at dispatch instead of riding all the way to `monitor-merge`.
-It is local-only (never pushes, never touches the PR) and mechanical: a clean
-rebase falls through to the normal launch; a textual **conflict** aborts, parks
-the ticket (`status:"stalled"` + `failureReason:"rebase_conflict_with_origin_main"`,
-`phase.<phase>.failed` emitted) and routes it to the escalation guard without launching a
-worker — conflicts are never auto-resolved. Resume dispatches (CTL-658) and the
-non-build phases (`triage`/`pr`/`remediate`/`monitor-merge`/`monitor-deploy`/`teardown`) skip
-the rebase; the `monitor-*` and `teardown` phases operate on the PR / merged SHA and keep their
-own `BEHIND` handling. Git logic lives in `lib/worktree-rebase.sh`; the build-phase
-set is `is_rebase_phase` in `lib/phase-sequence.sh`.
+**Dispatch-time rebase (CTL-667).** On a **fresh** dispatch of a **build** phase (`research`, `plan`, `implement`, `verify`, `review`), `phase-agent-dispatch` rebases the ticket's worktree onto current `origin/main` *before* launching the worker, so each build phase starts current with merged sibling work and a divergence surfaces at dispatch instead of riding all the way to `monitor-merge`. It is local-only (never pushes, never touches the PR) and mechanical: a clean rebase falls through to the normal launch; a textual **conflict** aborts, parks the ticket (`status:"stalled"` + `failureReason:"rebase_conflict_with_origin_main"`, `phase.<phase>.failed` emitted) and routes it to the escalation guard without launching a worker — conflicts are never auto-resolved. Resume dispatches (CTL-658) and the non-build phases (`triage`/`pr`/`remediate`/`monitor-merge`/`monitor-deploy`/`teardown`) skip the rebase; the `monitor-*` and `teardown` phases operate on the PR / merged SHA and keep their own `BEHIND` handling. Git logic lives in `lib/worktree-rebase.sh`; the build-phase set is `is_rebase_phase` in `lib/phase-sequence.sh`.
 
 ### State machine for one worker
 
@@ -235,18 +140,11 @@ stateDiagram-v2
   stalled --> [*]
 ```
 
-Revives are once-per-phase; on the second `phase.<name>.failed` for the same phase
-the orchestrator marks the worker `stalled`, posts `attention`, and stops advancing.
-The `verify ⇄ remediate` cycle (CTL-653) is the one exception to the
-"escalate on second failure" rule: a verify *verdict*-fail (a `complete` event
-with a high `regression_risk`, distinct from a verify *crash* `failed` event)
-self-heals through `remediate` up to 3 times before stalling — so a fixable
-verify failure no longer needs a human on the first try.
+Revives are once-per-phase; on the second `phase.<name>.failed` for the same phase the orchestrator marks the worker `stalled`, posts `attention`, and stops advancing. The `verify ⇄ remediate` cycle (CTL-653) is the one exception to the "escalate on second failure" rule: a verify *verdict*-fail (a `complete` event with a high `regression_risk`, distinct from a verify *crash* `failed` event) self-heals through `remediate` up to 3 times before stalling — so a fixable verify failure no longer needs a human on the first try.
 
 ## Phase 4 monitor — broker interests + event flow
 
-The orchestrator registers four broker interests at Phase 4 start. All four route
-back as `filter.wake.<ORCH_NAME>` so the orchestrator only watches one event stream:
+The orchestrator registers four broker interests at Phase 4 start. All four route back as `filter.wake.<ORCH_NAME>` so the orchestrator only watches one event stream:
 
 | Interest | Type | Cardinality | Source |
 |---|---|---|---|
@@ -255,11 +153,7 @@ back as `filter.wake.<ORCH_NAME>` so the orchestrator only watches one event str
 | `${ORCH_NAME}-comms-lifecycle` | `comms_lifecycle` | 1 per orchestrator | always |
 | `${ORCH_NAME}-phase-lifecycle-<TICKET>` | `phase_lifecycle` | 1 per ticket | only when `dispatchMode = "phase-agents"` |
 
-The `phase_lifecycle` interest carries `{ticket, phase_names[10]}`. The broker's
-`tryPhaseLifecycleRoute` function in `plugins/dev/scripts/broker/index.mjs` matches
-incoming events against
-`^phase\.([^.]+)\.(complete|failed)\.([A-Za-z][A-Za-z0-9_]*-\d+)$`
-deterministically (no Groq).
+The `phase_lifecycle` interest carries `{ticket, phase_names[10]}`. The broker's `tryPhaseLifecycleRoute` function in `plugins/dev/scripts/broker/index.mjs` matches incoming events against `^phase\.([^.]+)\.(complete|failed)\.([A-Za-z][A-Za-z0-9_]*-\d+)$` deterministically (no Groq).
 
 ```mermaid
 sequenceDiagram
@@ -287,49 +181,20 @@ sequenceDiagram
 
 `orchestrate-healthcheck` does two passes:
 
-1. **Legacy PID liveness** — for `workers/*.json` at `status=dispatched`, after a
-   `--grace-seconds` (default 15s) wait, checks `kill -0 $PID`. Dead PIDs →
-   `status=failed` + `worker-launch-failed` event.
-2. **Phase-mode `--bg` state-file mtime** — for each `workers/*/phase-*.json` with a
-   `bg_job_id`, stats `${JOBS_ROOT}/<bg>/state.json` (where `JOBS_ROOT` defaults
-   to `$HOME/.claude/jobs`). Stalled if:
+1. **Legacy PID liveness** — for `workers/*.json` at `status=dispatched`, after a `--grace-seconds` (default 15s) wait, checks `kill -0 $PID`. Dead PIDs → `status=failed` + `worker-launch-failed` event.
+2. **Phase-mode `--bg` state-file mtime** — for each `workers/*/phase-*.json` with a `bg_job_id`, stats `${JOBS_ROOT}/<bg>/state.json` (where `JOBS_ROOT` defaults to `$HOME/.claude/jobs`). Stalled if:
    - file missing → `STALL_REASON="state-json-missing"`, OR
-   - mtime older than `--stale-bg-seconds` (default 900s) AND `.state` not in
-     `{done, failed, errored, stopped}` → `STALL_REASON="state-json-stale"`
+   - mtime older than `--stale-bg-seconds` (default 900s) AND `.state` not in `{done, failed, errored, stopped}` → `STALL_REASON="state-json-stale"`
 
-   A **git-activity liveness guard** (CTL-509) protects the `state-json-stale`
-   branch: before flagging, it reads the worker worktree's most-recent commit
-   timestamp and, if it is newer than `--git-activity-seconds` (defaults to
-   `--stale-bg-seconds`), suppresses the stall (signal left `running`, a
-   `worker-phase-stale-suppressed` event logged, `gitActiveSuppressed` bumped in
-   the summary). This mirrors the execution-core `stalled-detector.mjs` guard
-   (inactive in phase-agents mode) so a live worker blocked in one long tool call
-   is not falsely re-dispatched. It never guards `state-json-missing` and is
-   opt-out via `--no-git-guard` / `CATALYST_HEALTHCHECK_GIT_GUARD=0`.
+A **git-activity liveness guard** (CTL-509) protects the `state-json-stale` branch: before flagging, it reads the worker worktree's most-recent commit timestamp and, if it is newer than `--git-activity-seconds` (defaults to `--stale-bg-seconds`), suppresses the stall (signal left `running`, a `worker-phase-stale-suppressed` event logged, `gitActiveSuppressed` bumped in the summary). This mirrors the execution-core `stalled-detector.mjs` guard (inactive in phase-agents mode) so a live worker blocked in one long tool call is not falsely re-dispatched. It never guards `state-json-missing` and is opt-out via `--no-git-guard` / `CATALYST_HEALTHCHECK_GIT_GUARD=0`.
 
-Revive budget: the top-level `workers/<TICKET>.json` carries `.reviveCount`. When
-`reviveCount >= MAX_REVIVES` (default 10), the worker is marked `stalled` with
-`attentionReason="revive-budget-exhausted"`.
+Revive budget: the top-level `workers/<TICKET>.json` carries `.reviveCount`. When `reviveCount >= MAX_REVIVES` (default 10), the worker is marked `stalled` with `attentionReason="revive-budget-exhausted"`.
 
-Phase-mode workers that emit `phase.<name>.turn-cap-exhausted.<TICKET>` are
-continued via `orchestrate-revive`'s per-phase loop (CTL-613): the loop reads
-`.handoffPath` off the per-phase signal, resolves the prior Claude session id
-from `${JOBS_ROOT}/<bg_job_id>/state.json`'s `linkScanPath` field, resolves the
-worktree from the orchestrator's `state.json`, and spawns a `claude --bg --resume`
-worker with `CATALYST_IS_CONTINUATION=true` + `CATALYST_HANDOFF_PATH=<path>` +
-`CATALYST_CONTINUATION_COUNT=<n>`. The per-phase signal flips back to `running`
-with the new `bg_job_id`, `phaseContinuationCount` bumps, and a
-`phase.<name>.dispatched` event re-arms the broker. `phaseContinuationCount` is
-budgeted separately from `phaseReviveCount` (which counts hard-error
-re-dispatches) and shares `MAX_CONTINUATIONS` with the legacy top-level
-continuation branch.
+Phase-mode workers that emit `phase.<name>.turn-cap-exhausted.<TICKET>` are continued via `orchestrate-revive`'s per-phase loop (CTL-613): the loop reads `.handoffPath` off the per-phase signal, resolves the prior Claude session id from `${JOBS_ROOT}/<bg_job_id>/state.json`'s `linkScanPath` field, resolves the worktree from the orchestrator's `state.json`, and spawns a `claude --bg --resume` worker with `CATALYST_IS_CONTINUATION=true` + `CATALYST_HANDOFF_PATH=<path>` + `CATALYST_CONTINUATION_COUNT=<n>`. The per-phase signal flips back to `running` with the new `bg_job_id`, `phaseContinuationCount` bumps, and a `phase.<name>.dispatched` event re-arms the broker. `phaseContinuationCount` is budgeted separately from `phaseReviveCount` (which counts hard-error re-dispatches) and shares `MAX_CONTINUATIONS` with the legacy top-level continuation branch.
 
 ## The events JSONL is the unified log
 
-Everything Catalyst does — worker dispatch, phase transitions, PR lifecycle,
-GitHub/Linear webhooks, broker wakes — flows through one append-only file at
-`~/catalyst/events/YYYY-MM.jsonl` (monthly rotation, canonical OTel-style envelope).
-This is the single source of cross-process truth.
+Everything Catalyst does — worker dispatch, phase transitions, PR lifecycle, GitHub/Linear webhooks, broker wakes — flows through one append-only file at `~/catalyst/events/YYYY-MM.jsonl` (monthly rotation, canonical OTel-style envelope). This is the single source of cross-process truth.
 
 ```mermaid
 flowchart LR
@@ -377,86 +242,17 @@ flowchart LR
   REAPER -- "re-emits *.reap-complete<br/>/ *.reap-failed echoes (CTL-649)" --> EL
 ```
 
-**The broker is both a producer and a consumer** — it tails the same log it writes
-into. The `shouldSkipEvent` function (in `broker/index.mjs`) prevents the feedback
-loop: events whose `resource."service.name"` equals `"catalyst.broker"` are dropped
-on read (belt-and-suspenders fallback also drops names prefixed `filter.` or
-`broker.daemon.`). A separate `_emittedWakeCache` (60s TTL on
-`(source_event_id, interest_id)`) deduplicates wakes when `fs.watch` fires twice
-on the same append.
+**The broker is both a producer and a consumer** — it tails the same log it writes into. The `shouldSkipEvent` function (in `broker/index.mjs`) prevents the feedback loop: events whose `resource."service.name"` equals `"catalyst.broker"` are dropped on read (belt-and-suspenders fallback also drops names prefixed `filter.` or `broker.daemon.`). A separate `_emittedWakeCache` (60s TTL on `(source_event_id, interest_id)`) deduplicates wakes when `fs.watch` fires twice on the same append.
 
-**The broker is also the ingestion-silence detector (CTL-1122).** Because it tails
-every event, the broker is the surviving process that can judge whether an upstream
-ingestion source has gone quiet — the out-of-process check the monitor can't do for
-itself (the SPOF behind a 2026-06-14 11h silent outage). Each watchdog tick it
-evaluates per-source event recency and edge-triggers `catalyst.ingestion.{stale,recovered}`
-(emit-only; CTL-1123 consumes them). The `catalyst.monitor` heartbeat is judged on a
-tight fixed cadence (3m/10m, ungated). The `catalyst.github` webhook source is judged
-on a wide threshold (15m/30m) **gated on fleet activity** — github silence only alarms
-while a worker is in-flight (a fresh non-terminal `worker_state` row), so an idle fleet
-never false-alarms. Linear is deferred (its bot-skip guard makes the source quiet even
-during active work). See the configuration reference for the env knobs.
+**The broker is also the ingestion-silence detector (CTL-1122).** Because it tails every event, the broker is the surviving process that can judge whether an upstream ingestion source has gone quiet — the out-of-process check the monitor can't do for itself (the SPOF behind a 2026-06-14 11h silent outage). Each watchdog tick it evaluates per-source event recency and edge-triggers `catalyst.ingestion.{stale,recovered}` (emit-only; CTL-1123 consumes them). The `catalyst.monitor` heartbeat is judged on a tight fixed cadence (3m/10m, ungated). The `catalyst.github` webhook source is judged on a wide threshold (15m/30m) **gated on fleet activity** — github silence only alarms while a worker is in-flight (a fresh non-terminal `worker_state` row), so an idle fleet never false-alarms. Linear is deferred (its bot-skip guard makes the source quiet even during active work). See the configuration reference for the env knobs.
 
-**On top of the detector, the broker is the alert-policy layer (CTL-1123).** The
-`catalyst.ingestion.*` events above are low-level; the broker promotes the
-operator-actionable subset into a stable `catalyst.alert.{raised,cleared}` topic
-(`event.label` = the alert kind). `system_down` is promoted from a critical source's
-sustained `catalyst.ingestion.stale` (a dead monitor).
+**On top of the detector, the broker is the alert-policy layer (CTL-1123).** The `catalyst.ingestion.*` events above are low-level; the broker promotes the operator-actionable subset into a stable `catalyst.alert.{raised,cleared}` topic (`event.label` = the alert kind). `system_down` is promoted from a critical source's sustained `catalyst.ingestion.stale` (a dead monitor).
 
-**System trouble is ONE fleet-scoped, auto-clearing alert — never one per ticket
-(CTL-2156).** Three kinds — `provider_degraded` (429/529 provider overload),
-`rate_limit_exhausted` (a Claude account / Linear / GitHub budget spent) and
-`capacity_unavailable` (a node with no execution slots) — are detected by
-`broker/system-trouble.mjs` from telemetry the fleet already emits
-(`execution-core.sdk.overloaded`, `account.status.changed`,
-`account.ratelimit.{sampled,unsampled}`, `linear.write.proxy.budget-exhausted`,
-`linear.label.retry-exhausted`, `node.capacity.changed`). Each kind's LEVEL is the
-number of *distinct* affected things (tickets / accounts / nodes) inside a trailing
-window, debounced by threshold + persistence + cooldown, so a provider outage
-touching forty tickets raises exactly **one** alert and writes **zero** per-ticket
-artifacts — the tickets simply wait and resume by themselves. The alert clears
-itself when the condition ends, either because a producer retracts (capacity
-restored, account no longer rejected) or because every affected key ages out of the
-window. This replaces the retired `needs_human_pileup` kind, which counted
-escalation LABELS — the per-ticket artifact — rather than the
-condition. These alert events ride the same event log → `otel-forward` → OTel collector → fan-out (Loki, dash0),
-where a downstream alert rule routes them to a channel. **Delivery is a separate concern**
-— the broker emits intent only; no channel or credential lives in the daemon, so the
-alerter survives a monitor death without depending on it.
+**System trouble is ONE fleet-scoped, auto-clearing alert — never one per ticket (CTL-2156).** Three kinds — `provider_degraded` (429/529 provider overload), `rate_limit_exhausted` (a Claude account / Linear / GitHub budget spent) and `capacity_unavailable` (a node with no execution slots) — are detected by `broker/system-trouble.mjs` from telemetry the fleet already emits (`execution-core.sdk.overloaded`, `account.status.changed`, `account.ratelimit.{sampled,unsampled}`, `linear.write.proxy.budget-exhausted`, `linear.label.retry-exhausted`, `node.capacity.changed`). Each kind's LEVEL is the number of *distinct* affected things (tickets / accounts / nodes) inside a trailing window, debounced by threshold + persistence + cooldown, so a provider outage touching forty tickets raises exactly **one** alert and writes **zero** per-ticket artifacts — the tickets simply wait and resume by themselves. The alert clears itself when the condition ends, either because a producer retracts (capacity restored, account no longer rejected) or because every affected key ages out of the window. This replaces the retired `needs_human_pileup` kind, which counted escalation LABELS — the per-ticket artifact — rather than the condition. These alert events ride the same event log → `otel-forward` → OTel collector → fan-out (Loki, dash0), where a downstream alert rule routes them to a channel. **Delivery is a separate concern** — the broker emits intent only; no channel or credential lives in the daemon, so the alerter survives a monitor death without depending on it.
 
-**Every stall resolves to exactly ONE class — or is HELD (CTL-2158).**
-`execution-core/stall-class.mjs` is the single classifier: `classifyStall(evidence)`
-maps a stall reason to **S — system** (provider overload, rate/account limits, tokens
-exhausted, connectivity, executor or worker death, an artifact written late,
-retry/cycle caps, an untidy working copy, fence/zombie trips, orphan-sweep staleness
-→ retry with backoff; if persistent, the ONE fleet alert above, and **zero**
-per-ticket artifacts), **A — ask** (scope, priority, approval, a credential or
-dashboard action only a person can take, design sign-off → one ask ticket carrying
-`blocks`), or **M — moot** (already done, superseded, no actionable plan → close).
-An exact table is tried first, then prefix rules, then three family patterns; if two
-families match, or none does, the verdict is **HELD** — not a fourth disposition but
-the *absence* of one. A held stall is never dropped, never guessed at, never
-auto-retried forever and never auto-cleared, because both possible defaults are
-expensive: defaulting to *ask* re-creates the bin (of 86 items flagged as waiting on
-a human, 3 genuinely were), and defaulting to *system* strands a real judgment call
-silently. `needs_human` itself classifies as HELD by construction — it records
-*that* an escalation happened and nothing about *why*. The verdict is stamped onto
-the phase signal (`stallClass`, `stallClassRule`, `stallClassManufactured`) by the
-four producers that publish a complete escalation, alongside `escalationPublished`,
-which is what `unstuck-sweep.mjs`'s quiet-gate now keys on — a property, not the
-`stalledReason:"needs_human"` token — so a ticket a human is already holding never
-receives a second authored Linear comment once that token goes away.
+**Every stall resolves to exactly ONE class — or is HELD (CTL-2158).** `execution-core/stall-class.mjs` is the single classifier: `classifyStall(evidence)` maps a stall reason to **S — system** (provider overload, rate/account limits, tokens exhausted, connectivity, executor or worker death, an artifact written late, retry/cycle caps, an untidy working copy, fence/zombie trips, orphan-sweep staleness → retry with backoff; if persistent, the ONE fleet alert above, and **zero** per-ticket artifacts), **A — ask** (scope, priority, approval, a credential or dashboard action only a person can take, design sign-off → one ask ticket carrying `blocks`), or **M — moot** (already done, superseded, no actionable plan → close). An exact table is tried first, then prefix rules, then three family patterns; if two families match, or none does, the verdict is **HELD** — not a fourth disposition but the *absence* of one. A held stall is never dropped, never guessed at, never auto-retried forever and never auto-cleared, because both possible defaults are expensive: defaulting to *ask* re-creates the bin (of 86 items flagged as waiting on a human, 3 genuinely were), and defaulting to *system* strands a real judgment call silently. `needs_human` itself classifies as HELD by construction — it records *that* an escalation happened and nothing about *why*. The verdict is stamped onto the phase signal (`stallClass`, `stallClassRule`, `stallClassManufactured`) by the four producers that publish a complete escalation, alongside `escalationPublished`, which is what `unstuck-sweep.mjs`'s quiet-gate now keys on — a property, not the `stalledReason:"needs_human"` token — so a ticket a human is already holding never receives a second authored Linear comment once that token goes away.
 
-**The execution-core daemon reaper (CTL-649) is the second producer-and-consumer.**
-It consumes the reap-intent requests appended by the reap-intent producers
-(`lib/emit-reap-intent.sh`, `execution-core/reap-intent.mjs`) — `phase.<kind>.reap-requested`,
-`worktree.presweep.reap-requested`, `pr.merged.cleanup-requested`, `orphans.reap-requested` — by
-boot-replaying any request with no matching `*-complete` echo on daemon start, then following new
-appends via an `fs.watch` + byte-cursor tail. For each it runs the matching local executor
-(`claude stop`, `git worktree remove`, `git branch -D`) and re-emits a `*.reap-complete` /
-`*.reap-failed` echo back into the same log; `orphans.reap-requested` fans out to one
-`phase.abort.reap-requested` per orphaned session. An in-memory dedupe window (keyed on
-`event:bg_job_id|worktree_path`) suppresses duplicate intents.
+**The execution-core daemon reaper (CTL-649) is the second producer-and-consumer.** It consumes the reap-intent requests appended by the reap-intent producers (`lib/emit-reap-intent.sh`, `execution-core/reap-intent.mjs`) — `phase.<kind>.reap-requested`, `worktree.presweep.reap-requested`, `pr.merged.cleanup-requested`, `orphans.reap-requested` — by boot-replaying any request with no matching `*-complete` echo on daemon start, then following new appends via an `fs.watch` + byte-cursor tail. For each it runs the matching local executor (`claude stop`, `git worktree remove`, `git branch -D`) and re-emits a `*.reap-complete` / `*.reap-failed` echo back into the same log; `orphans.reap-requested` fans out to one `phase.abort.reap-requested` per orphaned session. An in-memory dedupe window (keyed on `event:bg_job_id|worktree_path`) suppresses duplicate intents.
 
 ## Where you observe a running orchestration
 
@@ -470,74 +266,31 @@ Five operator surfaces — four read structured state, one reads diagnostic logs
 | **`catalyst-execution-core sessions/worktrees/branches list`** | live `claude agents` inventory + git worktree/branch state (read path of the CTL-649 audit CLI) | `plugins/dev/scripts/catalyst-execution-core` → `execution-core/cli/{sessions,worktrees,branches}.mjs` | Inventory and classify live sessions, worktrees, and branches — what the reaper sees before it acts |
 | **`catalyst broker logs`** | tails `~/catalyst/broker.log` (pino-structured daemon stdout) | `plugins/dev/scripts/catalyst-broker` | Broker daemon diagnostics — Groq errors, routing traces, key-missing warnings |
 
-**Broker logs vs events JSONL — these are different things.** The events log is the
-system's semantic fact record (sparse, structured, durable); `broker.log` is the
-daemon's operational diary (verbose, diagnostic). A `broker.daemon.startup` event
-appears in the events log specifically so orchestrators know to re-register their
-interests — not for human debugging. Broker errors that surface a named event go
-to both; ordinary daemon noise goes only to `broker.log`.
+**Broker logs vs events JSONL — these are different things.** The events log is the system's semantic fact record (sparse, structured, durable); `broker.log` is the daemon's operational diary (verbose, diagnostic). A `broker.daemon.startup` event appears in the events log specifically so orchestrators know to re-register their interests — not for human debugging. Broker errors that surface a named event go to both; ordinary daemon noise goes only to `broker.log`.
 
-`catalyst-hud` surfaces both layouts: flat `workers/*.json` and per-phase
-`workers/<TICKET>/phase-<name>.json`. The reader
-(`worker-signals-reader.ts::scanOrchestratorWorkersDir`) descends one level into
-per-ticket subdirectories, picks the most recent non-terminal phase, and overlays
-its `phaseName`/`status` onto the flat signal so the PHASE column shows the live
-phase (e.g. `implement`, `monitor-merge`).
+`catalyst-hud` surfaces both layouts: flat `workers/*.json` and per-phase `workers/<TICKET>/phase-<name>.json`. The reader (`worker-signals-reader.ts::scanOrchestratorWorkersDir`) descends one level into per-ticket subdirectories, picks the most recent non-terminal phase, and overlays its `phaseName`/`status` onto the flat signal so the PHASE column shows the live phase (e.g. `implement`, `monitor-merge`).
 
 ## Cost capture
 
-Both dispatch modes write the same four cost surfaces — `signal.cost`,
-`state.workers[ticket].usage`, `state.usage`, and the `session_metrics` SQLite
-mirror — but the USAGE source differs by mode. `orchestrate-roll-usage.sh`,
-invoked by `update-dashboard.sh --roll-usage` on every monitor wake-up,
-abstracts the difference.
+Both dispatch modes write the same four cost surfaces — `signal.cost`, `state.workers[ticket].usage`, `state.usage`, and the `session_metrics` SQLite mirror — but the USAGE source differs by mode. `orchestrate-roll-usage.sh`, invoked by `update-dashboard.sh --roll-usage` on every monitor wake-up, abstracts the difference.
 
-**Legacy (`oneshot-legacy` dispatch).** Workers run as `claude -p
---output-format stream-json`. The CLI streams a final `"type":"result"` event
-carrying `total_cost_usd`, `usage`, `num_turns`, and `duration_ms` into
-`workers/output/<TICKET>-stream.jsonl`. roll-usage parses that event into a
-USAGE record.
+**Legacy (`oneshot-legacy` dispatch).** Workers run as `claude -p --output-format stream-json`. The CLI streams a final `"type":"result"` event carrying `total_cost_usd`, `usage`, `num_turns`, and `duration_ms` into `workers/output/<TICKET>-stream.jsonl`. roll-usage parses that event into a USAGE record.
 
-**Phase-agent (`phase-agents` dispatch, CTL-496).** Workers run as `claude
---bg` jobs. There is no `result` event because there is no `--output-format
-stream-json` flag on the bg invocation; instead the CLI writes the full
-conversation to `~/.claude/projects/<wt>/<sessionId>.jsonl`. roll-usage
-resolves the JSONL path via `~/.claude/jobs/<bg_job_id>/state.json
--> linkScanPath` and shells `extract-cost-from-jsonl.sh --jsonl <path>
---pricing claude-pricing.json` to aggregate per-assistant-event `usage` by
-model, split cache_creation by 5m / 1h TTL, and apply the per-model rates
-from a versioned `plugins/dev/scripts/claude-pricing.json`. The four
-downstream writes are then unchanged from legacy.
+**Phase-agent (`phase-agents` dispatch, CTL-496).** Workers run as `claude --bg` jobs. There is no `result` event because there is no `--output-format stream-json` flag on the bg invocation; instead the CLI writes the full conversation to `~/.claude/projects/<wt>/<sessionId>.jsonl`. roll-usage resolves the JSONL path via `~/.claude/jobs/<bg_job_id>/state.json -> linkScanPath` and shells `extract-cost-from-jsonl.sh --jsonl <path> --pricing claude-pricing.json` to aggregate per-assistant-event `usage` by model, split cache_creation by 5m / 1h TTL, and apply the per-model rates from a versioned `plugins/dev/scripts/claude-pricing.json`. The four downstream writes are then unchanged from legacy.
 
-Phase mode aggregates `state.workers[ticket].usage` across phases (`+=`),
-not overwriting, so `state.workers[T].usage.costUSD == sum(phase.cost.costUSD)`
-for that ticket. The `session_metrics` mirror finds the right row via
-`signal.catalystSessionId` (persisted by the phase-agent prelude) or, for
-in-flight runs that predate that persistence, a DB lookup keyed on
-`ticket_key + skill_name = 'phase-<name>'`.
+Phase mode aggregates `state.workers[ticket].usage` across phases (`+=`), not overwriting, so `state.workers[T].usage.costUSD == sum(phase.cost.costUSD)` for that ticket. The `session_metrics` mirror finds the right row via `signal.catalystSessionId` (persisted by the phase-agent prelude) or, for in-flight runs that predate that persistence, a DB lookup keyed on `ticket_key + skill_name = 'phase-<name>'`.
 
-The sweep loop in `update-dashboard.sh` iterates both layouts on every
-wake-up. Killed-worker sidecars (`workers/<T>/phase-<name>.json.dead-<id>.json`)
-are skipped so booked cost is never double-counted.
+The sweep loop in `update-dashboard.sh` iterates both layouts on every wake-up. Killed-worker sidecars (`workers/<T>/phase-<name>.json.dead-<id>.json`) are skipped so booked cost is never double-counted.
 
 ## On Claude Code's "agent view" / agents sidebar
 
-Phase-agent workers run as `claude --bg` jobs and live under
-`~/.claude/jobs/<bg_job_id>/`. **Catalyst does not integrate with Claude Code's
-native UI surfaces.** Specifically:
+Phase-agent workers run as `claude --bg` jobs and live under `~/.claude/jobs/<bg_job_id>/`. **Catalyst does not integrate with Claude Code's native UI surfaces.** Specifically:
 
-- The Claude CLI **writes** `~/.claude/jobs/<id>/state.json`; Catalyst only reads
-  it (for healthcheck mtime / staleness detection).
+- The Claude CLI **writes** `~/.claude/jobs/<id>/state.json`; Catalyst only reads it (for healthcheck mtime / staleness detection).
 - Catalyst ships no UI that hooks into Claude Code's agents sidebar.
-- Whether Claude Code's agents sidebar displays `--bg` jobs is a **Claude Code
-  question**, not a Catalyst question, and is not described in any catalyst source.
+- Whether Claude Code's agents sidebar displays `--bg` jobs is a **Claude Code question**, not a Catalyst question, and is not described in any catalyst source.
 
-If you want to monitor a running orchestration, use `catalyst-hud`, the
-orch-monitor web dashboard, `catalyst-events tail`, the
-`catalyst-execution-core sessions/worktrees/branches list` audit CLI, or
-`catalyst broker logs` — those are the surfaces Catalyst owns. If you want to see
-backgrounded Claude jobs directly, consult the Claude CLI's own documentation for
-whatever inventory it exposes.
+If you want to monitor a running orchestration, use `catalyst-hud`, the orch-monitor web dashboard, `catalyst-events tail`, the `catalyst-execution-core sessions/worktrees/branches list` audit CLI, or `catalyst broker logs` — those are the surfaces Catalyst owns. If you want to see backgrounded Claude jobs directly, consult the Claude CLI's own documentation for whatever inventory it exposes.
 
 ## Canonical artifact / state locations
 
@@ -574,14 +327,11 @@ whatever inventory it exposes.
 | Healthcheck | PID liveness only | PID liveness + `~/.claude/jobs/<bg>/state.json` mtime (`--stale-bg-seconds`, default 900s) |
 | Linear states | Backlog / In Progress / In Review / Done / Canceled | + intermediate `triaged`, `researching`, `planning`, `verifying`, `reviewing`, `inReview` (CTL-454) |
 
-Legacy `oneshot-legacy` mode is unchanged — all the above only activates when
-`dispatchMode = "phase-agents"` is set in `.catalyst/config.json`.
+Legacy `oneshot-legacy` mode is unchanged — all the above only activates when `dispatchMode = "phase-agents"` is set in `.catalyst/config.json`.
 
 ## Cold-start recovery (CTL-639)
 
-When the daemon restarts after a crash or `kill`, the boot-resume pass
-(`boot-resume.mjs::reconcileBootResume`) re-dispatches in-flight tickets whose
-`--bg` workers are no longer alive. The pass classifies each candidate by phase:
+When the daemon restarts after a crash or `kill`, the boot-resume pass (`boot-resume.mjs::reconcileBootResume`) re-dispatches in-flight tickets whose `--bg` workers are no longer alive. The pass classifies each candidate by phase:
 
 | Phase class | Phases | Boot behaviour |
 |---|---|---|
@@ -596,10 +346,7 @@ To approve re-dispatch of a gated ticket, create the approval sentinel:
 touch "$ORCH_DIR/workers/<TICKET>/.boot-resume-approved"
 ```
 
-The scheduler picks it up within one tick (≤30 s) and calls `reviveDispatch`
-for that ticket's phase — subject to the same MAX_REVIVES and storm-breaker
-guards as a per-tick reclaim. Both sentinels are deleted on a successful
-dispatch so a subsequent reboot does not re-dispatch.
+The scheduler picks it up within one tick (≤30 s) and calls `reviveDispatch` for that ticket's phase — subject to the same MAX_REVIVES and storm-breaker guards as a per-tick reclaim. Both sentinels are deleted on a successful dispatch so a subsequent reboot does not re-dispatch.
 
 To list currently gated tickets:
 
@@ -609,8 +356,7 @@ find "$ORCH_DIR/workers" -name ".boot-resume-pending-approval" | while read p; d
 done
 ```
 
-If a HUD button later writes the same sentinel it requires no logic changes —
-`processApprovedResumes` polls for the file, not for the transport that wrote it.
+If a HUD button later writes the same sentinel it requires no logic changes — `processApprovedResumes` polls for the file, not for the transport that wrote it.
 
 ## See also
 
@@ -664,7 +410,7 @@ Two prerequisites block the board-visibility outcome (assigned agent visible in 
    jq --arg id "$BOT_ID" '.catalyst.linear.bot.orchestrator.botUserId = $id' \
      ~/.config/catalyst/config.json > /tmp/cfg.json && mv /tmp/cfg.json ~/.config/catalyst/config.json
    ```
-   Repeat on every host that runs the execution-core daemon.
+Repeat on every host that runs the execution-core daemon.
 
 5. **Restart the daemon** — `botUserId` is read only at startup:
    ```bash

@@ -1,7 +1,6 @@
 # Developer Documentation
 
-Reference documentation for Catalyst contributors. User-facing docs live at
-[catalyst.coalescelabs.ai](https://catalyst.coalescelabs.ai).
+Reference documentation for Catalyst contributors. User-facing docs live at [catalyst.coalescelabs.ai](https://catalyst.coalescelabs.ai).
 
 ## Contents
 

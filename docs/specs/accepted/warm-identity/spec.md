@@ -6,15 +6,11 @@ ticket: CTL-1071
 
 ## Problem
 
-Catalyst read as a Linear knockoff. The goal was to give it its own product
-identity — a warmer, "textbook-calm" visual language across the app, website,
-and logo — rather than borrowing Linear's cool greys wholesale.
+Catalyst read as a Linear knockoff. The goal was to give it its own product identity — a warmer, "textbook-calm" visual language across the app, website, and logo — rather than borrowing Linear's cool greys wholesale.
 
 ## Outcome
 
-Explored and landed as the CTL-1071 identity spike (Done). These mockups are the
-reference deliverables for that direction: the warm board, the warm inbox proof,
-and the type specimen that pins down the typography.
+Explored and landed as the CTL-1071 identity spike (Done). These mockups are the reference deliverables for that direction: the warm board, the warm inbox proof, and the type specimen that pins down the typography.
 
 ## Mockups
 

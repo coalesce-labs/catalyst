@@ -1,20 +1,13 @@
 # Migration record — `mockups/` → `docs/specs/` (CTL-1411)
 
-When the `docs/specs/` convention landed, the existing mockup HTML from repo-root
-`mockups/` was migrated here. This file records where each piece went and why, so
-the classification is transparent and easy to correct — remember, promotion or
-demotion is a single `git mv`.
+When the `docs/specs/` convention landed, the existing mockup HTML from repo-root `mockups/` was migrated here. This file records where each piece went and why, so the classification is transparent and easy to correct — remember, promotion or demotion is a single `git mv`.
 
 ## Classification rule
 
-- **accepted/** — the mockup's design was already committed to the repo as
-  reviewed source, **or** its feature demonstrably shipped (a Done ticket / merged
-  PR whose design this mockup represents).
-- **draft/** — an exploratory or competing direction with no confirmation it
-  shipped.
+- **accepted/** — the mockup's design was already committed to the repo as reviewed source, **or** its feature demonstrably shipped (a Done ticket / merged PR whose design this mockup represents).
+- **draft/** — an exploratory or competing direction with no confirmation it shipped.
 
-Where ship-status was uncertain, the call is noted below as **(best-guess)** —
-flip it with a `git mv` if you know better.
+Where ship-status was uncertain, the call is noted below as **(best-guess)** — flip it with a `git mv` if you know better.
 
 ## What moved
 
@@ -36,20 +29,12 @@ flip it with a `git mv` if you know better.
 | `rules-explorer-living-textbook.html` | `draft/rules-explorer/` | Competing rules-explorer direction |
 | `rules-explorer-mission-control.html` | `draft/rules-explorer/` | Competing rules-explorer direction |
 
-Tracked files (first three) were moved with `git mv` to preserve history. The
-rest were previously **untracked** WIP in `mockups/` and are newly committed here.
+Tracked files (first three) were moved with `git mv` to preserve history. The rest were previously **untracked** WIP in `mockups/` and are newly committed here.
 
 ## `mockups/board-redesign-2026-06-13/` — decision: **discard**
 
-That directory held three screenshots (`img1.png`, `img2.png`, `img3.png`) and
-**no spec prose**. Per the "screenshots are not specs" rule, and because the board
-redesign already shipped and is documented (CTL-996 · #1745), these screenshots
-have no durable value. **Decision: discard** — they were never tracked (matched
-`mockups/**/*.png` in `.gitignore`), so this is simply removing the local
-directory; nothing leaves git history.
+That directory held three screenshots (`img1.png`, `img2.png`, `img3.png`) and **no spec prose**. Per the "screenshots are not specs" rule, and because the board redesign already shipped and is documented (CTL-996 · #1745), these screenshots have no durable value. **Decision: discard** — they were never tracked (matched `mockups/**/*.png` in `.gitignore`), so this is simply removing the local directory; nothing leaves git history.
 
 ## `mockups/` after this migration
 
-`mockups/` retains only its ephemeral, gitignored screenshots (`mockups/**/*.png`).
-All reviewed mockup HTML now lives under `docs/specs/`. New design work should
-start under `docs/specs/`, not `mockups/`.
+`mockups/` retains only its ephemeral, gitignored screenshots (`mockups/**/*.png`). All reviewed mockup HTML now lives under `docs/specs/`. New design work should start under `docs/specs/`, not `mockups/`.

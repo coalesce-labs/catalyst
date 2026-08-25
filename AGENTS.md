@@ -1,20 +1,15 @@
 # AGENTS.md
 
-Guidance for AI coding agents working in this repository. This file is the
-portable, tool-agnostic source of truth. Tool-specific agents may keep their own
-thin bridge file that imports this one and adds tool-specific notes — keep that
-detail out of here.
+Guidance for AI coding agents working in this repository. This file is the portable, tool-agnostic source of truth. Tool-specific agents may keep their own thin bridge file that imports this one and adds tool-specific notes — keep that detail out of here.
 
 ## What This Repository Is
 
-A **portable collection of agents, skills, and workflows** for AI-assisted
-development, distributed as plugins. It is both:
+A **portable collection of agents, skills, and workflows** for AI-assisted development, distributed as plugins. It is both:
 
 1. A **source repository** for plugin-based agents and skills
 2. A **working installation** that uses its own tools (dogfooding)
 
-Agents and skills are organized in `plugins/*/` and surfaced to the agent via
-local symlinks.
+Agents and skills are organized in `plugins/*/` and surfaced to the agent via local symlinks.
 
 ## Agent Philosophy
 
@@ -78,45 +73,22 @@ No build process — this is markdown files and bash scripts.
 
 ## Skill & Agent References
 
-Skills are namespaced `plugin-name:skill-name` (e.g. `catalyst-dev:create-plan`,
-`catalyst-pm:prd-draft`). When instructing a reader to invoke a skill, use the
-fully-qualified name; bare names are acceptable in explanatory prose describing
-workflow relationships. Agent (subagent) references always use the full
-`plugin-name:agent-name` form.
+Skills are namespaced `plugin-name:skill-name` (e.g. `catalyst-dev:create-plan`, `catalyst-pm:prd-draft`). When instructing a reader to invoke a skill, use the fully-qualified name; bare names are acceptable in explanatory prose describing workflow relationships. Agent (subagent) references always use the full `plugin-name:agent-name` form.
 
 ## Knowledge Store
 
-- `thoughts/shared/learnings/` — past problem→solution entries (grep by component/tags/problem_type).
-  Search before implementing or debugging in a known area. Curated by `catalyst-dev:ticket-compound`.
+- `thoughts/shared/learnings/` — past problem→solution entries (grep by component/tags/problem_type). Search before implementing or debugging in a known area. Curated by `catalyst-dev:ticket-compound`.
 - `thoughts/shared/CONCEPTS.md` — shared domain vocabulary (reclaim, revive-budget, orphan, signal ownership…).
-- `thoughts/shared/retros/` — compound-loop outputs, written automatically at every merge
-  (CTL-831): `ticket/<date>.md` cross-ticket retros (`catalyst-dev:ticket-retro`);
-  `estimate/<YYYY-WW>-compound-log.md` per-PR estimation actuals (`catalyst-dev:compound-estimate`).
+- `thoughts/shared/retros/` — compound-loop outputs, written automatically at every merge (CTL-831): `ticket/<date>.md` cross-ticket retros (`catalyst-dev:ticket-retro`); `estimate/<YYYY-WW>-compound-log.md` per-PR estimation actuals (`catalyst-dev:compound-estimate`).
 
 ## Code Understanding (Serena)
 
-Coding agents orient on this codebase through **Serena** — a self-hosted, local, LSP-backed MCP
-server that provides semantic code retrieval (the replacement for the removed DeepWiki MCP). It lets
-agents answer "where does X live / how is Y wired / who calls Z" in a few precise calls instead of
-many broad `Grep`s, getting up to speed with far fewer tool calls and tokens.
+Coding agents orient on this codebase through **Serena** — a self-hosted, local, LSP-backed MCP server that provides semantic code retrieval (the replacement for the removed DeepWiki MCP). It lets agents answer "where does X live / how is Y wired / who calls Z" in a few precise calls instead of many broad `Grep`s, getting up to speed with far fewer tool calls and tokens.
 
-- **Install (per machine):** `uv tool install -p 3.13 serena-agent`, then register it as a
-  **user-scope MCP server** that runs `serena start-mcp-server`. Use the absolute path to the
-  `serena` binary so background worker jobs with a restricted `PATH` can launch it, and run it
-  headless on servers. It connects with no startup project and activates lazily. The exact
-  per-agent registration command lives in the bridge file.
-- **Versioned config (committed):** `.serena/project.yml` (languages `typescript` + `bash`,
-  `read_only: true`, ignores the harness worktree dir / `thoughts` / build output, plus an
-  `initial_prompt` pointer) and
-  `.serena/memories/codebase_map.md` (the directory map agents read via `read_memory("codebase_map")`).
-  The per-machine symbol cache `.serena/cache/` is gitignored; build it with `serena project index`.
-- **Wiring:** the research/analysis agents (`codebase-analyzer`, `codebase-locator`,
-  `codebase-pattern-finder`) and skills (`research-codebase`, `create-plan`, `phase-research`,
-  `phase-plan`) grant the read-only `mcp__serena__*` tools; `research-codebase` Step 0 activates the
-  project, reads the `codebase_map` memory, and maps symbols before spawning sub-agents.
-- **Use it:** `activate_project` (repo root / `.`) → `list_memories` / `read_memory` →
-  `get_symbols_overview`, `find_symbol`, `find_referencing_symbols`, `search_for_pattern`. It is
-  read-only — editing stays with the implement agents' `Edit`/`Write`.
+- **Install (per machine):** `uv tool install -p 3.13 serena-agent`, then register it as a **user-scope MCP server** that runs `serena start-mcp-server`. Use the absolute path to the `serena` binary so background worker jobs with a restricted `PATH` can launch it, and run it headless on servers. It connects with no startup project and activates lazily. The exact per-agent registration command lives in the bridge file.
+- **Versioned config (committed):** `.serena/project.yml` (languages `typescript` + `bash`, `read_only: true`, ignores the harness worktree dir / `thoughts` / build output, plus an `initial_prompt` pointer) and `.serena/memories/codebase_map.md` (the directory map agents read via `read_memory("codebase_map")`). The per-machine symbol cache `.serena/cache/` is gitignored; build it with `serena project index`.
+- **Wiring:** the research/analysis agents (`codebase-analyzer`, `codebase-locator`, `codebase-pattern-finder`) and skills (`research-codebase`, `create-plan`, `phase-research`, `phase-plan`) grant the read-only `mcp__serena__*` tools; `research-codebase` Step 0 activates the project, reads the `codebase_map` memory, and maps symbols before spawning sub-agents.
+- **Use it:** `activate_project` (repo root / `.`) → `list_memories` / `read_memory` → `get_symbols_overview`, `find_symbol`, `find_referencing_symbols`, `search_for_pattern`. It is read-only — editing stays with the implement agents' `Edit`/`Write`.
 
 ## Commit Conventions
 
@@ -128,8 +100,7 @@ many broad `Grep`s, getting up to speed with far fewer tool calls and tokens.
 
 **How release-please routes version bumps (monorepo):**
 
-- Routing is by **file paths changed**, NOT by commit message scope. A commit touching files in both
-  `plugins/dev/` and `plugins/playground/pm/` bumps both plugins regardless of scope.
+- Routing is by **file paths changed**, NOT by commit message scope. A commit touching files in both `plugins/dev/` and `plugins/playground/pm/` bumps both plugins regardless of scope.
 - The `(scope)` in `fix(dev):` controls **changelog grouping**, not which plugin gets bumped.
 - Squash merges work correctly — the GitHub API provides the file list to release-please.
 - Use the scope that best describes the primary intent. Both plugins still get their version bumps.
@@ -138,13 +109,11 @@ many broad `Grep`s, getting up to speed with far fewer tool calls and tokens.
 
 This workspace tracks: agent definitions, skills, documentation, scripts, configuration templates.
 
-**Do NOT commit**: Specific ticket prefixes (keep "PROJ"), Linear team/project IDs (keep null),
-personal thoughts user (keep null).
+**Do NOT commit**: Specific ticket prefixes (keep "PROJ"), Linear team/project IDs (keep null), personal thoughts user (keep null).
 
 ## CI/Automation
 
-CI skills (`ci-commit`, `ci-describe-pr`) follow the same conventions but skip all interactive
-prompts. They never commit sensitive files or add self-attribution.
+CI skills (`ci-commit`, `ci-describe-pr`) follow the same conventions but skip all interactive prompts. They never commit sensitive files or add self-attribution.
 
 ## Configuration
 
@@ -157,75 +126,30 @@ Two-layer config system:
 
 **Required**: Git, Bash, and an AI coding agent
 
-**Optional**: HumanLayer CLI (`humanlayer`) for the thoughts persistence system, Linearis CLI
-(`linearis`), GitHub CLI (`gh`), `catalyst-session` CLI
-(`plugins/dev/scripts/catalyst-session.sh`), `sqlite3`
+**Optional**: HumanLayer CLI (`humanlayer`) for the thoughts persistence system, Linearis CLI (`linearis`), GitHub CLI (`gh`), `catalyst-session` CLI (`plugins/dev/scripts/catalyst-session.sh`), `sqlite3`
 
 ## Plugin Development
 
-Edit plugin files in `plugins/*/`, test locally (symlinks make changes immediate), reload by
-restarting your agent session.
+Edit plugin files in `plugins/*/`, test locally (symlinks make changes immediate), reload by restarting your agent session.
 
 ## Orchestration
 
-Catalyst's **execution-core daemon** ships work as **phase-agent workers** — one short-lived
-background agent job per phase, walking a 10-phase pipeline (triage → research → plan → implement →
-verify → review → pr → monitor-merge → monitor-deploy → teardown). The legacy wave-orchestration model is
-preserved in the **catalyst-legacy** plugin as a fallback; the mode is selected by
-`.catalyst/config.json → catalyst.orchestration.dispatchMode`.
+Catalyst's **execution-core daemon** ships work as **phase-agent workers** — one short-lived background agent job per phase, walking a 10-phase pipeline (triage → research → plan → implement → verify → review → pr → monitor-merge → monitor-deploy → teardown). The legacy wave-orchestration model is preserved in the **catalyst-legacy** plugin as a fallback; the mode is selected by `.catalyst/config.json → catalyst.orchestration.dispatchMode`.
 
-Cross-process communication is built on a **single unified event log** at
-`~/catalyst/events/YYYY-MM.jsonl`. Workers, the phase dispatcher, the broker, the webhook
-receiver, and `catalyst-comms send` all append; the broker daemon, the HUD, the orch-monitor web
-dashboard, and `catalyst-events wait-for` all read.
+Cross-process communication is built on a **single unified event log** at `~/catalyst/events/YYYY-MM.jsonl`. Workers, the phase dispatcher, the broker, the webhook receiver, and `catalyst-comms send` all append; the broker daemon, the HUD, the orch-monitor web dashboard, and `catalyst-events wait-for` all read.
 
 ## Observability (OpenTelemetry: Loki · Tempo · Prometheus · Grafana)
 
-The Catalyst daemons and the underlying AI coding agent emit OpenTelemetry signals through a shared
-OTel Collector that fans out to three backends, all visualized and alerted in Grafana. **Traces
-EXPLAIN; metrics DETECT + LOCALIZE** — and the scheduler-health (RED) metrics are derived from the
-*unsampled* Tier-1 logs (via Collector connectors), so never wire health metrics off the
-tail-sampled spans. Other metrics (the native `catalyst.agent` host gauges, the agent's own native
-counters) are emitted *directly* to the OTLP metrics pipeline, not log-derived.
+The Catalyst daemons and the underlying AI coding agent emit OpenTelemetry signals through a shared OTel Collector that fans out to three backends, all visualized and alerted in Grafana. **Traces EXPLAIN; metrics DETECT + LOCALIZE** — and the scheduler-health (RED) metrics are derived from the *unsampled* Tier-1 logs (via Collector connectors), so never wire health metrics off the tail-sampled spans. Other metrics (the native `catalyst.agent` host gauges, the agent's own native counters) are emitted *directly* to the OTLP metrics pipeline, not log-derived.
 
-- **Logs & events → Loki (LogQL).** Catalyst events (forwarded by the `otel-forward` service) and the
-  Tier-1 daemon `.log` lines (shipped by Alloy) both land in Loki — confirm a given event/field is
-  present before alerting on it. Only `service_name` and `service_namespace` are stream labels
-  (the cheap selectors and the
-  cross-signal join key); every other field (`host_name`, `event_*`, `catalyst_node_name`, …) is
-  **structured metadata** — filter with `| field="x"`, aggregate with `sum by (field)`;
-  `label_values(field)` returns empty for it. The log body is a plain string — do **not** `| json` it
-  unless the line is a full-JSON daemon `.log`. Use `absent_over_time` for silence detection
-  (a fully-dead daemon is a missing series, which `count_over_time == 0` cannot assert).
-- **Traces → Tempo (TraceQL).** Daemon spans are live: `scheduler.tick` (root) with threshold-gated
-  `scheduler.pass` children and `liveness.refresh`, plus per-run `install` and context-engine
-  `index.run` traces. Tempo serves the per-tick/per-run flame graph that explains a wedge after the
-  metrics localize it; the metrics-generator is off and trace↔log correlation does not fully
-  round-trip yet (disjoint id spaces).
-- **Metrics → Prometheus (PromQL).** OTel dotted names become underscores and counters gain a
-  `_total` suffix; counters need `rate()`/`increase()` **innermost** then `sum by (...)` outermost —
-  never graph the raw counter. `signal_to_metrics` gauges are last-value and expire ~15m at rest.
-  Cross-signal joins go through the normalized labels `service_name`/`service_namespace` (underscore
-  form — the dotted `service.name` is the semantic-convention name, not the Prometheus label); host
-  identity is only reliable within `catalyst.*` (short `host_name`).
-- **Alerting → Grafana.** Alert rules are **file-provisioned** (`provisioning/alerting/*.yaml`) and
-  **upsert-only** — a malformed rule file crash-loops the *shared* Grafana, so validate any change
-  against a throwaway Grafana before deploying. Active rules cover the scheduler wedge
-  (tick / recovery-pass / liveness-timeout), system trouble (CTL-2156), slot starvation, and install/updater
-  failures.
+- **Logs & events → Loki (LogQL).** Catalyst events (forwarded by the `otel-forward` service) and the Tier-1 daemon `.log` lines (shipped by Alloy) both land in Loki — confirm a given event/field is present before alerting on it. Only `service_name` and `service_namespace` are stream labels (the cheap selectors and the cross-signal join key); every other field (`host_name`, `event_*`, `catalyst_node_name`, …) is **structured metadata** — filter with `| field="x"`, aggregate with `sum by (field)`; `label_values(field)` returns empty for it. The log body is a plain string — do **not** `| json` it unless the line is a full-JSON daemon `.log`. Use `absent_over_time` for silence detection (a fully-dead daemon is a missing series, which `count_over_time == 0` cannot assert).
+- **Traces → Tempo (TraceQL).** Daemon spans are live: `scheduler.tick` (root) with threshold-gated `scheduler.pass` children and `liveness.refresh`, plus per-run `install` and context-engine `index.run` traces. Tempo serves the per-tick/per-run flame graph that explains a wedge after the metrics localize it; the metrics-generator is off and trace↔log correlation does not fully round-trip yet (disjoint id spaces).
+- **Metrics → Prometheus (PromQL).** OTel dotted names become underscores and counters gain a `_total` suffix; counters need `rate()`/`increase()` **innermost** then `sum by (...)` outermost — never graph the raw counter. `signal_to_metrics` gauges are last-value and expire ~15m at rest. Cross-signal joins go through the normalized labels `service_name`/`service_namespace` (underscore form — the dotted `service.name` is the semantic-convention name, not the Prometheus label); host identity is only reliable within `catalyst.*` (short `host_name`).
+- **Alerting → Grafana.** Alert rules are **file-provisioned** (`provisioning/alerting/*.yaml`) and **upsert-only** — a malformed rule file crash-loops the *shared* Grafana, so validate any change against a throwaway Grafana before deploying. Active rules cover the scheduler wedge (tick / recovery-pass / liveness-timeout), system trouble (CTL-2156), slot starvation, and install/updater failures.
 
-**Signal catalog — the data dictionary.** The authoritative, signal-by-signal reference (every
-metric, log/event, trace span, and alert — with dimensions, gotchas, and copy-pasteable query
-patterns) lives in the sister repo **`catalyst-otel`** at `docs/data-dictionary.md`. **Read it before
-designing telemetry or trusting a query.** That repo (`collector-config.yaml`,
-`grafana-datasources.yml`, `tempo.yaml`, `dashboards/`, `provisioning/alerting/`) is the authoritative
-stack topology.
+**Signal catalog — the data dictionary.** The authoritative, signal-by-signal reference (every metric, log/event, trace span, and alert — with dimensions, gotchas, and copy-pasteable query patterns) lives in the sister repo **`catalyst-otel`** at `docs/data-dictionary.md`. **Read it before designing telemetry or trusting a query.** That repo (`collector-config.yaml`, `grafana-datasources.yml`, `tempo.yaml`, `dashboards/`, `provisioning/alerting/`) is the authoritative stack topology.
 
-**Endpoints are environment-specific.** Backend addresses are resolved from environment variables —
-`OTEL_EXPORTER_OTLP_ENDPOINT` / `CATALYST_OTLP_ENDPOINT` for the daemons (collector ingest), and
-`CATALYST_AGENT_OTLP_ENDPOINT` / `CATALYST_AGENT_METRICS_ENDPOINT` for the standalone `catalyst-agent`
-emitter (which stays silent if those are unset). The concrete addresses for a given deployment live in
-that deployment's config and the team's notes, not in this repository.
+**Endpoints are environment-specific.** Backend addresses are resolved from environment variables — `OTEL_EXPORTER_OTLP_ENDPOINT` / `CATALYST_OTLP_ENDPOINT` for the daemons (collector ingest), and `CATALYST_AGENT_OTLP_ENDPOINT` / `CATALYST_AGENT_METRICS_ENDPOINT` for the standalone `catalyst-agent` emitter (which stays silent if those are unset). The concrete addresses for a given deployment live in that deployment's config and the team's notes, not in this repository.
 
 ## Pull requests
 
@@ -236,22 +160,9 @@ A pull request is **not mergeable** until BOTH are true:
 
 So after opening a PR: wait for the checks to go green (subscribe to the event log — see **Working the Loop**, don't poll `gh` in a loop), then address every review comment (push fixes), reply, and resolve each thread before considering the PR done.
 
-**Reading the automated reviewer's signal.** When the automated code reviewer finds nothing, it
-signals a clean pass with a 👍 reaction (or a brief "no major issues" note) **instead of** opening
-review threads — that counts as a resolved review with nothing to address, not a missing one. The
-clean-pass result may arrive as a reaction or a plain comment rather than a structured review
-object, so detect it via reactions/comments, not only the reviews API. A re-review after a fix
-push may need to be requested explicitly rather than firing automatically.
+**Reading the automated reviewer's signal.** When the automated code reviewer finds nothing, it signals a clean pass with a 👍 reaction (or a brief "no major issues" note) **instead of** opening review threads — that counts as a resolved review with nothing to address, not a missing one. The clean-pass result may arrive as a reaction or a plain comment rather than a structured review object, so detect it via reactions/comments, not only the reviews API. A re-review after a fix push may need to be requested explicitly rather than firing automatically.
 
-**Deferring lower-priority findings after round one.** Fix every P0/P1 finding immediately, on
-every review round — that severity is never deferred. On a PR's *first* round of review-driven
-fixes, use judgment on P2-and-lower findings: fix the ones that are real, cheap, and clearly
-correct; defer the rest. On any later round (a re-review after a remediation push), P2-and-lower is
-always deferred, no exceptions — even a trivial one-liner goes to a follow-up ticket, not an inline
-fix: file the ticket, reply on the thread linking it, and resolve the thread. This still satisfies
-"every review thread resolved" above — deferral resolves the thread via that reply, it does not
-leave it open. The point is to stop chasing progressively finer findings across many review↔fix
-rounds; see `catalyst-dev:review-comments` for the mechanism.
+**Deferring lower-priority findings after round one.** Fix every P0/P1 finding immediately, on every review round — that severity is never deferred. On a PR's *first* round of review-driven fixes, use judgment on P2-and-lower findings: fix the ones that are real, cheap, and clearly correct; defer the rest. On any later round (a re-review after a remediation push), P2-and-lower is always deferred, no exceptions — even a trivial one-liner goes to a follow-up ticket, not an inline fix: file the ticket, reply on the thread linking it, and resolve the thread. This still satisfies "every review thread resolved" above — deferral resolves the thread via that reply, it does not leave it open. The point is to stop chasing progressively finer findings across many review↔fix rounds; see `catalyst-dev:review-comments` for the mechanism.
 
 ## Reference Docs
 
@@ -260,12 +171,7 @@ Read these on demand:
 - **Architecture & data flow** — `docs/architecture.md`
 - **Run lifecycle** — `docs/orchestrator-overview.md`
 - **Decision records (ADRs)** — `docs/adrs.md`
-- **Specs & mockups** — `docs/specs/` (durable `draft → accepted` home for specs, requirements,
-  and mockups; distinct from ADRs and `thoughts/` — see `docs/specs/README.md`)
-- **smee retirement + rollback** — `docs/runbooks/cloud-feed-cutover.md` (CTL-1928 retired the
-  Linear half 2026-08-17; CTL-1929 retired the **GitHub** half 2026-08-18 — both ingestion legs
-  are now the cloud feed, all 15 webhooks are disabled-not-deleted, and the runbook holds the
-  four per-host verify-by-content checks and both rollback lever pairs)
+- **Specs & mockups** — `docs/specs/` (durable `draft → accepted` home for specs, requirements, and mockups; distinct from ADRs and `thoughts/` — see `docs/specs/README.md`)
+- **smee retirement + rollback** — `docs/runbooks/cloud-feed-cutover.md` (CTL-1928 retired the Linear half 2026-08-17; CTL-1929 retired the **GitHub** half 2026-08-18 — both ingestion legs are now the cloud feed, all 15 webhooks are disabled-not-deleted, and the runbook holds the four per-host verify-by-content checks and both rollback lever pairs)
 - **Release process** — `docs/releases.md`
-- **Observability signal catalog** — `catalyst-otel/docs/data-dictionary.md` (sister repo: every
-  metric, log/event, trace, and alert; see the Observability section above)
+- **Observability signal catalog** — `catalyst-otel/docs/data-dictionary.md` (sister repo: every metric, log/event, trace, and alert; see the Observability section above)

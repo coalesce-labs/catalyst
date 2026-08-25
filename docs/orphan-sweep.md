@@ -1,8 +1,6 @@
 # Periodic Orphan Sweep
 
-`orphan-sweep.sh` is a launchd-scheduled bash script that runs every 30 minutes and reclaims
-orphaned resources on unattended hosts. It complements the execution-core real-time reaper
-(CTL-657) — it acts whether or not the orchestrator daemon is alive.
+`orphan-sweep.sh` is a launchd-scheduled bash script that runs every 30 minutes and reclaims orphaned resources on unattended hosts. It complements the execution-core real-time reaper (CTL-657) — it acts whether or not the orchestrator daemon is alive.
 
 ## What It Reclaims (Five Vectors)
 
@@ -18,8 +16,7 @@ Telemetry: one `emit-otel-event.sh` call per reclaimed resource (`catalyst.sweep
 
 ### Vector 5 tuning (agent-browser reaper)
 
-Version-agnostic backstop for the CTL-1500 leak (old agent-browser builds have no
-idle timeout). Knobs (env, all with production defaults):
+Version-agnostic backstop for the CTL-1500 leak (old agent-browser builds have no idle timeout). Knobs (env, all with production defaults):
 
 | Env | Default | Meaning |
 |-----|---------|---------|
@@ -29,12 +26,7 @@ idle timeout). Knobs (env, all with production defaults):
 | `SWEEP_AB_TTL_SECS` | `14400` | absolute leaked-browser age cap (4h) |
 | `SWEEP_AB_SOCKET_DIR` | `$AGENT_BROWSER_SOCKET_DIR` → `$XDG_RUNTIME_DIR/agent-browser` → `~/.agent-browser` | sock/pid dir |
 
-Reap = graceful `kill` of the owning daemon (its `SIGTERM` handler closes the browser)
-plus the root browser process (cascades helper children), then removal of that
-session's `.sock`/`.pid`. A shared-Playwright-marker browser with no live agent-browser
-daemon owner is left alone (it may be an unrelated Playwright job). Complements the
-forward fix: phase workers now launch with `AGENT_BROWSER_IDLE_TIMEOUT_MS` set so newer
-agent-browser self-shuts-down when idle.
+Reap = graceful `kill` of the owning daemon (its `SIGTERM` handler closes the browser) plus the root browser process (cascades helper children), then removal of that session's `.sock`/`.pid`. A shared-Playwright-marker browser with no live agent-browser daemon owner is left alone (it may be an unrelated Playwright job). Complements the forward fix: phase workers now launch with `AGENT_BROWSER_IDLE_TIMEOUT_MS` set so newer agent-browser self-shuts-down when idle.
 
 ## Installation
 
@@ -49,22 +41,16 @@ agent-browser self-shuts-down when idle.
 
 ### 1. Install the launchd job
 
-Normally the reaper is installed automatically as the 4th agent by
-`catalyst-stack install-services` (which `catalyst-join.sh` runs during
-onboarding), so a joined member gets it for free. To (re)install manually, run
-the installer **from the pristine clone**:
+Normally the reaper is installed automatically as the 4th agent by `catalyst-stack install-services` (which `catalyst-join.sh` runs during onboarding), so a joined member gets it for free. To (re)install manually, run the installer **from the pristine clone**:
 
 ```bash
 bash ~/catalyst/plugin-source/plugins/dev/scripts/install-orphan-sweep.sh
 launchctl list | grep orphan-sweep   # LastExit must be 0
 ```
 
-`install-orphan-sweep.sh` is idempotent, prefers the registered `pluginDirs`
-clone, and **refuses** to bake a linked-worktree or `/tmp` path. Preview with
-`--print-only`; remove with `--uninstall`.
+`install-orphan-sweep.sh` is idempotent, prefers the registered `pluginDirs` clone, and **refuses** to bake a linked-worktree or `/tmp` path. Preview with `--print-only`; remove with `--uninstall`.
 
-If `~/catalyst/plugin-source` is stale (e.g. a non-daemon host with no broker
-auto-pull), fast-forward it first: `bash <repo>/plugins/dev/scripts/setup-plugin-source.sh`.
+If `~/catalyst/plugin-source` is stale (e.g. a non-daemon host with no broker auto-pull), fast-forward it first: `bash <repo>/plugins/dev/scripts/setup-plugin-source.sh`.
 
 ### 2. Verify a clean run
 
@@ -84,14 +70,9 @@ launchctl unload ~/Library/LaunchAgents/ai.coalesce.catalyst-orphan-sweep.plist
 
 ### Flipping the widened branch to enforce
 
-Vector 1's widened (any-command) branch ships **dark** (`SWEEP_PROC_WIDEN=shadow`): it classifies
-and logs every candidate as `[shadow] would kill …` and signals nothing. Bake it, read the log, size
-the cap, then flip.
+Vector 1's widened (any-command) branch ships **dark** (`SWEEP_PROC_WIDEN=shadow`): it classifies and logs every candidate as `[shadow] would kill …` and signals nothing. Bake it, read the log, size the cap, then flip.
 
-**Do not hand-edit the installed plist.** `install-orphan-sweep.sh` unconditionally regenerates and
-replaces `~/Library/LaunchAgents/ai.coalesce.catalyst-orphan-sweep.plist`, and it runs as part of
-every routine `catalyst-stack install-services` — a hand-edit is silently reverted by the next
-install. The knob is therefore part of the shipped plist template and is resolved by the installer:
+**Do not hand-edit the installed plist.** `install-orphan-sweep.sh` unconditionally regenerates and replaces `~/Library/LaunchAgents/ai.coalesce.catalyst-orphan-sweep.plist`, and it runs as part of every routine `catalyst-stack install-services` — a hand-edit is silently reverted by the next install. The knob is therefore part of the shipped plist template and is resolved by the installer:
 
 | # | Source | When to use it |
 |---|--------|----------------|
@@ -100,9 +81,7 @@ install. The knob is therefore part of the shipped plist template and is resolve
 | 3 | the value already in the installed plist | **preservation** — a previous flip survives a plain reinstall |
 | 4 | `shadow` | the ADR-023 default |
 
-So a plain `bash install-orphan-sweep.sh` on a host already at `enforce` keeps `enforce`, and a
-host that has never been flipped stays at `shadow`. Anything outside `off|shadow|enforce` is
-rejected with a warning and falls back to `shadow` — never to `enforce`.
+So a plain `bash install-orphan-sweep.sh` on a host already at `enforce` keeps `enforce`, and a host that has never been flipped stays at `shadow`. Anything outside `off|shadow|enforce` is rejected with a warning and falls back to `shadow` — never to `enforce`.
 
 Verify what is actually installed (this is the production value, not the in-script default):
 
@@ -110,11 +89,9 @@ Verify what is actually installed (this is the production value, not the in-scri
 grep -A2 SWEEP_PROC_WIDEN ~/Library/LaunchAgents/ai.coalesce.catalyst-orphan-sweep.plist
 ```
 
-To roll back, reinstall with `SWEEP_PROC_WIDEN=off` (which removes the widened admission entirely)
-or `SWEEP_PROC_WIDEN=shadow` (which keeps observing).
+To roll back, reinstall with `SWEEP_PROC_WIDEN=off` (which removes the widened admission entirely) or `SWEEP_PROC_WIDEN=shadow` (which keeps observing).
 
-The daemon-side sibling of this knob is `orchestration.orphanReaper.procReaper.widenMode`. The two
-are **independent** — flipping one does not arm the other.
+The daemon-side sibling of this knob is `orchestration.orphanReaper.procReaper.widenMode`. The two are **independent** — flipping one does not arm the other.
 
 ## Configuration (env overrides)
 
@@ -139,24 +116,10 @@ All widened numerics are parsed as **bounded base-10** integers. A value Bash ar
 
 ## Health check & troubleshooting
 
-`catalyst-doctor` asserts the reaper is healthy (CTL-1306). Every reaper check is
-a **WARN**, never a FAIL — the doctor's exit code gates the `catalyst-join`
-activation gate, which runs *before* `install-services` would reinstall a stale
-plist, so a FAILing reaper check would block a node from self-healing via join:
-`reaper-installed` (WARN if the LaunchAgent is absent), `reaper-path` (WARN if the
-baked program path no longer exists — the silent-death signature), `reaper-loaded`
-(WARN if the plist is present but launchd never loaded the job), and
-`reaper-health` (WARN on a `LastExit` of 127 or any other non-zero exit). A
-loaded job with `LastExit` 0 (or that has never run yet) is `reaper-health` PASS.
+`catalyst-doctor` asserts the reaper is healthy (CTL-1306). Every reaper check is a **WARN**, never a FAIL — the doctor's exit code gates the `catalyst-join` activation gate, which runs *before* `install-services` would reinstall a stale plist, so a FAILing reaper check would block a node from self-healing via join: `reaper-installed` (WARN if the LaunchAgent is absent), `reaper-path` (WARN if the baked program path no longer exists — the silent-death signature), `reaper-loaded` (WARN if the plist is present but launchd never loaded the job), and `reaper-health` (WARN on a `LastExit` of 127 or any other non-zero exit). A loaded job with `LastExit` 0 (or that has never run yet) is `reaper-health` PASS.
 
-- **`launchctl list | grep orphan-sweep` shows exit 127**, log full of
-  `No such file or directory` → the baked path was deleted. Re-point from the
-  pristine clone (Installation above). This is the CTL-1306 failure mode.
-- **Debris not shrinking** → SAFE removals are capped per run
-  (`maxRemovalsPerRun`, default 10). For a one-shot drain raise it:
-  `SWEEP_MAX_REMOVALS=50 orphan-sweep.sh`. Remaining trees are protected
-  SALVAGE/dirty — triage by hand, never `rm -rf` (that also leaves stale
-  `.git/worktrees` admin entries; use `git worktree remove` + `git worktree prune`).
+- **`launchctl list | grep orphan-sweep` shows exit 127**, log full of `No such file or directory` → the baked path was deleted. Re-point from the pristine clone (Installation above). This is the CTL-1306 failure mode.
+- **Debris not shrinking** → SAFE removals are capped per run (`maxRemovalsPerRun`, default 10). For a one-shot drain raise it: `SWEEP_MAX_REMOVALS=50 orphan-sweep.sh`. Remaining trees are protected SALVAGE/dirty — triage by hand, never `rm -rf` (that also leaves stale `.git/worktrees` admin entries; use `git worktree remove` + `git worktree prune`).
 
 ## Relationship to Other Components
 
