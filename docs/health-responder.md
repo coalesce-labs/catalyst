@@ -1,18 +1,10 @@
 # Cloud-Sync Health Responder
 
-`health-responder.sh` is a launchd-scheduled bash script that runs every 3 minutes (configurable)
-and performs a **bounded, local ACT step** for the supervised cloud-sync replica writer:
-catalyst-doctor only *detects* a dead/wedged writer; the responder *kickstarts* it — at most a few
-times per window — then escalates loudly and stops (CTL-1509).
+`health-responder.sh` is a launchd-scheduled bash script that runs every 3 minutes (configurable) and performs a **bounded, local ACT step** for the supervised cloud-sync replica writer: catalyst-doctor only *detects* a dead/wedged writer; the responder *kickstarts* it — at most a few times per window — then escalates loudly and stops (CTL-1509).
 
 ## Why a Periodic Sweep, Not a Daemon
 
-The responder guards long-lived daemons against exactly the failure class long-lived daemons
-suffer: silent wedging. A watcher **daemon** can zombie the same way its patient does; a
-short-lived launchd `StartInterval` job (the orphan-sweep pattern) is a fresh process every
-interval and cannot. All detection is **local** — plist on disk, `pgrep`, `writer.lock` mtime, the
-CTL-1508 breadcrumb file — never Linear, never Loki, so the responder keeps working through
-exactly the outages it exists to respond to.
+The responder guards long-lived daemons against exactly the failure class long-lived daemons suffer: silent wedging. A watcher **daemon** can zombie the same way its patient does; a short-lived launchd `StartInterval` job (the orphan-sweep pattern) is a fresh process every interval and cannot. All detection is **local** — plist on disk, `pgrep`, `writer.lock` mtime, the CTL-1508 breadcrumb file — never Linear, never Loki, so the responder keeps working through exactly the outages it exists to respond to.
 
 ## What It Watches (Three Conditions)
 
@@ -22,46 +14,28 @@ exactly the outages it exists to respond to.
 | 2 | stale-writer | process EXISTS but `<db>.writer.lock` mtime older than `RESPONDER_LOCK_STALE_SECS` (900s) | the SDK rewrites the lock ~5s, **feed-independently** — a quiet Linear feed never stales the lock; only a dead SDK heartbeat does. Doctor WARNs at 60s; the responder ACTS only at 900s (act-threshold ≫ detect-threshold, so heartbeat jitter is never kickstarted) |
 | 3 | no-respawn | cloud-sync plist installed, `~/catalyst/cloud-sync.selfheal.json` has `expectRestart:true`, no process, and the breadcrumb `ts` (or file mtime) is older than `RESPONDER_SELFHEAL_GRACE_SECS` (120s) | the CTL-1508 self-heal exit expected a launchd relaunch that never came. **File absent = the normal case** (CTL-1508 ships in parallel); absent/malformed is silently ignored |
 
-All three conditions are **installed-gated** — a node without the cloud-sync plist is not on the
-replica tier and is never acted on, even if a stale breadcrumb is lying around.
+All three conditions are **installed-gated** — a node without the cloud-sync plist is not on the replica tier and is never acted on, even if a stale breadcrumb is lying around.
 
-**Settling hold:** a breadcrumb *within* the grace window suppresses **all** action (including
-dead-writer) and heartbeats `status=settling` — the writer exited on purpose expecting a launchd
-relaunch, and a `kickstart -k` during that window would race and kill the legitimately-settling
-instance. The breadcrumb either clears (relaunch landed) or ages into condition 3.
+**Settling hold:** a breadcrumb *within* the grace window suppresses **all** action (including dead-writer) and heartbeats `status=settling` — the writer exited on purpose expecting a launchd relaunch, and a `kickstart -k` during that window would race and kill the legitimately-settling instance. The breadcrumb either clears (relaunch landed) or ages into condition 3.
 
-**Fail-safe cap:** if the attempt marker cannot be written (unwritable state dir), the responder
-refuses to kickstart at all (`status=degraded`, loud ERROR each sweep) — an uncountable attempt
-would make the cap unenforceable, degrading into exactly the unbounded restart storm the cap
-exists to prevent. `--dry-run` is read-only end to end: no state dir creation, no marker pruning,
-no re-arm — only `would-…` log lines.
+**Fail-safe cap:** if the attempt marker cannot be written (unwritable state dir), the responder refuses to kickstart at all (`status=degraded`, loud ERROR each sweep) — an uncountable attempt would make the cap unenforceable, degrading into exactly the unbounded restart storm the cap exists to prevent. `--dry-run` is read-only end to end: no state dir creation, no marker pruning, no re-arm — only `would-…` log lines.
 
-An **absent** `writer.lock` is *not* stale (guard disabled / writer never started / older SDK —
-doctor makes the same call); only a **present-but-old** lock is the strong "SDK heartbeat died"
-signal. A node without the cloud-sync plist is not on the replica tier and is simply left alone.
+An **absent** `writer.lock` is *not* stale (guard disabled / writer never started / older SDK — doctor makes the same call); only a **present-but-old** lock is the strong "SDK heartbeat died" signal. A node without the cloud-sync plist is not on the replica tier and is simply left alone.
 
 ## What It Does (Bounded Kickstart)
 
-On any condition: `launchctl kickstart -k gui/$(id -u)/ai.coalesce.catalyst-cloud-sync`, capped at
-`RESPONDER_MAX_ATTEMPTS` (3) per `RESPONDER_ATTEMPT_WINDOW_SECS` (3600). Attempts are timestamped
-marker files under `~/catalyst/.health-responder/`, pruned past the window on every run. After a
-kickstart the responder waits ~10s, re-probes, and logs `recovered` or `still-down`. A failed
-`launchctl` call is logged and **still counted** — the responder never crash-loops launchctl.
+On any condition: `launchctl kickstart -k gui/$(id -u)/ai.coalesce.catalyst-cloud-sync`, capped at `RESPONDER_MAX_ATTEMPTS` (3) per `RESPONDER_ATTEMPT_WINDOW_SECS` (3600). Attempts are timestamped marker files under `~/catalyst/.health-responder/`, pruned past the window on every run. After a kickstart the responder waits ~10s, re-probes, and logs `recovered` or `still-down`. A failed `launchctl` call is logged and **still counted** — the responder never crash-loops launchctl.
 
 ## Escalation Contract
 
 When the cap is exhausted and the condition persists:
 
 1. Write the one-shot marker `~/catalyst/.health-responder/ESCALATED.cloud-sync`.
-2. Emit `catalyst.responder.escalated` via `emit-otel-event.sh` (fail-open — a telemetry failure
-   never fails the responder).
-3. Log an `ERROR: escalated …` line (Alloy ships `~/catalyst/health-responder.log` conventions to
-   Loki for alerting).
-4. **Stop kickstarting.** While the marker exists and the condition persists, every run is a
-   heartbeat-only hold.
+2. Emit `catalyst.responder.escalated` via `emit-otel-event.sh` (fail-open — a telemetry failure never fails the responder).
+3. Log an `ERROR: escalated …` line (Alloy ships `~/catalyst/health-responder.log` conventions to Loki for alerting).
+4. **Stop kickstarting.** While the marker exists and the condition persists, every run is a heartbeat-only hold.
 
-The condition clearing (a healthy probe) removes the marker and the attempt files — the responder
-re-arms itself with a fresh budget for the next incident.
+The condition clearing (a healthy probe) removes the marker and the attempt files — the responder re-arms itself with a fresh budget for the next incident.
 
 ## Heartbeat (a Dead Responder Must Be Distinguishable From a Quiet One)
 
@@ -71,8 +45,7 @@ Every run — healthy, acting, escalated, disabled, dry-run — ends with exactl
 [health-responder <run-id>] heartbeat status=<healthy|recovered|still-down|escalated|disabled|dry-run> installed=… alive=… dead_writer=… stale_lock=… no_respawn=… attempts=N/M escalated=…
 ```
 
-Silence in `~/catalyst/health-responder.log` for longer than the interval means the **responder**
-is down (the stale-copy-reports-healthy rule), not that everything is fine.
+Silence in `~/catalyst/health-responder.log` for longer than the interval means the **responder** is down (the stale-copy-reports-healthy rule), not that everything is fine.
 
 ## Configuration (env overrides)
 
@@ -95,55 +68,25 @@ is down (the stale-copy-reports-healthy rule), not that everything is fine.
 | `CATALYST_REPLICA_DB` | `~/catalyst/catalyst-replica.db` | Lock = `<db>.writer.lock` (mirrors `getReplicaDbPath`) |
 | `CATALYST_LAUNCHAGENTS_DIR` | `~/Library/LaunchAgents` | Plist dir (mirrors doctor.mjs) |
 
-The launchd schedule comes from `.catalyst/config.json` → `catalyst.responder.intervalSeconds`
-(default 180, clamped 60–900) at install time.
+The launchd schedule comes from `.catalyst/config.json` → `catalyst.responder.intervalSeconds` (default 180, clamped 60–900) at install time.
 
 ## Scheduling: launchd + cron, Because launchd Alone Cannot Be Trusted
 
-The original design assumed a `StartInterval` sweep "cannot zombie". A fleet host disproved that
-live (mini-2, 2026-07-25): launchd held the job loaded with a clean last exit and dispatched
-**nothing** — the interval spawn stayed pended for hours, and after a clean `bootout`/`bootstrap`
-even `RunAtLoad` stopped firing, while `launchctl kickstart` ran the sweep fine and an older
-`StartInterval` job kept firing in the same gui domain. So the installer now provisions **two
-independent schedulers**:
+The original design assumed a `StartInterval` sweep "cannot zombie". A fleet host disproved that live (mini-2, 2026-07-25): launchd held the job loaded with a clean last exit and dispatched **nothing** — the interval spawn stayed pended for hours, and after a clean `bootout`/`bootstrap` even `RunAtLoad` stopped firing, while `launchctl kickstart` ran the sweep fine and an older `StartInterval` job kept firing in the same gui domain. So the installer now provisions **two independent schedulers**:
 
 1. The launchd `StartInterval` LaunchAgent (unchanged), and
-2. a self-tagged user **crontab backstop** (`# ai.coalesce.catalyst-health-responder backstop
-   CTL-1510`), at the interval rounded up to whole minutes, with the plist's PATH + `CATALYST_DIR`
-   inline.
+2. a self-tagged user **crontab backstop** (`# ai.coalesce.catalyst-health-responder backstop CTL-1510`), at the interval rounded up to whole minutes, with the plist's PATH + `CATALYST_DIR` inline.
 
-Overlap between the two is serialized by a **whole-sweep `mkdir` reservation**
-(`$RESPONDER_STATE_DIR/sweep.lock`): the loser of the race heartbeats `status=skipped` and exits, so
-a double schedule can never double-kickstart. A lock older than
-`RESPONDER_SWEEP_LOCK_STALE_SECS` belongs to a crashed sweep and is broken. On a read-only state
-dir the sweep proceeds unlocked (it cannot act anyway — the attempt-cap fail-safe refuses).
+Overlap between the two is serialized by a **whole-sweep `mkdir` reservation** (`$RESPONDER_STATE_DIR/sweep.lock`): the loser of the race heartbeats `status=skipped` and exits, so a double schedule can never double-kickstart. A lock older than `RESPONDER_SWEEP_LOCK_STALE_SECS` belongs to a crashed sweep and is broken. On a read-only state dir the sweep proceeds unlocked (it cannot act anyway — the attempt-cap fail-safe refuses).
 
-If **both** schedulers die, `catalyst-doctor`'s `responder-dispatch` check WARNs when the heartbeat
-log's mtime exceeds 3× the plist's `StartInterval` (floor 900 s), and remotely the heartbeat simply
-disappears from Loki (see below).
+If **both** schedulers die, `catalyst-doctor`'s `responder-dispatch` check WARNs when the heartbeat log's mtime exceeds 3× the plist's `StartInterval` (floor 900 s), and remotely the heartbeat simply disappears from Loki (see below).
 
 ## Remote Visibility (Loki) and Its Two Known Traps
 
-The heartbeat line ships to Loki as the `catalyst.health-responder` stream (Alloy's 7th) — and
-**absence of the heartbeat in Loki IS the dead-responder signal**. Two operational caveats, both
-learned live:
+The heartbeat line ships to Loki as the `catalyst.health-responder` stream (Alloy's 7th) — and **absence of the heartbeat in Loki IS the dead-responder signal**. Two operational caveats, both learned live:
 
-- **Late-created log files were invisible to Alloy.** Alloy's `loki.source.file` targets are
-  static: a log file that does not exist when Alloy starts was never picked up later, so a host
-  whose responder log appeared minutes after an Alloy restart shipped nothing (dark for 4 h on
-  mini-2 while the other six streams flowed). The log-shipper launcher now **pre-creates every
-  tailed log file** before `exec alloy` (CTL-1510 item 7).
-- **dev/monitor-class hosts have no Alloy at all** (item 2, documented decision): those classes get
-  the responder via `adopt-cloud-sync`, but only `install-services` (worker-class setup) installs
-  the log shipper. On a dev/monitor host the responder's heartbeat and escalation are therefore
-  **host-local only** (`~/catalyst/health-responder.log`) — the Loki absence-signal does not cover
-  them, and remote alerting must not assume it does. **Do not run `catalyst-stack
-  install-services` on a dev/monitor host to get remote coverage** — it is not shipper-only; its
-  `RunAtLoad` also bootstraps the full stack LaunchAgent (`catalyst-stack start`, which starts
-  broker/execution-core), exactly what a class meant to stay daemonless must avoid. There is
-  currently no shipper-only launchd install path; the only way to ship this host's log without
-  installing the daemon stack is running `log-shipper/launch.sh` manually/foreground. Treat
-  host-local-only as the accepted default for these classes.
+- **Late-created log files were invisible to Alloy.** Alloy's `loki.source.file` targets are static: a log file that does not exist when Alloy starts was never picked up later, so a host whose responder log appeared minutes after an Alloy restart shipped nothing (dark for 4 h on mini-2 while the other six streams flowed). The log-shipper launcher now **pre-creates every tailed log file** before `exec alloy` (CTL-1510 item 7).
+- **dev/monitor-class hosts have no Alloy at all** (item 2, documented decision): those classes get the responder via `adopt-cloud-sync`, but only `install-services` (worker-class setup) installs the log shipper. On a dev/monitor host the responder's heartbeat and escalation are therefore **host-local only** (`~/catalyst/health-responder.log`) — the Loki absence-signal does not cover them, and remote alerting must not assume it does. **Do not run `catalyst-stack install-services` on a dev/monitor host to get remote coverage** — it is not shipper-only; its `RunAtLoad` also bootstraps the full stack LaunchAgent (`catalyst-stack start`, which starts broker/execution-core), exactly what a class meant to stay daemonless must avoid. There is currently no shipper-only launchd install path; the only way to ship this host's log without installing the daemon stack is running `log-shipper/launch.sh` manually/foreground. Treat host-local-only as the accepted default for these classes.
 
 ## Installation
 
@@ -152,18 +95,14 @@ learned live:
 > can be deleted, after which the job exit-127s silently every interval — and the fleet loses its
 > cloud-sync self-healer exactly when nobody is watching.
 
-Normally installed automatically by `catalyst-stack install-services` (same delegated,
-non-fatal block as the orphan-sweep reaper). To (re)install manually, run **from the pristine
-clone**:
+Normally installed automatically by `catalyst-stack install-services` (same delegated, non-fatal block as the orphan-sweep reaper). To (re)install manually, run **from the pristine clone**:
 
 ```bash
 bash ~/catalyst/plugin-source/plugins/dev/scripts/install-health-responder.sh
 launchctl list | grep health-responder   # LastExit must be 0
 ```
 
-`install-health-responder.sh` is idempotent, prefers the registered `pluginDirs` clone, and
-**refuses** to bake a linked-worktree or `/tmp` path. Preview with `--print-only`; remove with
-`--uninstall`.
+`install-health-responder.sh` is idempotent, prefers the registered `pluginDirs` clone, and **refuses** to bake a linked-worktree or `/tmp` path. Preview with `--print-only`; remove with `--uninstall`.
 
 ```bash
 # Dry-run — logs intended actions without performing any
@@ -174,33 +113,15 @@ tail -f ~/catalyst/health-responder.log
 
 ## Health Check
 
-`catalyst-doctor` asserts the responder is healthy (`checkHealthResponder`, mirroring
-`checkReaper`). Every check is a **WARN**, never a FAIL — doctor's exit code gates the
-`catalyst-join` activation gate, which runs *before* `install-services` would reinstall a stale
-plist, so a FAILing responder check would block a node from self-healing via join:
-`responder-installed` (plist absent/malformed), `responder-path` (baked program path gone — the
-CTL-1306 silent-death signature), `responder-killswitch` (installed script lacks the
-`RESPONDER_ENABLED` marker — stale install), `responder-loaded` (present but never bootstrapped),
-`responder-health` (`LastExit` 127 / non-zero), and `responder-dispatch` (heartbeat log mtime older
-than 3× the `StartInterval` — loaded + clean exit but **no scheduler is actually dispatching**, the
-CTL-1510 launchd wedge). Loaded + exit 0 (or never run yet) with a fresh heartbeat is PASS.
+`catalyst-doctor` asserts the responder is healthy (`checkHealthResponder`, mirroring `checkReaper`). Every check is a **WARN**, never a FAIL — doctor's exit code gates the `catalyst-join` activation gate, which runs *before* `install-services` would reinstall a stale plist, so a FAILing responder check would block a node from self-healing via join: `responder-installed` (plist absent/malformed), `responder-path` (baked program path gone — the CTL-1306 silent-death signature), `responder-killswitch` (installed script lacks the `RESPONDER_ENABLED` marker — stale install), `responder-loaded` (present but never bootstrapped), `responder-health` (`LastExit` 127 / non-zero), and `responder-dispatch` (heartbeat log mtime older than 3× the `StartInterval` — loaded + clean exit but **no scheduler is actually dispatching**, the CTL-1510 launchd wedge). Loaded + exit 0 (or never run yet) with a fresh heartbeat is PASS.
 
 ## Relationship to Other Components
 
-- **doctor `checkCloudSync`** — the detect side (60s lock-stale WARN, agent-installed,
-  process-alive). The responder deliberately re-implements the same probes in bash with a far more
-  conservative act threshold; it never changes doctor behavior.
-- **CTL-1508 self-heal breadcrumb** — built in parallel; the responder treats file-absent as the
-  normal case. `expectRestart:true` relaunches within the grace window are *expected* and never
-  counted against the attempt cap.
-- **`catalyst-stack adopt-cloud-sync`** — the install/repair path for the writer itself; the
-  responder only kickstarts the existing LaunchAgent, never bootstraps or reconfigures it (and
-  never runs `bun cloud-sync.mjs` directly — that would fight the SDK single-writer lock and
-  bypass token sourcing).
-- **orphan-sweep (`docs/orphan-sweep.md`)** — the structural template: same installer contract,
-  same launchd pattern, same fail-open telemetry idiom.
+- **doctor `checkCloudSync`** — the detect side (60s lock-stale WARN, agent-installed, process-alive). The responder deliberately re-implements the same probes in bash with a far more conservative act threshold; it never changes doctor behavior.
+- **CTL-1508 self-heal breadcrumb** — built in parallel; the responder treats file-absent as the normal case. `expectRestart:true` relaunches within the grace window are *expected* and never counted against the attempt cap.
+- **`catalyst-stack adopt-cloud-sync`** — the install/repair path for the writer itself; the responder only kickstarts the existing LaunchAgent, never bootstraps or reconfigures it (and never runs `bun cloud-sync.mjs` directly — that would fight the SDK single-writer lock and bypass token sourcing).
+- **orphan-sweep (`docs/orphan-sweep.md`)** — the structural template: same installer contract, same launchd pattern, same fail-open telemetry idiom.
 
 ## Log
 
-All output goes to `~/catalyst/health-responder.log` (configured in the plist). Each line is
-prefixed with `[health-responder <run-id>]` for correlation.
+All output goes to `~/catalyst/health-responder.log` (configured in the plist). Each line is prefixed with `[health-responder <run-id>]` for correlation.

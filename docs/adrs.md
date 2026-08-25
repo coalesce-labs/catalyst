@@ -1,7 +1,6 @@
 # Architecture Decision Records
 
-Decision log. Each entry: Decision + key rationale/consequences. ADR numbers and outcomes are
-load-bearing — do not renumber or drop.
+Decision log. Each entry: Decision + key rationale/consequences. ADR numbers and outcomes are load-bearing — do not renumber or drop.
 
 > Code-anchored note (verified 2026-06-21): the broker was refactored from a single ~1300-line
 > `broker/index.mjs` into modules. `index.mjs` (~635 lines) is now a barrel that re-exports.
@@ -14,857 +13,303 @@ load-bearing — do not renumber or drop.
 
 ## ADR-001: Plugin-Based Distribution
 
-Distribute Catalyst as Claude Code plugins (not git clone). Updates via `/plugin update`;
-marketplace discoverability; local `.catalyst/config.json` preserved. Cost: plugin structure in
-`plugins/*/` must be maintained; breaking changes need version management; users install only what
-they need (dev/meta/pm/…).
+Distribute Catalyst as Claude Code plugins (not git clone). Updates via `/plugin update`; marketplace discoverability; local `.catalyst/config.json` preserved. Cost: plugin structure in `plugins/*/` must be maintained; breaking changes need version management; users install only what they need (dev/meta/pm/…).
 
 ## ADR-002: HumanLayer Profile-Based Configuration
 
-Use HumanLayer's native `profile`/`repoMappings` to auto-select the thoughts repo per working
-directory — no manual `configName`. Init with `humanlayer thoughts init --profile <name>`; scripts
-discover the current repo via `humanlayer thoughts status`. Projects stay isolated.
+Use HumanLayer's native `profile`/`repoMappings` to auto-select the thoughts repo per working directory — no manual `configName`. Init with `humanlayer thoughts init --profile <name>`; scripts discover the current repo via `humanlayer thoughts status`. Projects stay isolated.
 
 ## ADR-003: Three-Layer Memory Architecture
 
-Separate **config** (project settings, committable), **long-term** (thoughts, git-backed, synced via
-`humanlayer thoughts sync`), and **short-term** (workflow-context, session state, gitignored).
-Skills update workflow-context when creating docs.
+Separate **config** (project settings, committable), **long-term** (thoughts, git-backed, synced via `humanlayer thoughts sync`), and **short-term** (workflow-context, session state, gitignored). Skills update workflow-context when creating docs.
 
 ## ADR-004: Workflow-Context for Session State
 
-Store recent doc references in `.catalyst/.workflow-context.json` so skills chain
-(`research → plan → implement`) without users tracking paths. Local per-worktree, never committed,
-no secrets. Managed via `scripts/workflow-context.sh`. Lost on worktree delete (by design).
+Store recent doc references in `.catalyst/.workflow-context.json` so skills chain (`research → plan → implement`) without users tracking paths. Local per-worktree, never committed, no secrets. Managed via `scripts/workflow-context.sh`. Lost on worktree delete (by design).
 
 ## ADR-005: Configurable Worktree Convention
 
-Organize repos/worktrees via `GITHUB_SOURCE_ROOT`. Main: `${ROOT}/<org>/<repo>`; worktrees:
-`${ROOT}/<org>/<repo>-worktrees/<feature>`. `create-worktree.sh` detects org from git remote; falls
-back to `~/wt/<repo>`. No hardcoded paths.
+Organize repos/worktrees via `GITHUB_SOURCE_ROOT`. Main: `${ROOT}/<org>/<repo>`; worktrees: `${ROOT}/<org>/<repo>-worktrees/<feature>`. `create-worktree.sh` detects org from git remote; falls back to `~/wt/<repo>`. No hardcoded paths.
 
 ## ADR-006: Global Orchestrator State
 
-Single `~/catalyst/state.json` global registry of active orchestrators + append-only event log
-`~/catalyst/events/YYYY-MM.jsonl` (rotated monthly) + completed snapshots in
-`~/catalyst/history/<id>--<startedAt>.json`. Layout also includes `~/catalyst/catalyst.db` (SQLite,
-WAL) and `~/catalyst/wt/`.
+Single `~/catalyst/state.json` global registry of active orchestrators + append-only event log `~/catalyst/events/YYYY-MM.jsonl` (rotated monthly) + completed snapshots in `~/catalyst/history/<id>--<startedAt>.json`. Layout also includes `~/catalyst/catalyst.db` (SQLite, WAL) and `~/catalyst/wt/`.
 
-- Global state is a denormalized query summary; per-worktree `state.json` still serves crash
-  recovery.
-- Writes go through `catalyst-state.sh` (mkdir-based locking, no flock dep). Events append lock-free
-  (POSIX atomic). `cat *.jsonl | jq` queries across months.
-- Heartbeat: orchestrators write `lastHeartbeat` each poll; `catalyst-state.sh gc` archives entries
-  stale >10 min as `abandoned`.
-- Contract schemas: `plugins/dev/templates/global-state.json`. The event envelope's contract is
-  **executable**, not a template — `plugins/dev/scripts/lib/event-envelope.mjs` (CTL-1819). The
-  former `global-event.json` was deleted: measured against the live log it passed **zero** live
-  events, and no code ever imported it.
+- Global state is a denormalized query summary; per-worktree `state.json` still serves crash recovery.
+- Writes go through `catalyst-state.sh` (mkdir-based locking, no flock dep). Events append lock-free (POSIX atomic). `cat *.jsonl | jq` queries across months.
+- Heartbeat: orchestrators write `lastHeartbeat` each poll; `catalyst-state.sh gc` archives entries stale >10 min as `abandoned`.
+- Contract schemas: `plugins/dev/templates/global-state.json`. The event envelope's contract is **executable**, not a template — `plugins/dev/scripts/lib/event-envelope.mjs` (CTL-1819). The former `global-event.json` was deleted: measured against the live log it passed **zero** live events, and no code ever imported it.
 
 ## ADR-008: SQLite Session Store
 
-Add `~/catalyst/catalyst.db` (SQLite, WAL) as the durable store for **session analytics** (not a
-replacement for the event log, which remains the live cross-process bus per ADR-006/018). Managed by
-`catalyst-db.sh` (schema/migrate/CRUD) and `catalyst-session.sh` (sub-50ms write CLI:
-`start|phase|metric|tool|pr|end|emit-context`).
+Add `~/catalyst/catalyst.db` (SQLite, WAL) as the durable store for **session analytics** (not a replacement for the event log, which remains the live cross-process bus per ADR-006/018). Managed by `catalyst-db.sh` (schema/migrate/CRUD) and `catalyst-session.sh` (sub-50ms write CLI: `start|phase|metric|tool|pr|end|emit-context`).
 
-Schema (`db-migrations/001_initial_schema.sql`): `sessions`, `session_events`, `session_metrics`,
-`session_tools`, `session_prs`, `schema_migrations`. (Migrations dir now runs 001–006.)
-`orch-monitor` reads the DB directly (WAL concurrent readers). Dual-write to the JSONL stream is
-retained for tools that consume it. `sqlite3` is an optional dep.
+Schema (`db-migrations/001_initial_schema.sql`): `sessions`, `session_events`, `session_metrics`, `session_tools`, `session_prs`, `schema_migrations`. (Migrations dir now runs 001–006.) `orch-monitor` reads the DB directly (WAL concurrent readers). Dual-write to the JSONL stream is retained for tools that consume it. `sqlite3` is an optional dep.
 
 ## ADR-009: Daily Release Cadence
 
-Cut one release/day via scheduled merge at 05:00 UTC instead of auto-merging the release-please
-Release PR on every push to `main` — avoids per-merge point releases and mid-wave `update-branch`
-rebase cascades.
+Cut one release/day via scheduled merge at 05:00 UTC instead of auto-merging the release-please Release PR on every push to `main` — avoids per-merge point releases and mid-wave `update-branch` rebase cascades.
 
 - `release-please.yml` opens/updates the Release PR + runs `enhance-release-notes.sh` on every push.
-- `release-please-scheduled-merge.yml` (05:00 UTC) finds the `autorelease: pending` PR, verifies
-  mergeability, merges; exits 0 on empty day; `workflow_dispatch` = manual "cut now".
-  Blocked/conflicted PR → dedup'd `release-health` issue.
-- **Intraday channel (deferred):** marketplace auto-update gates on `plugin.json.version`, which
-  moves once/day. MVP for early access = install from a commit SHA on `main` (zero plumbing).
-  Designed-but-deferred: a `next` branch fast-forwarding `main` with `-rc.<n>` version bumps + a
-  second marketplace entry. `check-release-health.sh` check #2 unchanged. Rollback = revert the two
-  workflow changes.
+- `release-please-scheduled-merge.yml` (05:00 UTC) finds the `autorelease: pending` PR, verifies mergeability, merges; exits 0 on empty day; `workflow_dispatch` = manual "cut now". Blocked/conflicted PR → dedup'd `release-health` issue.
+- **Intraday channel (deferred):** marketplace auto-update gates on `plugin.json.version`, which moves once/day. MVP for early access = install from a commit SHA on `main` (zero plumbing). Designed-but-deferred: a `next` branch fast-forwarding `main` with `-rc.<n>` version bumps + a second marketplace entry. `check-release-health.sh` check #2 unchanged. Rollback = revert the two workflow changes.
 
 ## ADR-010: Catalyst CLI Install via `~/.catalyst/bin/`
 
-Install `catalyst-*` CLIs as symlinks in `~/.catalyst/bin/` with one `$PATH` entry — works across
-zsh/bash/fish without shell-specific alias blocks; `ls` is a discoverable inventory; symlinks strip
-`.sh`. `install-cli.sh` is authoritative for the exposed-CLI allowlist (update it when adding a
-CLI). Plugin updates move scripts to a version-stamped cache path, staling symlinks; re-run
-`setup-catalyst`/`install-cli.sh` to repair (`check-setup.sh` surfaces broken links). Uninstall:
-`install-cli.sh --uninstall`.
+Install `catalyst-*` CLIs as symlinks in `~/.catalyst/bin/` with one `$PATH` entry — works across zsh/bash/fish without shell-specific alias blocks; `ls` is a discoverable inventory; symlinks strip `.sh`. `install-cli.sh` is authoritative for the exposed-CLI allowlist (update it when adding a CLI). Plugin updates move scripts to a version-stamped cache path, staling symlinks; re-run `setup-catalyst`/`install-cli.sh` to repair (`check-setup.sh` surfaces broken links). Uninstall: `install-cli.sh --uninstall`.
 
 ## ADR-011: Hybrid SQLite + Filesystem Archive for Orchestrator Artifacts
 
-Persist orchestrator artifacts out of runs/worktrees into a two-layer store: **blobs** at
-`~/catalyst/archives/{orchId}/` (summaries, briefings, signals, phase logs, comms, metadata.json) +
-**index** in three SQLite tables (`orchestrators`, `archived_workers` PK `(orch_id,worker_id)`,
-`archived_artifacts` UNIQUE `(orch_id,path)`; `db-migrations/003_archives.sql`). Written by
-`orch-monitor/catalyst-archive.ts sweep`; served read-only via `/api/archive/*`.
+Persist orchestrator artifacts out of runs/worktrees into a two-layer store: **blobs** at `~/catalyst/archives/{orchId}/` (summaries, briefings, signals, phase logs, comms, metadata.json) + **index** in three SQLite tables (`orchestrators`, `archived_workers` PK `(orch_id,worker_id)`, `archived_artifacts` UNIQUE `(orch_id,path)`; `db-migrations/003_archives.sql`). Written by `orch-monitor/catalyst-archive.ts sweep`; served read-only via `/api/archive/*`.
 
-- Rationale: pure-SQLite balloons on text blobs; pure-FS loses query speed. Hybrid = indexed
-  metadata + unbounded blobs.
-- **Filesystem-first invariant**: blobs written via atomic tmp+rename BEFORE SQLite rows; on SQLite
-  failure `catalyst-archive sync` rebuilds the index from disk.
-- Teardown refuses to delete unless the sweep succeeded (or `--force`). File serving is
-  path-traversal safe (`realpathSync` must resolve within `archive_path`; rel segments
-  regex-validated). Subcommands: `sweep|sync|prune|list|show` (prune respects
-  `archive.retentionDays`).
+- Rationale: pure-SQLite balloons on text blobs; pure-FS loses query speed. Hybrid = indexed metadata + unbounded blobs.
+- **Filesystem-first invariant**: blobs written via atomic tmp+rename BEFORE SQLite rows; on SQLite failure `catalyst-archive sync` rebuilds the index from disk.
+- Teardown refuses to delete unless the sweep succeeded (or `--force`). File serving is path-traversal safe (`realpathSync` must resolve within `archive_path`; rel segments regex-validated). Subcommands: `sweep|sync|prune|list|show` (prune respects `archive.retentionDays`).
 
 ## ADR-012: Webhook-Driven orch-monitor with smee.io Tunnel
 
-Migrate orch-monitor from 30s poll-everything to webhook-driven ingestion via a smee.io tunnel,
-polling kept as a 10-min fallback. The 30s loop ran ~26.6k GraphQL calls/hr (222 PRs, ~3 active),
-draining the 5k/hr GitHub bucket in ~11 min (CTL-209). Webhooks deliver in seconds at zero budget.
-smee.io = least-resistance local delivery (no public ingress/Worker); `gh webhook forward` rejected
-(CLI-session-oriented). Repo-level subscriptions via lazy `ensureSubscribed(repo)`. Hard cutover (no
-feature flag); worst case = 10-min poll fallback.
+Migrate orch-monitor from 30s poll-everything to webhook-driven ingestion via a smee.io tunnel, polling kept as a 10-min fallback. The 30s loop ran ~26.6k GraphQL calls/hr (222 PRs, ~3 active), draining the 5k/hr GitHub bucket in ~11 min (CTL-209). Webhooks deliver in seconds at zero budget. smee.io = least-resistance local delivery (no public ingress/Worker); `gh webhook forward` rejected (CLI-session-oriented). Repo-level subscriptions via lazy `ensureSubscribed(repo)`. Hard cutover (no feature flag); worst case = 10-min poll fallback.
 
-- New dep `smee-client@^5.0.0`; `lib/webhook-*.ts` modules; `POST /api/webhook`. Config adds
-  `catalyst.monitor.github.smeeChannel` + `webhookSecretEnv` (HMAC secret in env);
-  `setup-webhooks.sh` is the idempotent helper.
-- Startup replay: 1-hr delivery window from `gh api repos/{repo}/hooks/{id}/deliveries` replayed
-  through the live handler (synthetic signing) to reconcile downtime.
-- Every accepted event fans out to `~/catalyst/events/YYYY-MM.jsonl` with topic
-  `<source>.<noun>.<verb>` (e.g. `github.pr.merged`) — seeded the unified event bus that CTL-210
-  (Linear webhooks + `catalyst-events` CLI, shipped) and CTL-211 (worker DoD = deploy success,
-  shipped) build on. Steady state: well under the 5k/hr ceilings.
+- New dep `smee-client@^5.0.0`; `lib/webhook-*.ts` modules; `POST /api/webhook`. Config adds `catalyst.monitor.github.smeeChannel` + `webhookSecretEnv` (HMAC secret in env); `setup-webhooks.sh` is the idempotent helper.
+- Startup replay: 1-hr delivery window from `gh api repos/{repo}/hooks/{id}/deliveries` replayed through the live handler (synthetic signing) to reconcile downtime.
+- Every accepted event fans out to `~/catalyst/events/YYYY-MM.jsonl` with topic `<source>.<noun>.<verb>` (e.g. `github.pr.merged`) — seeded the unified event bus that CTL-210 (Linear webhooks + `catalyst-events` CLI, shipped) and CTL-211 (worker DoD = deploy success, shipped) build on. Steady state: well under the 5k/hr ceilings.
 
 ## ADR-013: Event-Driven Worker Waits (`wait-for-github` two-phase)
 
-Replace `gh pr view --json` (GraphQL) poll loops in worker skills with a `catalyst-events wait-for`
-blocking call over the unified event log, plus a REST-authoritative re-check after each wake.
-GraphQL polling exhausted the 5k/hr budget (CTL-209). REST (`gh api repos/{repo}/pulls/{n}`) is
-cheaper and returns `.mergeable_state`.
+Replace `gh pr view --json` (GraphQL) poll loops in worker skills with a `catalyst-events wait-for` blocking call over the unified event log, plus a REST-authoritative re-check after each wake. GraphQL polling exhausted the 5k/hr budget (CTL-209). REST (`gh api repos/{repo}/pulls/{n}`) is cheaper and returns `.mergeable_state`.
 
-Two-phase: (1) `wait-for --timeout 180` for any relevant event → REST check; on timeout run
-diagnostics. (2) Diagnostics: count heartbeats in last 500 lines, re-check tunnel; healthy → extend,
-else REST fallback. (3) `--timeout 7200` (2-hr) when infra confirmed healthy. (4) REST fallback
-`sleep 300` loop when tunnel down. Filter jq must cover v1 (`.event`) and v2
-(`.attributes."event.name"`) envelopes. Never use `.mergeable_state` as sole signal
-(eventually-consistent) — always REST re-check.
+Two-phase: (1) `wait-for --timeout 180` for any relevant event → REST check; on timeout run diagnostics. (2) Diagnostics: count heartbeats in last 500 lines, re-check tunnel; healthy → extend, else REST fallback. (3) `--timeout 7200` (2-hr) when infra confirmed healthy. (4) REST fallback `sleep 300` loop when tunnel down. Filter jq must cover v1 (`.event`) and v2 (`.attributes."event.name"`) envelopes. Never use `.mergeable_state` as sole signal (eventually-consistent) — always REST re-check.
 
 ## ADR-014: Worker Owns Full PR Lifecycle (CTL-252)
 
-Remove `gh pr merge --auto` from all worker skills. After opening a PR the worker enters the ADR-013
-listen loop, resolves blockers inline, runs `gh pr merge --squash --delete-branch` directly when
-CLEAN, and writes `status:"done"`. Orchestrator Phase 4 becomes a safety net for crashed workers
-only (poll relaxed to 10-min). `autoMergeArmedAt` removed from the `pr` signal subobject. State
-machine shrinks to `pr-created → done`.
+Remove `gh pr merge --auto` from all worker skills. After opening a PR the worker enters the ADR-013 listen loop, resolves blockers inline, runs `gh pr merge --squash --delete-branch` directly when CLEAN, and writes `status:"done"`. Orchestrator Phase 4 becomes a safety net for crashed workers only (poll relaxed to 10-min). `autoMergeArmedAt` removed from the `pr` signal subobject. State machine shrinks to `pr-created → done`.
 
 ## ADR-015: Bidirectional catalyst-comms (CTL-249)
 
-Add inbound reads to workers: poll the shared comms channel at each phase boundary for
-`--filter-to <ticket-id>` messages, using a `COMMS_LAST_READ` cursor (initialized to line count at
-join) to skip pre-join history. Recognized inbound: `abort` (immediate exit); others TBD. **ACK
-gap**: no delivery guarantee (CTL-253 tracks ACK). `catalyst-comms send` emits
-`comms.message.posted` (v2 envelope) so tools observe traffic without reading the channel file. ~5
-poll calls/run added.
+Add inbound reads to workers: poll the shared comms channel at each phase boundary for `--filter-to <ticket-id>` messages, using a `COMMS_LAST_READ` cursor (initialized to line count at join) to skip pre-join history. Recognized inbound: `abort` (immediate exit); others TBD. **ACK gap**: no delivery guarantee (CTL-253 tracks ACK). `catalyst-comms send` emits `comms.message.posted` (v2 envelope) so tools observe traffic without reading the channel file. ~5 poll calls/run added.
 
 ## ADR-016: Claude Code metadata on the canonical envelope (CTL-374)
 
-**Accepted 2026-05-13.** Claude Code per-session telemetry (context %, cost, turns, model) is
-exposed only via the statusLine pipeline, not hooks. Add five typed attributes —
-`claude.session.id`, `claude.model`, `claude.context.used_pct`, `claude.context.tokens`,
-`claude.turn` — plus a `session.context` event emitted by `catalyst-statusline.sh` per tick, and
-`attention.context_pressure` when context crosses 70% upward.
+**Accepted 2026-05-13.** Claude Code per-session telemetry (context %, cost, turns, model) is exposed only via the statusLine pipeline, not hooks. Add five typed attributes — `claude.session.id`, `claude.model`, `claude.context.used_pct`, `claude.context.tokens`, `claude.turn` — plus a `session.context` event emitted by `catalyst-statusline.sh` per tick, and `attention.context_pressure` when context crosses 70% upward.
 
-Migration `005_claude_session_metadata.sql` adds `claude_session_id` (bound via
-`catalyst-session.sh start --claude-session-id`, fallback `CLAUDE_CODE_SESSION_ID`; indexed) and
-`last_context_pct` (threshold bookkeeping; read/written by `emit-context`).
+Migration `005_claude_session_metadata.sql` adds `claude_session_id` (bound via `catalyst-session.sh start --claude-session-id`, fallback `CLAUDE_CODE_SESSION_ID`; indexed) and `last_context_pct` (threshold bookkeeping; read/written by `emit-context`).
 
-**PII boundary**: `cost_usd` is intentionally NOT a typed attribute — it rides in
-`body.payload.cost_usd`, which the OTLP forwarder (`otel-forward/lib/destinations/otlp.ts`) does NOT
-forward (it forwards `attributes` + `body.message` only). Payload stays on-machine. **Install**:
-point `statusLine.command` at `catalyst-statusline.sh` (renders via `ccstatusline` /
-`$CATALYST_STATUSLINE_CMD`; emit runs detached so failures never break the status bar). Single 70%
-threshold matches the implement-plan handoff rule; more thresholds deferred.
+**PII boundary**: `cost_usd` is intentionally NOT a typed attribute — it rides in `body.payload.cost_usd`, which the OTLP forwarder (`otel-forward/lib/destinations/otlp.ts`) does NOT forward (it forwards `attributes` + `body.message` only). Payload stays on-machine. **Install**: point `statusLine.command` at `catalyst-statusline.sh` (renders via `ccstatusline` / `$CATALYST_STATUSLINE_CMD`; emit runs detached so failures never break the status bar). Single 70% threshold matches the implement-plan handoff rule; more thresholds deferred.
 
 ## ADR-017: Phase-Agent Dispatch Architecture (CTL-447 → CTL-470)
 
-**Accepted 2026-05-17.** Pre-CTL-452 dispatched one long-lived
-`claude -p /catalyst-legacy:oneshot <TICKET>` per ticket, running the full lifecycle in one context
-window → context rot, one worst-case turn cap for all phases, crash-recovery from a saturated state.
+**Accepted 2026-05-17.** Pre-CTL-452 dispatched one long-lived `claude -p /catalyst-legacy:oneshot <TICKET>` per ticket, running the full lifecycle in one context window → context rot, one worst-case turn cap for all phases, crash-recovery from a saturated state.
 
-**Decision**: dispatch one short-lived
-`claude --bg --resume /catalyst-dev:phase-<name> <TICKET> --orch-dir <ORCH_DIR>` per phase. The
-orchestrator walks the canonical **10-phase** sequence
-`triage → research → plan → implement → verify → review → pr → monitor-merge → monitor-deploy → teardown`
-(teardown split out as the dedicated terminal phase in CTL-703) via `orchestrate-phase-advance`,
-waking on `phase.<name>.complete.<TICKET>` routed by the broker `phase_lifecycle` interest. Selected
-by `.catalyst/config.json → catalyst.orchestration.dispatchMode`: `"phase-agents"` is the template
-default; `"oneshot-legacy"` is the fallback.
+**Decision**: dispatch one short-lived `claude --bg --resume /catalyst-dev:phase-<name> <TICKET> --orch-dir <ORCH_DIR>` per phase. The orchestrator walks the canonical **10-phase** sequence `triage → research → plan → implement → verify → review → pr → monitor-merge → monitor-deploy → teardown` (teardown split out as the dedicated terminal phase in CTL-703) via `orchestrate-phase-advance`, waking on `phase.<name>.complete.<TICKET>` routed by the broker `phase_lifecycle` interest. Selected by `.catalyst/config.json → catalyst.orchestration.dispatchMode`: `"phase-agents"` is the template default; `"oneshot-legacy"` is the fallback.
 
-- Per-phase turn caps (`phase-agent-dispatch` `phase_default_turn_cap`, overridable via
-  `catalyst.orchestration.phaseAgents.turnCaps`) — e.g. triage ~10, implement ~75. Per-phase model
-  selection (`phaseAgents`) lets cheap phases (monitor-deploy defaults to Haiku) skip Opus cost.
-- `phase_lifecycle` is a deterministic regex match (`broker/namespace-contract.mjs`:
-  `^phase\.([^.]+)\.(complete|failed|turn-cap-exhausted|skipped)\.([A-Za-z][A-Za-z0-9_]*-\d+)$`) —
-  no LLM classification; one interest per ticket. All four orchestrator interests (`pr_lifecycle`,
-  `ticket_lifecycle`, `comms_lifecycle`, `phase_lifecycle`) fire back as `filter.wake.<ORCH_NAME>`.
+- Per-phase turn caps (`phase-agent-dispatch` `phase_default_turn_cap`, overridable via `catalyst.orchestration.phaseAgents.turnCaps`) — e.g. triage ~10, implement ~75. Per-phase model selection (`phaseAgents`) lets cheap phases (monitor-deploy defaults to Haiku) skip Opus cost.
+- `phase_lifecycle` is a deterministic regex match (`broker/namespace-contract.mjs`: `^phase\.([^.]+)\.(complete|failed|turn-cap-exhausted|skipped)\.([A-Za-z][A-Za-z0-9_]*-\d+)$`) — no LLM classification; one interest per ticket. All four orchestrator interests (`pr_lifecycle`, `ticket_lifecycle`, `comms_lifecycle`, `phase_lifecycle`) fire back as `filter.wake.<ORCH_NAME>`.
 
 **Consequences**:
 
-- Signal layout splits: flat `workers/<TICKET>.json` plus per-phase
-  `workers/<TICKET>/phase-<name>.json`.
-- `--bg` healthcheck (`orchestrate-healthcheck`) stats `${JOBS_ROOT}/<bg>/state.json` (default
-  `~/.claude/jobs/<bg>/state.json`); files older than `--stale-bg-seconds` (default 900) with
-  `.state` not in `{done,failed,errored,stopped}` = stalled. PID liveness still covers
-  `oneshot-legacy`.
-- Intermediate Linear states (CTL-454): `triaged`, `researching`, `planning`, `verifying`,
-  `reviewing` (+ existing `inProgress`/`inReview`), mapped via `stateMap` (opt-in).
-- Revive budget at the top-level signal (`reviveCount`); `>= MAX_REVIVES` (default 10) → `stalled`,
-  `attentionReason="revive-budget-exhausted"`. Once-per-phase; second `failed` for the same phase
-  escalates.
+- Signal layout splits: flat `workers/<TICKET>.json` plus per-phase `workers/<TICKET>/phase-<name>.json`.
+- `--bg` healthcheck (`orchestrate-healthcheck`) stats `${JOBS_ROOT}/<bg>/state.json` (default `~/.claude/jobs/<bg>/state.json`); files older than `--stale-bg-seconds` (default 900) with `.state` not in `{done,failed,errored,stopped}` = stalled. PID liveness still covers `oneshot-legacy`.
+- Intermediate Linear states (CTL-454): `triaged`, `researching`, `planning`, `verifying`, `reviewing` (+ existing `inProgress`/`inReview`), mapped via `stateMap` (opt-in).
+- Revive budget at the top-level signal (`reviveCount`); `>= MAX_REVIVES` (default 10) → `stalled`, `attentionReason="revive-budget-exhausted"`. Once-per-phase; second `failed` for the same phase escalates.
 - Legacy `oneshot-legacy` preserved (catalyst-legacy plugin); cutover is per-project.
-- Built across CTL-447 (broker interest), 452 (state-machine rewrite + `--bg` cutover), 454 (Linear
-  states), 455 (session_metrics fix) → 470. Internal reference: `docs/orchestrator-overview.md`.
-  Related: ADR-006, ADR-008, ADR-014.
+- Built across CTL-447 (broker interest), 452 (state-machine rewrite + `--bg` cutover), 454 (Linear states), 455 (session_metrics fix) → 470. Internal reference: `docs/orchestrator-overview.md`. Related: ADR-006, ADR-008, ADR-014.
 
 ## ADR-018: Event-Sourced Worker Signal Files via Broker Projection (CTL-483)
 
-**Accepted 2026-05-17. Phase 1 mechanism retired 2026-08-03 (CTL-1628) — see "What actually
-shipped" below.** `workers/<TICKET>.json` is written by seven racing code paths (dispatch-next,
-followup, the worker agent, healthcheck, revive, auto-fixup, auto-rebase) with no inter-process
-locking — cross-script races silent. The broker already event-sources `broker-interests.json` from
-`filter.register/deregister`.
+**Accepted 2026-05-17. Phase 1 mechanism retired 2026-08-03 (CTL-1628) — see "What actually shipped" below.** `workers/<TICKET>.json` is written by seven racing code paths (dispatch-next, followup, the worker agent, healthcheck, revive, auto-fixup, auto-rebase) with no inter-process locking — cross-script races silent. The broker already event-sources `broker-interests.json` from `filter.register/deregister`.
 
-**Original decision**: move worker-state mutations to "emit a `worker.state_changed` command event;
-broker projects to disk". Event carries the FULL new state in `body.payload.state` (not a patch).
-Dual-write in three phases (mirrors ADR-008):
+**Original decision**: move worker-state mutations to "emit a `worker.state_changed` command event; broker projects to disk". Event carries the FULL new state in `body.payload.state` (not a patch). Dual-write in three phases (mirrors ADR-008):
 
-- **Phase 1**: writers keep direct `jq>tmp&&mv` AND emit the event; broker projects to a **shadow
-  path** `workers/<TICKET>.json.projected` (never races direct writes). `orchestrate-shadow-diff`
-  reports drift. PoC writer: `orchestrate-auto-rebase`; the other six migrate one at a time.
-- **Phase 2 (cutover)**: at zero drift across a full cycle for all seven, remove direct writes;
-  broker becomes sole writer at the canonical path.
+- **Phase 1**: writers keep direct `jq>tmp&&mv` AND emit the event; broker projects to a **shadow path** `workers/<TICKET>.json.projected` (never races direct writes). `orchestrate-shadow-diff` reports drift. PoC writer: `orchestrate-auto-rebase`; the other six migrate one at a time.
+- **Phase 2 (cutover)**: at zero drift across a full cycle for all seven, remove direct writes; broker becomes sole writer at the canonical path.
 - **Phase 3 (optional)**: mirror to SQLite `worker_state` `(orch_id,ticket)` (ADR-011 hybrid).
 
-**What actually shipped**: only `orchestrate-auto-rebase` ever migrated to Phase 1 (1 of 7 writers);
-the migration stalled there from 2026-05-17. Phase 1's only reader was the manual
-`orchestrate-shadow-diff` verification CLI (a human-run drift check) — nothing operational or
-automated ever consumed the `.json.projected` shadow files. CTL-1628 removed the Phase 1
-shadow-write **scaffolding** as dead weight — the broker's
-`handleWorkerStateChanged`/`getProjectedWorkerStatePath`/`writeProjectedWorkerState`, the dedicated
-`lib/emit-worker-state-changed.sh` emitter, and `orchestrate-shadow-diff` itself. **Phase 2's plan**
-(cut over to broker-sole-writer once Phase 1 reached zero drift) **is dead** — it depended on the
-now-retired Phase 1 drift-check pipeline, so that specific implementation can no longer execute; the
-canonical `workers/<TICKET>.json` files are still written exactly as before, by the same seven
-racing scripts. The *problem* Phase 2 was meant to solve — the seven-script single-writer race — is
-still open, but it is no longer tracked as this ADR's Phase 2: **CTL-1631** now owns it as a
-standalone ticket, replacing the retired Phase-2 plan rather than continuing it. **Phase 3** — as
-originally scoped, a `(orch_id,ticket)` SQLite mirror — **did ship**, as CTL-532 below; both
-`projection.mjs:291` and `broker-state.mjs:194` label it in-code as `(ADR-018 Phase 3)`.
+**What actually shipped**: only `orchestrate-auto-rebase` ever migrated to Phase 1 (1 of 7 writers); the migration stalled there from 2026-05-17. Phase 1's only reader was the manual `orchestrate-shadow-diff` verification CLI (a human-run drift check) — nothing operational or automated ever consumed the `.json.projected` shadow files. CTL-1628 removed the Phase 1 shadow-write **scaffolding** as dead weight — the broker's `handleWorkerStateChanged`/`getProjectedWorkerStatePath`/`writeProjectedWorkerState`, the dedicated `lib/emit-worker-state-changed.sh` emitter, and `orchestrate-shadow-diff` itself. **Phase 2's plan** (cut over to broker-sole-writer once Phase 1 reached zero drift) **is dead** — it depended on the now-retired Phase 1 drift-check pipeline, so that specific implementation can no longer execute; the canonical `workers/<TICKET>.json` files are still written exactly as before, by the same seven racing scripts. The *problem* Phase 2 was meant to solve — the seven-script single-writer race — is still open, but it is no longer tracked as this ADR's Phase 2: **CTL-1631** now owns it as a standalone ticket, replacing the retired Phase-2 plan rather than continuing it. **Phase 3** — as originally scoped, a `(orch_id,ticket)` SQLite mirror — **did ship**, as CTL-532 below; both `projection.mjs:291` and `broker-state.mjs:194` label it in-code as `(ADR-018 Phase 3)`.
 
-The `worker.state_changed` **event name and wire schema are not gone**, only the dedicated producer
-and shadow-file consumer: `reduceWorkerStateEvent` (below) still treats it as valid input, both (a)
-on every broker restart within the same calendar month — `replayWorkerStateProjection` folds the
-*entire* current-month event log, so any `worker.state_changed` record already on disk from before
-this change remains live replay input — and (b) as a defensive compat-consume in the broker router
-(`if (name === "worker.state_changed") return;`, CTL-1628) for an un-upgraded `orchestrate-auto-rebase`
-still emitting it during a mixed-version fleet rollout. The wire schema stays documented in
-`references/event-schema.md`, marked as a retired producer retained for replay/compat.
+The `worker.state_changed` **event name and wire schema are not gone**, only the dedicated producer and shadow-file consumer: `reduceWorkerStateEvent` (below) still treats it as valid input, both (a) on every broker restart within the same calendar month — `replayWorkerStateProjection` folds the *entire* current-month event log, so any `worker.state_changed` record already on disk from before this change remains live replay input — and (b) as a defensive compat-consume in the broker router (`if (name === "worker.state_changed") return;`, CTL-1628) for an un-upgraded `orchestrate-auto-rebase` still emitting it during a mixed-version fleet rollout. The wire schema stays documented in `references/event-schema.md`, marked as a retired producer retained for replay/compat.
 
-**CTL-532 shipped this ADR's Phase 3.** `processEvent` folds every event (not just
-`worker.state_changed`) into `projectWorkerStateEvent` unconditionally, above all routing gates; the
-pure `reduceWorkerStateEvent` reducer normalizes `worker.state_changed`, `phase.<name>.<status>.<TICKET>`,
-and a specific subset of `orchestrator.worker.*` actions into a patch. For the phase family, only
-`status` ∈ `{complete, failed, turn-cap-exhausted}` matches `WORKER_PHASE_EVENT_PATTERN`;
-`phase.<name>.skipped.<TICKET>` (e.g. `phase-monitor-deploy`'s no-deploy-observed outcome) is a real,
-separately-routed event but is **not** in that pattern's alternation, so it is not folded here. For
-the `orchestrator.worker.*` family it is **not** a wildcard: `revived`, `pr_created`, and
-`status_terminal` are special-cased, and `dispatched`/`done`/`failed`/`launch_failed` map through
-`WORKER_LIFECYCLE_STATUS`; `pr_merged` and `phase_advanced` are real, separately-routed
-`orchestrator.worker.*` events that hit no branch and are silently dropped (`return null`).
-`upsertWorkerState` gates `phase`, `status`, and the `last_event_id`/`last_event_ts` watermark itself
-on an order-independent watermark — an incoming event's `last_event_ts` must be `>=` (not `>`) the
-row's current watermark to apply, so on an exact timestamp tie the later-*processed* event wins, not
-the later-*occurring* one (pinned by `worker-state-projection.test.mjs:1140-1163`). `pr_number`
-(`COALESCE(excluded.pr_number, worker_state.pr_number)`) and `revive_count`
-(`MAX(excluded.revive_count, worker_state.revive_count)`) are **not** watermark-gated — every upsert
-applies them unconditionally regardless of event order (revive_count's `MAX` can't regress either
-way; pr_number's `COALESCE` can be clobbered by an out-of-order event supplying a different non-null
-value). The result lands in the broker SQLite `worker_state` table — one row per
-`(orchestrator, ticket)` holding phase/status/PR-number/revive-count — plus `worker_revive_events`
-(idempotency ledger) and `projection_meta` (single-row watermark), all defined in
-`broker/broker-state.mjs:194-232` and shipped in #936. This was previously undocumented against this
-ADR.
+**CTL-532 shipped this ADR's Phase 3.** `processEvent` folds every event (not just `worker.state_changed`) into `projectWorkerStateEvent` unconditionally, above all routing gates; the pure `reduceWorkerStateEvent` reducer normalizes `worker.state_changed`, `phase.<name>.<status>.<TICKET>`, and a specific subset of `orchestrator.worker.*` actions into a patch. For the phase family, only `status` ∈ `{complete, failed, turn-cap-exhausted}` matches `WORKER_PHASE_EVENT_PATTERN`; `phase.<name>.skipped.<TICKET>` (e.g. `phase-monitor-deploy`'s no-deploy-observed outcome) is a real, separately-routed event but is **not** in that pattern's alternation, so it is not folded here. For the `orchestrator.worker.*` family it is **not** a wildcard: `revived`, `pr_created`, and `status_terminal` are special-cased, and `dispatched`/`done`/`failed`/`launch_failed` map through `WORKER_LIFECYCLE_STATUS`; `pr_merged` and `phase_advanced` are real, separately-routed `orchestrator.worker.*` events that hit no branch and are silently dropped (`return null`). `upsertWorkerState` gates `phase`, `status`, and the `last_event_id`/`last_event_ts` watermark itself on an order-independent watermark — an incoming event's `last_event_ts` must be `>=` (not `>`) the row's current watermark to apply, so on an exact timestamp tie the later-*processed* event wins, not the later-*occurring* one (pinned by `worker-state-projection.test.mjs:1140-1163`). `pr_number` (`COALESCE(excluded.pr_number, worker_state.pr_number)`) and `revive_count` (`MAX(excluded.revive_count, worker_state.revive_count)`) are **not** watermark-gated — every upsert applies them unconditionally regardless of event order (revive_count's `MAX` can't regress either way; pr_number's `COALESCE` can be clobbered by an out-of-order event supplying a different non-null value). The result lands in the broker SQLite `worker_state` table — one row per `(orchestrator, ticket)` holding phase/status/PR-number/revive-count — plus `worker_revive_events` (idempotency ledger) and `projection_meta` (single-row watermark), all defined in `broker/broker-state.mjs:194-232` and shipped in #936. This was previously undocumented against this ADR.
 
-**CTL-532 is observational, not a fix for the single-writer-race problem.**
-`upsertWorkerState` only inserts/updates the SQLite `worker_state` row; it never reads or writes the
-canonical `workers/<TICKET>.json` file. That problem — originally Phase 2's remit — is CTL-1631's to
-close, not this ADR's.
+**CTL-532 is observational, not a fix for the single-writer-race problem.** `upsertWorkerState` only inserts/updates the SQLite `worker_state` row; it never reads or writes the canonical `workers/<TICKET>.json` file. That problem — originally Phase 2's remit — is CTL-1631's to close, not this ADR's.
 
-**No supersession happened.** Phase 2 — the only phase that would have replaced the direct-write
-`workers/<TICKET>.json` design (from ADR-017's signal layout) with a broker-sole-writer path — was
-never built. The original seven-script write path, races included, is unchanged from before this
-ADR. Global state + event log (ADR-006) were never in scope here and stay in force regardless.
+**No supersession happened.** Phase 2 — the only phase that would have replaced the direct-write `workers/<TICKET>.json` design (from ADR-017's signal layout) with a broker-sole-writer path — was never built. The original seven-script write path, races included, is unchanged from before this ADR. Global state + event log (ADR-006) were never in scope here and stay in force regardless.
 
 ## ADR-019: Turn-cap exhaustion → automated handoff continuation (CTL-484)
 
-Phase agents have turn caps (default 75 for implement). Before CTL-484, `orchestrate-revive` treated
-a turn-cap stop as a failure, burning the revive budget on successful forward progress; tickets
-needing >75 turns silently hit `revive-budget-exhausted`.
+Phase agents have turn caps (default 75 for implement). Before CTL-484, `orchestrate-revive` treated a turn-cap stop as a failure, burning the revive budget on successful forward progress; tickets needing >75 turns silently hit `revive-budget-exhausted`.
 
-**Decision**: introduce `turn-cap-exhausted` as a distinct non-terminal status in `phase_lifecycle`
-routing. A worker nearing the cap writes a handoff to
-`thoughts/shared/handoffs/<TICKET>/<ts>_turn-cap-continuation.md` and emits
-`phase.<name>.turn-cap-exhausted.<TICKET>` (handoff path in payload). `orchestrate-revive`: detects
-it → spawns `claude --bg --resume <session_id>` with `CATALYST_IS_CONTINUATION=true`,
-`CATALYST_HANDOFF_PATH`, `CATALYST_CONTINUATION_COUNT` → bumps `.continuationCount` on a
-**separate** budget (`MAX_CONTINUATIONS`, default 3) → exhaustion = `stalled`,
-`attentionReason="continuation-budget-exhausted"`. Resumed worker reads the handoff and trusts the
-summary.
+**Decision**: introduce `turn-cap-exhausted` as a distinct non-terminal status in `phase_lifecycle` routing. A worker nearing the cap writes a handoff to `thoughts/shared/handoffs/<TICKET>/<ts>_turn-cap-continuation.md` and emits `phase.<name>.turn-cap-exhausted.<TICKET>` (handoff path in payload). `orchestrate-revive`: detects it → spawns `claude --bg --resume <session_id>` with `CATALYST_IS_CONTINUATION=true`, `CATALYST_HANDOFF_PATH`, `CATALYST_CONTINUATION_COUNT` → bumps `.continuationCount` on a **separate** budget (`MAX_CONTINUATIONS`, default 3) → exhaustion = `stalled`, `attentionReason="continuation-budget-exhausted"`. Resumed worker reads the handoff and trusts the summary.
 
-Lives in: `phase-agent-emit-complete` / `lib/phase-emit-complete.sh`
-(`--status turn-cap-exhausted --handoff-path`); broker `PHASE_EVENT_PATTERN`
-(`namespace-contract.mjs`, tests `phase-lifecycle.test.mjs`); `templates/worker-signal.json`
-(`continuationCount`, `continuations[]`, `handoffPath`) + `signal-schema.ts` + `state-reader.ts`;
-`orchestrate-revive` (`spawn_continuation_bg`, `--max-continuations`); `resume-handoff/SKILL.md`;
-`phase-implement/SKILL.md` (producer). Rationale: distinct routable status (not a payload
-discriminator); separate budget (reviveCount ≠ continuationCount); worker self-detection (no
-external watchdog); bash-templated handoff (background path can't run interactive `create-handoff`);
-non-terminal (omits `completedAt`, off `TERMINAL_STATUSES`). Rejected: raise MAX_REVIVES, bump caps
-in config, external watchdog. Scope = `phase-implement` for v1; reusable infra.
+Lives in: `phase-agent-emit-complete` / `lib/phase-emit-complete.sh` (`--status turn-cap-exhausted --handoff-path`); broker `PHASE_EVENT_PATTERN` (`namespace-contract.mjs`, tests `phase-lifecycle.test.mjs`); `templates/worker-signal.json` (`continuationCount`, `continuations[]`, `handoffPath`) + `signal-schema.ts` + `state-reader.ts`; `orchestrate-revive` (`spawn_continuation_bg`, `--max-continuations`); `resume-handoff/SKILL.md`; `phase-implement/SKILL.md` (producer). Rationale: distinct routable status (not a payload discriminator); separate budget (reviveCount ≠ continuationCount); worker self-detection (no external watchdog); bash-templated handoff (background path can't run interactive `create-handoff`); non-terminal (omits `completedAt`, off `TERMINAL_STATUSES`). Rejected: raise MAX_REVIVES, bump caps in config, external watchdog. Scope = `phase-implement` for v1; reusable infra.
 
 ## ADR-020: Phase-mode turn-cap continuation lives in `orchestrate-revive`, not the daemon (CTL-613)
 
-ADR-019's loop ran against the legacy top-level signal; phase-mode workers (ADR-017 default) write
-only per-phase `workers/<TICKET>/phase-<name>.json`, so it's a no-op for them. The CTL-493 per-phase
-loop only consumed `stalled` and silently skipped `turn-cap-exhausted` → handoff sat unused, ticket
-hung (incident ADV-1134). The daemon's `execution-core/signal-reader.mjs` correctly classifies
-`turn-cap-exhausted` as terminal (continuation ≠ reclaim).
+ADR-019's loop ran against the legacy top-level signal; phase-mode workers (ADR-017 default) write only per-phase `workers/<TICKET>/phase-<name>.json`, so it's a no-op for them. The CTL-493 per-phase loop only consumed `stalled` and silently skipped `turn-cap-exhausted` → handoff sat unused, ticket hung (incident ADV-1134). The daemon's `execution-core/signal-reader.mjs` correctly classifies `turn-cap-exhausted` as terminal (continuation ≠ reclaim).
 
-**Decision**: add a branch to `orchestrate-revive`'s CTL-493 per-phase loop that consumes
-`P_STATUS=="turn-cap-exhausted"` directly: budget-check `.phaseContinuationCount` (shares
-`MAX_CONTINUATIONS`=3 with ADR-019's counter, tracked separately), resolve session id + worktree,
-spawn via `spawn_continuation_bg`, set per-phase signal back to `running`, emit
-`phase.<name>.dispatched` to re-arm the broker. Resolve the prior session id from
-`~/.claude/jobs/<bg>/state.json::linkScanPath` (basename minus `.jsonl`) rather than plumbing it
-into the signal — keeps the dispatcher's single-write contract intact. Daemon terminal
-classification stays; recovery is the script's job, invoked by the daemon sweep. New
-`resolve_phase_session_id` coexists with the legacy `resolve_session_id`.
+**Decision**: add a branch to `orchestrate-revive`'s CTL-493 per-phase loop that consumes `P_STATUS=="turn-cap-exhausted"` directly: budget-check `.phaseContinuationCount` (shares `MAX_CONTINUATIONS`=3 with ADR-019's counter, tracked separately), resolve session id + worktree, spawn via `spawn_continuation_bg`, set per-phase signal back to `running`, emit `phase.<name>.dispatched` to re-arm the broker. Resolve the prior session id from `~/.claude/jobs/<bg>/state.json::linkScanPath` (basename minus `.jsonl`) rather than plumbing it into the signal — keeps the dispatcher's single-write contract intact. Daemon terminal classification stays; recovery is the script's job, invoked by the daemon sweep. New `resolve_phase_session_id` coexists with the legacy `resolve_session_id`.
 
 ## ADR-021: Workspace-level type-label taxonomy (CTL-995)
 
-All six type labels (`bug`, `feature`, `refactor`, `docs`, `chore`, `test`) live at **workspace**
-scope under a `type` label group, with canonical colors: bug `#e5484d`, feature `#8b5cf6`, refactor
-`#14b8a6`, docs `#3b82f6`, chore `#8d8d8d`, test `#22c55e`. Pre-migration, four were per-team
-duplicates (color drift, per-team ID lists). `issueLabelUpdate(teamId:null)` was rejected by the API
-→ used rename-create-relabel-delete. Tooling must filter by the workspace IDs in
-`thoughts/shared/research/2026-06-10-ctl-995-label-taxonomy-migration.md`. Component labels
-(orchestrator/broker/phase-agent/monitor/cli/ci/website/estimation/worktree) remain team-scoped;
-only the type axis is workspace-level.
+All six type labels (`bug`, `feature`, `refactor`, `docs`, `chore`, `test`) live at **workspace** scope under a `type` label group, with canonical colors: bug `#e5484d`, feature `#8b5cf6`, refactor `#14b8a6`, docs `#3b82f6`, chore `#8d8d8d`, test `#22c55e`. Pre-migration, four were per-team duplicates (color drift, per-team ID lists). `issueLabelUpdate(teamId:null)` was rejected by the API → used rename-create-relabel-delete. Tooling must filter by the workspace IDs in `thoughts/shared/research/2026-06-10-ctl-995-label-taxonomy-migration.md`. Component labels (orchestrator/broker/phase-agent/monitor/cli/ci/website/estimation/worktree) remain team-scoped; only the type axis is workspace-level.
 
 ## ADR-022: Belief engine is a derivation layer; "log → projection" is the directional target, not the shipped reality
 
-**Accepted (direction) 2026-06-14.** Track A active; Track B is a deliberate un-started bet.
-Sources: `thoughts/shared/research/2026-06-14-resilience-and-peer-platform-learnings.md`,
-`…/2026-06-13-catalyst-patentability-and-open-core-strategy.md`.
+**Accepted (direction) 2026-06-14.** Track A active; Track B is a deliberate un-started bet. Sources: `thoughts/shared/research/2026-06-14-resilience-and-peer-platform-learnings.md`, `…/2026-06-13-catalyst-patentability-and-open-core-strategy.md`.
 
-The conceptual fit is exact — Datalog EDB→IDB closure **is** event-sourcing's `state=fold(log)`. The
-engine (`execution-core/beliefs/`, CTL-962→967, CTL-1063) gets determinism right: `now` captured
-once/tick (`collector.mjs`), EDB frozen in one SQLite txn during eval, and a differential shadow
-oracle (`advance-shadow.mjs`) comparing Datalog `advance_to` vs procedural `deriveAdvancement`. But
-three facts bound the claim:
+The conceptual fit is exact — Datalog EDB→IDB closure **is** event-sourcing's `state=fold(log)`. The engine (`execution-core/beliefs/`, CTL-962→967, CTL-1063) gets determinism right: `now` captured once/tick (`collector.mjs`), EDB frozen in one SQLite txn during eval, and a differential shadow oracle (`advance-shadow.mjs`) comparing Datalog `advance_to` vs procedural `deriveAdvancement`. But three facts bound the claim:
 
-1. **EDB is fed from mutable live state, not the log.** 8 of 9 `obs_*` tables are live probes; the
-   one log-sourced table `obs_heartbeat` is permanently empty (no `worker.heartbeat` emitter,
-   `collector.mjs`). As shipped = "the filesystem is the agent, observed through Datalog," not a log
-   projection.
-2. **The `rules.dl` compiler compiles only 3 of 18 rules** (`compiler/index.mjs`); load-bearing
-   logic (recursive S5 deps, S6 `advance_to`/`cycle_exhausted`) is `extern` hand-written SQL with a
-   61 KB hand-synced generated artifact.
-3. **Advancement is graded against the 33-line procedural `deriveAdvancement` as ground truth** —
-   porting to Datalog can at best equal it (low standalone ROI).
+1. **EDB is fed from mutable live state, not the log.** 8 of 9 `obs_*` tables are live probes; the one log-sourced table `obs_heartbeat` is permanently empty (no `worker.heartbeat` emitter, `collector.mjs`). As shipped = "the filesystem is the agent, observed through Datalog," not a log projection.
+2. **The `rules.dl` compiler compiles only 3 of 18 rules** (`compiler/index.mjs`); load-bearing logic (recursive S5 deps, S6 `advance_to`/`cycle_exhausted`) is `extern` hand-written SQL with a 61 KB hand-synced generated artifact.
+3. **Advancement is graded against the 33-line procedural `deriveAdvancement` as ground truth** — porting to Datalog can at best equal it (low standalone ROI).
 
-The engine has been shadow/dark its whole life; graduation is blocked on prerequisites that don't
-exist (a log-sourced EDB; `caused_by` + monotonic `seq` on the envelope, both verified absent).
+The engine has been shadow/dark its whole life; graduation is blocked on prerequisites that don't exist (a log-sourced EDB; `caused_by` + monotonic `seq` on the envelope, both verified absent).
 
-**Decision**: (1) Affirm "immutable log → deterministic projection" as the target; keep the engine
-as the projection substrate — don't rip it out. (2) Stop calling the EDB a "log projection" in docs
-until its authoritative tables come from the log. (3) Split the ambition: **Track A** —
-derivation/health/provenance/absence-detection (S5 deps, `catalyst why`, negation-over-time); keep,
-invest, graduate. **Track B** — Datalog owns the control path (R16/R17 replace `deriveAdvancement`,
-log-sourced EDB, `signal.json` demoted to regeneratable projection); a deliberate bet gated by the
-`advance-shadow` zero-disagreement oracle. (4) First graduation = the resilience absence-detector
-("no `github.*`/`linear.*` event in N min → `ingestion_stale`"), which forces emitting
-heartbeat/webhook-freshness events (fixes empty `obs_heartbeat`) — all Track A.
+**Decision**: (1) Affirm "immutable log → deterministic projection" as the target; keep the engine as the projection substrate — don't rip it out. (2) Stop calling the EDB a "log projection" in docs until its authoritative tables come from the log. (3) Split the ambition: **Track A** — derivation/health/provenance/absence-detection (S5 deps, `catalyst why`, negation-over-time); keep, invest, graduate. **Track B** — Datalog owns the control path (R16/R17 replace `deriveAdvancement`, log-sourced EDB, `signal.json` demoted to regeneratable projection); a deliberate bet gated by the `advance-shadow` zero-disagreement oracle. (4) First graduation = the resilience absence-detector ("no `github.*`/`linear.*` event in N min → `ingestion_stale`"), which forces emitting heartbeat/webhook-freshness events (fixes empty `obs_heartbeat`) — all Track A.
 
-Rationale: decide/act seam stays a bright line (Datalog derives; an imperative executor acts —
-`escalate.mjs`, gated `CATALYST_INTENTS_ENFORCE=1`, sits outside the rule engine). Datalog not
-Prolog (guaranteed termination for a control plane; bounded `WITH RECURSIVE` only). Per-tick EDB
-checkpoints = the snapshot half of event sourcing. Consequences: `caused_by` + monotonic `seq` are
-prerequisites (`EVENT_SCHEMA_CAUSAL_SEQ` gap, near-free). The 3/18 compiler's fate is decided by
-Track-B intent (migrate `extern` rules or retire the compiler). Do NOT "fix" `REVIVE_BUDGET=1` (dead
-code; CTL-736 progress-gate is live). Complements ADR-018 / ADR-006/008. Rejected: rip out the
-engine; promote `advance_to` now; full "log is the agent" rewrite now (= Track B).
+Rationale: decide/act seam stays a bright line (Datalog derives; an imperative executor acts — `escalate.mjs`, gated `CATALYST_INTENTS_ENFORCE=1`, sits outside the rule engine). Datalog not Prolog (guaranteed termination for a control plane; bounded `WITH RECURSIVE` only). Per-tick EDB checkpoints = the snapshot half of event sourcing. Consequences: `caused_by` + monotonic `seq` are prerequisites (`EVENT_SCHEMA_CAUSAL_SEQ` gap, near-free). The 3/18 compiler's fate is decided by Track-B intent (migrate `extern` rules or retire the compiler). Do NOT "fix" `REVIVE_BUDGET=1` (dead code; CTL-736 progress-gate is live). Complements ADR-018 / ADR-006/008. Rejected: rip out the engine; promote `advance_to` now; full "log is the agent" rewrite now (= Track B).
 
-**Amendment, 2026-08-20 — Track B is retired; Track A stands, pending a lease-liveness follow-up.**
-Two-plus months after acceptance, neither gating flag (`CATALYST_BELIEFS_SHADOW`,
-`CATALYST_INTENTS_ENFORCE`) is set anywhere in `catalyst-cluster` — not in either host's
-`hosts/{mini,mini-2}/execution-core.env`, not anywhere else in that repo (verified live via grep,
-2026-08-20). Both default to off in code (`config.mjs:2714-2716`'s flag map; `label-guard.mjs:113/497`,
-`recovery.mjs:2821`, `scheduler.mjs:9101` all gate on `env.X === "1"` / `env.X ?? "0"`), so both are
-dark on both hosts by default-absence, not an explicit `=0` override — same practical effect (the
-shadow oracle Track B's graduation was gated on has never run a single tick), corrected citation.
+**Amendment, 2026-08-20 — Track B is retired; Track A stands, pending a lease-liveness follow-up.** Two-plus months after acceptance, neither gating flag (`CATALYST_BELIEFS_SHADOW`, `CATALYST_INTENTS_ENFORCE`) is set anywhere in `catalyst-cluster` — not in either host's `hosts/{mini,mini-2}/execution-core.env`, not anywhere else in that repo (verified live via grep, 2026-08-20). Both default to off in code (`config.mjs:2714-2716`'s flag map; `label-guard.mjs:113/497`, `recovery.mjs:2821`, `scheduler.mjs:9101` all gate on `env.X === "1"` / `env.X ?? "0"`), so both are dark on both hosts by default-absence, not an explicit `=0` override — same practical effect (the shadow oracle Track B's graduation was gated on has never run a single tick), corrected citation.
 
 Two independent things happened in the interim that change the call, not one:
 
-1. **The control path is already solved.** ADR-029 (2026-08-13) and the lease-authority work
-   (CTL-1785/1786) together give the pipeline's control path (advancement, dispatch exclusion) a
-   real mechanism — Linear as trigger, a cloud-DO lease as the conditional-write lock — with no
-   rule-engine derivation involved. This alone retires Track B's stated goal (Datalog owning
-   `advance_to`/dispatch exclusion): there's nothing left for it to graduate into.
-2. **Leases are also a better fit for the liveness reasoning Track B and part of Track A were doing
-   heuristically.** A live example, from the same day this amendment was written: CTL-2090 (mini-2's
-   scheduler admitting zero new work despite a free slot and a ready ticket) required hours of
-   stewards manually SSHing in, grepping `daemon.log`, and diffing tick counters by hand to answer
-   "is this claim actually still alive" — exactly the kind of question a rules engine encoding
-   heuristics was meant to answer, done instead as ad-hoc inference because no first-class "is this
-   lease currently held and recently renewed" fact exists yet. A real claim/renew/release lease
-   answers that directly, once renewal ships (`renew()` is currently stubbed —
-   `lease-verbs.ts`'s `renew-not-implemented` — the actual blocking prerequisite, not a reason to
-   abandon the approach).
+1. **The control path is already solved.** ADR-029 (2026-08-13) and the lease-authority work (CTL-1785/1786) together give the pipeline's control path (advancement, dispatch exclusion) a real mechanism — Linear as trigger, a cloud-DO lease as the conditional-write lock — with no rule-engine derivation involved. This alone retires Track B's stated goal (Datalog owning `advance_to`/dispatch exclusion): there's nothing left for it to graduate into.
+2. **Leases are also a better fit for the liveness reasoning Track B and part of Track A were doing heuristically.** A live example, from the same day this amendment was written: CTL-2090 (mini-2's scheduler admitting zero new work despite a free slot and a ready ticket) required hours of stewards manually SSHing in, grepping `daemon.log`, and diffing tick counters by hand to answer "is this claim actually still alive" — exactly the kind of question a rules engine encoding heuristics was meant to answer, done instead as ad-hoc inference because no first-class "is this lease currently held and recently renewed" fact exists yet. A real claim/renew/release lease answers that directly, once renewal ships (`renew()` is currently stubbed — `lease-verbs.ts`'s `renew-not-implemented` — the actual blocking prerequisite, not a reason to abandon the approach).
 
-CTL-1244 (the epic executing this ADR's Track B) is retargeted: the "kill `signal.json` as primary
-state" goal stays, but its mechanism becomes the plain log+projection rewrite the lease/trigger work
-already implies, not a Datalog-derived EDB. **Track B is retired, not merely left ungraduated** — the
-3/18-compiled `rules.dl`/`compiler/index.mjs` and the `advance-shadow` comparator are dead weight to
-delete alongside CTL-1244's rescoped work, not a bet to keep open.
+CTL-1244 (the epic executing this ADR's Track B) is retargeted: the "kill `signal.json` as primary state" goal stays, but its mechanism becomes the plain log+projection rewrite the lease/trigger work already implies, not a Datalog-derived EDB. **Track B is retired, not merely left ungraduated** — the 3/18-compiled `rules.dl`/`compiler/index.mjs` and the `advance-shadow` comparator are dead weight to delete alongside CTL-1244's rescoped work, not a bet to keep open.
 
-**Track A stands as this amendment's decision — not reopened here — but item 2 above puts its
-liveness/absence-detection half on watch, not settled.** Provenance work with no liveness angle
-(`catalyst why`, negation-over-time) is unaffected. The CTL-1143 ingestion-stale-detector graduation
-(Hardening backlog) is exactly the kind of absence-detection Track A was scoped to own, and it is the
-same shape of problem leases solved for CTL-2090 — worth a real comparison once lease renewal lands,
-not before. That comparison is future work, explicitly not decided by this amendment. Separately, an
-unratified proposal (`thoughts/.../2026-08-11-event-delivery-plane.md`, status "proposal — not yet
-ratified", explicitly marked DO NOT IMPLEMENT) argues for deleting the whole 15,202-line engine
-outright now; that broader call was considered and deferred, same as before this amendment.
+**Track A stands as this amendment's decision — not reopened here — but item 2 above puts its liveness/absence-detection half on watch, not settled.** Provenance work with no liveness angle (`catalyst why`, negation-over-time) is unaffected. The CTL-1143 ingestion-stale-detector graduation (Hardening backlog) is exactly the kind of absence-detection Track A was scoped to own, and it is the same shape of problem leases solved for CTL-2090 — worth a real comparison once lease renewal lands, not before. That comparison is future work, explicitly not decided by this amendment. Separately, an unratified proposal (`thoughts/.../2026-08-11-event-delivery-plane.md`, status "proposal — not yet ratified", explicitly marked DO NOT IMPLEMENT) argues for deleting the whole 15,202-line engine outright now; that broader call was considered and deferred, same as before this amendment.
 
-(HRW — the deterministic-hashing layer that assigns ticket ownership across the roster — is a
-separate mechanism from both Track A and Track B and is out of scope here. It depends on every
-member knowing the full roster, which is fine while the roster is a small set of long-lived hosts;
-it becomes worth revisiting only once execution moves toward elastic/cloud-managed workers with a
-dynamic roster, which is a real but not-yet-scheduled direction, not a current decision.)
+(HRW — the deterministic-hashing layer that assigns ticket ownership across the roster — is a separate mechanism from both Track A and Track B and is out of scope here. It depends on every member knowing the full roster, which is fine while the roster is a small set of long-lived hosts; it becomes worth revisiting only once execution moves toward elastic/cloud-managed workers with a dynamic roster, which is a real but not-yet-scheduled direction, not a current decision.)
 
 ## ADR-023: Shadow→Enforce Rollout Discipline for Autonomous Actuators
 
-**Accepted 2026-06-16.** The fleet has many autonomous actuators (session reaper CTL-649/657,
-proc-reaper CTL-1165, stall-janitor CTL-1004/1064, unstuck-sweep CTL-1064, belief executors
-CTL-962→967, fleet-health self-heal CTL-1165 D5), each able to take a hard-to-reverse action. The
-1,798-job / 17 GB-swap reap-leak (CTL-1165) is the cautionary case. Verified 2026-06-16: every
-recovery actuator runs on its conservative default (shadow/off).
+**Accepted 2026-06-16.** The fleet has many autonomous actuators (session reaper CTL-649/657, proc-reaper CTL-1165, stall-janitor CTL-1004/1064, unstuck-sweep CTL-1064, belief executors CTL-962→967, fleet-health self-heal CTL-1165 D5), each able to take a hard-to-reverse action. The 1,798-job / 17 GB-swap reap-leak (CTL-1165) is the cautionary case. Verified 2026-06-16: every recovery actuator runs on its conservative default (shadow/off).
 
 **Decision** — one discipline for every actuator:
 
 1. **Rules DERIVE, executors ACT** — decide/act bright line (mirrors ADR-022).
-2. **Dark by default** — ships `off`/`shadow`, gated by one knob (env flag
-   `CATALYST_INTENTS_ENFORCE` / `CATALYST_STALL_JANITOR` / `CATALYST_UNSTUCK_SWEEP` /
-   `CATALYST_DIAGNOSTICIAN` / `EXECUTION_CORE_FLEET_SELF_HEAL`, or Layer-1 mode
-   `orphanReaper.procReaper.mode`).
-3. **Three-state `off → shadow → enforce`** — shadow emits a "would-X" twin
-   (`procOrphans.would-reap`, `unstuck.would.push`, `janitor.would.kill`, the `advance-shadow`
-   comparator).
-4. **Gated criteria flips** — shadow→enforce needs written criteria verified on real hosts over a
-   real window (CTL-1165 proc-reaper criteria = template: ≥3–5 days of real candidates, each
-   spot-checked, no false spared/reaped, steady-state bounded).
+2. **Dark by default** — ships `off`/`shadow`, gated by one knob (env flag `CATALYST_INTENTS_ENFORCE` / `CATALYST_STALL_JANITOR` / `CATALYST_UNSTUCK_SWEEP` / `CATALYST_DIAGNOSTICIAN` / `EXECUTION_CORE_FLEET_SELF_HEAL`, or Layer-1 mode `orphanReaper.procReaper.mode`).
+3. **Three-state `off → shadow → enforce`** — shadow emits a "would-X" twin (`procOrphans.would-reap`, `unstuck.would.push`, `janitor.would.kill`, the `advance-shadow` comparator).
+4. **Gated criteria flips** — shadow→enforce needs written criteria verified on real hosts over a real window (CTL-1165 proc-reaper criteria = template: ≥3–5 days of real candidates, each spot-checked, no false spared/reaped, steady-state bounded).
 5. **Reversible by unset** — flip reverts by unsetting + restart; gates fail closed.
 6. **One at a time** — independent knobs; never a blanket on.
 
-Rationale: shadow-first + gated criteria makes harm observable before possible. **Known
-coarseness**: `CATALYST_INTENTS_ENFORCE` is today a single flag arming four belief executors at once
-— safety rests on each being idempotent/bounded (`labelOnce`, bgJobId-pinned kill, max-attempts)
-until per-intent granularity exists. This is the deterministic-vs-flexible boundary (flexible LLM
-layer = ADR-025). Consequences: new actuators MUST ship `off|shadow|enforce` + `would-X` + written
-criteria; modes instantiated in `website/.../reference/configuration.md` + schema enum; flips
-operator-owned (no auto-promotion) — the **ownerless-gate risk** (clean shadow evidence with nobody
-flipping) is itself an operator concern (ADR-025/CTL-1176). Rejected: enable-on-merge; single global
-enforce flag.
+Rationale: shadow-first + gated criteria makes harm observable before possible. **Known coarseness**: `CATALYST_INTENTS_ENFORCE` is today a single flag arming four belief executors at once — safety rests on each being idempotent/bounded (`labelOnce`, bgJobId-pinned kill, max-attempts) until per-intent granularity exists. This is the deterministic-vs-flexible boundary (flexible LLM layer = ADR-025). Consequences: new actuators MUST ship `off|shadow|enforce` + `would-X` + written criteria; modes instantiated in `website/.../reference/configuration.md` + schema enum; flips operator-owned (no auto-promotion) — the **ownerless-gate risk** (clean shadow evidence with nobody flipping) is itself an operator concern (ADR-025/CTL-1176). Rejected: enable-on-merge; single global enforce flag.
 
 ## ADR-024: Mechanical Fleet Hygiene — Reapers, Janitors, GC (Thread 1)
 
-**Accepted 2026-06-16.** Each phase-agent worker leaves durable state: a `~/.claude/jobs/<id>` dir,
-an `execution-core/workers/<TICKET>/` signal dir, a `~/catalyst/wt/` worktree, reparented
-`node`/`bun` children. Two incidents: the reap-leak (1,798 dirs / 17 GB, CTL-1165) and a 2026-06-16
-incident where 137 `execution-core/workers/` dirs cold the CTL-731 liveness snapshot
-(`inFlightCount:0` while workers live) → daemon held all new-work dispatch incl Urgent.
+**Accepted 2026-06-16.** Each phase-agent worker leaves durable state: a `~/.claude/jobs/<id>` dir, an `execution-core/workers/<TICKET>/` signal dir, a `~/catalyst/wt/` worktree, reparented `node`/`bun` children. Two incidents: the reap-leak (1,798 dirs / 17 GB, CTL-1165) and a 2026-06-16 incident where 137 `execution-core/workers/` dirs cold the CTL-731 liveness snapshot (`inFlightCount:0` while workers live) → daemon held all new-work dispatch incl Urgent.
 
 **Decision** — one named layer of bounded deterministic cleaners, each governed by ADR-023:
 
 1. **Session/bg-worker reaper** (CTL-649/657) — `claude stop` + `reap-complete`. Enforce.
-2. **proc-reaper** (CTL-1165 D2, `orphanReaper.procReaper.mode`) — kills reparented grandchildren.
-   Shadow; flip gated on CTL-1165 criteria.
+2. **proc-reaper** (CTL-1165 D2, `orphanReaper.procReaper.mode`) — kills reparented grandchildren. Shadow; flip gated on CTL-1165 criteria.
 3. **job-dir GC** (CTL-1165 D3) — removes aged `~/.claude/jobs` past 24 h.
-4. **worker-dir GC** (CTL-1205, NEW) — removes `execution-core/workers/<TICKET>/` on pipeline
-   completion (reaper `pr.merged` cleanup, after worktree removal) + periodic Done/merged sweep.
-   Nothing reaped these before; the per-tick `readdirSync` over the pile cold the CTL-731 snapshot.
-5. **stall-janitor** (CTL-1004/1064, `CATALYST_STALL_JANITOR`) — J1 reaps orphan worktrees, J2 kills
-   idle ghost sessions, J3 re-dispatches the narrow `prior-artifact-retry-exhausted` stall.
-   Shadow→enforce.
-6. **unstuck-sweep** (CTL-1064, `CATALYST_UNSTUCK_SWEEP`) — category-aware rescuer; `actByCategory`
-   seams intentionally unwired (`{}`).
-7. **fleet-health probe** (CTL-1165 D5) — alerts `fleet.health.degraded` on jobs/swap/procs
-   thresholds; self-heal default-off.
+4. **worker-dir GC** (CTL-1205, NEW) — removes `execution-core/workers/<TICKET>/` on pipeline completion (reaper `pr.merged` cleanup, after worktree removal) + periodic Done/merged sweep. Nothing reaped these before; the per-tick `readdirSync` over the pile cold the CTL-731 snapshot.
+5. **stall-janitor** (CTL-1004/1064, `CATALYST_STALL_JANITOR`) — J1 reaps orphan worktrees, J2 kills idle ghost sessions, J3 re-dispatches the narrow `prior-artifact-retry-exhausted` stall. Shadow→enforce.
+6. **unstuck-sweep** (CTL-1064, `CATALYST_UNSTUCK_SWEEP`) — category-aware rescuer; `actByCategory` seams intentionally unwired (`{}`).
+7. **fleet-health probe** (CTL-1165 D5) — alerts `fleet.health.degraded` on jobs/swap/procs thresholds; self-heal default-off.
 
-**Boundary (load-bearing)**: these operate on fleet _state_, not ticket content (= ADR-025). Not
-interchangeable: the stall-janitor reaps worktrees+sessions but NOT worker-state dirs (= worker-dir
-GC). A cold liveness snapshot is a worker-dir-GC problem, not a stall-janitor one (misdiagnosed the
-2026-06-16 incident). Rationale: liveness depends on hygiene (CTL-731 guard pressured by per-tick
-I/O over accumulated dirs); single clear target per cleaner; the event log is source of truth so
-removing a completed ticket's dir is safe (daemon restores on boot). Consequences: worker-dir GC
-(CTL-1205) is the durable fix for the cold-snapshot class; each cleaner follows ADR-023. Rejected:
-let state accumulate; one mega-reaper.
+**Boundary (load-bearing)**: these operate on fleet _state_, not ticket content (= ADR-025). Not interchangeable: the stall-janitor reaps worktrees+sessions but NOT worker-state dirs (= worker-dir GC). A cold liveness snapshot is a worker-dir-GC problem, not a stall-janitor one (misdiagnosed the 2026-06-16 incident). Rationale: liveness depends on hygiene (CTL-731 guard pressured by per-tick I/O over accumulated dirs); single clear target per cleaner; the event log is source of truth so removing a completed ticket's dir is safe (daemon restores on boot). Consequences: worker-dir GC (CTL-1205) is the durable fix for the cold-snapshot class; each cleaner follows ADR-023. Rejected: let state accumulate; one mega-reaper.
 
 ## ADR-025: Pre-Human Reasoning-Recovery Sweep and Operator Surfacing (Thread 3)
 
-**Accepted (direction) 2026-06-16.** Surfacing shipped (CTL-1180/1182/1181); the reasoning sweep
-(CTL-1176) is proposed, not built. When a ticket stalls/fails/needs a decision, it must **surface**
-to the operator and ideally something should try to **unstick** it first. Both were broken:
-ADV-1392's `pr` phase failed (`push_rejected_no_workflow_scope`) and surfaced nowhere (the escalation
-was applied only for `stalled`, never `failed`); CTL-1167 stalled with no comment; a scan found **31
-silently-stuck tickets/month vs 6 `escalate.human` events**. Nothing reasons over the queue
-(diagnostician CTL-937/828 evidence-only/dark; janitor J3 narrow; `phase-remediate` CTL-653
-in-pipeline only; unstuck-sweep seams unwired).
+**Accepted (direction) 2026-06-16.** Surfacing shipped (CTL-1180/1182/1181); the reasoning sweep (CTL-1176) is proposed, not built. When a ticket stalls/fails/needs a decision, it must **surface** to the operator and ideally something should try to **unstick** it first. Both were broken: ADV-1392's `pr` phase failed (`push_rejected_no_workflow_scope`) and surfaced nowhere (the escalation was applied only for `stalled`, never `failed`); CTL-1167 stalled with no comment; a scan found **31 silently-stuck tickets/month vs 6 `escalate.human` events**. Nothing reasons over the queue (diagnostician CTL-937/828 evidence-only/dark; janitor J3 narrow; `phase-remediate` CTL-653 in-pipeline only; unstuck-sweep seams unwired).
 
-**Decision** — a flexible LLM-reasoning recovery layer in front of the human inbox (distinct from
-ADR-024 hygiene and ADR-022 belief):
+**Decision** — a flexible LLM-reasoning recovery layer in front of the human inbox (distinct from ADR-024 hygiene and ADR-022 belief):
 
-1. **Reasoning recovery sweep (CTL-1176)** — periodic LLM pass over the stuck/failed/escalated
-   queue; per item, reconstruct from log + belief store + worktree/PR/CI and ask "human-decision or
-   can I unblock?". Resolves mechanical cases via existing deterministic seams; escalates only true
-   human-decisions **with a written reason**. Unifies diagnostician + janitor + sweeper +
-   remediator. **Guardrail (CTL-828 three-panel)**: NOT a general fixer — DETERMINISTIC when
-   stuck-type is typed and fix mechanical; LLM only with a structured brief + downstream
-   deterministic re-check + hard cycle cap; HUMAN otherwise. No open-ended re-dispatch authority
-   (reopens CTL-736 revive-storm). Every decision → log + Linear comment.
-2. **Surfacing model (CTL-1180, shipped)** — a terminally-`failed` phase surfaces like `stalled`:
-   an escalation for `status ∈ {failed, stalled}` when not pipeline-done (scheduler terminal sweep),
-   plus a `phaseFailed`/`escalationType` trigger in the monitor's `deriveAttention` → Needs-You
-   inbox + nav dot + `/queue`. Closes the `failed ≠ stalled` gap.
-3. **Always-record comment policy (CTL-1182, shipped)** — every phase, including failed, records its
-   outcome on the ticket; codified `linearis` fallback when the app-actor mirror fails.
-4. **Registered deterministic act-seams the sweep invokes** — workflow-scope push detour (CTL-1181),
-   sibling-conflict resolve (CTL-855), orphan-PR detect/adopt (CTL-1175/1159/1160), ADR-024
-   cleaners. The LLM _selects among_ registered seams; it never invents mutations.
+1. **Reasoning recovery sweep (CTL-1176)** — periodic LLM pass over the stuck/failed/escalated queue; per item, reconstruct from log + belief store + worktree/PR/CI and ask "human-decision or can I unblock?". Resolves mechanical cases via existing deterministic seams; escalates only true human-decisions **with a written reason**. Unifies diagnostician + janitor + sweeper + remediator. **Guardrail (CTL-828 three-panel)**: NOT a general fixer — DETERMINISTIC when stuck-type is typed and fix mechanical; LLM only with a structured brief + downstream deterministic re-check + hard cycle cap; HUMAN otherwise. No open-ended re-dispatch authority (reopens CTL-736 revive-storm). Every decision → log + Linear comment.
+2. **Surfacing model (CTL-1180, shipped)** — a terminally-`failed` phase surfaces like `stalled`: an escalation for `status ∈ {failed, stalled}` when not pipeline-done (scheduler terminal sweep), plus a `phaseFailed`/`escalationType` trigger in the monitor's `deriveAttention` → Needs-You inbox + nav dot + `/queue`. Closes the `failed ≠ stalled` gap.
+3. **Always-record comment policy (CTL-1182, shipped)** — every phase, including failed, records its outcome on the ticket; codified `linearis` fallback when the app-actor mirror fails.
+4. **Registered deterministic act-seams the sweep invokes** — workflow-scope push detour (CTL-1181), sibling-conflict resolve (CTL-855), orphan-PR detect/adopt (CTL-1175/1159/1160), ADR-024 cleaners. The LLM _selects among_ registered seams; it never invents mutations.
 
-Rationale: the fleet only alerts + escalates then stops; the "try to clean it up first" step was
-scaffolding only (31:6 quantifies the cost). Deterministic-vs-flexible boundary (ADR-023): hygiene
-stays gated; LLM judgment is bounded to "human-or-not + which seam." Surfacing is the floor — inbox
-membership keys on worker-dir/event status (`failed`/`stalled`), not just
-`gh pr list`, so failed-but-no-PR cases surface. Consequences: CTL-1176 needs its own scoping doc
-(becomes this ADR's implementation vehicle); belief executors (ADR-022) and this sweep are
-complementary; this is the "supervisor" record previously split across CTL-780/828/937. Rejected: a
-general open-ended re-dispatch agent (CTL-828 panel — reopens CTL-736); surfacing-only (leaves
-resolvable stalls consuming attention); leave re-engagement to the inference engine's lease rules
-(CTL-780 — that's the deterministic complement, held).
+Rationale: the fleet only alerts + escalates then stops; the "try to clean it up first" step was scaffolding only (31:6 quantifies the cost). Deterministic-vs-flexible boundary (ADR-023): hygiene stays gated; LLM judgment is bounded to "human-or-not + which seam." Surfacing is the floor — inbox membership keys on worker-dir/event status (`failed`/`stalled`), not just `gh pr list`, so failed-but-no-PR cases surface. Consequences: CTL-1176 needs its own scoping doc (becomes this ADR's implementation vehicle); belief executors (ADR-022) and this sweep are complementary; this is the "supervisor" record previously split across CTL-780/828/937. Rejected: a general open-ended re-dispatch agent (CTL-828 panel — reopens CTL-736); surfacing-only (leaves resolvable stalls consuming attention); leave re-engagement to the inference engine's lease rules (CTL-780 — that's the deterministic complement, held).
 
 ## ADR-026: Two-Axis Worker State Model + worker-status Label Group (CTL-764)
 
-**Decision** — worker state transitions **that the scheduler records** are consolidated behind a
-single chokepoint and a workspace-scoped, single-valued `worker-status` Linear label group carrying
-worker _disposition_ independently of _pipeline stage_ (known gaps in that coverage are listed
-below). The live chokepoint is the **inline
-`recordTransition`** function inside `scheduler.mjs`'s `schedulerTick` — not the standalone
-`recordWorkerTransition` module (`record-worker-transition.mjs`) named in this ADR's original
-design: that module's own doc comment declared only three of the eventual five sinks (Sink 1 Linear
-workflow status via `applyPhaseStatus`, Sink 2 the disposition label via `convergeLabel`, Sink 3 the
-unified event log via `appendWorkerTransitionEvent`) and flagged itself as unfinished — "Phase 5 will
-wire the production defaults... and route all call sites here." That Phase 5 wiring never happened;
-the scheduler's live path never called the module. Of the two sinks the module never reached, only
-sink 4 (OTLP via `otel-forward`) is actually live — it rides automatically on sink 3's event-log
-write. Sink 5 (a broker `ticket_state_transitions` table, CTL-764 Phase 10) was **never
-implemented** anywhere, live path or otherwise — no schema, no writer, no broker consumer exist in
-the codebase. CTL-1628 removed the retired module as consumer-free.
+**Decision** — worker state transitions **that the scheduler records** are consolidated behind a single chokepoint and a workspace-scoped, single-valued `worker-status` Linear label group carrying worker _disposition_ independently of _pipeline stage_ (known gaps in that coverage are listed below). The live chokepoint is the **inline `recordTransition`** function inside `scheduler.mjs`'s `schedulerTick` — not the standalone `recordWorkerTransition` module (`record-worker-transition.mjs`) named in this ADR's original design: that module's own doc comment declared only three of the eventual five sinks (Sink 1 Linear workflow status via `applyPhaseStatus`, Sink 2 the disposition label via `convergeLabel`, Sink 3 the unified event log via `appendWorkerTransitionEvent`) and flagged itself as unfinished — "Phase 5 will wire the production defaults... and route all call sites here." That Phase 5 wiring never happened; the scheduler's live path never called the module. Of the two sinks the module never reached, only sink 4 (OTLP via `otel-forward`) is actually live — it rides automatically on sink 3's event-log write. Sink 5 (a broker `ticket_state_transitions` table, CTL-764 Phase 10) was **never implemented** anywhere, live path or otherwise — no schema, no writer, no broker consumer exist in the codebase. CTL-1628 removed the retired module as consumer-free.
 
-**The chokepoint is not the only `worker.transition` emitter.** The daemon's `handleCommentWake`
-(CTL-768, `execution-core/daemon.mjs`) calls `appendWorkerTransitionEvent` directly at two
-structurally distinct sites, both bypassing `recordTransition` but for different reasons:
-- The **`needs-input` clear** (a per-signal branch gated on `status === "needs-input"`) removes the
-  label, emits the clear, and redispatches the parked worker in the same block. Its own code comment
-  explains the bypass: "scheduler.mjs owns the park/apply emission; the clear is emitted here (the
-  daemon removes the durable label out-of-band and redispatches — the scheduler never observes this
-  edge)."
-- The **escalation clear** runs once per comment-wake call, gated on positive human provenance
-  and a managed ticket, with **no redispatch** in that block. It bypasses `recordTransition` because
-  the scheduler's own escalation handling is STICKY-by-design (never clears it itself on a
-  steady-state admission pass, per the `recordTransition` suppression logic above) — the
-  "redispatches" half of the quoted rationale does not apply to this site.
+**The chokepoint is not the only `worker.transition` emitter.** The daemon's `handleCommentWake` (CTL-768, `execution-core/daemon.mjs`) calls `appendWorkerTransitionEvent` directly at two structurally distinct sites, both bypassing `recordTransition` but for different reasons:
+- The **`needs-input` clear** (a per-signal branch gated on `status === "needs-input"`) removes the label, emits the clear, and redispatches the parked worker in the same block. Its own code comment explains the bypass: "scheduler.mjs owns the park/apply emission; the clear is emitted here (the daemon removes the durable label out-of-band and redispatches — the scheduler never observes this edge)."
+- The **escalation clear** runs once per comment-wake call, gated on positive human provenance and a managed ticket, with **no redispatch** in that block. It bypasses `recordTransition` because the scheduler's own escalation handling is STICKY-by-design (never clears it itself on a steady-state admission pass, per the `recordTransition` suppression logic above) — the "redispatches" half of the quoted rationale does not apply to this site.
 
 Both are deliberate, self-documented second-producer sites.
 
-**A separate escalation path emits no `worker.transition` for its disposition change.** Pass 0w's
-hung-worker escalation (`killHungWorker` in `watchdog-action.mjs`, invoked from `scheduler.mjs`'s
-progress-watchdog pass) does emit `phase.terminal.reap-requested` (via `emitReapIntent`, when
-`bgJobId` exists) for the kill/reap side of the sequence — that part of the path is observable. But
-it publishes the escalation via the shared guard (`label-guard.mjs`) and
-never calls `recordTransition`, `appendWorkerTransitionEvent`, or any other `worker.transition`
-emitter anywhere in that path — a real Axis-2 transition with no `worker.transition` record. Unlike
-the daemon's comment-wake sites above, this is a genuine coverage gap in the transition stream
-specifically, not an alternate producer. See "Two-axis worker state & the recordWorkerTransition
-chokepoint (CTL-764)" in `docs/architecture.md` for the live mechanism.
+**A separate escalation path emits no `worker.transition` for its disposition change.** Pass 0w's hung-worker escalation (`killHungWorker` in `watchdog-action.mjs`, invoked from `scheduler.mjs`'s progress-watchdog pass) does emit `phase.terminal.reap-requested` (via `emitReapIntent`, when `bgJobId` exists) for the kill/reap side of the sequence — that part of the path is observable. But it publishes the escalation via the shared guard (`label-guard.mjs`) and never calls `recordTransition`, `appendWorkerTransitionEvent`, or any other `worker.transition` emitter anywhere in that path — a real Axis-2 transition with no `worker.transition` record. Unlike the daemon's comment-wake sites above, this is a genuine coverage gap in the transition stream specifically, not an alternate producer. See "Two-axis worker state & the recordWorkerTransition chokepoint (CTL-764)" in `docs/architecture.md` for the live mechanism.
 
 **Two orthogonal axes (never blurred):**
 
-- **Axis 1 — Pipeline stage** (where the ticket is in the pipeline): Linear workflow Status, written
-  through the single `applyPhaseStatus` chokepoint.
-- **Axis 2 — Worker disposition** (how the worker is doing): **three** mutually exclusive values in
-  the `worker-status` label group (`queued`, `blocked`, `needs-input`).
+- **Axis 1 — Pipeline stage** (where the ticket is in the pipeline): Linear workflow Status, written through the single `applyPhaseStatus` chokepoint.
+- **Axis 2 — Worker disposition** (how the worker is doing): **three** mutually exclusive values in the `worker-status` label group (`queued`, `blocked`, `needs-input`).
 
-  ⛔ **CTL-2161 — the group went from FOUR members to THREE.** `needs-human` was the fourth. It is
-  deleted (CTL-2155 epic): measured across 86 items it flagged, 3 genuinely needed a person and 41
-  were the model provider being overloaded, escalated one ticket at a time. It is replaced by two
-  distinct paths, neither of which is a worker-disposition label — SYSTEM trouble raises ONE
-  fleet-scoped, auto-clearing alert (CTL-2156) with zero per-ticket artifacts, and a genuine human
-  question becomes ONE ask ticket carrying a `blocks` relation to the work it holds (CTL-2157). The
-  surviving three keep their meanings unchanged: they are all *worker* states, which is what the
-  axis is for; `needs-human` never was.
+⛔ **CTL-2161 — the group went from FOUR members to THREE.** `needs-human` was the fourth. It is deleted (CTL-2155 epic): measured across 86 items it flagged, 3 genuinely needed a person and 41 were the model provider being overloaded, escalated one ticket at a time. It is replaced by two distinct paths, neither of which is a worker-disposition label — SYSTEM trouble raises ONE fleet-scoped, auto-clearing alert (CTL-2156) with zero per-ticket artifacts, and a genuine human question becomes ONE ask ticket carrying a `blocks` relation to the work it holds (CTL-2157). The surviving three keep their meanings unchanged: they are all *worker* states, which is what the axis is for; `needs-human` never was.
 
-**Single-valued workspace group** — workspace scope (shared by CTL and ADV teams) ensures the label
-is always readable regardless of which team's ticket is in flight. Exclusive group enforces
-single-value; the daemon removes stale members before applying a new one.
+**Single-valued workspace group** — workspace scope (shared by CTL and ADV teams) ensures the label is always readable regardless of which team's ticket is in flight. Exclusive group enforces single-value; the daemon removes stale members before applying a new one.
 
-**Precedence** — `needs-input > blocked > queued > none`. All three are tick-converged (re-derived
-on diff each tick). The sticky, apply-once member (`needs-human`) is gone with CTL-2161; the
-`labelOnce` once-marker machinery survives it because five retry loops read its return value as
-their STOP condition and boot-resume reads the marker to suppress auto-resume of a chronically
-failing ticket (see CTL-2159).
+**Precedence** — `needs-input > blocked > queued > none`. All three are tick-converged (re-derived on diff each tick). The sticky, apply-once member (`needs-human`) is gone with CTL-2161; the `labelOnce` once-marker machinery survives it because five retry loops read its return value as their STOP condition and boot-resume reads the marker to suppress auto-resume of a chronically failing ticket (see CTL-2159).
 
-**Resolution-gated clearing.** The two confirmed-removal paths built for `needs-human` — (1)
-`clearStalledLabel`'s `onRemoved` callback at scheduler-side resolution points, and (2) the daemon's
-`handleCommentWake` clear on a managed ticket's confirmed human reply — remain in place for the
-surviving members and for clearing the label off tickets that still wear it during the CTL-2160
-migration. They are deliberately NOT deleted with the producers: deleting a clearer before the
-backlog is swept strands every ticket already carrying the label.
+**Resolution-gated clearing.** The two confirmed-removal paths built for `needs-human` — (1) `clearStalledLabel`'s `onRemoved` callback at scheduler-side resolution points, and (2) the daemon's `handleCommentWake` clear on a managed ticket's confirmed human reply — remain in place for the surviving members and for clearing the label off tickets that still wear it during the CTL-2160 migration. They are deliberately NOT deleted with the producers: deleting a clearer before the backlog is swept strands every ticket already carrying the label.
 
-**`waiting` → `queued` rename** — the prior `waiting` label was renamed to `queued` to align with
-the disposition vocabulary. Back-compat: legacy `waiting` labels map to `queued` in the HUD and
-`heldFor`. CTL-755 team-level `blocked`/`waiting` labels are superseded by the workspace group.
+**`waiting` → `queued` rename** — the prior `waiting` label was renamed to `queued` to align with the disposition vocabulary. Back-compat: legacy `waiting` labels map to `queued` in the HUD and `heldFor`. CTL-755 team-level `blocked`/`waiting` labels are superseded by the workspace group.
 
-**Rationale** — scattered label writes produced observable drift (an escalation in the event log but
-healthy in Linear, or vice versa). One chokepoint, one group, one canonical `worker.transition`
-event per genuine change eliminates the coordination problem without per-site reasoning.
+**Rationale** — scattered label writes produced observable drift (an escalation in the event log but healthy in Linear, or vice versa). One chokepoint, one group, one canonical `worker.transition` event per genuine change eliminates the coordination problem without per-site reasoning.
 
-**Alternatives considered** — per-site label writes (rejected: coordination problem persists);
-merged axes into a single status enum (rejected: pipeline stage and disposition are independent and
-both need independent observability); async `recordWorkerTransition` only (rejected: `schedulerTick`
-is sync; async would require a separate flush loop with new failure modes).
+**Alternatives considered** — per-site label writes (rejected: coordination problem persists); merged axes into a single status enum (rejected: pipeline stage and disposition are independent and both need independent observability); async `recordWorkerTransition` only (rejected: `schedulerTick` is sync; async would require a separate flush loop with new failure modes).
 
-**Consequences** — four sinks are **live** (Linear Status, label, event log, OTLP via otel-forward);
-all fail-open. No single transition reaches all four — each recordTransition call is either
-stage-only or disposition-only (`toDisposition === undefined` means "no disposition guard, always
-emit" for a pure stage move; omitting `toStage`/`fromStage` means no Linear-Status write for a pure
-disposition move), so a transition reaches at most three: a stage move touches Linear Status + event
-log + OTLP (skips the label sink); a disposition move touches the label + event log + OTLP (skips
-Linear Status) — e.g. the dependency-cycle escalation (`scheduler.mjs`) routes through the shared
-escalation guard (event log + OTLP) with no stage touched at all. Since CTL-2161 that path publishes
-an ASK ticket rather than a `needs-human` disposition. Only a call that sets both `toStage` and
-`toDisposition` together would reach all four. A fifth sink (an optional broker
-`ticket_state_transitions` table, CTL-764 Phase 10) was designed but never implemented — no schema,
-writer, or broker consumer exist for it. The HUD capacity header gains per-disposition buckets and
-triage is carved out of `maxParallel` counting. AGENTS.md / architecture.md carry the two-axis model
-as first-class concepts.
+**Consequences** — four sinks are **live** (Linear Status, label, event log, OTLP via otel-forward); all fail-open. No single transition reaches all four — each recordTransition call is either stage-only or disposition-only (`toDisposition === undefined` means "no disposition guard, always emit" for a pure stage move; omitting `toStage`/`fromStage` means no Linear-Status write for a pure disposition move), so a transition reaches at most three: a stage move touches Linear Status + event log + OTLP (skips the label sink); a disposition move touches the label + event log + OTLP (skips Linear Status) — e.g. the dependency-cycle escalation (`scheduler.mjs`) routes through the shared escalation guard (event log + OTLP) with no stage touched at all. Since CTL-2161 that path publishes an ASK ticket rather than a `needs-human` disposition. Only a call that sets both `toStage` and `toDisposition` together would reach all four. A fifth sink (an optional broker `ticket_state_transitions` table, CTL-764 Phase 10) was designed but never implemented — no schema, writer, or broker consumer exist for it. The HUD capacity header gains per-disposition buckets and triage is carved out of `maxParallel` counting. AGENTS.md / architecture.md carry the two-axis model as first-class concepts.
 
 ## ADR-027: Browser automation stays local — cloud browser backends rejected (2026-07-25)
 
-**Decision** — Catalyst's browser automation continues to run **local Chromium** via
-`agent-browser`'s default backend. A hosted browser provider (Browserbase, and by extension Kernel /
-Browserless-cloud / BrowserStack) is **not** adopted. Recorded because the proposal is superficially
-attractive and will otherwise be re-proposed.
+**Decision** — Catalyst's browser automation continues to run **local Chromium** via `agent-browser`'s default backend. A hosted browser provider (Browserbase, and by extension Kernel / Browserless-cloud / BrowserStack) is **not** adopted. Recorded because the proposal is superficially attractive and will otherwise be re-proposed.
 
-**Killer 1 — a cloud browser cannot reach a local dev server.** Every browser target Catalyst cares
-about is loopback or tailnet: `mini:7400` (orch-monitor SPA), `localhost:3000/4000/8080` (dev
-servers in worktrees), `127.0.0.1:<rand>` (gstack control plane). Browserbase ships **no tunnel** —
-no BrowserStack-Local / Sauce-Connect equivalent; verified as a documented absence across
-`docs.browserbase.com` (`llms.txt` index, `remote-browser-versus-local-browser`,
-`building-automated-tests`, `allowed-domains`), and stated affirmatively in
-`platform/browser/files/uploads`: the remote browser "can't access files on your local machine". The
-adjacent `platform/identity/vpn` feature runs the **opposite** direction (routes the cloud browser's
-_egress_ through a proxy you deploy) and validates proxies eagerly at session creation, so a
-local-only proxy fails the session outright. `agent-browser` ships no tunneling either — navigation
-executes as CDP `Page.navigate` **inside the remote container**, so `localhost` resolves there.
-Adopting a cloud backend is a capability deletion.
+**Killer 1 — a cloud browser cannot reach a local dev server.** Every browser target Catalyst cares about is loopback or tailnet: `mini:7400` (orch-monitor SPA), `localhost:3000/4000/8080` (dev servers in worktrees), `127.0.0.1:<rand>` (gstack control plane). Browserbase ships **no tunnel** — no BrowserStack-Local / Sauce-Connect equivalent; verified as a documented absence across `docs.browserbase.com` (`llms.txt` index, `remote-browser-versus-local-browser`, `building-automated-tests`, `allowed-domains`), and stated affirmatively in `platform/browser/files/uploads`: the remote browser "can't access files on your local machine". The adjacent `platform/identity/vpn` feature runs the **opposite** direction (routes the cloud browser's _egress_ through a proxy you deploy) and validates proxies eagerly at session creation, so a local-only proxy fails the session outright. `agent-browser` ships no tunneling either — navigation executes as CDP `Page.navigate` **inside the remote container**, so `localhost` resolves there. Adopting a cloud backend is a capability deletion.
 
-**Killer 2 — the stated motive was false.** The proposal's premise was relieving pressure from local
-headless Chromium. Measured live on 2026-07-25: **0 headless Chromium processes on mini and 0 on
-mini-2**; mini-2 has no browser binary installed at all and still swaps. No skill in
-`plugins/*/skills/` invokes `agent-browser` on the fleet — every fleet-side reference is
-provisioning (`install-cli.sh:242`, `check-setup.sh:106`), env injection
-(`phase-agent-dispatch:863,944`), or leak containment (`orphan-sweep.sh:779`). Actual memory
-pressure is exec-core (3.7–6 GB), orch-monitor (2.5 GB), an 826 MB monthly event log, and 101
-worktrees on mini. Offloading browsers reclaims ~0 MB of a 15 GB problem.
+**Killer 2 — the stated motive was false.** The proposal's premise was relieving pressure from local headless Chromium. Measured live on 2026-07-25: **0 headless Chromium processes on mini and 0 on mini-2**; mini-2 has no browser binary installed at all and still swaps. No skill in `plugins/*/skills/` invokes `agent-browser` on the fleet — every fleet-side reference is provisioning (`install-cli.sh:242`, `check-setup.sh:106`), env injection (`phase-agent-dispatch:863,944`), or leak containment (`orphan-sweep.sh:779`). Actual memory pressure is exec-core (3.7–6 GB), orch-monitor (2.5 GB), an 826 MB monthly event log, and 101 worktrees on mini. Offloading browsers reclaims ~0 MB of a 15 GB problem.
 
-**Do not solve Killer 1 with a reverse tunnel.** `orphan-sweep.sh` has five vectors and zero tunnel
-coverage, so a tunnel spawned in a `claude --bg` worker is a new unreapable orphan class — and a
-leaked tunnel is not a wasted process but persistent public ingress. Critically,
-`orch-monitor/server.ts:795` binds `0.0.0.0` with no auth across ~80 routes including actuation
-(`POST /api/ec-worker/<T>/stop`, `POST /api/ticket/<T>/respond` → re-dispatches an autonomous agent
-holding repo-write and PR-merge authority), and `/debug/heap-snapshot` (~server.ts:4632) is gated on
-`server.requestIP(req)?.address === 127.0.0.1`. Tunnel daemons dial the origin over loopback, so
-**every tunneled request presents as 127.0.0.1 and that gate fails open to the internet.** A tunnel
-converts the localhost trust boundary into a fail-open one. (The webhook routes are properly
-HMAC-verified with `timingSafeEqual`; the actuation routes are not.)
+**Do not solve Killer 1 with a reverse tunnel.** `orphan-sweep.sh` has five vectors and zero tunnel coverage, so a tunnel spawned in a `claude --bg` worker is a new unreapable orphan class — and a leaked tunnel is not a wasted process but persistent public ingress. Critically, `orch-monitor/server.ts:795` binds `0.0.0.0` with no auth across ~80 routes including actuation (`POST /api/ec-worker/<T>/stop`, `POST /api/ticket/<T>/respond` → re-dispatches an autonomous agent holding repo-write and PR-merge authority), and `/debug/heap-snapshot` (~server.ts:4632) is gated on `server.requestIP(req)?.address === 127.0.0.1`. Tunnel daemons dial the origin over loopback, so **every tunneled request presents as 127.0.0.1 and that gate fails open to the internet.** A tunnel converts the localhost trust boundary into a fail-open one. (The webhook routes are properly HMAC-verified with `timingSafeEqual`; the actuation routes are not.)
 
-**Cost inversion** — even inside the included tier, the economics fail on leak behavior, not price.
-A leaked session goes **free → metered**: CTL-1500's exact failure shape (worker dies, browser
-survives) costs $0 today and is reaped hourly; on a hosted provider it bills to the 6-hour session
-cap, and `orphan-sweep.sh` vector 5 cannot see — let alone reap — a remote session.
-`AGENT_BROWSER_IDLE_TIMEOUT_MS` becomes a billing floor stacked on the 1-minute session minimum
-rather than a safety net.
+**Cost inversion** — even inside the included tier, the economics fail on leak behavior, not price. A leaked session goes **free → metered**: CTL-1500's exact failure shape (worker dies, browser survives) costs $0 today and is reaped hourly; on a hosted provider it bills to the 6-hour session cap, and `orphan-sweep.sh` vector 5 cannot see — let alone reap — a remote session. `AGENT_BROWSER_IDLE_TIMEOUT_MS` becomes a billing floor stacked on the 1-minute session minimum rather than a safety net.
 
-**BrowserStack specifically is structurally incompatible**, independent of price. Its endpoint
-`wss://cdp.browserstack.com/playwright?caps=…` speaks Playwright's proprietary **server** protocol
-despite the `cdp.` hostname; `agent-browser` speaks **raw CDP** (`connectOverCDP`). Compounding:
-credentials must ride inside a URL-encoded caps JSON (no header auth), caps must carry a
-`client.playwrightVersion` matching the caller's bundled Playwright, and a **90-second idle
-timeout** would kill sessions during normal LLM reasoning pauses. Noted because BrowserStack Local
-is ironically the only mature localhost tunnel in the comparison — it solves the exact blocker, on
-the one vendor we cannot drive.
+**BrowserStack specifically is structurally incompatible**, independent of price. Its endpoint `wss://cdp.browserstack.com/playwright?caps=…` speaks Playwright's proprietary **server** protocol despite the `cdp.` hostname; `agent-browser` speaks **raw CDP** (`connectOverCDP`). Compounding: credentials must ride inside a URL-encoded caps JSON (no header auth), caps must carry a `client.playwrightVersion` matching the caller's bundled Playwright, and a **90-second idle timeout** would kill sessions during normal LLM reasoning pauses. Noted because BrowserStack Local is ironically the only mature localhost tunnel in the comparison — it solves the exact blocker, on the one vendor we cannot drive.
 
-**Alternatives considered** — _Kernel / Browser Use / AgentCore_: same localhost blocker.
-_Cloudflare Browser Rendering_: same, plus always bot-identified. _Browserless self-hosted_: viable
-on reachability but SSPL-1.0-or-commercial, a license decision plain Chrome sidesteps. **If browser
-consolidation is ever genuinely wanted**, the correct shape is plain headless Chrome on the `home`
-OTel box (100.65.193.30, Linux) + `agent-browser connect ws://<ip>:9222` — raw CDP, $0, no license
-question, and unlike any hosted provider it can reach `mini:7400`. Requires
-`--remote-debugging-address=0.0.0.0`, addressing by **IP not hostname** (Chrome host-header
-validation, CVE-2018-6101), and `--user-data-dir` on Chrome 136+. Note this yields _tailnet_
-reachability, not literal localhost: dev servers must bind `0.0.0.0`. Do not site it on mini.
+**Alternatives considered** — _Kernel / Browser Use / AgentCore_: same localhost blocker. _Cloudflare Browser Rendering_: same, plus always bot-identified. _Browserless self-hosted_: viable on reachability but SSPL-1.0-or-commercial, a license decision plain Chrome sidesteps. **If browser consolidation is ever genuinely wanted**, the correct shape is plain headless Chrome on the `home` OTel box (100.65.193.30, Linux) + `agent-browser connect ws://<ip>:9222` — raw CDP, $0, no license question, and unlike any hosted provider it can reach `mini:7400`. Requires `--remote-debugging-address=0.0.0.0`, addressing by **IP not hostname** (Chrome host-header validation, CVE-2018-6101), and `--user-data-dir` on Chrome 136+. Note this yields _tailnet_ reachability, not literal localhost: dev servers must bind `0.0.0.0`. Do not site it on mini.
 
-**Consequences** — no vendor dependency, no subscription, no new orphan class, and the localhost
-trust boundary is preserved. `orphan-sweep.sh` vector 5 remains the correct and sufficient
-containment for browser leaks. Revisit only if a _stated_ driver appears that local Chrome cannot
-serve — parallel session isolation, execution on non-Mac hosts, IP diversity, or stealth — and note
-that for stealth or persistent auth, Kernel (`KERNEL_STEALTH`, `KERNEL_PROFILE_NAME`) and
-Browserless (`BROWSERLESS_STEALTH`) expose knobs the Browserbase create path in `agent-browser` does
-not send at all.
+**Consequences** — no vendor dependency, no subscription, no new orphan class, and the localhost trust boundary is preserved. `orphan-sweep.sh` vector 5 remains the correct and sufficient containment for browser leaks. Revisit only if a _stated_ driver appears that local Chrome cannot serve — parallel session isolation, execution on non-Mac hosts, IP diversity, or stealth — and note that for stealth or persistent auth, Kernel (`KERNEL_STEALTH`, `KERNEL_PROFILE_NAME`) and Browserless (`BROWSERLESS_STEALTH`) expose knobs the Browserbase create path in `agent-browser` does not send at all.
 
-**Verification caveat** — provider internals were established against `agent-browser 0.27.2`
-(laptop); the fleet runs **0.32.4**. Re-verify binary-level claims (that the Browserbase create path
-sends no `projectId` / `keepAlive` / `browserSettings` / `advancedStealth`) against 0.32.4 before
-relying on them.
+**Verification caveat** — provider internals were established against `agent-browser 0.27.2` (laptop); the fleet runs **0.32.4**. Re-verify binary-level claims (that the Browserbase create path sends no `projectId` / `keepAlive` / `browserSettings` / `advancedStealth`) against 0.32.4 before relying on them.
 
-**Follow-up, independent of this decision** — the unauthenticated orch-monitor control plane on
-`0.0.0.0` is a standing finding, currently contained only by the tailnet perimeter. Untickted as of
-this ADR.
+**Follow-up, independent of this decision** — the unauthenticated orch-monitor control plane on `0.0.0.0` is a standing finding, currently contained only by the tailnet perimeter. Untickted as of this ADR.
 
 ## ADR-028: Catalyst self-hosts its CAT backlog via a separate fork clone (CAT-52)
 
-**Decision.** The CAT team is registered in `execution-core/registry.json`, allowing the fleet to
-work Catalyst's own self-healing findings. Its `repoRoot` is a **separate clone of the fork**
-(`thagale/catalyst`), never the live `plugin-source` checkout from which the fleet loads its
-plugins. This is CAT-52's option 2.
+**Decision.** The CAT team is registered in `execution-core/registry.json`, allowing the fleet to work Catalyst's own self-healing findings. Its `repoRoot` is a **separate clone of the fork** (`thagale/catalyst`), never the live `plugin-source` checkout from which the fleet loads its plugins. This is CAT-52's option 2.
 
-**Why not option 1** (register `plugin-source` itself): phase agents would edit the execution-core
-currently executing them, and `plugin-source` has no `/github/<owner>/<repo>` path segment, so
-`ownerRepoFromRepoRoot` cannot resolve it and board-health falls back to number-only ambiguous
-skips for CAT tickets.
+**Why not option 1** (register `plugin-source` itself): phase agents would edit the execution-core currently executing them, and `plugin-source` has no `/github/<owner>/<repo>` path segment, so `ownerRepoFromRepoRoot` cannot resolve it and board-health falls back to number-only ambiguous skips for CAT tickets.
 
-**Why not option 3** (exclude CAT and work it by hand): recovery-pass findings are routed into CAT
-so the system learns and recurring wedge classes disappear. A queue that only fills re-derives
-defects already filed and unread. No exclusion primitive exists and none is introduced here.
+**Why not option 3** (exclude CAT and work it by hand): recovery-pass findings are routed into CAT so the system learns and recurring wedge classes disappear. A queue that only fills re-derives defects already filed and unread. No exclusion primitive exists and none is introduced here.
 
 **A correct CAT `repoRoot` must satisfy all three:**
 
 1. It is a checkout of the fork (`thagale/catalyst`), whose main carries CAT-numbered history.
-2. Its Layer-1 `catalyst.linear.teamKey` is `CAT`, matching the registry schema's contract and the
-   warn-only enforcement added in CAT-52.
-3. Its path contains `/github/<owner>/<repo>` so `ownerRepoFromRepoRoot` resolves
-   `thagale/catalyst`. The canonical path is `~/code-repos/github/thagale/catalyst`.
+2. Its Layer-1 `catalyst.linear.teamKey` is `CAT`, matching the registry schema's contract and the warn-only enforcement added in CAT-52.
+3. Its path contains `/github/<owner>/<repo>` so `ownerRepoFromRepoRoot` resolves `thagale/catalyst`. The canonical path is `~/code-repos/github/thagale/catalyst`.
 
-**Deploy story.** Merged CAT pull requests land on `thagale/catalyst` main. Because
-`plugin-source`'s `origin` is that fork, the updater pulls those changes into the running plugins,
-closing the self-hosting loop.
+**Deploy story.** Merged CAT pull requests land on `thagale/catalyst` main. Because `plugin-source`'s `origin` is that fork, the updater pulls those changes into the running plugins, closing the self-hosting loop.
 
-**Consequences.** The registry's `team` ↔ `teamKey` contract is observable through a
-`registry.mjs` warning and the advisory `registry-team-identity` doctor check. A mismatched entry
-is still dispatched so a typo cannot silently stop fleet work. Nothing yet detects a Linear team
-with Todo work that is wholly absent from the registry; that requires a workspace-wide Linear team
-sweep and remains outside CAT-52. The `coalesce-labs/catalyst` clone remains the CTL project and
-keeps its `CTL` Layer-1 declaration; it is not a valid CAT `repoRoot`.
+**Consequences.** The registry's `team` ↔ `teamKey` contract is observable through a `registry.mjs` warning and the advisory `registry-team-identity` doctor check. A mismatched entry is still dispatched so a typo cannot silently stop fleet work. Nothing yet detects a Linear team with Todo work that is wholly absent from the registry; that requires a workspace-wide Linear team sweep and remains outside CAT-52. The `coalesce-labs/catalyst` clone remains the CTL project and keeps its `CTL` Layer-1 declaration; it is not a valid CAT `repoRoot`.
 
 ## ADR-029: The event–automation contract — Linear is the trigger, the lease is the lock (2026-08-13)
 
-**Decision.** Every side effect in the fleet belongs to a subscriber, not to the actor that caused
-it. A phase is a goal-loop: it works until its goal is met, posts one outcome, and stops — it does
-not advance the ticket, write Linear, or dispatch the next phase. The complete list of triggers,
-their bounded actions, and — for each — **which component refuses the second delivery** is ratified
-as `docs/event-automation-contract.md`. An 18-row automation table and a 33-row stage-transition
-lookup table (20 machine edges keyed on the holder's declaration, 13 human/foreign-agent intents
-keyed on `(class, to_state)`) are the contract; this entry is the decision, not the data.
+**Decision.** Every side effect in the fleet belongs to a subscriber, not to the actor that caused it. A phase is a goal-loop: it works until its goal is met, posts one outcome, and stops — it does not advance the ticket, write Linear, or dispatch the next phase. The complete list of triggers, their bounded actions, and — for each — **which component refuses the second delivery** is ratified as `docs/event-automation-contract.md`. An 18-row automation table and a 33-row stage-transition lookup table (20 machine edges keyed on the holder's declaration, 13 human/foreign-agent intents keyed on `(class, to_state)`) are the contract; this entry is the decision, not the data.
 
-**Linear is the trigger, never the lock.** A Linear stage change says "go look" and starts an
-automation. It is never asked to refuse anything, and no design may propose it as the exclusion
-point. The direct consequence is worked through rather than avoided: two hosts receiving the same
-stage-change webhook both pass the trigger, so the claim is acquired **after** the trigger and
-**before** any side effect, and exactly one wins. Linear is written **last**, as a mirror — which is
-what the code already does (`scheduler.mjs` advancement sweep: `dispatchAndVerify` → emit
-`phase.advance.applied` → reap predecessor → `applyPhaseStatus`, whose own comment reads "idempotent
-… never aborts the tick"). The ADR names the fact rather than contradicting it.
+**Linear is the trigger, never the lock.** A Linear stage change says "go look" and starts an automation. It is never asked to refuse anything, and no design may propose it as the exclusion point. The direct consequence is worked through rather than avoided: two hosts receiving the same stage-change webhook both pass the trigger, so the claim is acquired **after** the trigger and **before** any side effect, and exactly one wins. Linear is written **last**, as a mirror — which is what the code already does (`scheduler.mjs` advancement sweep: `dispatchAndVerify` → emit `phase.advance.applied` → reap predecessor → `applyPhaseStatus`, whose own comment reads "idempotent … never aborts the tick"). The ADR names the fact rather than contradicting it.
 
-**Machine edges are keyed on the declaration, not on `(from_state, to_state)`.** The phase→state map
-is many-to-one: `verify` and `review` both map to `Validate`, and `pr` / `monitor-merge` /
-`monitor-deploy` / `teardown` all map to `PR`, so four of the ten pipeline advances produce no
-observable Linear transition at all (measured on mini, 2026-08: 185 no-op same-state writes;
-`review` 48 of 49). A tuple lookup structurally cannot address those edges. Keying on
-`(declaration, phase)` dissolves the problem — and the transport is the one that works:
-intermediate-stage webhooks deliver at ~2–5% (replica 323 CTL transitions vs. 116 events,
-2026-08-01→13), while the local declaration append does not lose. The collapse itself is **kept**:
-it is a deliberate lossy projection of a value authoritative elsewhere, and widening it would
-re-couple board granularity to the pipeline across every saved view in the workspace.
+**Machine edges are keyed on the declaration, not on `(from_state, to_state)`.** The phase→state map is many-to-one: `verify` and `review` both map to `Validate`, and `pr` / `monitor-merge` / `monitor-deploy` / `teardown` all map to `PR`, so four of the ten pipeline advances produce no observable Linear transition at all (measured on mini, 2026-08: 185 no-op same-state writes; `review` 48 of 49). A tuple lookup structurally cannot address those edges. Keying on `(declaration, phase)` dissolves the problem — and the transport is the one that works: intermediate-stage webhooks deliver at ~2–5% (replica 323 CTL transitions vs. 116 events, 2026-08-01→13), while the local declaration append does not lose. The collapse itself is **kept**: it is a deliberate lossy projection of a value authoritative elsewhere, and widening it would re-couple board granularity to the pipeline across every saved view in the workspace.
 
-**Terminology.** The contract asks **"Who says no?"** — when the same trigger is delivered twice,
-which component refuses the second attempt. The phrase "exclusion store" is retired as unclear
-jargon. A cursored log redelivers after a crash (the reaper's boot replay does exactly this), so
-redelivery is normal operation and every row owes an answer. `git --ff-only`, `set -o noclobber`,
-GitHub's `--match-head-commit`, and a conditional write can refuse; a plain file write, an
-append-only log, and a Linear state field cannot. **The log declares; it cannot exclude.**
+**Terminology.** The contract asks **"Who says no?"** — when the same trigger is delivered twice, which component refuses the second attempt. The phrase "exclusion store" is retired as unclear jargon. A cursored log redelivers after a crash (the reaper's boot replay does exactly this), so redelivery is normal operation and every row owes an answer. `git --ff-only`, `set -o noclobber`, GitHub's `--match-head-commit`, and a conditional write can refuse; a plain file write, an append-only log, and a Linear state field cannot. **The log declares; it cannot exclude.**
 
-**Consequences.** Seven automation rows (2, 3, 5, 9, 11, 14, 15) have no cross-host refusal today
-and are blocked on lease work, not on event-substrate work; until then their refusal is host-local
-and graded as such. `phase.advance.applied` gets its first consumer (the Linear mirror write, row
-18), and the consumer-free `linear.state.write` emitter becomes deletable. Two reconcilers that do
-**not** exist must ship with the human-intent table: a replica-side sweep for lost INTENT commands
-(a lost kill leaves a worker burning), and anything that can re-derive "in a build stage with no
-live holder". The self-echo guard is demoted to defence-in-depth: it already discriminates on our
-own app-actor ids rather than on "is a bot" (`daemon.mjs:264-288`), which keeps other agents' Linear
-comments deliverable, but it fails open on an unknown id, so an echo record carries the weight.
+**Consequences.** Seven automation rows (2, 3, 5, 9, 11, 14, 15) have no cross-host refusal today and are blocked on lease work, not on event-substrate work; until then their refusal is host-local and graded as such. `phase.advance.applied` gets its first consumer (the Linear mirror write, row 18), and the consumer-free `linear.state.write` emitter becomes deletable. Two reconcilers that do **not** exist must ship with the human-intent table: a replica-side sweep for lost INTENT commands (a lost kill leaves a worker burning), and anything that can re-derive "in a build stage with no live holder". The self-echo guard is demoted to defence-in-depth: it already discriminates on our own app-actor ids rather than on "is a bot" (`daemon.mjs:264-288`), which keeps other agents' Linear comments deliverable, but it fails open on an unknown id, so an echo record carries the weight.
 
-**Citation hygiene.** The governing invariants are catalyst-cloud's **ADR-0027**
-(`catalyst-cloud/docs/adr/0027-reliability-initiative-invariants-and-acceptance.md`, accepted
-2026-08-12). That is a **different repository's numbering** from this repo's **ADR-027** ("Browser
-automation stays local"), which is unrelated. Always cite the cloud ADR by repo + path, never by
-bare number.
+**Citation hygiene.** The governing invariants are catalyst-cloud's **ADR-0027** (`catalyst-cloud/docs/adr/0027-reliability-initiative-invariants-and-acceptance.md`, accepted 2026-08-12). That is a **different repository's numbering** from this repo's **ADR-027** ("Browser automation stays local"), which is unrelated. Always cite the cloud ADR by repo + path, never by bare number.
 
-**Amendment, 2026-08-13 — the pipeline tail becomes subscribers, and human intent preempts.** The
-contract's §7a records seven rulings that extend this decision without changing it. **The tail
-collapses:** `monitor-merge`, `monitor-deploy` and `teardown` stop being phase agents — the pipeline
-goes **10 phases → 7**, with `pr` as the terminal — and their work moves to subscribers on
-`github.pr.merged` (447 delivered on mini in 2026-08, carrying `vcs.pr.number` and
-`body.payload.mergeCommitSha`), plus a per-repo deploy-watcher and a level-triggered reconciler. Two
-things must move _with_ the deletion, not after it: **Done** (teardown is today the sole originating
-authority — `scheduler.mjs:3675` fires only when `signals[TERMINAL_PHASE] === "done"` at `:8092`, so
-it is re-homed onto a done-writer whose evidence is the CTL-1667 PR-identity gate plus a live
-`gh pr view … MERGED` read, I6) and **BEHIND-rebase on an open PR** (today's only owner is the live
-monitor-merge agent; it becomes a demand-driven `fix_class:"rebase"`, never an eager sweep — an
-eager one reproduces the CTL-1704 Pages/re-review serialization incident by construction). **Human
-intent preempts:** any human or foreign state change on a ticket with a live worker alerts that
-worker, which wraps up, pushes WIP, posts a closure comment saying what it did and where it left it,
-and exits on `phase.<P>.abandoned.<T>` — a terminal `PHASE_EVENT_PATTERN` already routes
-(`namespace-contract.mjs:81-86`, CTL-1790), so the protocol needs **no** namespace change. **The
-departing worker does not decide what happens next; the new state does** — which retires this ADR's
-§9.1 open question ("a human sets Done on a live worker") by generalizing past it. **And the
-many-to-one collapse this ADR kept is precisely what makes the deletion free:** `pr`,
-`monitor-merge`, `monitor-deploy` and `teardown` all carry `linearKey: "inReview"` → `PR`
-(`workflow.default.json:65-68`, verified), so the ticket sits in `PR` until `Done` either way and
-the board loses nothing. Ryan explicitly **considered and rejected** adding `Review` and `Merge`
-Linear states — he proposed them, was shown this ADR's rationale (widening re-couples board
-granularity to the pipeline across nine teams' saved views), and reversed. **No new Linear states.**
-`Ready` is archived (21 `issue_history` transitions workspace-wide, zero live occupants). Full
-design, re-homing table, preempt failure modes and quantified deletion:
-`docs/event-automation-contract.md` §7a.
+**Amendment, 2026-08-13 — the pipeline tail becomes subscribers, and human intent preempts.** The contract's §7a records seven rulings that extend this decision without changing it. **The tail collapses:** `monitor-merge`, `monitor-deploy` and `teardown` stop being phase agents — the pipeline goes **10 phases → 7**, with `pr` as the terminal — and their work moves to subscribers on `github.pr.merged` (447 delivered on mini in 2026-08, carrying `vcs.pr.number` and `body.payload.mergeCommitSha`), plus a per-repo deploy-watcher and a level-triggered reconciler. Two things must move _with_ the deletion, not after it: **Done** (teardown is today the sole originating authority — `scheduler.mjs:3675` fires only when `signals[TERMINAL_PHASE] === "done"` at `:8092`, so it is re-homed onto a done-writer whose evidence is the CTL-1667 PR-identity gate plus a live `gh pr view … MERGED` read, I6) and **BEHIND-rebase on an open PR** (today's only owner is the live monitor-merge agent; it becomes a demand-driven `fix_class:"rebase"`, never an eager sweep — an eager one reproduces the CTL-1704 Pages/re-review serialization incident by construction). **Human intent preempts:** any human or foreign state change on a ticket with a live worker alerts that worker, which wraps up, pushes WIP, posts a closure comment saying what it did and where it left it, and exits on `phase.<P>.abandoned.<T>` — a terminal `PHASE_EVENT_PATTERN` already routes (`namespace-contract.mjs:81-86`, CTL-1790), so the protocol needs **no** namespace change. **The departing worker does not decide what happens next; the new state does** — which retires this ADR's §9.1 open question ("a human sets Done on a live worker") by generalizing past it. **And the many-to-one collapse this ADR kept is precisely what makes the deletion free:** `pr`, `monitor-merge`, `monitor-deploy` and `teardown` all carry `linearKey: "inReview"` → `PR` (`workflow.default.json:65-68`, verified), so the ticket sits in `PR` until `Done` either way and the board loses nothing. Ryan explicitly **considered and rejected** adding `Review` and `Merge` Linear states — he proposed them, was shown this ADR's rationale (widening re-couples board granularity to the pipeline across nine teams' saved views), and reversed. **No new Linear states.** `Ready` is archived (21 `issue_history` transitions workspace-wide, zero live occupants). Full design, re-homing table, preempt failure modes and quantified deletion: `docs/event-automation-contract.md` §7a.
