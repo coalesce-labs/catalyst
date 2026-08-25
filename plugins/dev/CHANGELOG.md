@@ -1,5 +1,12 @@
 # Changelog
 
+## [12.65.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.65.0...catalyst-dev-v12.65.1) (2026-08-25)
+
+
+### Bug Fixes
+
+* **dev:** CTL-2216 — reflow house-rules template to unwrapped prose ([#3983](https://github.com/coalesce-labs/catalyst/issues/3983)) ([a09afb5](https://github.com/coalesce-labs/catalyst/commit/a09afb520c8ded37d912d80ffba6d5a4df27fed7))
+
 ## [12.65.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.64.0...catalyst-dev-v12.65.0) (2026-08-24)
 
 
