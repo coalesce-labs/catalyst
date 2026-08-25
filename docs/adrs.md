@@ -868,3 +868,79 @@ granularity to the pipeline across nine teams' saved views), and reversed. **No 
 `Ready` is archived (21 `issue_history` transitions workspace-wide, zero live occupants). Full
 design, re-homing table, preempt failure modes and quantified deletion:
 `docs/event-automation-contract.md` §7a.
+
+## ADR-030: `orch-monitor` runs two TypeScript packages side by side (CTL-2179)
+
+**Decision.** `orch-monitor` (and its `ui` workspace member) declare **two** TypeScript packages
+under two names in `package.json`: the bare `"typescript"` name stays on the **6.x** line, and
+`"@typescript/native": "npm:typescript@^7.0.2"` is an alias that provides
+`node_modules/.bin/tsc`. So `bun run typecheck` runs the real **TypeScript 7.0.2** compiler binary,
+while every import of the bare `typescript` package — most importantly, the one
+`typescript-eslint@8.67.0` performs at module-load time — resolves the real **TypeScript 6.0.3**
+API. This is not a version pin left behind by an incomplete upgrade; it is the two intentional
+halves of one split, and each is pinned by an executable contract test
+(`plugins/dev/scripts/orch-monitor/__tests__/typescript-toolchain-contract.test.ts`).
+
+**Why a bare `typescript: ^7.0.2` bump cannot work.** TypeScript 7.0 is the native (Go) port and
+ships **no JavaScript-callable compiler API** — only the `tsc`/`tsserver` binaries. But
+`eslint.config.js` runs **type-aware** lint (`recommendedTypeChecked`,
+`parserOptions.projectService: true`), which needs a loadable TypeScript API, and
+`typescript-eslint@8.67.0`'s `dist/index.js` reads `ts.versionMajorMinor` off its own `typescript`
+resolution and **throws at import time** when the major version is `>= 7`. All eight
+`@typescript-eslint/*` packages peer on `typescript: >=4.8.4 <6.1.0`; upstream's own tracking issue
+for TS 7 support (typescript-eslint#10940) is open and targets `>= 7.1`, and the TS-7.0-specific
+request (typescript-eslint#12518) is closed *not planned*. A same-package upgrade would either break
+lint entirely (silently, at CI, exactly as PR #3909 did) or require disabling type-aware rules —
+which is the one thing this decision is designed to avoid.
+
+**Why the alias direction is inverted from the upstream-recommended layout.** TypeScript's own 7.0
+announcement recommends the opposite pairing: `typescript: npm:@typescript/typescript6@^6.0.2` (a
+shim) plus `@typescript/native: npm:typescript@^7.0.2` (the real 7.x package) — i.e. put the shim
+under the bare name and the real 7.x package under the alias. Installed exactly that way under this
+repo's package manager (bun 1.3.5), it is **broken**: `@typescript/typescript6`'s own dependency is
+`"@typescript/old": "npm:typescript@^6"`, and bun resolves that nested alias **through the root
+`typescript` alias it is itself part of**, producing a self-reference — `node_modules/@typescript/old`
+ends up populated with the typescript6 shim itself. The measured symptom is exact and reproducible:
+`require("typescript")` returns `{}` (zero keys), `ts.versionMajorMinor` is `undefined`, and
+`import("typescript-eslint")` throws `Cannot read properties of undefined (reading 'split')` — the
+guard's own version check, tripped by the cycle rather than by a real major-version mismatch. A
+positive control confirmed the shim package is fine in isolation (installing
+`@typescript/typescript6` *without* a root `typescript` alias resolves cleanly to real
+`typescript@6.0.3`); the root alias is what breaks it. This repo's layout puts the **real** 6.x
+package under the bare `typescript` name instead — same two-compiler idea, opposite assignment,
+stable under three fresh installs, a `--frozen-lockfile` install, and a key-order swap.
+
+**Consequences.**
+
+- `orch-monitor/package.json` reads as though `"typescript": "^6.0.2"` is a hold-back. It is not —
+  it is the lint-API half of the split, and the in-file comment plus this entry are the two places
+  that say so. Do not "fix" it back to `^7.x` without also solving the typescript-eslint peer bound.
+- `tsserver` (editor language service) continues to come from the TS 6 package; editor behavior is
+  unchanged by this decision. The TS 6 CLI (`node_modules/typescript/bin/tsc`) is still on disk if
+  anyone needs it directly — it is just not the binary `bun run typecheck` invokes.
+- The `ui` workspace member takes the same split (`@typescript/native` alias, `typescript` bumped to
+  `^6.0.2`) even though it is outside eslint's scope (`eslint.config.js` ignores `ui/**`) — one
+  coherent two-compiler story across the workspace, not two different toolchain arrangements.
+  Measured in-tree: the UI's own TS 6 API typechecks its own `tsconfig.json` with 0 errors; the same
+  tsconfig under the TS 7 binary produced errors entirely in the "missing ambient types" class
+  (`node:*` builtins, `bun:test`/`ImportMeta.dir`, CSS side-effect imports) — none were genuine
+  source errors. The fix was `"types": ["bun", "vite/client"]` in `ui/tsconfig.json` plus an
+  explicit `@types/bun` devDependency (mirroring the parent's `"types": ["bun"]`), which brought the
+  UI to 0 errors under TS 7.0.2 (verified with a positive control: an injected type error still
+  fails under both binaries). A `Typecheck (ui)` step was added to
+  `.github/workflows/orch-monitor-quality.yml` so this is a gated fact, not an assertion.
+- 20 platform-specific `@typescript/typescript-<os>-<cpu>@7.0.2` optional dependencies enter
+  `bun.lock`; each CI runner and each developer's machine downloads only its own.
+
+**Exit condition — collapse this back to one dependency.** When `typescript-eslint` ships TS ≥ 7.1
+support (typescript-eslint#10940), delete the `@typescript/native` alias in both workspaces, move
+`typescript` to a real `^7.x` in both, and delete the two split-specific assertions from
+`typescript-toolchain-contract.test.ts` (leave the "lint scope unchanged" assertion in place — that
+invariant outlives the split). Until then, the split is pinned by that test file, not by convention:
+a committed contract test fails the moment either half silently flips.
+
+**Positive-control discipline.** The contract test's every disk read (package resolution, lockfile
+read, `tsc --version`) is fail-closed — an absent binary, an unlocatable package, or a
+non-string `version` field is a **failure**, never a skip. This repo has shipped a false-clean gate
+before (`[].every(p) === true`); the toolchain contract test is written so a "could not look" branch
+cannot read as a pass.

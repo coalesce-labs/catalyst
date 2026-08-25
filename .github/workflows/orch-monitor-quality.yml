@@ -34,6 +34,10 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
+      - name: Typecheck (ui)
+        working-directory: plugins/dev/scripts/orch-monitor/ui
+        run: bun run typecheck
+
       - name: Lint
         run: bun run lint
 
