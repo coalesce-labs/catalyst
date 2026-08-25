@@ -666,6 +666,73 @@ window with `secondary: null`, while a real 5-hour window exists only under a di
 Claude shape would mislabel the weekly window as 5h and report the 5h window as absent — both in
 the direction that reads as "quota to spare".
 
+### Fleet-wide executor-routing policy (the actuator, CTL-2116)
+
+CTL-1457 shipped the read/dispatch half of per-phase executor routing —
+`resolveExecutorForPhase` (`execution-core/config.mjs`) resolves a phase → executor map and
+`makePhaseAwareDispatchFn` (`dispatch.mjs`) honors it on every dispatch. CTL-2116 ships the
+**actuator**: before it, an operator materialized that map by hand-editing a launchd plist env var
+(`CATALYST_EXECUTOR_BY_PHASE`) on each host, one host at a time, with no record of who changed it,
+what it was before, or whether Codex had the quota to absorb the change — the exact shape that
+produced the CTL-2046 incident (a hand-set pin that emitted 276 INFO-severity `rate-park` events
+and paged nobody until a human noticed).
+
+- **Store**: a declarative routing policy at `cluster.json.executorPolicy` in the
+  `catalyst-cluster` control-plane repo — the SAME file the roster already lives in, pulled by
+  every host every `CLUSTER_SYNC_INTERVAL_MS` (≤5 min) and read live/uncached per call
+  (`readClusterConfig`, `config.mjs`). Choosing this store over a project-repo file was
+  deliberate: a project-repo edit needs a PR + merge + checkout refresh (not "one command") and
+  lands in a file that is `git reset --hard`-ed on worker nodes.
+- **Reader**: `readExecutorPolicy` (`execution-core/executor-policy.mjs`, a dependency-light leaf
+  — `node:fs`/`node:crypto` + `KNOWN_PHASES` only) parses and strictly shape-validates the policy.
+  A malformed policy (a non-string route value, a non-object `routes`) is `null` **in full** —
+  never a partial map — because a partial map would silently hide a valid rung-2/3 route for the
+  phases the malformed entries dropped. It deliberately does NOT canonicalize aliases or validate
+  against `EXECUTORS`; that stays solely in `resolveExecutorForPhase`, which throws loudly on an
+  invalid value, so there is exactly one validity ladder, not two silently-divergent ones.
+- **Precedence**: `readExecutorByPhaseLayer1` gained a new top rung — the fleet policy now
+  outranks `CATALYST_EXECUTOR_BY_PHASE`, which stays above the Layer-1 file exactly as before.
+  Each rung fully REPLACES the map from the rung below (no per-phase merge across rungs, mirroring
+  `resolveExecutor`'s existing env-over-Layer-1 precedence). `CATALYST_EXECUTOR_POLICY=off` is the
+  documented per-host escape hatch. An empty `routes: {}` is a real policy ("route nothing"), not
+  "absent" — otherwise `route all` followed by `route clear` would silently resurrect a stale
+  rung-2/3 pin. See the reference config doc for the full three-rung table.
+- **Actuator**: `catalyst cluster route set|clear|all|rollback|show|history`
+  (`cli/cluster-route.mjs`), reusing/generalizing the roster's edit-commit-push primitive
+  (`writeClusterJson`/`commitAndPushCluster`, `cli/cluster.mjs`) and the operator-guard sequence
+  proven by `catalyst-stack codex-account switch` — cluster clone present → clean → `git pull
+  --ff-only` (derive the prior value from the fleet, not a stale local copy) → validate → budget
+  gate → write → commit → push. Every change is recorded twice: a bounded (`HISTORY_MAX = 20`,
+  newest-first) `executorPolicy.history[]` array carrying `{at, by, host, change, priorRoutes}` —
+  `priorRoutes` is the WHOLE prior map, so `rollback` is an exact restore, not an inverse-op
+  replay — and a git commit whose message embeds prior → next, human-attributed.
+- **Command-time Codex budget gate (Scenario 3)**: `classifyPolicyBudget`
+  (`execution-core/executor-policy-budget.mjs`) refuses a `route set`/`route all` that **adds**
+  Codex load (never a codex-removing or no-op change) when the maximum remaining headroom across
+  usable Codex accounts is below a configured floor (`CATALYST_CODEX_BUDGET_FLOOR_PERCENT` env →
+  `cluster.json.executorPolicy.codexBudgetFloorPercent` → 20 default). Three-valued —
+  `allow`/`refuse`/`inconclusive` — and the CLI refuses on `inconclusive` exactly like `refuse`,
+  because "I could not look" reproducing as "there is headroom" is precisely the CTL-2046 shape.
+  Overridable with `--force`, recorded as `forcedBudget: true` on the history entry. This is a
+  **command-time** gate ("may this change add load right now?"), distinct from CTL-1459's
+  separate dispatch-time gate ("can we afford this dispatch") — no dispatch-path code changed.
+  Reuses CTL-2072's zero-token account plane (`lib/codex-account-client.mjs` +
+  `lib/codex-account-plane.mjs`) — no new quota mechanism.
+- **The live-policy occupancy hazard (Phase 4)**: `hasInProcessRoute` — does ANY routed phase run
+  in-process (`sdk`/`codex-exec`) even though the node's boot dispatch mode is `bg` — was derived
+  **once at daemon boot** and threaded as a plain boolean into the scheduler/monitor occupancy
+  gates (`scheduler.mjs`, `monitor.mjs`). Because the fleet policy is read live, a policy change
+  that adds an in-process route to a RUNNING daemon takes effect at dispatch immediately while a
+  boot-captured boolean stays `false` until restart — under-counting occupancy and over-admitting
+  past `maxParallel`. `armsInProcessOccupancy` (`execution-core/occupancy-arm.mjs`) accepts a
+  boolean (byte-identical, ~20 unchanged pass-through sites) or a thunk; the daemon now passes a
+  thunk that re-reads the routing map fresh on every tick — the same uncached-per-call posture as
+  the roster and deployment-mode readers.
+- **Vendored schema**: `docs/schemas/cluster.schema.json` (`additionalProperties: false`) gained
+  the `executorPolicy` key so a `cluster.json` this command writes validates. The **canonical**
+  schema in the private `coalesce-labs/catalyst-cluster` repo needs the same key and is not
+  editable from this repo — a manual follow-up.
+
 ### Dispatch-time rebase (front-load conflict surfacing, CTL-667 + CTL-707 + CAT-31)
 
 On a **fresh** dispatch of a **build** phase (`research`,`plan`,`implement`,`verify`,`review`),

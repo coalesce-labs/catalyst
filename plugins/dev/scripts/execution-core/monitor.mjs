@@ -53,8 +53,12 @@ import {
   getExistenceHosts, // CTL-1785
   hostMembershipWarning, // CTL-1057
   isDraining as isDrainingDefault, // CTL-1095: drain gate
-  isInProcessDispatchMode, // CTL-1457 (T2): sdk|codex-exec occupancy gate predicate
 } from "./config.mjs";
+// CTL-2116 (Phase 4): armsInProcessOccupancy replaces the inline
+// `isInProcessDispatchMode(dispatchMode) || hasInProcessRoute` gate so a thunked
+// hasInProcessRoute (the daemon's live policy re-read) is re-evaluated per tick
+// rather than boot-captured. See occupancy-arm.mjs.
+import { armsInProcessOccupancy } from "./occupancy-arm.mjs";
 // CTL-1847: the dispatch-source gate. Imported here rather than the capture
 // sink or the producer, deliberately — cloud-feed-gate.mjs is a pure leaf whose
 // only import is lib/event-name.mjs, so it cannot drag `bun:sqlite` into this
@@ -802,8 +806,9 @@ export function computeTriageBudget({
   // (sdk OR codex-exec) → still 0 under bg/oneshot-legacy (byte-identical). CTL-1457
   // (N1): also arm when a per-phase in-process route is present on a bg node — the
   // triage phase routed to codex-exec/sdk writes the same no-bg signal.
+  // CTL-2116 (Phase 4): armsInProcessOccupancy re-evaluates a thunked route live.
   let sdkInflight = 0;
-  if (isInProcessDispatchMode(dispatchMode) || hasInProcessRoute) {
+  if (armsInProcessOccupancy(dispatchMode, hasInProcessRoute)) {
     try {
       sdkInflight = countSdkInflight(orchDir);
     } catch {

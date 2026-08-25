@@ -364,3 +364,64 @@ describe("cluster.schema.json accepts projects[]", () => {
     expect(validateAgainstSchema({ schemaVersion: 1 }, clusterSchema).length).toBeGreaterThan(0);
   });
 });
+
+// CTL-2116: a cluster.json written by `catalyst cluster route <verb>` must
+// validate against this vendored schema — additionalProperties:false at the
+// top level means an unregistered executorPolicy key would reject the file.
+describe("cluster.schema.json accepts executorPolicy (CTL-2116)", () => {
+  test("a cluster.json written by `route set` validates", () => {
+    const cfg = {
+      schemaVersion: 1,
+      roster: ["mini-2"],
+      executorPolicy: {
+        routes: { triage: "codex-exec" },
+        updatedAt: "2026-08-24T00:00:00Z",
+        updatedBy: "ryan",
+        history: [
+          {
+            id: "abc123",
+            at: "2026-08-24T00:00:00Z",
+            by: "ryan",
+            host: "mini-2",
+            change: { phase: "triage", from: null, to: "codex-exec" },
+            priorRoutes: {},
+          },
+        ],
+      },
+    };
+    expect(validateAgainstSchema(cfg, clusterSchema)).toEqual([]);
+  });
+
+  test("an empty routes map + codexBudgetFloorPercent validates", () => {
+    const cfg = {
+      schemaVersion: 1,
+      roster: ["mini-2"],
+      executorPolicy: { routes: {}, codexBudgetFloorPercent: 30, updatedAt: null, updatedBy: null, history: [] },
+    };
+    expect(validateAgainstSchema(cfg, clusterSchema)).toEqual([]);
+  });
+
+  test("cluster.json with no executorPolicy key still validates (zero behavior change)", () => {
+    expect(validateAgainstSchema({ schemaVersion: 1, roster: ["mini-2"] }, clusterSchema)).toEqual(
+      [],
+    );
+  });
+
+  test("a non-string route value is rejected", () => {
+    const cfg = {
+      schemaVersion: 1,
+      roster: ["mini-2"],
+      executorPolicy: { routes: { triage: false } },
+    };
+    expect(validateAgainstSchema(cfg, clusterSchema).length).toBeGreaterThan(0);
+  });
+
+  test("an unrecognized executorPolicy key is rejected (additionalProperties:false)", () => {
+    const cfg = {
+      schemaVersion: 1,
+      roster: ["mini-2"],
+      executorPolicy: { routes: {}, bogusKey: "nope" },
+    };
+    expect(validateAgainstSchema(cfg, clusterSchema).length).toBeGreaterThan(0);
+  });
+});

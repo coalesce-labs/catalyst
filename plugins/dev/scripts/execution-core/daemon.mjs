@@ -1518,13 +1518,27 @@ export function startDaemon({
     // on a node whose boot executor is still bg — there dispatchMode is "phase-agents"
     // so the scheduler/monitor slot gates (which gate on isInProcessDispatchMode) skip
     // countSdkInflight and the routed no-bg worker is NOT counted → over-admit past
-    // maxParallel. Derive this flag from the ALREADY-READ executorByPhase map and thread
-    // it alongside dispatchMode so those gates OR it in and count the routed worker.
+    // maxParallel. Derive this flag from the executorByPhase map and thread it
+    // alongside dispatchMode so those gates OR it in and count the routed worker.
     // Empty map (the default) → false → byte-identical. NOTE: a routed-but-degraded
     // executor (codex not eligible → bg) still arms the gate, but countSdkInflight then
     // sees 0 no-bg signals (the phase launches bg with a bg_job_id), so occupancy is
     // unchanged — the flag is safe to derive from the raw routing map.
-    const hasInProcessRoute = hasInProcessExecutorRoute(executorByPhase);
+    //
+    // CTL-2116 (Phase 4): LIVE, not boot-captured — a fleet policy change (Phases 1-3)
+    // that adds an in-process route must arm the occupancy gates on the NEXT TICK, not
+    // the next restart. Previously this read executorByPhase ONCE at boot (the const
+    // above, `executorByPhase`) and froze the result into a boolean threaded through
+    // the rest of the daemon's lifetime; a live policy change was then invisible to
+    // the occupancy gates until a restart, which is exactly the over-admit hazard this
+    // ticket's plan calls out ("Making the policy live breaks that assumption in the
+    // dangerous direction"). A thunk re-reads the map fresh on every evaluation — one
+    // small readFileSync per scheduler/monitor tick, the same posture as the roster and
+    // deployment-mode readers (both explicitly uncached). armsInProcessOccupancy
+    // (occupancy-arm.mjs) accepts either a boolean or a thunk, so every OTHER caller of
+    // this value (the ~20 pass-through sites) is unaffected.
+    const hasInProcessRoute = () =>
+      hasInProcessExecutorRoute(readExecutorByPhaseLayer1(configPath));
     // CTL-1365b: the comment-wake re-dispatch binding — routes a parked ticket's
     // re-dispatch through the SAME resolved executor (no split-brain).
     const commentWakeDispatch = makeCommentWakeDispatch(dispatchFn);

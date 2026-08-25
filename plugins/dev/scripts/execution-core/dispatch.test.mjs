@@ -698,6 +698,23 @@ describe("makePhaseAwareDispatchFn (CTL-1457)", () => {
     expect(dispatched[0].executor).toBe("bg"); // concrete non-codex fallback, never codex-exec
   });
 
+  // CTL-2116 Phase 2: makePhaseAwareDispatchFn consults resolveExecutorForPhase
+  // purely by its returned {executor, source} shape — it has no idea whether the
+  // "executorByPhase" source was the env pin, the Layer-1 file, or (as of Phase 2)
+  // the fleet cluster-repo policy. A policy-sourced route must degrade on a failed
+  // codex boot gate exactly like an env-sourced one — dispatch.mjs itself needs no
+  // change for the new precedence tier; this pins that it doesn't.
+  test("a POLICY-sourced route (source: executorByPhase) degrades to the boot executor when codexBootEligible=false", () => {
+    const { dispatchFn, dispatched } = harness({
+      routeMap: { implement: "codex-exec" }, // stands in for a cluster-policy route
+      bootExecutor: "bg",
+      codexBootEligible: false,
+      emitEvent: () => {},
+    });
+    dispatchFn({ orchDir: "/ec", ticket: "CTL-1", phase: "implement" });
+    expect(dispatched[0].executor).toBe("bg");
+  });
+
   // A phase EXPLICITLY routed to codex-exec on a codex-exec boot node with a failed
   // boot gate also degrades to bg (never a codex-exec self-fallback loop).
   test("routed codex-exec + bootExecutor codex-exec + codexBootEligible=false → degrades to bg", () => {

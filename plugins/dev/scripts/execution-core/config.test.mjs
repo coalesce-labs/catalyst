@@ -822,6 +822,98 @@ describe("executor flag + resolver (CTL-1365a)", () => {
     expect(hasInProcessExecutorRoute({ triage: " Codex-Exec " })).toBe(true);
   });
 
+  // --- CTL-2116 Phase 2: the fleet policy tier — above the env pin ---
+  // readExecutorByPhaseLayer1 gains a first rung: a cluster-repo policy (injected
+  // via `readPolicy`, defaulting to reading cluster.json live). Absent policy →
+  // byte-identical to today's env → Layer-1 ladder.
+  describe("executorByPhase — fleet policy tier (CTL-2116)", () => {
+    test("is byte-identical to today when no cluster policy exists", () => {
+      writeExecutorByPhase({ plan: "sdk" });
+      const noPolicy = { readPolicy: () => null };
+      expect(
+        readExecutorByPhaseLayer1(l1, { CATALYST_EXECUTOR_BY_PHASE: '{"triage":"codex-exec"}' }, noPolicy),
+      ).toEqual({ triage: "codex-exec" });
+      expect(readExecutorByPhaseLayer1(l1, {}, noPolicy)).toEqual({ plan: "sdk" });
+    });
+
+    test("a fleet policy REPLACES the env pin (the CTL-2116 supersede)", () => {
+      const map = readExecutorByPhaseLayer1(
+        l1,
+        { CATALYST_EXECUTOR_BY_PHASE: '{"triage":"codex-exec"}' },
+        { readPolicy: () => ({ routes: { implement: "codex-exec" } }) },
+      );
+      expect(map).toEqual({ implement: "codex-exec" }); // full replace, not a merge
+    });
+
+    test("warns ONCE naming both maps when it overrides an env pin", () => {
+      const warnCalls = [];
+      const originalWarn = log.warn;
+      log.warn = (...args) => warnCalls.push(args);
+      try {
+        const deps = { readPolicy: () => ({ routes: { implement: "codex-exec" } }) };
+        const env = { CATALYST_EXECUTOR_BY_PHASE: '{"triage":"codex-exec"}' };
+        readExecutorByPhaseLayer1(l1, env, deps);
+        readExecutorByPhaseLayer1(l1, env, deps);
+      } finally {
+        log.warn = originalWarn;
+      }
+      const overrideWarns = warnCalls.filter(
+        ([, msg]) => typeof msg === "string" && /overrides|override/i.test(msg),
+      );
+      expect(overrideWarns.length).toBe(1);
+    });
+
+    test("CATALYST_EXECUTOR_POLICY=off disables the tier entirely (per-host escape hatch)", () => {
+      const map = readExecutorByPhaseLayer1(
+        l1,
+        {
+          CATALYST_EXECUTOR_BY_PHASE: '{"triage":"codex-exec"}',
+          CATALYST_EXECUTOR_POLICY: "off",
+        },
+        { readPolicy: () => ({ routes: { implement: "codex-exec" } }) },
+      );
+      expect(map).toEqual({ triage: "codex-exec" });
+    });
+
+    test("an EMPTY policy routes map is a real policy (routes nothing) — not 'absent'", () => {
+      // `route all bg` then `route clear` must not resurrect a stale plist pin.
+      const map = readExecutorByPhaseLayer1(
+        l1,
+        { CATALYST_EXECUTOR_BY_PHASE: '{"triage":"codex-exec"}' },
+        { readPolicy: () => ({ routes: {} }) },
+      );
+      expect(map).toEqual({});
+    });
+
+    test("a MALFORMED policy falls through to env (never a partial map) and warns", () => {
+      const map = readExecutorByPhaseLayer1(
+        l1,
+        { CATALYST_EXECUTOR_BY_PHASE: '{"triage":"codex-exec"}' },
+        { readPolicy: () => null }, // readExecutorPolicy already normalizes malformed → null
+      );
+      expect(map).toEqual({ triage: "codex-exec" });
+    });
+
+    test("resolveExecutorForPhase still THROWS on an invalid value sourced from the policy", () => {
+      expect(() =>
+        resolveExecutorForPhase("triage", {
+          configPath: l1,
+          readPolicy: () => ({ routes: { triage: "bogus" } }),
+        }),
+      ).toThrow(/not a valid executor/);
+    });
+
+    test("a policy-routed phase still reports source 'executorByPhase'", () => {
+      // dispatch.mjs gates on this discriminator — it must not change.
+      expect(
+        resolveExecutorForPhase("triage", {
+          configPath: l1,
+          readPolicy: () => ({ routes: { triage: "codex-exec" } }),
+        }),
+      ).toEqual({ executor: "codex-exec", source: "executorByPhase" });
+    });
+  });
+
   test("codexConfig resolves defaults (home ~/catalyst/codex-home, bin codex, model null, writableRoots [catalystDir])", () => {
     // l1 has no codex key; env bag empty → pure defaults. catalystDir() reads the
     // hermetic CATALYST_DIR pinned by test-setup.mjs.

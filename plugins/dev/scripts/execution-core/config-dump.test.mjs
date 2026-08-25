@@ -445,6 +445,10 @@ describe("registry drift guards", () => {
     "execution-core/daemon.mjs",
     "execution-core/worktree-refresh-timer.mjs",
     "execution-core/linear-reconcile-timer.mjs",
+    // CTL-2116: CATALYST_CODEX_BUDGET_FLOOR_PERCENT is read in cli/cluster-route.mjs,
+    // not in config.mjs — the budget gate is a CLI-command-time seam, not a daemon
+    // dispatch-path reader.
+    "execution-core/cli/cluster-route.mjs",
     "lib/deployment-mode.mjs",
     "lib/draft-pr.sh",
     "lib/secret-contract.mjs",
