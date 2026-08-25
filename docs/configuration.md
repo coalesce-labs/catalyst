@@ -1,7 +1,6 @@
 # Catalyst Configuration Reference
 
-This document describes every configuration file Catalyst reads or writes, how the two-layer config
-system works, and common patterns for tuning behavior per-machine or per-project.
+This document describes every configuration file Catalyst reads or writes, how the two-layer config system works, and common patterns for tuning behavior per-machine or per-project.
 
 JSON Schema files for all config shapes live in [`docs/schemas/`](./schemas/).
 
@@ -16,8 +15,7 @@ Catalyst uses two separate JSON files that are merged at runtime:
 | **Layer 1** | `.catalyst/config.json` (repo root) | Yes | Team-wide defaults, safe to share |
 | **Layer 2** | `~/.config/catalyst/config.json` | Never | Machine-specific secrets and overrides |
 
-Layer 2 wins over Layer 1 on a **per-field basis** — only the fields present in Layer 2 override
-their Layer-1 counterparts. Fields absent from Layer 2 fall back to Layer-1 values.
+Layer 2 wins over Layer 1 on a **per-field basis** — only the fields present in Layer 2 override their Layer-1 counterparts. Fields absent from Layer 2 fall back to Layer-1 values.
 
 ---
 
@@ -90,8 +88,7 @@ cp plugins/dev/templates/config.template.json .catalyst/config.json
 }
 ```
 
-All `stateMap` values must exactly match the state names in your Linear team. The daemon uses
-these to transition tickets as phases complete.
+All `stateMap` values must exactly match the state names in your Linear team. The daemon uses these to transition tickets as phases complete.
 
 #### Linear Webhook Bot Identity
 
@@ -107,25 +104,14 @@ these to transition tickets as phases complete.
 }
 ```
 
-`monitor.linear.botUserId` is the Linear user UUID of the Catalyst app-actor — the "Linear for
-Agents" app user that posts comments **as the app**. It is the self-echo / loop-prevention guard
-for the whole Linear app-actor comms channel:
+`monitor.linear.botUserId` is the Linear user UUID of the Catalyst app-actor — the "Linear for Agents" app user that posts comments **as the app**. It is the self-echo / loop-prevention guard for the whole Linear app-actor comms channel:
 
-- The orch-monitor server uses it to suppress bot-authored issue events so the app's own writes
-  don't feed back into the event log as write loops.
-- The execution-core daemon uses it to filter the agent's own mirror comments and
-  description-updates out of each worker's `inbox.jsonl`, so a human reply on a ticket is the
-  only thing that wakes a parked worker (not the agent's own echo).
+- The orch-monitor server uses it to suppress bot-authored issue events so the app's own writes don't feed back into the event log as write loops.
+- The execution-core daemon uses it to filter the agent's own mirror comments and description-updates out of each worker's `inbox.jsonl`, so a human reply on a ticket is the only thing that wakes a parked worker (not the agent's own echo).
 
-**When to set it:** required for the Linear app-actor comms channel — i.e. when the execution-core
-daemon mirrors phase-agent output to Linear and wakes on human replies (CTL-550 / CTL-549 /
-CTL-749). Without it, the system cannot tell the agent's own comments apart from a human's. The
-value is not secret (it appears on every comment the app posts) but it **is workspace-specific**,
-so the committed config ships `null` and each operator fills in their own.
+**When to set it:** required for the Linear app-actor comms channel — i.e. when the execution-core daemon mirrors phase-agent output to Linear and wakes on human replies (CTL-550 / CTL-549 / CTL-749). Without it, the system cannot tell the agent's own comments apart from a human's. The value is not secret (it appears on every comment the app posts) but it **is workspace-specific**, so the committed config ships `null` and each operator fills in their own.
 
-**How to obtain it:** query `viewer.id` with the app-actor token. The app OAuth credentials live
-in the per-project Layer-2 file (`~/.config/catalyst/config-<projectKey>.json` →
-`catalyst.linear.agent.{clientId,clientSecret,accessToken}`). Using the stored access token:
+**How to obtain it:** query `viewer.id` with the app-actor token. The app OAuth credentials live in the per-project Layer-2 file (`~/.config/catalyst/config-<projectKey>.json` → `catalyst.linear.agent.{clientId,clientSecret,accessToken}`). Using the stored access token:
 
 ```bash
 TOKEN=$(jq -r '.catalyst.linear.agent.accessToken' ~/.config/catalyst/config-<projectKey>.json)
@@ -135,8 +121,7 @@ BOT_ID=$(curl -s -X POST https://api.linear.app/graphql \
   -d '{"query":"query{viewer{id name}}"}' | jq -r .data.viewer.id)
 ```
 
-Write `$BOT_ID` into `.catalyst/config.json` → `catalyst.monitor.linear.botUserId`, then restart
-both readers (they read `botUserId` only at startup):
+Write `$BOT_ID` into `.catalyst/config.json` → `catalyst.monitor.linear.botUserId`, then restart both readers (they read `botUserId` only at startup):
 
 ```bash
 catalyst-monitor stop && catalyst-monitor start
@@ -191,20 +176,12 @@ catalyst-execution-core restart
 
 **`dispatchMode`**
 
-- `"phase-agents"` (default) — runs one short-lived `claude --bg` job per pipeline phase
-  (triage → research → plan → implement → verify → review → pr → monitor-merge → monitor-deploy → teardown).
-- `"oneshot-legacy"` — runs a single long-lived `claude -p /catalyst-legacy:oneshot` job per ticket.
-  Preserved as a fallback; not recommended for new setups.
+- `"phase-agents"` (default) — runs one short-lived `claude --bg` job per pipeline phase (triage → research → plan → implement → verify → review → pr → monitor-merge → monitor-deploy → teardown).
+- `"oneshot-legacy"` — runs a single long-lived `claude -p /catalyst-legacy:oneshot` job per ticket. Preserved as a fallback; not recommended for new setups.
 
-**`phaseAgents.models` / `modelOverrides`** — `models[<phase>]` is the model every worker for that
-phase runs on; `modelOverrides[<phase>][<ticket>]` is a per-ticket exception. Resolution order in
-`phase-agent-dispatch`: CLI `--model` > `modelOverrides` > `models` > workflow descriptor > the
-script's fallback (`sonnet`). ⚠️ If the whole `phaseAgents` block is absent the fallback applies to
-every phase — which is how the fleet silently ran everything on opus until 2026-08-23. Commit the
-block; do not rely on the fallback.
+**`phaseAgents.models` / `modelOverrides`** — `models[<phase>]` is the model every worker for that phase runs on; `modelOverrides[<phase>][<ticket>]` is a per-ticket exception. Resolution order in `phase-agent-dispatch`: CLI `--model` > `modelOverrides` > `models` > workflow descriptor > the script's fallback (`sonnet`). ⚠️ If the whole `phaseAgents` block is absent the fallback applies to every phase — which is how the fleet silently ran everything on opus until 2026-08-23. Commit the block; do not rely on the fallback.
 
-**`executionCore.eligibleQuery`** is **deprecated** — this field is ignored by the daemon. Use
-the registry instead (see [Registry](#registry) below).
+**`executionCore.eligibleQuery`** is **deprecated** — this field is ignored by the daemon. Use the registry instead (see [Registry](#registry) below).
 
 ---
 
@@ -230,8 +207,7 @@ This file is machine-local and **must never be committed**. It contains:
 
 ### Merging Rules
 
-The scheduler and phase-agent-dispatch scripts read both files. For the following fields, Layer 2
-wins **per-field**:
+The scheduler and phase-agent-dispatch scripts read both files. For the following fields, Layer 2 wins **per-field**:
 
 | Field | Layer-2 path |
 |-------|-------------|
@@ -317,8 +293,7 @@ wins **per-field**:
 }
 ```
 
-Required when `catalyst.filter.groqModel` is configured and the broker's LLM event filtering is
-active.
+Required when `catalyst.filter.groqModel` is configured and the broker's LLM event filtering is active.
 
 ---
 
@@ -328,17 +303,9 @@ active.
 
 ### Purpose
 
-A **machine-local, never-committed** shell env file that the execution-core daemon sources on
-start. `catalyst-execution-core start` runs `[[ -f "$file" ]] && source "$file"` immediately before
-it launches the daemon, so every variable the file exports is inherited by the daemon process and
-by every phase-agent bg job it dispatches. `restart` re-sources it (it calls `stop` then `start`),
-so edits take effect on the next restart — **not** live.
+A **machine-local, never-committed** shell env file that the execution-core daemon sources on start. `catalyst-execution-core start` runs `[[ -f "$file" ]] && source "$file"` immediately before it launches the daemon, so every variable the file exports is inherited by the daemon process and by every phase-agent bg job it dispatches. `restart` re-sources it (it calls `stop` then `start`), so edits take effect on the next restart — **not** live.
 
-The path defaults to `~/.config/catalyst/execution-core.env` and can be overridden with the
-`CATALYST_EXECUTION_CORE_ENV` environment variable. This file is **entirely opt-in**: an absent file
-is a complete no-op, which is the common case. Because the values are machine-specific (proxy port,
-local CA path), setup never writes it for you — copy the committed example template and edit it by
-hand.
+The path defaults to `~/.config/catalyst/execution-core.env` and can be overridden with the `CATALYST_EXECUTION_CORE_ENV` environment variable. This file is **entirely opt-in**: an absent file is a complete no-op, which is the common case. Because the values are machine-specific (proxy port, local CA path), setup never writes it for you — copy the committed example template and edit it by hand.
 
 ### Options
 
@@ -352,9 +319,7 @@ hand.
 
 ### Debugging Linear API rate-limiting (mitmproxy — opt-in, default OFF)
 
-The mitmproxy is a **rare diagnostic tool**, not always-on infrastructure. The daemon runs
-correctly without it. Use it for a short window when you need to observe Linear API traffic, inspect
-rate-limit headers, or trace which callers are exhausting the quota. Turn it off again when done.
+The mitmproxy is a **rare diagnostic tool**, not always-on infrastructure. The daemon runs correctly without it. Use it for a short window when you need to observe Linear API traffic, inspect rate-limit headers, or trace which callers are exhausting the quota. Turn it off again when done.
 
 **Turn ON for a diagnostic session:**
 
@@ -362,11 +327,7 @@ rate-limit headers, or trace which callers are exhausting the quota. Turn it off
 catalyst-stack restart --proxy
 ```
 
-This starts mitmproxy, then restarts the execution-core daemon with `HTTPS_PROXY`,
-`NODE_USE_ENV_PROXY=1`, `NODE_EXTRA_CA_CERTS`, and `NO_PROXY=api.anthropic.com,...` set as an
-inline env prefix (not written to disk). Traffic is logged to `~/catalyst/linear-proxy.jsonl`.
-On first use, `catalyst-stack` installs mitmproxy via `brew install mitmproxy` if absent and
-generates the CA cert.
+This starts mitmproxy, then restarts the execution-core daemon with `HTTPS_PROXY`, `NODE_USE_ENV_PROXY=1`, `NODE_EXTRA_CA_CERTS`, and `NO_PROXY=api.anthropic.com,...` set as an inline env prefix (not written to disk). Traffic is logged to `~/catalyst/linear-proxy.jsonl`. On first use, `catalyst-stack` installs mitmproxy via `brew install mitmproxy` if absent and generates the CA cert.
 
 **Turn OFF:**
 
@@ -374,11 +335,9 @@ generates the CA cert.
 catalyst-stack restart
 ```
 
-Restarts the daemon without any proxy vars. The proxy vars are **never sticky** — they are
-injected only for the lifetime of the `--proxy` daemon process.
+Restarts the daemon without any proxy vars. The proxy vars are **never sticky** — they are injected only for the lifetime of the `--proxy` daemon process.
 
-**Important:** `NO_PROXY=api.anthropic.com,...` is always included in the `--proxy` prefix so
-Claude worker API calls bypass the proxy even if mitmdump hiccups mid-session.
+**Important:** `NO_PROXY=api.anthropic.com,...` is always included in the `--proxy` prefix so Claude worker API calls bypass the proxy even if mitmdump hiccups mid-session.
 
 > **Do not `source` `execution-core.env` in an interactive shell or shell profile.** It is sourced
 > by `catalyst-execution-core start` for the daemon only. Sourcing it in your terminal pins
@@ -394,28 +353,17 @@ Claude worker API calls bypass the proxy even if mitmdump hiccups mid-session.
 > and prints the exact line to delete. If you already have one, remove it and open a fresh terminal —
 > the daemon still routes through the proxy because it sources the file itself at launch.
 
-**Why `NODE_USE_ENV_PROXY=1` is required.** Node 20+/24+ native `fetch` (undici) **ignores**
-`HTTPS_PROXY`/`HTTP_PROXY` unless `NODE_USE_ENV_PROXY=1` is also set. Omit it and the daemon's
-Linear calls bypass the proxy entirely while looking perfectly healthy — the audit silently captures
-nothing.
+**Why `NODE_USE_ENV_PROXY=1` is required.** Node 20+/24+ native `fetch` (undici) **ignores** `HTTPS_PROXY`/`HTTP_PROXY` unless `NODE_USE_ENV_PROXY=1` is also set. Omit it and the daemon's Linear calls bypass the proxy entirely while looking perfectly healthy — the audit silently captures nothing.
 
 ### Health check
 
-A misconfigured proxy silently breaks the daemon's Linear connectivity on a fresh or changed
-machine, which is otherwise hard to debug. `check-setup.sh` (and `/catalyst-foundry:setup-catalyst`)
-therefore verify the setup whenever the env file configures a proxy, and warn loudly + actionably on
-each failure mode:
+A misconfigured proxy silently breaks the daemon's Linear connectivity on a fresh or changed machine, which is otherwise hard to debug. `check-setup.sh` (and `/catalyst-foundry:setup-catalyst`) therefore verify the setup whenever the env file configures a proxy, and warn loudly + actionably on each failure mode:
 
 - the proxy host:port is **not listening** → start `mitmdump` or unset the proxy vars;
-- `NODE_EXTRA_CA_CERTS` points at a **missing file** → fix the path or re-run mitmproxy to
-  regenerate its CA;
-- `*_PROXY` is set but `NODE_USE_ENV_PROXY=1` is **missing** → Node fetch will ignore the proxy and
-  calls bypass the audit silently.
+- `NODE_EXTRA_CA_CERTS` points at a **missing file** → fix the path or re-run mitmproxy to regenerate its CA;
+- `*_PROXY` is set but `NODE_USE_ENV_PROXY=1` is **missing** → Node fetch will ignore the proxy and calls bypass the audit silently.
 
-When no env file exists (or it sets no proxy) the check is a no-op and reports nothing but an
-informational pointer to the example template. `check-project-setup.sh` (the hot-path workflow gate)
-carries only the highest-impact `NODE_USE_ENV_PROXY` silent-bypass warning; the full port/CA
-diagnostics live in `check-setup.sh`.
+When no env file exists (or it sets no proxy) the check is a no-op and reports nothing but an informational pointer to the example template. `check-project-setup.sh` (the hot-path workflow gate) carries only the highest-impact `NODE_USE_ENV_PROXY` silent-bypass warning; the full port/CA diagnostics live in `check-setup.sh`.
 
 ---
 
@@ -425,12 +373,9 @@ diagnostics live in `check-setup.sh`.
 
 ### Purpose
 
-The registry is the execution-core daemon's source of truth for which projects are enrolled and
-what Linear state constitutes "eligible for dispatch." It is **not** part of the two-layer config
-— it lives in the daemon's working directory and is managed separately.
+The registry is the execution-core daemon's source of truth for which projects are enrolled and what Linear state constitutes "eligible for dispatch." It is **not** part of the two-layer config — it lives in the daemon's working directory and is managed separately.
 
-This file supersedes the deprecated `catalyst.orchestration.executionCore.eligibleQuery` field in
-Layer-1 config. The daemon ignores that field and reads the registry exclusively.
+This file supersedes the deprecated `catalyst.orchestration.executionCore.eligibleQuery` field in Layer-1 config. The daemon ignores that field and reads the registry exclusively.
 
 ### Structure
 
@@ -465,19 +410,9 @@ node plugins/dev/scripts/execution-core/registry.mjs upsert \
   --status Todo
 ```
 
-**The `team` ↔ `teamKey` contract.** A registry entry's `team` MUST equal — exactly, since the
-runtime compares with `===`/`!==` — the `catalyst.linear.teamKey` declared in
-`<repoRoot>/.catalyst/config.json`. The contract, its failure mode, and the full repair procedure
-(including preserving a custom `eligibleQuery` and cleaning up worktrees already cut from the wrong
-checkout) are documented in the canonical configuration reference:
-`website/src/content/docs/reference/configuration.md` → "The `team` ↔ `teamKey` contract".
+**The `team` ↔ `teamKey` contract.** A registry entry's `team` MUST equal — exactly, since the runtime compares with `===`/`!==` — the `catalyst.linear.teamKey` declared in `<repoRoot>/.catalyst/config.json`. The contract, its failure mode, and the full repair procedure (including preserving a custom `eligibleQuery` and cleaning up worktrees already cut from the wrong checkout) are documented in the canonical configuration reference: `website/src/content/docs/reference/configuration.md` → "The `team` ↔ `teamKey` contract".
 
-Implementation notes for this repo (CAT-52): the contract is declared by
-`docs/schemas/registry.schema.json` and observed by `teamIdentityOf()` in `registry.mjs`, which
-attaches a runtime-only `identity` field to each entry `listProjects()` returns — `matches: null`
-means "unknown", deliberately distinct from `false` ("mismatch"). `listProjects()` warns on a
-mismatch and `checkRegistryTeamIdentity()` in `doctor.mjs` grades it (WARN mismatch / INFO
-unverified / PASS all-verified, never FAIL).
+Implementation notes for this repo (CAT-52): the contract is declared by `docs/schemas/registry.schema.json` and observed by `teamIdentityOf()` in `registry.mjs`, which attaches a runtime-only `identity` field to each entry `listProjects()` returns — `matches: null` means "unknown", deliberately distinct from `false` ("mismatch"). `listProjects()` warns on a mismatch and `checkRegistryTeamIdentity()` in `doctor.mjs` grades it (WARN mismatch / INFO unverified / PASS all-verified, never FAIL).
 
 See ADR-028 for Catalyst's own CAT registration.
 
@@ -489,12 +424,9 @@ See ADR-028 for Catalyst's own CAT registration.
 
 **Location:** `~/catalyst/execution-core/workers/{TICKET}/phase-{name}.json`
 
-Phase signal files are the coordination channel between the execution-core daemon and phase-agent
-workers. The daemon writes the file to dispatch a phase; the worker updates `status` and
-`bg_job_id` as it runs; the daemon reads the file to decide when to advance to the next phase.
+Phase signal files are the coordination channel between the execution-core daemon and phase-agent workers. The daemon writes the file to dispatch a phase; the worker updates `status` and `bg_job_id` as it runs; the daemon reads the file to decide when to advance to the next phase.
 
-Workers emit terminal status values (`done`, `failed`, `skipped`, `turn-cap-exhausted`) using the
-`phase-agent-emit-complete` helper script, which updates the signal file atomically.
+Workers emit terminal status values (`done`, `failed`, `skipped`, `turn-cap-exhausted`) using the `phase-agent-emit-complete` helper script, which updates the signal file atomically.
 
 ---
 
@@ -504,14 +436,11 @@ Workers emit terminal status values (`done`, `failed`, `skipped`, `turn-cap-exha
 
 This file is **written by Claude Code, not Catalyst**. Catalyst reads it read-only for:
 
-- **Session continuation** — `resumeSessionId` (Claude Code ≥2.x) is the primary field passed as
-  `--resume-session` when boot-resume or turn-cap revival re-launches a phase-agent.
-- **Job liveness probes** — the `state` field (`"running"` / `"stopped"`) is read by
-  `defaultStatJob` to determine if a bg job is still alive.
+- **Session continuation** — `resumeSessionId` (Claude Code ≥2.x) is the primary field passed as `--resume-session` when boot-resume or turn-cap revival re-launches a phase-agent.
+- **Job liveness probes** — the `state` field (`"running"` / `"stopped"`) is read by `defaultStatJob` to determine if a bg job is still alive.
 - **Worktree validation** — `cwd` is read during orphan detection.
 
-The legacy `linkScanPath` field (Claude Code <2.x) is still read as a fallback for sessions
-running older Claude Code versions.
+The legacy `linkScanPath` field (Claude Code <2.x) is still read as a fallback for sessions running older Claude Code versions.
 
 ---
 
@@ -558,8 +487,7 @@ Edit `~/.config/catalyst/config.json`:
 }
 ```
 
-This overrides Layer-1's `maxParallel` for this machine only. The committed `.catalyst/config.json`
-is unchanged.
+This overrides Layer-1's `maxParallel` for this machine only. The committed `.catalyst/config.json` is unchanged.
 
 ### "Route triage, research, and implement to specific models"
 
@@ -630,13 +558,7 @@ Edit `.catalyst/config.json`:
 
 ### "Tune (or disable) the `~/.claude/jobs` directory GC"
 
-The orphan reaper also garbage-collects stale `~/.claude/jobs/<id>` directories
-on its periodic cadence (CTL-1165). The sweep is **fail-closed** — if `claude
-agents` cannot be read it deletes nothing — and only removes a job directory when
-it is not a live or registered session, not the controlling session, and older
-than `retentionSeconds` (default 24h). It deletes the job directory alone (never
-`claude rm`), capped at `batchCap` per sweep with the remainder draining on the
-next tick. Edit `.catalyst/config.json`:
+The orphan reaper also garbage-collects stale `~/.claude/jobs/<id>` directories on its periodic cadence (CTL-1165). The sweep is **fail-closed** — if `claude agents` cannot be read it deletes nothing — and only removes a job directory when it is not a live or registered session, not the controlling session, and older than `retentionSeconds` (default 24h). It deletes the job directory alone (never `claude rm`), capped at `batchCap` per sweep with the remainder draining on the next tick. Edit `.catalyst/config.json`:
 
 ```json
 {
@@ -654,11 +576,7 @@ next tick. Edit `.catalyst/config.json`:
 }
 ```
 
-Set `"enabled": false` to disable only the directory GC (the orphan-reaper sweep
-still runs). The env vars `CATALYST_JOB_GC_RETENTION_SECONDS` and
-`CATALYST_JOB_GC_BATCH_CAP` override the corresponding fields. See
-[`catalyst-config.schema.json`](./schemas/catalyst-config.schema.json) for the
-canonical field reference.
+Set `"enabled": false` to disable only the directory GC (the orphan-reaper sweep still runs). The env vars `CATALYST_JOB_GC_RETENTION_SECONDS` and `CATALYST_JOB_GC_BATCH_CAP` override the corresponding fields. See [`catalyst-config.schema.json`](./schemas/catalyst-config.schema.json) for the canonical field reference.
 
 ### "Change the Linear state the daemon polls for new work"
 

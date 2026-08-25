@@ -7,23 +7,18 @@
 
 A portable development workflow for Claude Code, packaged as a Claude Code plugin marketplace.
 
-This is the workspace I use daily for AI-assisted development. It's battle-tested on real projects
-and optimized for efficient, context-aware AI collaboration. I'm sharing it so others can use it,
-fork it, and contribute ideas back.
+This is the workspace I use daily for AI-assisted development. It's battle-tested on real projects and optimized for efficient, context-aware AI collaboration. I'm sharing it so others can use it, fork it, and contribute ideas back.
 
 ## Tech Stack & Integrations
 
-Catalyst integrates with your development tools through both **CLI-based** (token-efficient) and
-**MCP-based** (richer features) approaches:
+Catalyst integrates with your development tools through both **CLI-based** (token-efficient) and **MCP-based** (richer features) approaches:
 
 ### Project Management & Issue Tracking
 
-- **Linear** - Issue tracking, sprint planning, ticket lifecycle (CLI via
-  [Linearis](https://www.npmjs.com/package/linearis))
+- **Linear** - Issue tracking, sprint planning, ticket lifecycle (CLI via [Linearis](https://www.npmjs.com/package/linearis))
   - `catalyst-dev`: Core research agents and workflow commands
   - `catalyst-pm`: Advanced PM workflows (PRDs, strategy, priorities)
-  - `catalyst-pm-ops`: Operational PM workflows (cycle analysis, milestone tracking, backlog
-    grooming, cadence, comms)
+  - `catalyst-pm-ops`: Operational PM workflows (cycle analysis, milestone tracking, backlog grooming, cadence, comms)
 
 ### Version Control & Code Hosting
 
@@ -66,16 +61,13 @@ This keeps your typical session lean while having powerful tools available when 
 
 ## What's Inside
 
-**Catalyst** is an 8-plugin system for Claude Code focused on **token efficiency**, **session-aware
-MCP management**, and **persistent context** through parallel agent research, structured handoffs,
-and shared memory systems.
+**Catalyst** is an 8-plugin system for Claude Code focused on **token efficiency**, **session-aware MCP management**, and **persistent context** through parallel agent research, structured handoffs, and shared memory systems.
 
 **catalyst-dev** (Core - Always enabled)
 
 - 9 research agents (codebase + infrastructure)
 - 21 skills covering full dev lifecycle
-- Three-tier model strategy (Opus for planning/implementation, Sonnet for CI/automation, Haiku for
-  data collection)
+- Three-tier model strategy (Opus for planning/implementation, Sonnet for CI/automation, Haiku for data collection)
 - Linear integration via Linearis CLI
 - CI/automation commands for non-interactive workflows
 - Handoff system for context persistence
@@ -163,8 +155,7 @@ chmod +x setup-catalyst.sh
 | Linear API token       | `LINEAR_API_TOKEN`, or `~/.linear_api_token` | must be a **personal** key (`lin_api_…`). An OAuth token (`lin_oauth_…`) is rejected                    |
 | Sentry / PostHog / Exa | prompted, or their usual env vars            | all optional                                                                                            |
 
-Nothing above is required to get a working node — omit the cloud flags and setup behaves exactly as
-it always has.
+Nothing above is required to get a working node — omit the cloud flags and setup behaves exactly as it always has.
 
 This script will guide you through:
 
@@ -185,11 +176,7 @@ This script will guide you through:
 # Restart Claude Code
 ```
 
-**Install the CLI tools** — _setup now does this for you._ It puts `catalyst-stack` and the other
-`catalyst-*` commands in `$HOME/.catalyst/bin`, provisions `plugin-source`, turns on replica reads,
-and enrols the project. Anything it could not finish is printed at the end of the run as a
-**deferred step**, with the command that completes it and the command that verifies it — so if that
-list says "No steps were deferred", these are already done.
+**Install the CLI tools** — _setup now does this for you._ It puts `catalyst-stack` and the other `catalyst-*` commands in `$HOME/.catalyst/bin`, provisions `plugin-source`, turns on replica reads, and enrols the project. Anything it could not finish is printed at the end of the run as a **deferred step**, with the command that completes it and the command that verifies it — so if that list says "No steps were deferred", these are already done.
 
 To run it by hand anyway (or to complete a deferred step):
 
@@ -264,9 +251,7 @@ Plugins automatically load/unload MCPs when enabled/disabled:
 /plugin enable catalyst-pm catalyst-analytics catalyst-debugging
 ```
 
-**Why this matters**: Most development sessions don't need analytics or debugging MCPs. Starting
-with just `catalyst-dev` keeps your context at ~3.5k tokens instead of ~65k, leaving more room for
-code and conversation.
+**Why this matters**: Most development sessions don't need analytics or debugging MCPs. Starting with just `catalyst-dev` keeps your context at ~3.5k tokens instead of ~65k, leaving more room for code and conversation.
 
 ### Updating Plugins
 
@@ -286,8 +271,7 @@ claude plugin marketplace update catalyst
 - ✨ **New features**: Minor versions (e.g., 3.0.0 → 3.1.0) - New commands or capabilities
 - 🔄 **Breaking changes**: Major versions (e.g., 3.0.0 → 4.0.0) - May require configuration updates
 
-**Important:** A restart is required for plugin updates to take effect. Active sessions use the old
-version until you restart Claude Code.
+**Important:** A restart is required for plugin updates to take effect. Active sessions use the old version until you restart Claude Code.
 
 **One-command post-merge update** (ff-pull + rsync into the live cache + restart):
 
@@ -304,10 +288,8 @@ catalyst-stack restart --hotpatch
 
 **Need help?**
 
-- [Documentation Site](https://catalyst.coalescelabs.ai) - Complete setup, installation, and
-  configuration
-- [Claude Code Plugin Guide](https://docs.claude.com/en/docs/claude-code/plugins.md) - Official
-  plugin documentation
+- [Documentation Site](https://catalyst.coalescelabs.ai) - Complete setup, installation, and configuration
+- [Claude Code Plugin Guide](https://docs.claude.com/en/docs/claude-code/plugins.md) - Official plugin documentation
 
 ## Complete Workflow
 
@@ -321,8 +303,7 @@ With handoffs for context persistence:
 /create-handoff → /resume-handoff
 ```
 
-Agents proactively monitor context during implementation and will prompt you to create handoffs
-before running out of context, creating structured handoff documents that add to persistent memory.
+Agents proactively monitor context during implementation and will prompt you to create handoffs before running out of context, creating structured handoff documents that add to persistent memory.
 
 **Learn More:**
 
@@ -331,19 +312,14 @@ before running out of context, creating structured handoff documents that add to
 
 ### Agent Teams
 
-For complex implementations spanning multiple domains, Catalyst supports
-[Claude Code agent teams](https://www.anthropic.com/news/claude-opus-4-6) — multiple Claude
-instances working in parallel on a shared codebase:
+For complex implementations spanning multiple domains, Catalyst supports [Claude Code agent teams](https://www.anthropic.com/news/claude-opus-4-6) — multiple Claude instances working in parallel on a shared codebase:
 
 ```
 /implement-plan --team thoughts/shared/plans/my-plan.md
 /oneshot --team PROJ-123
 ```
 
-A lead agent (Opus) coordinates the work, spawning teammates (Sonnet) that each own distinct files.
-Each teammate can spawn its own research sub-agents, enabling two-level parallelism. See
-[How we built our multi-agent research system](https://www.anthropic.com/engineering/multi-agent-research-system)
-for the patterns behind this approach.
+A lead agent (Opus) coordinates the work, spawning teammates (Sonnet) that each own distinct files. Each teammate can spawn its own research sub-agents, enabling two-level parallelism. See [How we built our multi-agent research system](https://www.anthropic.com/engineering/multi-agent-research-system) for the patterns behind this approach.
 
 ## Core Philosophy
 
@@ -356,9 +332,7 @@ for the patterns behind this approach.
 
 ### Reusability and Shared Memory
 
-Uses the [HumanLayer thoughts system](https://github.com/humanlayer/humanlayer) for shared
-persistent memory across teams and projects. The research → plan → implement → validate workflow is
-adapted from HumanLayer's approach.
+Uses the [HumanLayer thoughts system](https://github.com/humanlayer/humanlayer) for shared persistent memory across teams and projects. The research → plan → implement → validate workflow is adapted from HumanLayer's approach.
 
 ### CLI-First Integration
 
@@ -418,8 +392,7 @@ Run the prerequisite check:
 
 ## Recurring Workflows with /loop
 
-The built-in `/loop` command runs a skill or prompt on a recurring interval. Use it for monitoring
-and periodic tasks during active development sessions.
+The built-in `/loop` command runs a skill or prompt on a recurring interval. Use it for monitoring and periodic tasks during active development sessions.
 
 ### CI Check Monitoring (after pushing a PR)
 
@@ -443,8 +416,7 @@ Monitors GitHub Actions workflow runs triggered by your merge.
 /loop 1d /context-daily
 ```
 
-Refreshes the context engineering adoption dashboard once per day. Alternative to the GitHub Actions
-cron — useful in long-running sessions.
+Refreshes the context engineering adoption dashboard once per day. Alternative to the GitHub Actions cron — useful in long-running sessions.
 
 ### Cycle Health Monitoring
 
@@ -462,51 +434,41 @@ Generates a fresh cycle health report every 4 hours during a sprint.
 
 Checks for orphaned PRs and out-of-sync Linear issues every 2 hours.
 
-**Note**: `/loop` is session-scoped (max ~3 days). For persistent scheduling, use GitHub Actions
-cron. `/loop` is best for active monitoring during development sessions.
+**Note**: `/loop` is session-scoped (max ~3 days). For persistent scheduling, use GitHub Actions cron. `/loop` is best for active monitoring during development sessions.
 
 ## Credits
 
 Built on patterns from:
 
-- [HumanLayer](https://github.com/humanlayer/humanlayer) - Thoughts system for shared persistent
-  memory and research/plan/implement/validate workflow
+- [HumanLayer](https://github.com/humanlayer/humanlayer) - Thoughts system for shared persistent memory and research/plan/implement/validate workflow
 
 Personal refinement over hundreds of hours on real projects.
 
 ## Contributing
 
-**This is my personal workflow workspace**, primarily built for my own development style and
-preferences. That said, I'm happy to:
+**This is my personal workflow workspace**, primarily built for my own development style and preferences. That said, I'm happy to:
 
 - **Discuss ideas** - Open issues with workflow suggestions or improvements
 - **See your forks** - Adapt it to your needs and share what you built
 - **Fix bugs** - If something's broken, let me know
 - **Learn together** - Share your workflow patterns and approaches
 
-**Important**: I may not accept PRs that change core workflows or add features I don't personally
-use, since this is the workspace I rely on daily. But I **love** seeing how others adapt these
-patterns to their own needs!
+**Important**: I may not accept PRs that change core workflows or add features I don't personally use, since this is the workspace I rely on daily. But I **love** seeing how others adapt these patterns to their own needs!
 
 **Best approach**: Fork it, make it yours, and share what you learned. That's how we all get better!
 
 ## Documentation
 
-- [Documentation Site](https://catalyst.coalescelabs.ai) - Comprehensive guides, reference, and
-  tutorials
+- [Documentation Site](https://catalyst.coalescelabs.ai) - Comprehensive guides, reference, and tutorials
 - [Architecture](docs/architecture.md) - Three-layer system and memory model
 - [ADRs](docs/adrs.md) - Architecture decision records
 - [Releases](docs/releases.md) - Release Please workflow
 
 ## Brand Assets
 
-Catalyst ships a V2 brand kit (Ignition Chevron) under [`assets/brand-v2/`](assets/brand-v2/): the
-mark, wordmark, lockups, favicon set, and the 1200×630 social preview card. All SVGs use
-`stroke="currentColor"` so they theme via CSS; the OG card raster (`assets/brand-v2/og-card.png`)
-bakes in the Operator Console palette.
+Catalyst ships a V2 brand kit (Ignition Chevron) under [`assets/brand-v2/`](assets/brand-v2/): the mark, wordmark, lockups, favicon set, and the 1200×630 social preview card. All SVGs use `stroke="currentColor"` so they theme via CSS; the OG card raster (`assets/brand-v2/og-card.png`) bakes in the Operator Console palette.
 
-Repo admins: to set the GitHub repository social preview, go to **Settings → Social preview → Upload
-an image** and upload `assets/brand-v2/og-card.png`.
+Repo admins: to set the GitHub repository social preview, go to **Settings → Social preview → Upload an image** and upload `assets/brand-v2/og-card.png`.
 
 ## License
 
@@ -514,11 +476,7 @@ MIT - Use it however you want!
 
 ## Note on Personal Use
 
-This is my personal workflow shared for learning and inspiration. You're welcome to use it as-is,
-fork it, or adapt the patterns to your own needs. Just keep in mind that it's optimized for my
-development style, so your mileage may vary. Some decisions are opinionated based on my preferences,
-and I may not accept PRs that don't align with how I work. Think of it as a starting point rather
-than a one-size-fits-all solution—take what works, adapt what doesn't!
+This is my personal workflow shared for learning and inspiration. You're welcome to use it as-is, fork it, or adapt the patterns to your own needs. Just keep in mind that it's optimized for my development style, so your mileage may vary. Some decisions are opinionated based on my preferences, and I may not accept PRs that don't align with how I work. Think of it as a starting point rather than a one-size-fits-all solution—take what works, adapt what doesn't!
 
 ---
 
