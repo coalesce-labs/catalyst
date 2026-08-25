@@ -189,8 +189,7 @@ source_ticket: { TICKET-ID or null }
 
 # Research: {User's Research Question}
 
-**Date**: {date/time with timezone} **Researcher**: {your-name} **Git Commit**: {commit-hash}
-**Branch**: {branch-name} **Repository**: {repo-name}
+**Date**: {date/time with timezone} **Researcher**: {your-name} **Git Commit**: {commit-hash} **Branch**: {branch-name} **Repository**: {repo-name}
 
 ## Research Question
 
@@ -198,8 +197,7 @@ source_ticket: { TICKET-ID or null }
 
 ## Summary
 
-{High-level documentation of what you found. 2-3 paragraphs explaining the current state of the
-system in this area. Focus on WHAT EXISTS, not what should exist.}
+{High-level documentation of what you found. 2-3 paragraphs explaining the current state of the system in this area. Focus on WHAT EXISTS, not what should exist.}
 
 ## Detailed Findings
 
