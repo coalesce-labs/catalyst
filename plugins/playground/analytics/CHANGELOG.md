@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-analytics-v1.3.1...catalyst-analytics-v1.4.0) (2026-08-24)
+
+
+### Features
+
+* **packaging:** CTL-1463 — installable plugin packages for Codex + open-spec agents ([#3978](https://github.com/coalesce-labs/catalyst/issues/3978)) ([3b80357](https://github.com/coalesce-labs/catalyst/commit/3b803576f1f801278ebf6ac92da68026d289d6dd))
+
 ## [1.3.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-analytics-v1.3.0...catalyst-analytics-v1.3.1) (2026-04-13)
 
 

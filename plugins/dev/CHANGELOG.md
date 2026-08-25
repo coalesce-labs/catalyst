@@ -1,5 +1,19 @@
 # Changelog
 
+## [12.65.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.64.0...catalyst-dev-v12.65.0) (2026-08-24)
+
+
+### Features
+
+* **dev:** CTL-2192 — stop re-claiming a live SDK worker, and reap the generation you replace ([#3955](https://github.com/coalesce-labs/catalyst/issues/3955)) ([242a8e7](https://github.com/coalesce-labs/catalyst/commit/242a8e73c9872aa7c7867b794316db80890b7088))
+* **execution-core:** CTL-2189 — event-log retention on a derived window ([#3953](https://github.com/coalesce-labs/catalyst/issues/3953)) ([a8d4946](https://github.com/coalesce-labs/catalyst/commit/a8d4946cc23202706e6b7f994d14a958a57dad44))
+* **packaging:** CTL-1463 — installable plugin packages for Codex + open-spec agents ([#3978](https://github.com/coalesce-labs/catalyst/issues/3978)) ([3b80357](https://github.com/coalesce-labs/catalyst/commit/3b803576f1f801278ebf6ac92da68026d289d6dd))
+
+
+### Bug Fixes
+
+* **dev:** CTL-2166 — HRW-filter the eligible pool before STEP A admission ranking ([#3889](https://github.com/coalesce-labs/catalyst/issues/3889)) ([a83a7ba](https://github.com/coalesce-labs/catalyst/commit/a83a7ba450ea599c112c195699ab597a8d233f3c))
+
 ## [12.64.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.63.0...catalyst-dev-v12.64.0) (2026-08-23)
 
 

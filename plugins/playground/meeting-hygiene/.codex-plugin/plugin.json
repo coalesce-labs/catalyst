@@ -1,6 +1,6 @@
 {
   "name": "catalyst-meeting-hygiene",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Meeting workflow skills: agenda creation, transcript processing, end-of-day batch cleanup, and effectiveness retros — extracted from catalyst-pm",
   "author": {
     "name": "Coalesce Labs",
