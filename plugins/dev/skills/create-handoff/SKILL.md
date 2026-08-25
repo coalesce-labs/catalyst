@@ -107,16 +107,11 @@ source_research: "[[research-filename]]" # or null
 
 ## Task(s)
 
-{description of the task(s) that you were working on, along with the status of each (completed, work
-in progress, planned/discussed). If you are working on an implementation plan, make sure to call out
-which phase you are on. Reference the plan and/or research documents using wiki-links (e.g.,
-[[plan-filename]], [[research-filename]]), if applicable.}
+{description of the task(s) that you were working on, along with the status of each (completed, work in progress, planned/discussed). If you are working on an implementation plan, make sure to call out which phase you are on. Reference the plan and/or research documents using wiki-links (e.g., [[plan-filename]], [[research-filename]]), if applicable.}
 
 ## Critical References
 
-{List any critical specification documents, architectural decisions, or design docs that must be
-followed using wiki-links (e.g., [[doc-filename]]). Include only 2-3 most important references.
-Leave blank if none.}
+{List any critical specification documents, architectural decisions, or design docs that must be followed using wiki-links (e.g., [[doc-filename]]). Include only 2-3 most important references. Leave blank if none.}
 
 ## Recent changes
 
@@ -124,26 +119,19 @@ Leave blank if none.}
 
 ## Learnings
 
-{describe important things that you learned - e.g. patterns, root causes of bugs, or other important
-pieces of information someone that is picking up your work after you should know. consider listing
-explicit file paths.}
+{describe important things that you learned - e.g. patterns, root causes of bugs, or other important pieces of information someone that is picking up your work after you should know. consider listing explicit file paths.}
 
 ## Artifacts
 
-{ an exhaustive list of artifacts you produced or updated as filepaths and/or file:line references -
-e.g. paths to feature documents, implementation plans, etc that should be read in order to resume
-your work.}
+{ an exhaustive list of artifacts you produced or updated as filepaths and/or file:line references - e.g. paths to feature documents, implementation plans, etc that should be read in order to resume your work.}
 
 ## Action Items & Next Steps
 
-{ a list of action items and next steps for the next agent to accomplish based on your tasks and
-their statuses}
+{ a list of action items and next steps for the next agent to accomplish based on your tasks and their statuses}
 
 ## Other Notes
 
-{ other notes, references, or useful information - e.g. where relevant sections of the codebase are,
-where relevant documents are, or other important things you learned that you want to pass on but
-that don't fall into the above categories}
+{ other notes, references, or useful information - e.g. where relevant sections of the codebase are, where relevant documents are, or other important things you learned that you want to pass on but that don't fall into the above categories}
 ```
 
 ---
