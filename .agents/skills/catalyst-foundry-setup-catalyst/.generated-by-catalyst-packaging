@@ -2,6 +2,6 @@
   "generatedBy": "catalyst-packaging",
   "pack": "catalyst-foundry",
   "skill": "setup-catalyst",
-  "sourceFileCount": 1,
-  "sourceHash": "sha256:dbeeb94824b4afc42c85fd9af3322bbca6fd4cf2a4762128b07d3c706ef82a8f"
+  "sourceFileCount": 6,
+  "sourceHash": "sha256:7a8b2c2f11cd71e5b54a6769b3c3b69531efb4bdd4adc25c1415a12a678e3080"
 }
