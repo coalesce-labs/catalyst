@@ -82,7 +82,7 @@ Auto-discovery has already run in Prerequisites above. Check its output and foll
 
 2. **Extract ticket and update Linear state**:
 
-If a ticket is detected (from the research document's `source_ticket` frontmatter, from the command argument, or from context), update ticket status to `stateMap.planning` from config using Linearis CLI (run `linearis issues usage` for syntax). If Linearis CLI is not available, skip silently and continue planning.
+   If a ticket is detected (from the research document's `source_ticket` frontmatter, from the command argument, or from context), update ticket status to `stateMap.planning` from config using Linearis CLI (run `linearis issues usage` for syntax). If Linearis CLI is not available, skip silently and continue planning.
 
 3. **Gather context using research sub-agents** — use the same agent palette and orientation process as `/catalyst-dev:research-codebase` (that skill is the single source of truth for how codebase research works). For planning, focus agents on the specific ticket/task scope rather than broad exploration:
    - **codebase-locator** — find all files related to the ticket/task
@@ -111,15 +111,15 @@ After getting initial clarifications:
 
 3. **Spawn parallel sub-tasks for comprehensive research**:
 
-**For local codebase:**
+   **For local codebase:**
    - **codebase-locator** — find specific files
    - **codebase-analyzer** — understand implementation details
    - **codebase-pattern-finder** — find similar features to model after
 
-**For external research:**
+   **For external research:**
    - **external-research** — framework patterns and best practices from popular repos
 
-**For historical context:**
+   **For historical context:**
    - **thoughts-locator** / **thoughts-analyzer** — find past research, plans, decisions
 
 4. **Wait for ALL sub-tasks to complete** before proceeding
@@ -147,7 +147,7 @@ After structure approval:
    REPO_NAME=$(basename "$(git rev-parse --show-toplevel)")
    ```
 
-**IMPORTANT: Document Storage Rules**
+   **IMPORTANT: Document Storage Rules**
    - ALWAYS write to `thoughts/shared/plans/`
    - NEVER write to `thoughts/searchable/` (read-only search index)
 
@@ -323,7 +323,8 @@ humanlayer thoughts sync
 
 6. **After plan approval**, provide implementation command:
 
-**Use `--team` when:** 3+ parallel phases, distinct domains, non-overlapping files, 10+ files **Use standard mode when:** sequential phases, same directory, <10 files, tightly coupled
+   **Use `--team` when:** 3+ parallel phases, distinct domains, non-overlapping files, 10+ files
+   **Use standard mode when:** sequential phases, same directory, <10 files, tightly coupled
 
    ```
    ## Ready to Implement
