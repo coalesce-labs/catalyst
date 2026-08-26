@@ -46,6 +46,24 @@ name: publish-skills
 #       release runs must never run together — with cancel-in-progress:
 #       false, since every queued release still needs its own tag pushed; a
 #       cancelled run is a lost tag, not a skipped duplicate.
+#
+#       ⚠️ KNOWN LIMITATION, and it is the opposite of what the sentence
+#       above wants. `cancel-in-progress: false` protects the RUNNING job
+#       only. GitHub's concurrency queue holds exactly ONE pending run per
+#       group: "any previously pending job or workflow in the concurrency
+#       group will be canceled." So with N releases from one merge, run 1
+#       executes, runs 2..N-1 are each superseded while pending, and only
+#       run N survives to execute — the middle releases DO lose their
+#       mirrored tag, which is precisely the loss this group was added to
+#       prevent. Serializing is still right (parallel runs corrupt the
+#       branch push); the queue depth is the part GitHub does not give us.
+#       RECOVERY, and it is exact rather than approximate: re-run each
+#       cancelled run from the Actions tab. The tag step below is idempotent
+#       and fail-closed, so a re-run pushes only the missing tag and a tag
+#       already at the right SHA is a no-op. A durable fix (per-release
+#       concurrency group plus a rebase-and-retry on the branch push, so no
+#       run is ever superseded) is deliberately NOT attempted here — it is
+#       new, untestable-in-CI workflow logic and belongs in its own ticket.
 #   3b: all N releases from one merge render byte-identical pack content, so
 #       only the first resolves to `publish` — the rest are `no-change` and,
 #       under the old code, skipped the tag push entirely (it lived inside
