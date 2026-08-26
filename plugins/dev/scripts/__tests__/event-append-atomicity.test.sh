@@ -406,8 +406,9 @@ scan_silenced_appends() {
 }
 # Discover callers rather than hard-code them: a new file that calls the primitive must be
 # covered the day it lands, not the day someone remembers to add it to a list. plugins/dev,
-# not just scripts/, because the Stop hook (hooks/emit-lifecycle-event.sh) is a caller and
-# was one of the five.
+# not just scripts/, because a hooks/*.sh caller was one of the five re-silenced call sites
+# this suite was written against (the emit-lifecycle-event.sh Stop hook — removed in CTL-2234,
+# but hooks/ can still gain other callers of the primitive, so the broad scan stays).
 PLUGIN_DIR="$(dirname "$SCRIPTS_DIR")"
 CALLER_FILES=()
 while IFS= read -r f; do
@@ -432,9 +433,9 @@ printf 'canonical_jsonl_append "$d" "$l" 2>/dev/null || true\n' > "$D/silenced-s
   printf '  "$(jq -nc --arg t "$ts" %s 2>/dev/null)" || true\n' "'{ts:\$t}'"; } > "$D/ok-inner-jq.sh"
 [[ -z "$(scan_silenced_appends "$D/ok-inner-jq.sh")" ]] \
   || fail "the scan flags a legitimate inner jq redirect — it would force callers to un-mute jq noise"
-# (c) the multi-line TRAILING mute — the emit-lifecycle-event.sh shape, the one of the five
-#     that a line-oriented grep misses. If this decoy is not reported, the scan is only
-#     covering shape (a) and shape (b)'s file could hide a real mute.
+# (c) the multi-line TRAILING mute — the shape the former emit-lifecycle-event.sh call site
+#     had, the one of the five that a line-oriented grep misses. If this decoy is not
+#     reported, the scan is only covering shape (a) and shape (b)'s file could hide a real mute.
 { printf 'canonical_jsonl_append "$d" \\\n'
   printf '  "$(jq -nc --arg t "$ts" %s 2>/dev/null)" 2>/dev/null || true\n' "'{ts:\$t}'"; } > "$D/silenced-trailing.sh"
 [[ -n "$(scan_silenced_appends "$D/silenced-trailing.sh")" ]] \

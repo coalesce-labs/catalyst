@@ -15,27 +15,9 @@ export const collections = {
       },
       {
         provider: "keep-a-changelog",
-        base: "changelog/catalyst-pm",
-        changelog: "../plugins/playground/pm/CHANGELOG.md",
-        title: "Catalyst PM — Change Log",
-      },
-      {
-        provider: "keep-a-changelog",
         base: "changelog/catalyst-meta",
         changelog: "../plugins/meta/CHANGELOG.md",
         title: "Catalyst Meta — Change Log",
-      },
-      {
-        provider: "keep-a-changelog",
-        base: "changelog/catalyst-analytics",
-        changelog: "../plugins/playground/analytics/CHANGELOG.md",
-        title: "Catalyst Analytics — Change Log",
-      },
-      {
-        provider: "keep-a-changelog",
-        base: "changelog/catalyst-debugging",
-        changelog: "../plugins/playground/debugging/CHANGELOG.md",
-        title: "Catalyst Debugging — Change Log",
       },
     ]),
   }),

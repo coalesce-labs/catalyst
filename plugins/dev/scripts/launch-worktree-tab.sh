@@ -10,7 +10,7 @@
 #
 # Examples:
 #   launch-worktree-tab.sh --project catalyst pm main
-#   launch-worktree-tab.sh --project catalyst --prompt-file /path/to/pm-kickoff.md pm main
+#   launch-worktree-tab.sh --project catalyst --prompt-file /path/to/kickoff.md pm main
 #   launch-worktree-tab.sh --project catalyst --prompt '/catalyst-legacy:oneshot CTL-123' CTL-123 main
 #   launch-worktree-tab.sh --project catalyst CTL-64 main fix-auth
 #   launch-worktree-tab.sh ADV-230 main                  # --project omitted

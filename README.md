@@ -17,24 +17,12 @@ Catalyst integrates with your development tools through both **CLI-based** (toke
 
 - **Linear** - Issue tracking, sprint planning, ticket lifecycle (CLI via [Linearis](https://www.npmjs.com/package/linearis))
   - `catalyst-dev`: Core research agents and workflow commands
-  - `catalyst-pm`: Advanced PM workflows (PRDs, strategy, priorities)
   - `catalyst-pm-ops`: Operational PM workflows (cycle analysis, milestone tracking, backlog grooming, cadence, comms)
 
 ### Version Control & Code Hosting
 
 - **GitHub** - Pull requests, code review, repository management (CLI via `gh`)
   - `catalyst-dev`: PR creation, branch management, worktree workflows
-
-### Error Monitoring & Debugging
-
-- **Sentry** - Production error monitoring, stack traces, root cause analysis (MCP + CLI)
-  - `catalyst-debugging`: Sentry MCP integration (~20k tokens when enabled)
-  - Supports single-project and multi-project configurations
-
-### Product Analytics
-
-- **PostHog** - User behavior, conversion funnels, feature analytics (MCP)
-  - `catalyst-analytics`: PostHog MCP integration (~40k tokens when enabled)
 
 ### Documentation & Code Search
 
@@ -53,15 +41,13 @@ Catalyst integrates with your development tools through both **CLI-based** (toke
 **Why CLI + lightweight MCP?** Most development sessions don't need heavy integrations:
 
 - Start with `catalyst-dev` (~3.5k tokens): Core workflow + Linear + GitHub
-- Enable `catalyst-analytics` when analyzing user behavior (~+40k tokens)
-- Enable `catalyst-debugging` when investigating production errors (~+20k tokens)
-- Disable when done to free context for code and conversation
+- Disable optional plugins when done to free context for code and conversation
 
 This keeps your typical session lean while having powerful tools available when needed.
 
 ## What's Inside
 
-**Catalyst** is an 8-plugin system for Claude Code focused on **token efficiency**, **session-aware MCP management**, and **persistent context** through parallel agent research, structured handoffs, and shared memory systems.
+**Catalyst** is a 5-plugin system for Claude Code focused on **token efficiency**, **session-aware MCP management**, and **persistent context** through parallel agent research, structured handoffs, and shared memory systems.
 
 **catalyst-dev** (Core - Always enabled)
 
@@ -73,45 +59,10 @@ This keeps your typical session lean while having powerful tools available when 
 - Handoff system for context persistence
 - ~3.5k context (lightweight MCP: Context7)
 
-**catalyst-pm** (Optional - Enable for product strategy)
+**catalyst-pm-ops** (Optional - Enable for Linear backlog grooming)
 
-- 12 skills for product strategy (PRDs, north star, prioritization, and release planning)
-- 7 sub-agents forming a review panel (engineering, design, executive, legal, UX, customer voice)
-- Research-first architecture (Haiku for data collection, Sonnet/Opus for analysis)
-- PRD workflows, north star definition, strategy sprints, expansion planning
-
-**catalyst-pm-ops** (Optional - Enable for day-to-day PM operations)
-
-- 12 skills for Linear/GitHub project-management mechanics
-- 4 specialized agents: cycle-analyzer, milestone-analyzer, backlog-analyzer, github-linear-analyzer
-- Cycle health, milestone tracking, backlog grooming, PR↔issue sync
-- Daily/weekly cadence, status updates, Slack drafting
-
-**catalyst-meeting-hygiene** (Optional - Enable for meeting workflows)
-
-- 4 skills for meeting lifecycle management
-- Agenda creation, transcript-to-action-items, end-of-day batch cleanup, effectiveness retros
-
-**catalyst-discovery** (Optional - Enable for user research and metrics)
-
-- 14 skills for understanding users and validating hypotheses
-- User interviews, research synthesis, journey maps, competitor analysis
-- Metrics framework (STEDII), activation/retention analysis, experiment planning
-- Prototyping via Artifacts, Lovable, v0, or Bolt
-
-**catalyst-analytics** (Optional - Enable when needed)
-
-- PostHog MCP integration (~40k context)
-- Product analytics and user behavior analysis
-- Conversion funnels and cohort analysis
-- 3 specialized analytics skills
-
-**catalyst-debugging** (Optional - Enable when needed)
-
-- Sentry MCP integration (~20k context)
-- Production error monitoring and debugging
-- Stack trace analysis and root cause detection
-- 3 specialized debugging skills
+- 1 skill: `groom-backlog` — orphan / stale / duplicate ticket detection
+- 1 specialized agent: `catalyst-pm-ops:backlog-analyzer`
 
 **catalyst-meta** (Optional - For advanced users)
 
@@ -208,23 +159,8 @@ Alternatively, install plugins manually via Claude Code plugin system:
 # Install core workflow (required)
 /plugin install catalyst-dev
 
-# Optional: Install PM plugin (strategy, PRDs, prioritization)
-/plugin install catalyst-pm
-
 # Optional: Install PM ops plugin (cycle/backlog/cadence operations)
 /plugin install catalyst-pm-ops
-
-# Optional: Install meeting hygiene plugin (agendas, notes, cleanup)
-/plugin install catalyst-meeting-hygiene
-
-# Optional: Install discovery plugin (user research, metrics, prototyping)
-/plugin install catalyst-discovery
-
-# Optional: Install analytics plugin (if you use PostHog)
-/plugin install catalyst-analytics
-
-# Optional: Install debugging plugin (if you use Sentry)
-/plugin install catalyst-debugging
 
 # Optional: Install meta plugin (workflow discovery)
 /plugin install catalyst-meta
@@ -235,23 +171,14 @@ Alternatively, install plugins manually via Claude Code plugin system:
 Plugins automatically load/unload MCPs when enabled/disabled:
 
 ```bash
-# Enable PM tools for sprint planning and cycle reviews
-/plugin enable catalyst-pm  # Lightweight CLI-based, minimal context
-
-# Enable analytics when analyzing user behavior
-/plugin enable catalyst-analytics  # Loads PostHog MCP (+40k context)
+# Enable PM ops tools for sprint planning and cycle reviews
+/plugin enable catalyst-pm-ops  # Lightweight CLI-based, minimal context
 
 # Disable when done to free context
-/plugin disable catalyst-analytics  # Unloads PostHog MCP (-40k context)
-
-# Enable debugging for incident response
-/plugin enable catalyst-debugging  # Loads Sentry MCP (+20k context)
-
-# Can enable multiple plugins simultaneously
-/plugin enable catalyst-pm catalyst-analytics catalyst-debugging
+/plugin disable catalyst-pm-ops
 ```
 
-**Why this matters**: Most development sessions don't need analytics or debugging MCPs. Starting with just `catalyst-dev` keeps your context at ~3.5k tokens instead of ~65k, leaving more room for code and conversation.
+**Why this matters**: Starting with just `catalyst-dev` keeps your context at ~3.5k tokens, leaving more room for code and conversation.
 
 ### Updating Plugins
 
@@ -381,8 +308,6 @@ When possible, uses CLIs instead of MCPs for token efficiency:
 **MCP Tools** (bundled with plugins):
 
 - Context7 - Built into `catalyst-dev` (~3.5k tokens)
-- PostHog - Built into `catalyst-analytics` (~40k tokens when enabled)
-- Sentry - Built into `catalyst-debugging` (~20k tokens when enabled)
 
 Run the prerequisite check:
 
@@ -418,21 +343,13 @@ Monitors GitHub Actions workflow runs triggered by your merge.
 
 Refreshes the context engineering adoption dashboard once per day. Alternative to the GitHub Actions cron — useful in long-running sessions.
 
-### Cycle Health Monitoring
+### Backlog Grooming
 
 ```
-/loop 4h /analyze-cycle
+/loop 1d /catalyst-pm-ops:groom-backlog
 ```
 
-Generates a fresh cycle health report every 4 hours during a sprint.
-
-### PR/Linear Sync
-
-```
-/loop 2h /sync-prs
-```
-
-Checks for orphaned PRs and out-of-sync Linear issues every 2 hours.
+Flags orphaned, stale, and duplicate Linear tickets once per day.
 
 **Note**: `/loop` is session-scoped (max ~3 days). For persistent scheduling, use GitHub Actions cron. `/loop` is best for active monitoring during development sessions.
 

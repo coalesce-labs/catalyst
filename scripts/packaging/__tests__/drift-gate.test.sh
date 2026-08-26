@@ -127,5 +127,44 @@ rm -rf "$STRAY_DIR"
 git -C "$ROOT" clean -qfd
 
 echo ""
+echo "=== CTL-2215 Phase 2: agentskills.io conformance catches a spec violation planted in the SOURCE skill (scratch copy) ==="
+# setup-catalyst is one of the two real skills eligible for the agentsSkills
+# target — mutating its SOURCE frontmatter (never the generated
+# .agents/skills/ output) exercises the conformance command the same way a
+# real PR regression would: the emitter derives the emitted description from
+# this file, so stripping it here produces description: "" downstream.
+# disable-model-invocation: true is kept, or the unrelated invocation-parity
+# hard-error (checkInvocationParity) would fire first and mask what this
+# test is actually checking.
+SETUP_CATALYST_SKILL="$ROOT/plugins/foundry/skills/setup-catalyst/SKILL.md"
+cp "$SETUP_CATALYST_SKILL" "$SETUP_CATALYST_SKILL.orig"
+cat >"$SETUP_CATALYST_SKILL" <<'EOF'
+---
+name: setup-catalyst
+disable-model-invocation: true
+---
+
+# Setup Catalyst (drift-gate test mutation: description stripped)
+EOF
+
+CONFORMANCE_LOG="$SCRATCH/conformance.log"
+if (cd "$ROOT" && bun scripts/packaging/cli.mjs conformance --target agentsSkills) >"$CONFORMANCE_LOG" 2>&1; then
+	fail "conformance should exit non-zero once a spec-required field is missing" "$(cat "$CONFORMANCE_LOG")"
+else
+	if grep -q 'verdict=violations' "$CONFORMANCE_LOG" && grep -q 'description' "$CONFORMANCE_LOG"; then
+		pass "conformance exits non-zero and names the missing description field"
+	else
+		fail "conformance should report verdict=violations naming the description field" "$(cat "$CONFORMANCE_LOG")"
+	fi
+fi
+
+mv "$SETUP_CATALYST_SKILL.orig" "$SETUP_CATALYST_SKILL"
+if (cd "$ROOT" && bun scripts/packaging/cli.mjs conformance --target agentsSkills) >"$CONFORMANCE_LOG" 2>&1; then
+	pass "reverting the mutation restores a clean conformance verdict"
+else
+	fail "conformance should pass again after reverting the mutation" "$(cat "$CONFORMANCE_LOG")"
+fi
+
+echo ""
 echo "=== $PASSES passed, $FAILURES failed ==="
 [[ $FAILURES -eq 0 ]]

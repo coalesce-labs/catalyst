@@ -29,9 +29,9 @@ function realSkillCountAcrossRepo() {
 }
 
 describe("renderAllPacks — cli.mjs's render command core", () => {
-  test("renders all 10 plugins, all valid, with a skill total matching an independent filesystem count", () => {
+  test("renders all 5 plugins, all valid, with a skill total matching an independent filesystem count", () => {
     const results = renderAllPacks(repoRoot);
-    expect(results.length).toBe(10);
+    expect(results.length).toBe(5);
     for (const { pluginRelPath, validation } of results) {
       expect(validation.errors).toEqual([]);
       expect(validation.ok).toBe(true);

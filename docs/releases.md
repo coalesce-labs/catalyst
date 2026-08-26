@@ -25,6 +25,16 @@
 
 The `version` field in `plugin.json` is the auto-update gate: at session start Claude Code fetches the marketplace repo, and if `plugin.json.version` at the new HEAD differs from the installed version, it refreshes the cache. Same version → skipped even if code changed.
 
+`.codex-plugin/` and `.agents/plugins/` are **generated, gitattributes-marked** trees — never hand-edited — regenerated with `bun scripts/packaging/cli.mjs render --target <claude|codex|agentsSkills> --write`.
+
+## Portable Skills Pack Publication (CTL-2215)
+
+On a published GitHub Release, `.github/workflows/publish-skills.yml` regenerates the `agentsSkills` target, grades it against the agentskills.io/`skills`-CLI contract (`bun scripts/packaging/cli.mjs conformance --target agentsSkills`), and — if it changed — pushes the result into the sibling repo **`coalesce-labs/catalyst-skills`**, under `skills/`, as an ordinary accumulating commit on `main` (never a force-push, never a history rewrite). That repo is **generated and must never be hand-edited** — its own README says so in its first line. A byte-identical regeneration reports `no-change` and pushes nothing; a missing `SKILLS_PUBLISH_TOKEN` or an unresolvable target repo fails the job loudly rather than skipping. Since CTL-2220 removed release-please (above), nothing creates GitHub Releases automatically anymore — publishing now requires either a manually-created Release (`gh release create`) or the workflow's `workflow_dispatch` trigger (with a `dry_run` input, default `true`).
+
+Each publish also pushes a lightweight tag mirroring the source release tag, so a consumer can pin by tag or by commit SHA — a `workflow_dispatch` run has no release tag to mirror and skips that step. **The pack SHA (the commit this workflow pushes to `coalesce-labs/catalyst-skills`) is the pinning unit** downstream consumers record — e.g. catalyst-cloud's runner-container image label (CTC-977/CTC-1034) — so a container build can always trace back to the exact source commit that produced the skills it shipped. Install with `npx skills add coalesce-labs/catalyst-skills`.
+
+The publish DECISION (no-change / publish / inconclusive) is a pure, unit-tested function (`scripts/packaging/publish/plan-publish.mjs`); git mechanics (clone/commit/push/tag) live in the workflow itself.
+
 ## Commit Conventions
 
 Conventional-commit messages are still expected — they're what `scripts/check-plugin-version.sh` looks for as its pass-without-a-manual-bump escape hatch (see above), and they keep history readable. See `AGENTS.md` → "Commit Conventions" for the format and valid scopes.

@@ -20,6 +20,7 @@ You own one project or initiative until it closes: for each ready ticket you lau
 | creating or updating the status doc | `references/status-doc.md` |
 | replying to anyone, or picking a thread | `ask/references/threading.md` (canonical), then `references/threads.md` |
 | launching a relay-ticket session, reading its report, or holding a ticket back | `references/dispatch.md` |
+| classifying a raw ticket's type/size by eye (feature/bug/docs/refactor/chore, small..epic) | `references/classify-and-estimate.md` |
 | a ticket has not moved, or a worker went quiet | `references/stalls.md` |
 | setting up a NEW project or initiative | `references/initiative-setup.md` |
 | the replica might be stale, or this host may have no cloud mirror | `references/cloud-detection.md` |

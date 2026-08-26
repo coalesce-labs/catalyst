@@ -37,12 +37,7 @@ const REAL_PLUGIN_IDS = Object.freeze([
   "catalyst-foundry",
   "catalyst-legacy",
   "catalyst-meta",
-  "catalyst-analytics",
-  "catalyst-debugging",
-  "catalyst-discovery",
-  "catalyst-meeting-hygiene",
   "catalyst-pm-ops",
-  "catalyst-pm",
 ]);
 
 const SKILL_IDENTIFIER_PATTERN = /\bcatalyst-[a-z-]+\/[a-z][a-z0-9-]*\b/g;

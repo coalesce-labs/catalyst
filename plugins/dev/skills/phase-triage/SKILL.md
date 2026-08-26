@@ -220,8 +220,8 @@ ACRONYMS_EXPANDED="$(jq -nc --arg t "$COMBINED" '
 #     FALSE blockers that deadlocked tickets against work they do not depend on.
 #     Real prerequisites are first-class, captured two ways, NEVER by scraping:
 #       1. The ticket AUTHOR sets formal Linear `blocked_by` LINKS at creation time
-#          (see the gherkin-ticket / linear / create-tickets skills). Those are
-#          already durable Linear relations the scheduler honors directly.
+#          (see the gherkin-ticket / linear skills). Those are already durable
+#          Linear relations the scheduler honors directly.
 #       2. An Opus-mode triage pass acts as a SECOND PAIR OF EYES — it examines the
 #          backlog and records only GENUINE missed blockers (see "2c" below).
 #     The bash fallback therefore emits an empty list (safe: no false blocks). It
@@ -369,8 +369,8 @@ exponential / linear — whatever `issueEstimation.type` the team has set in Lin
 **Step 1 (preferred): reference-class lookup.** Run:
 
 ```bash
-bun "${REPO_ROOT}/plugins/playground/pm/scripts/estimate/reference-class-lookup.ts" \
-  --corpus "${REPO_ROOT}/plugins/playground/pm/scripts/estimate/reference-class-corpus.json" \
+bun "${REPO_ROOT}/plugins/dev/scripts/estimate/reference-class-lookup.ts" \
+  --corpus "${REPO_ROOT}/plugins/dev/scripts/estimate/reference-class-corpus.json" \
   --title "<ticket title>" --json
 ```
 
@@ -417,10 +417,9 @@ list by design (CTL-838 killed the old `2d` regex scrape). Real prerequisites co
 and your job here is the second one:
 
 1. **Formal author links (primary).** The agent that authored the ticket records its real
-   prerequisites as Linear `blocked_by` LINKS at creation time (the gherkin-ticket / linear /
-   create-tickets skills now instruct this). Those are already durable Linear relations and the
-   admission gate honors them directly from the live graph — triage does **not** need to re-derive
-   or re-emit them.
+   prerequisites as Linear `blocked_by` LINKS at creation time (the gherkin-ticket / linear skills
+   now instruct this). Those are already durable Linear relations and the admission gate honors
+   them directly from the live graph — triage does **not** need to re-derive or re-emit them.
 
 2. **Triage as a SECOND PAIR OF EYES (your job).** You are NOT a parser. Do **not** add a dependency
    because an id appears in the prose. Instead: read the ticket's intent, then **examine the
