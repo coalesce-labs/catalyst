@@ -62,7 +62,7 @@ This keeps your typical session lean while having powerful tools available when 
 **catalyst-pm-ops** (Optional - Enable for Linear backlog grooming)
 
 - 1 skill: `groom-backlog` — orphan / stale / duplicate ticket detection
-- 1 specialized agent: backlog-analyzer
+- 1 specialized agent: `catalyst-pm-ops:backlog-analyzer`
 
 **catalyst-meta** (Optional - For advanced users)
 
@@ -346,7 +346,7 @@ Refreshes the context engineering adoption dashboard once per day. Alternative t
 ### Backlog Grooming
 
 ```
-/loop 1d /groom-backlog
+/loop 1d /catalyst-pm-ops:groom-backlog
 ```
 
 Flags orphaned, stale, and duplicate Linear tickets once per day.
