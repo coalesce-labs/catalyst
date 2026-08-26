@@ -132,29 +132,6 @@
       ]
     },
     {
-      "name": "catalyst-discovery",
-      "source": "./plugins/playground/discovery",
-      "description": "User research, metrics, experimentation, and prototyping skills \u2014 upstream discovery work for product teams. Enable when running user research, defining metrics, or building prototypes.",
-      "author": {
-        "name": "Coalesce Labs",
-        "email": "hello@coalesce.dev"
-      },
-      "homepage": "https://github.com/coalesce-labs/catalyst",
-      "repository": "https://github.com/coalesce-labs/catalyst.git",
-      "license": "MIT",
-      "category": "productivity",
-      "keywords": [
-        "user-research",
-        "metrics",
-        "experimentation",
-        "prototyping",
-        "discovery",
-        "jtbd",
-        "analytics",
-        "pm"
-      ]
-    },
-    {
       "name": "catalyst-legacy",
       "source": "./plugins/legacy",
       "description": "Pre-phase-agent (wave-based) orchestration workflow preserved as a documented fallback: oneshot, orchestrate, god, setup-orchestrate. Superseded by catalyst-dev's execution-core/phase-agent pipeline.",

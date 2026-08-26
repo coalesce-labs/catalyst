@@ -84,13 +84,6 @@ This keeps your typical session lean while having powerful tools available when 
 - 4 skills for meeting lifecycle management
 - Agenda creation, transcript-to-action-items, end-of-day batch cleanup, effectiveness retros
 
-**catalyst-discovery** (Optional - Enable for user research and metrics)
-
-- 14 skills for understanding users and validating hypotheses
-- User interviews, research synthesis, journey maps, competitor analysis
-- Metrics framework (STEDII), activation/retention analysis, experiment planning
-- Prototyping via Artifacts, Lovable, v0, or Bolt
-
 **catalyst-analytics** (Optional - Enable when needed)
 
 - PostHog MCP integration (~40k context)
@@ -205,9 +198,6 @@ Alternatively, install plugins manually via Claude Code plugin system:
 
 # Optional: Install meeting hygiene plugin (agendas, notes, cleanup)
 /plugin install catalyst-meeting-hygiene
-
-# Optional: Install discovery plugin (user research, metrics, prototyping)
-/plugin install catalyst-discovery
 
 # Optional: Install analytics plugin (if you use PostHog)
 /plugin install catalyst-analytics
