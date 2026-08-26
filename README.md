@@ -68,10 +68,8 @@ This keeps your typical session lean while having powerful tools available when 
 
 **catalyst-meta** (Optional - For advanced users)
 
-- 6 skills for workflow management
-- Discover workflows from community repos
-- Import and adapt patterns
-- Create new workflows
+- 3 skills for workflow management
+- Frontmatter validation across skills and agents
 - Plugin health auditing and directory reorganization
 
 ## Quick Setup (5 Minutes)
