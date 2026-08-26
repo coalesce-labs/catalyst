@@ -1,6 +1,14 @@
 #!/bin/bash
 # Check if plugin files were modified but version not bumped
 # Can be used as a pre-commit hook or CI check
+#
+# CTL-2220: release-please (the tool that used to auto-bump versions on
+# merge) has been removed from this repo. There is currently no automated
+# replacement — see docs/releases.md "Versioning (post release-please)".
+# This gate still enforces the conventional-commit format as an escape
+# hatch: a plugin change with no manual version bump passes as long as the
+# branch's commits are conventional-commit-shaped. It does not bump, and
+# nothing downstream of it bumps, the version for you.
 
 set -e
 
@@ -21,13 +29,19 @@ if [[ -z "$CHANGED_FILES" ]]; then
   exit 0
 fi
 
-# Check every release package from the same config release-please uses. This
-# keeps playground paths and newly added plugins covered without a second,
+# Check every plugin listed in the shared plugin roster manifest. This keeps
+# playground paths and newly added plugins covered without a second,
 # silently drifting hardcoded roster.
+#
+# NOTE: `release-please-config.json` keeps its name for now purely because
+# scripts/packaging/cli.mjs (owned by the in-flight CTL-1461 packaging work,
+# out of scope for CTL-2220) hardcodes that path as its plugin-order source.
+# It is no longer release-please's config — release-please itself is gone —
+# just a `{"packages": {"<plugin-dir>": {"component": "<name>"}}}` roster.
 REPO_ROOT=$(git rev-parse --show-toplevel)
 RELEASE_CONFIG="$REPO_ROOT/release-please-config.json"
 if [[ ! -f "$RELEASE_CONFIG" ]]; then
-  echo "❌ release-please-config.json not found"
+  echo "❌ release-please-config.json (plugin roster manifest) not found"
   exit 1
 fi
 PLUGIN_DIRS=()
@@ -41,7 +55,8 @@ for PLUGIN_DIR in "${PLUGIN_DIRS[@]}"; do
     continue
   fi
 
-  # Check if any files in this plugin changed (excluding Release Please managed files)
+  # Check if any files in this plugin changed (excluding the changelog/version
+  # record files a version bump itself would touch)
   PLUGIN_CHANGED=$(echo "$CHANGED_FILES" | grep "^$PLUGIN_DIR/" | grep -v "CHANGELOG.md$" | grep -v "version.txt$" || true)
 
   if [[ -z "$PLUGIN_CHANGED" ]]; then
@@ -50,9 +65,9 @@ for PLUGIN_DIR in "${PLUGIN_DIRS[@]}"; do
 
   # Check if plugin.json version was also changed — CTL-1463: .codex-plugin/
   # plugin.json is an equally valid bump target now that it carries a second
-  # extra-files-managed version, so a Codex-only manifest change (e.g. a
-  # release-please bump, or a manual regen after CTL-1461 lands) must not
-  # mis-fire this gate as "plugin files changed but version not bumped".
+  # version field, so a Codex-only manifest change (e.g. a manual version
+  # bump, or a regen after CTL-1461 lands) must not mis-fire this gate as
+  # "plugin files changed but version not bumped".
   VERSION_CHANGED=$(echo "$CHANGED_FILES" | grep -E "^$PLUGIN_DIR/\.(claude|codex)-plugin/plugin\.json$" || true)
 
   # If plugin files changed but version didn't, flag it
@@ -63,9 +78,12 @@ done
 
 # Report findings
 if [[ ${#NEEDS_VERSION_BUMP[@]} -gt 0 ]]; then
-  # Release Please manages versions via conventional commits.
-  # Check if the commits on this branch use conventional commit format,
-  # which means Release Please will handle the version bump automatically.
+  # No automated version-bump mechanism runs after this gate (CTL-2220
+  # removed release-please and nothing has replaced it). The conventional-
+  # commit check below is only an escape hatch: it decides whether THIS gate
+  # blocks the PR, not whether some later step will bump the version for
+  # you. If a plugin actually needs a new version, bump version.txt and both
+  # plugin.json files by hand in this PR.
   CONVENTIONAL_COMMITS=false
   if [[ -n "${BASE_REF:-}" ]]; then
     # Check commit messages for conventional commit prefixes
@@ -77,7 +95,7 @@ if [[ ${#NEEDS_VERSION_BUMP[@]} -gt 0 ]]; then
 
   if [[ "$CONVENTIONAL_COMMITS" == true ]]; then
     echo ""
-    echo "ℹ️  Plugin files changed — version bump will be handled by Release Please"
+    echo "ℹ️  Plugin files changed without a version bump"
     echo ""
     echo "The following plugins have modifications:"
     for plugin_dir in "${NEEDS_VERSION_BUMP[@]}"; do
@@ -86,7 +104,9 @@ if [[ ${#NEEDS_VERSION_BUMP[@]} -gt 0 ]]; then
       echo "$CHANGED_FILES" | grep "^$plugin_dir/" | sed 's/^/     - /'
     done
     echo ""
-    echo "✅ Conventional commits detected — Release Please will bump versions on merge"
+    echo "✅ Conventional commit message(s) detected — passing without a version bump."
+    echo "   Nothing bumps the version automatically (release-please was removed,"
+    echo "   CTL-2220); if this change should ship a new version, bump it by hand."
     exit 0
   fi
 
@@ -102,10 +122,11 @@ if [[ ${#NEEDS_VERSION_BUMP[@]} -gt 0 ]]; then
   echo ""
   echo "💡 Recommended action:"
   echo ""
-  echo "   Use conventional commit messages so Release Please can auto-bump versions:"
-  echo "   - feat(scope)!: breaking change  → major bump"
-  echo "   - feat(scope): new feature       → minor bump"
-  echo "   - fix(scope): bug fix            → patch bump"
+  echo "   Either bump the version by hand (version.txt + both plugin.json files),"
+  echo "   or use a conventional commit message so this gate passes without one:"
+  echo "   - feat(scope)!: breaking change"
+  echo "   - feat(scope): new feature"
+  echo "   - fix(scope): bug fix"
   echo ""
 
   # In CI or pre-commit mode, fail

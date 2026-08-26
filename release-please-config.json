@@ -1,197 +1,34 @@
 {
-  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
-  "separate-pull-requests": false,
-  "bootstrap-sha": "e494235",
   "packages": {
     "plugins/dev": {
-      "release-type": "simple",
-      "component": "catalyst-dev",
-      "package-name": "catalyst-dev",
-      "changelog-path": "CHANGELOG.md",
-      "include-component-in-tag": true,
-      "extra-files": [
-        {
-          "type": "json",
-          "path": ".claude-plugin/plugin.json",
-          "jsonpath": "$.version"
-        },
-        {
-          "type": "json",
-          "path": ".codex-plugin/plugin.json",
-          "jsonpath": "$.version"
-        }
-      ]
+      "component": "catalyst-dev"
     },
     "plugins/playground/pm": {
-      "release-type": "simple",
-      "component": "catalyst-pm",
-      "package-name": "catalyst-pm",
-      "changelog-path": "CHANGELOG.md",
-      "include-component-in-tag": true,
-      "extra-files": [
-        {
-          "type": "json",
-          "path": ".claude-plugin/plugin.json",
-          "jsonpath": "$.version"
-        },
-        {
-          "type": "json",
-          "path": ".codex-plugin/plugin.json",
-          "jsonpath": "$.version"
-        }
-      ]
+      "component": "catalyst-pm"
     },
     "plugins/playground/analytics": {
-      "release-type": "simple",
-      "component": "catalyst-analytics",
-      "package-name": "catalyst-analytics",
-      "changelog-path": "CHANGELOG.md",
-      "include-component-in-tag": true,
-      "extra-files": [
-        {
-          "type": "json",
-          "path": ".claude-plugin/plugin.json",
-          "jsonpath": "$.version"
-        },
-        {
-          "type": "json",
-          "path": ".codex-plugin/plugin.json",
-          "jsonpath": "$.version"
-        }
-      ]
+      "component": "catalyst-analytics"
     },
     "plugins/playground/debugging": {
-      "release-type": "simple",
-      "component": "catalyst-debugging",
-      "package-name": "catalyst-debugging",
-      "changelog-path": "CHANGELOG.md",
-      "include-component-in-tag": true,
-      "extra-files": [
-        {
-          "type": "json",
-          "path": ".claude-plugin/plugin.json",
-          "jsonpath": "$.version"
-        },
-        {
-          "type": "json",
-          "path": ".codex-plugin/plugin.json",
-          "jsonpath": "$.version"
-        }
-      ]
+      "component": "catalyst-debugging"
     },
     "plugins/meta": {
-      "release-type": "simple",
-      "component": "catalyst-meta",
-      "package-name": "catalyst-meta",
-      "changelog-path": "CHANGELOG.md",
-      "include-component-in-tag": true,
-      "extra-files": [
-        {
-          "type": "json",
-          "path": ".claude-plugin/plugin.json",
-          "jsonpath": "$.version"
-        },
-        {
-          "type": "json",
-          "path": ".codex-plugin/plugin.json",
-          "jsonpath": "$.version"
-        }
-      ]
+      "component": "catalyst-meta"
     },
     "plugins/playground/pm-ops": {
-      "release-type": "simple",
-      "component": "catalyst-pm-ops",
-      "package-name": "catalyst-pm-ops",
-      "changelog-path": "CHANGELOG.md",
-      "include-component-in-tag": true,
-      "extra-files": [
-        {
-          "type": "json",
-          "path": ".claude-plugin/plugin.json",
-          "jsonpath": "$.version"
-        },
-        {
-          "type": "json",
-          "path": ".codex-plugin/plugin.json",
-          "jsonpath": "$.version"
-        }
-      ]
+      "component": "catalyst-pm-ops"
     },
     "plugins/playground/meeting-hygiene": {
-      "release-type": "simple",
-      "component": "catalyst-meeting-hygiene",
-      "package-name": "catalyst-meeting-hygiene",
-      "changelog-path": "CHANGELOG.md",
-      "include-component-in-tag": true,
-      "extra-files": [
-        {
-          "type": "json",
-          "path": ".claude-plugin/plugin.json",
-          "jsonpath": "$.version"
-        },
-        {
-          "type": "json",
-          "path": ".codex-plugin/plugin.json",
-          "jsonpath": "$.version"
-        }
-      ]
+      "component": "catalyst-meeting-hygiene"
     },
     "plugins/playground/discovery": {
-      "release-type": "simple",
-      "component": "catalyst-discovery",
-      "package-name": "catalyst-discovery",
-      "changelog-path": "CHANGELOG.md",
-      "include-component-in-tag": true,
-      "extra-files": [
-        {
-          "type": "json",
-          "path": ".claude-plugin/plugin.json",
-          "jsonpath": "$.version"
-        },
-        {
-          "type": "json",
-          "path": ".codex-plugin/plugin.json",
-          "jsonpath": "$.version"
-        }
-      ]
+      "component": "catalyst-discovery"
     },
     "plugins/legacy": {
-      "release-type": "simple",
-      "component": "catalyst-legacy",
-      "package-name": "catalyst-legacy",
-      "changelog-path": "CHANGELOG.md",
-      "include-component-in-tag": true,
-      "extra-files": [
-        {
-          "type": "json",
-          "path": ".claude-plugin/plugin.json",
-          "jsonpath": "$.version"
-        },
-        {
-          "type": "json",
-          "path": ".codex-plugin/plugin.json",
-          "jsonpath": "$.version"
-        }
-      ]
+      "component": "catalyst-legacy"
     },
     "plugins/foundry": {
-      "release-type": "simple",
-      "component": "catalyst-foundry",
-      "package-name": "catalyst-foundry",
-      "changelog-path": "CHANGELOG.md",
-      "include-component-in-tag": true,
-      "extra-files": [
-        {
-          "type": "json",
-          "path": ".claude-plugin/plugin.json",
-          "jsonpath": "$.version"
-        },
-        {
-          "type": "json",
-          "path": ".codex-plugin/plugin.json",
-          "jsonpath": "$.version"
-        }
-      ]
+      "component": "catalyst-foundry"
     }
   }
 }

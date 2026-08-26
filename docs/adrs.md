@@ -48,6 +48,8 @@ Schema (`db-migrations/001_initial_schema.sql`): `sessions`, `session_events`, `
 
 ## ADR-009: Daily Release Cadence
 
+**Superseded (CTL-2220, 2026-08-26):** release-please and both workflows named below were removed at Ryan's direct request. No replacement versioning/changelog mechanism was specified — see `docs/releases.md` → "Versioning (post release-please)". Kept below as historical record of the design this repo ran with from adoption until removal.
+
 Cut one release/day via scheduled merge at 05:00 UTC instead of auto-merging the release-please Release PR on every push to `main` — avoids per-merge point releases and mid-wave `update-branch` rebase cascades.
 
 - `release-please.yml` opens/updates the Release PR + runs `enhance-release-notes.sh` on every push.
