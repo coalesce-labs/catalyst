@@ -3,9 +3,10 @@
 // Run: bun test scripts/packaging/__tests__/codex-emitter.test.mjs
 
 import { describe, test, expect, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   resolveCodexVersion,
@@ -13,7 +14,13 @@ import {
   buildCodexInterface,
   buildCodexCatalog,
   renderCodexCatalog,
+  renderCodexPluginJson,
 } from "../emitters/codex.mjs";
+import { readPackManifest } from "../core/pack-manifest.mjs";
+import { readExistingVersion } from "../emitters/claude.mjs";
+import { listPluginRelPaths } from "../providers/local.mjs";
+
+const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
 
 let _tmpDirs = [];
 function fixtureDir() {
@@ -236,5 +243,71 @@ describe("Codex catalog — no version field at any depth, both directions", () 
     const entries = [{ pluginRelPath: "plugins/x", packManifest: packManifest() }];
     const text = renderCodexCatalog(entries);
     expect(text.includes('"version"')).toBe(false);
+  });
+});
+
+// --- CTL-1461 Phase 3: round-trip against the REAL committed tree ----------
+// Prior coverage here used synthetic in-memory fixtures only (the research's
+// finding). This is what actually proves the drift gate has something real
+// to compare against for the Codex target, the way claude-emitter.test.mjs
+// already does for the Claude target.
+describe("codex emitter — round-trip against the real committed .codex-plugin/plugin.json (all codex-enabled plugins)", () => {
+  const codexEnabledPluginRelPaths = listPluginRelPaths(repoRoot).filter(
+    (p) => readPackManifest(repoRoot, p).distribution.codex?.enabled === true
+  );
+
+  test("at least one real plugin is codex-enabled (positive control on the filter itself)", () => {
+    expect(codexEnabledPluginRelPaths.length).toBeGreaterThan(0);
+  });
+
+  for (const pluginRelPath of codexEnabledPluginRelPaths) {
+    test(`${pluginRelPath}/.codex-plugin/plugin.json regenerates byte-identically`, () => {
+      const manifest = readPackManifest(repoRoot, pluginRelPath);
+      const claudeVersion = readExistingVersion(repoRoot, pluginRelPath);
+      const version = resolveCodexVersion({ repoRoot, pluginRelPath, claudeVersion });
+      const rendered = renderCodexPluginJson(manifest, version) + "\n";
+      const committed = readFileSync(resolve(repoRoot, pluginRelPath, ".codex-plugin/plugin.json"), "utf8");
+      expect(rendered).toBe(committed);
+    });
+  }
+
+  test("mutation control: perturbing one plugin's description produces a NON-empty diff against the real committed file", () => {
+    const pluginRelPath = codexEnabledPluginRelPaths[0];
+    const manifest = readPackManifest(repoRoot, pluginRelPath);
+    const claudeVersion = readExistingVersion(repoRoot, pluginRelPath);
+    const version = resolveCodexVersion({ repoRoot, pluginRelPath, claudeVersion });
+
+    const mutated = JSON.parse(JSON.stringify(manifest));
+    mutated.identity.description += " MUTATED";
+    const rendered = renderCodexPluginJson(mutated, version) + "\n";
+    const committed = readFileSync(resolve(repoRoot, pluginRelPath, ".codex-plugin/plugin.json"), "utf8");
+    expect(rendered).not.toBe(committed);
+  });
+});
+
+describe("codex emitter — round-trip against the real committed .agents/plugins/marketplace.json", () => {
+  function realConfigOrder() {
+    const config = JSON.parse(readFileSync(resolve(repoRoot, "release-please-config.json"), "utf8"));
+    return Object.keys(config.packages);
+  }
+
+  test("regenerates the real committed catalog byte-identically", () => {
+    const order = realConfigOrder().filter((p) => readPackManifest(repoRoot, p).distribution.codex?.enabled === true);
+    const entries = order.map((pluginRelPath) => ({ pluginRelPath, packManifest: readPackManifest(repoRoot, pluginRelPath) }));
+    const rendered = renderCodexCatalog(entries) + "\n";
+    const committed = readFileSync(resolve(repoRoot, ".agents/plugins/marketplace.json"), "utf8");
+    expect(rendered).toBe(committed);
+  });
+
+  test("mutation control: perturbing one entry's description produces a NON-empty diff against the real committed catalog", () => {
+    const order = realConfigOrder().filter((p) => readPackManifest(repoRoot, p).distribution.codex?.enabled === true);
+    const entries = order.map((pluginRelPath) => ({ pluginRelPath, packManifest: readPackManifest(repoRoot, pluginRelPath) }));
+    const mutated = JSON.parse(JSON.stringify(entries[0].packManifest));
+    mutated.identity.description += " MUTATED";
+    entries[0] = { ...entries[0], packManifest: mutated };
+
+    const rendered = renderCodexCatalog(entries) + "\n";
+    const committed = readFileSync(resolve(repoRoot, ".agents/plugins/marketplace.json"), "utf8");
+    expect(rendered).not.toBe(committed);
   });
 });
