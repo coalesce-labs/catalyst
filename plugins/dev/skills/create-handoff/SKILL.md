@@ -22,16 +22,13 @@ fi
 
 ## Configuration Note
 
-This command uses ticket references like `PROJ-123`. Replace `PROJ` with your Linear team's ticket
-prefix:
+This command uses ticket references like `PROJ-123`. Replace `PROJ` with your Linear team's ticket prefix:
 
 - Read from `.catalyst/config.json` if available
 - Otherwise use a generic format like `TICKET-XXX`
 - Examples: `ENG-123`, `FEAT-456`, `BUG-789`
 
-You are tasked with writing a handoff document to hand off your work to another agent in a new
-session. You will create a handoff document that is thorough, but also **concise**. The goal is to
-compact and summarize your context without losing any of the key details of what you're working on.
+You are tasked with writing a handoff document to hand off your work to another agent in a new session. You will create a handoff document that is thorough, but also **concise**. The goal is to compact and summarize your context without losing any of the key details of what you're working on.
 
 ## Process
 
@@ -42,11 +39,7 @@ compact and summarize your context without losing any of the key details of what
 - ALWAYS write to `thoughts/shared/` (appropriate subdirectory)
 - NEVER write to `thoughts/searchable/` — this is a read-only search index
 
-**Do NOT compose the filename yourself.** `thoughts/shared` is a *per-project symlink*: the
-same relative path resolves to a different physical subtree depending on which worktree you
-are in, and a hand-typed `HH-MM-SS` drifts between the filename, the frontmatter and the
-citation. Both produce a path you announce and the next turn cannot find (CTL-2104). Ask the
-helper instead — it stamps the time mechanically and resolves the symlink for you:
+**Do NOT compose the filename yourself.** `thoughts/shared` is a *per-project symlink*: the same relative path resolves to a different physical subtree depending on which worktree you are in, and a hand-typed `HH-MM-SS` drifts between the filename, the frontmatter and the citation. Both produce a path you announce and the next turn cannot find (CTL-2104). Ask the helper instead — it stamps the time mechanically and resolves the symlink for you:
 
 ```bash
 source "${CLAUDE_PLUGIN_ROOT}/scripts/lib/handoff-durability.sh"
@@ -59,12 +52,9 @@ HANDOFF_ABS="$(printf '%s\n' "$HANDOFF_PATHS" | sed -n '2p')"   # /Users/.../rep
 printf 'relative: %s\nabsolute: %s\n' "$HANDOFF_REL" "$HANDOFF_ABS"
 ```
 
-Capture **both** echoed lines. `$HANDOFF_ABS` is the absolute path you will cite; it is the
-one form that stays correct no matter which worktree the reader is in.
+Capture **both** echoed lines. `$HANDOFF_ABS` is the absolute path you will cite; it is the one form that stays correct no matter which worktree the reader is in.
 
-Get current git information for metadata (branch, commit, repository name) using git commands.
-Use the timestamp already embedded in `$HANDOFF_REL` for the frontmatter `date` — do not
-generate a second one.
+Get current git information for metadata (branch, commit, repository name) using git commands. Use the timestamp already embedded in `$HANDOFF_REL` for the frontmatter `date` — do not generate a second one.
 
 **Examples of what the helper returns:**
 
@@ -73,15 +63,13 @@ generate a second one.
 
 ### 2. Handoff writing.
 
-Using the above conventions, write your document **to a temp file** — `handoff_write_verified`
-installs it at `$HANDOFF_ABS` in step 3 and proves the bytes landed:
+Using the above conventions, write your document **to a temp file** — `handoff_write_verified` installs it at `$HANDOFF_ABS` in step 3 and proves the bytes landed:
 
 ```bash
 HANDOFF_TMP="$(mktemp -t handoff-XXXXXX)"   # Write your document content here.
 ```
 
-Use the following YAML frontmatter pattern. Use the metadata gathered in step 1, Structure the document with YAML
-frontmatter followed by content:
+Use the following YAML frontmatter pattern. Use the metadata gathered in step 1, Structure the document with YAML frontmatter followed by content:
 
 Use the following template structure:
 
@@ -138,8 +126,7 @@ source_research: "[[research-filename]]" # or null
 
 ### 3. Install, sync, and report the durability verdict
 
-Install the content and classify what actually happened. Both commands echo the fact you
-will cite — never restate a path or a durability claim from memory:
+Install the content and classify what actually happened. Both commands echo the fact you will cite — never restate a path or a durability claim from memory:
 
 ```bash
 # Installs atomically, then RE-READS the destination and byte-compares. Non-zero means the
@@ -160,14 +147,11 @@ HANDOFF_VERDICT="$(handoff_sync_and_classify "$HANDOFF_ABS")"
 printf 'absolute: %s\nrelative: %s\nverdict: %s\n' "$HANDOFF_ABS" "$HANDOFF_REL" "$HANDOFF_VERDICT"
 ```
 
-⚠️ **Cite the echoed `$HANDOFF_ABS` verbatim, and do NOT re-type the path or the timestamp
-from memory.** A re-typed stamp that differs by one second is a citation that misses a file
-which genuinely exists — one of the three causes behind CTL-2104.
+⚠️ **Cite the echoed `$HANDOFF_ABS` verbatim, and do NOT re-type the path or the timestamp from memory.** A re-typed stamp that differs by one second is a citation that misses a file which genuinely exists — one of the three causes behind CTL-2104.
 
 ## Durability contract
 
-The helper returns a verdict so the caller never has to re-verify a citation by hand. Report
-the one you actually got — this section is the guarantee attached to each:
+The helper returns a verdict so the caller never has to re-verify a citation by hand. Report the one you actually got — this section is the guarantee attached to each:
 
 | Verdict                         | What it guarantees                                                                                       |
 | ------------------------------- | -------------------------------------------------------------------------------------------------------- |
@@ -177,34 +161,19 @@ the one you actually got — this section is the guarantee attached to each:
 | `local-only:sync-unavailable`   | No `humanlayer` on PATH.                                                                                  |
 | `local-only:git-unavailable`    | No `git`, or the thoughts tree is not a checkout — durability is unprovable here.                         |
 
-**Every `local-only:*` verdict still means the file is written and verified on disk at
-`$HANDOFF_ABS`.** No work is lost, and the path is safe to cite on **this host now**. Do
-**not** retry the sync yourself — two retry ladders on one failure is a storm.
+**Every `local-only:*` verdict still means the file is written and verified on disk at `$HANDOFF_ABS`.** No work is lost, and the path is safe to cite on **this host now**. Do **not** retry the sync yourself — two retry ladders on one failure is a storm.
 
-⚠️ **The next-tick guarantee applies to `not-in-pushed-tree` only.** That verdict is the
-async case: the sync ran, and the following tick (≤300 s) usually carries the bytes up.
-`sync-failed`, `sync-unavailable` and `git-unavailable` are **not** waiting on a tick —
-an unresolved rebase conflict or missing tooling persists until somebody fixes it, and no
-amount of waiting makes the handoff cross-host. Treat those three as **host-local until
-something positively verifies the pushed bytes**; say so rather than promising a sync that
-may never come.
+⚠️ **The next-tick guarantee applies to `not-in-pushed-tree` only.** That verdict is the async case: the sync ran, and the following tick (≤300 s) usually carries the bytes up. `sync-failed`, `sync-unavailable` and `git-unavailable` are **not** waiting on a tick — an unresolved rebase conflict or missing tooling persists until somebody fixes it, and no amount of waiting makes the handoff cross-host. Treat those three as **host-local until something positively verifies the pushed bytes**; say so rather than promising a sync that may never come.
 
-⚠️ **`$HANDOFF_ABS` is this host's path.** It contains this machine's home and thoughts
-checkout location, so it is the unambiguous citation *here* but may not resolve on another
-host. Cite **both** forms: the absolute path for same-host use, and `$HANDOFF_REL` — the
-`thoughts/shared/...` form — as the portable identity a reader on another host resolves in
-their own tree.
+⚠️ **`$HANDOFF_ABS` is this host's path.** It contains this machine's home and thoughts checkout location, so it is the unambiguous citation *here* but may not resolve on another host. Cite **both** forms: the absolute path for same-host use, and `$HANDOFF_REL` — the `thoughts/shared/...` form — as the portable identity a reader on another host resolves in their own tree.
 
-Never announce "synced" on a `local-only:*` verdict. An unconditional durability claim is
-exactly what made six real files look like phantoms.
+Never announce "synced" on a `local-only:*` verdict. An unconditional durability claim is exactly what made six real files look like phantoms.
 
-Then respond to the user with the template matching your verdict, between
-<template_response></template_response> XML tags. Do NOT include the tags in your response.
+Then respond to the user with the template matching your verdict, between <template_response></template_response> XML tags. Do NOT include the tags in your response.
 
 **When `HANDOFF_VERDICT` is `synced`:**
 
-<template_response> Handoff written, verified, and synced — the pushed bytes are this
-handoff. Resume from it in a new session with:
+<template_response> Handoff written, verified, and synced — the pushed bytes are this handoff. Resume from it in a new session with:
 
 ```bash
 /catalyst-dev:resume-handoff <the echoed absolute path>
@@ -214,12 +183,9 @@ On another host, resolve `<the echoed relative path>` in that host's thoughts tr
 
 </template_response>
 
-**When `HANDOFF_VERDICT` is `local-only:not-in-pushed-tree`** (the async case — a tick may
-still carry it up):
+**When `HANDOFF_VERDICT` is `local-only:not-in-pushed-tree`** (the async case — a tick may still carry it up):
 
-<template_response> Handoff written and verified on disk, but **not yet in the pushed tree**
-— safe to cite on this host now; cross-host resume follows the next sync tick (≤300 s).
-Resume from it with:
+<template_response> Handoff written and verified on disk, but **not yet in the pushed tree** — safe to cite on this host now; cross-host resume follows the next sync tick (≤300 s). Resume from it with:
 
 ```bash
 /catalyst-dev:resume-handoff <the echoed absolute path>
@@ -227,13 +193,9 @@ Resume from it with:
 
 </template_response>
 
-**When `HANDOFF_VERDICT` is any other `local-only:*`** (`sync-failed`, `sync-unavailable`,
-`git-unavailable` — these are **not** waiting on a tick):
+**When `HANDOFF_VERDICT` is any other `local-only:*`** (`sync-failed`, `sync-unavailable`, `git-unavailable` — these are **not** waiting on a tick):
 
-<template_response> Handoff written and verified on disk, but **host-local**
-(`<the verdict>`) — it is safe to cite on this host now, and it will **not** become
-cross-host on its own: this verdict means the sync could not run or could not complete, so
-it stays here until that is resolved. Resume from it on this host with:
+<template_response> Handoff written and verified on disk, but **host-local** (`<the verdict>`) — it is safe to cite on this host now, and it will **not** become cross-host on its own: this verdict means the sync could not run or could not complete, so it stays here until that is resolved. Resume from it on this host with:
 
 ```bash
 /catalyst-dev:resume-handoff <the echoed absolute path>
@@ -241,11 +203,9 @@ it stays here until that is resolved. Resume from it on this host with:
 
 </template_response>
 
-for example (between <example_response></example_response> XML tags — do NOT include these tags
-in your actual response to the user)
+for example (between <example_response></example_response> XML tags — do NOT include these tags in your actual response to the user)
 
-<example_response> Handoff written, verified, and synced — durable and safe to cite from any
-host. Resume from it in a new session with:
+<example_response> Handoff written, verified, and synced — durable and safe to cite from any host. Resume from it in a new session with:
 
 ```bash
 /catalyst-dev:resume-handoff /Users/you/hlt/coalesce-labs/thoughts/repos/my-project/shared/handoffs/PROJ-123/2025-01-08_13-44-55_create-context-compaction.md
@@ -257,11 +217,6 @@ host. Resume from it in a new session with:
 
 ## Additional Notes & Instructions
 
-- **more information, not less**. This is a guideline that defines the minimum of what a handoff
-  should be. Always feel free to include more information if necessary.
-- **be thorough and precise**. include both top-level objectives, and lower-level details as
-  necessary.
-- **avoid excessive code snippets**. While a brief snippet to describe some key change is important,
-  avoid large code blocks or diffs; do not include one unless it's absolutely necessary. Prefer
-  using `/path/to/file.ext:line` references that an agent can follow later when it's ready, e.g.
-  `packages/dashboard/src/app/dashboard/page.tsx:12-24`
+- **more information, not less**. This is a guideline that defines the minimum of what a handoff should be. Always feel free to include more information if necessary.
+- **be thorough and precise**. include both top-level objectives, and lower-level details as necessary.
+- **avoid excessive code snippets**. While a brief snippet to describe some key change is important, avoid large code blocks or diffs; do not include one unless it's absolutely necessary. Prefer using `/path/to/file.ext:line` references that an agent can follow later when it's ready, e.g. `packages/dashboard/src/app/dashboard/page.tsx:12-24`

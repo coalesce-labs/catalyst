@@ -15,9 +15,7 @@ version: 1.0.0
 
 # Implementation Plan
 
-You are tasked with creating detailed implementation plans through an interactive, iterative
-process. You should be skeptical, thorough, and work collaboratively with the user to produce
-high-quality technical specifications.
+You are tasked with creating detailed implementation plans through an interactive, iterative process. You should be skeptical, thorough, and work collaboratively with the user to produce high-quality technical specifications.
 
 Replace `PROJ` in ticket references with your Linear team's prefix from `.catalyst/config.json`.
 
@@ -84,15 +82,9 @@ Auto-discovery has already run in Prerequisites above. Check its output and foll
 
 2. **Extract ticket and update Linear state**:
 
-   If a ticket is detected (from the research document's `source_ticket` frontmatter, from the
-   command argument, or from context), update ticket status to `stateMap.planning` from config
-   using Linearis CLI (run `linearis issues usage` for syntax).
-   If Linearis CLI is not available, skip silently and continue planning.
+If a ticket is detected (from the research document's `source_ticket` frontmatter, from the command argument, or from context), update ticket status to `stateMap.planning` from config using Linearis CLI (run `linearis issues usage` for syntax). If Linearis CLI is not available, skip silently and continue planning.
 
-3. **Gather context using research sub-agents** — use the same agent palette and orientation
-   process as `/catalyst-dev:research-codebase` (that skill is the single source of
-   truth for how codebase research works). For planning, focus agents on the specific ticket/task
-   scope rather than broad exploration:
+3. **Gather context using research sub-agents** — use the same agent palette and orientation process as `/catalyst-dev:research-codebase` (that skill is the single source of truth for how codebase research works). For planning, focus agents on the specific ticket/task scope rather than broad exploration:
    - **codebase-locator** — find all files related to the ticket/task
    - **codebase-analyzer** — understand how the current implementation works
    - **thoughts-locator** — find existing thoughts documents about this feature (if relevant)
@@ -119,15 +111,15 @@ After getting initial clarifications:
 
 3. **Spawn parallel sub-tasks for comprehensive research**:
 
-   **For local codebase:**
+**For local codebase:**
    - **codebase-locator** — find specific files
    - **codebase-analyzer** — understand implementation details
    - **codebase-pattern-finder** — find similar features to model after
 
-   **For external research:**
+**For external research:**
    - **external-research** — framework patterns and best practices from popular repos
 
-   **For historical context:**
+**For historical context:**
    - **thoughts-locator** / **thoughts-analyzer** — find past research, plans, decisions
 
 4. **Wait for ALL sub-tasks to complete** before proceeding
@@ -155,7 +147,7 @@ After structure approval:
    REPO_NAME=$(basename "$(git rev-parse --show-toplevel)")
    ```
 
-   **IMPORTANT: Document Storage Rules**
+**IMPORTANT: Document Storage Rules**
    - ALWAYS write to `thoughts/shared/plans/`
    - NEVER write to `thoughts/searchable/` (read-only search index)
 
@@ -331,8 +323,7 @@ humanlayer thoughts sync
 
 6. **After plan approval**, provide implementation command:
 
-   **Use `--team` when:** 3+ parallel phases, distinct domains, non-overlapping files, 10+ files
-   **Use standard mode when:** sequential phases, same directory, <10 files, tightly coupled
+**Use `--team` when:** 3+ parallel phases, distinct domains, non-overlapping files, 10+ files **Use standard mode when:** sequential phases, same directory, <10 files, tightly coupled
 
    ```
    ## Ready to Implement
@@ -347,11 +338,9 @@ humanlayer thoughts sync
 
 1. **Be Skeptical**: Question vague requirements. Don't assume — verify with code.
 2. **Be Interactive**: Don't write the full plan in one shot. Get buy-in at each step.
-3. **Be Thorough**: Read all context files COMPLETELY. Include file:line references. Use
-   `make check` over individual lint/test commands when available.
+3. **Be Thorough**: Read all context files COMPLETELY. Include file:line references. Use `make check` over individual lint/test commands when available.
 4. **Be Practical**: Focus on incremental, testable changes. Include "what we're NOT doing".
-5. **No Open Questions in Final Plan**: Research or ask for clarification immediately. The plan must
-   be complete and actionable — every decision made before finalizing.
+5. **No Open Questions in Final Plan**: Research or ask for clarification immediately. The plan must be complete and actionable — every decision made before finalizing.
 
 ## Success Criteria Guidelines
 
@@ -366,30 +355,22 @@ All patterns follow TDD: write tests for each step BEFORE implementing it.
 
 ### For Database Changes:
 
-Schema/migration → **tests for** store methods → store methods → **tests for** business logic →
-business logic → **tests for** API → API → clients
+Schema/migration → **tests for** store methods → store methods → **tests for** business logic → business logic → **tests for** API → API → clients
 
 ### For New Features:
 
-Research patterns → data model → **tests for** backend logic → backend logic → **tests for** API
-endpoints → API endpoints → **tests for** UI components → UI
+Research patterns → data model → **tests for** backend logic → backend logic → **tests for** API endpoints → API endpoints → **tests for** UI components → UI
 
 ### For Refactoring:
 
-**Capture existing behavior as tests first** → incremental changes (keep tests green) → backwards
-compatibility → migration strategy
+**Capture existing behavior as tests first** → incremental changes (keep tests green) → backwards compatibility → migration strategy
 
 ## Linear Integration
 
 State names (`stateMap.*`) come from the `linearis` skill's single-source transition table — not restated here.
 
-If a ticket is detected (from research document's `source_ticket` frontmatter, command argument, or
-context):
+If a ticket is detected (from research document's `source_ticket` frontmatter, command argument, or context):
 
-- **At planning start** (Step 1): Update ticket status to `stateMap.planning` from config
-  using Linearis CLI (run `linearis issues usage` for syntax).
-- **After plan saved**: Add a comment with the plan path — this is an agent-authored comment,
-  so post it through the app actor (`linear-reply.mjs --as <role>`, or the
-  `linear-comment-post.sh` helper), never bare `linearis issues discuss`/`reply` (those post as
-  the human — see the `linearis` skill's "Comment on a ticket" section).
+- **At planning start** (Step 1): Update ticket status to `stateMap.planning` from config using Linearis CLI (run `linearis issues usage` for syntax).
+- **After plan saved**: Add a comment with the plan path — this is an agent-authored comment, so post it through the app actor (`linear-reply.mjs --as <role>`, or the `linear-comment-post.sh` helper), never bare `linearis issues discuss`/`reply` (those post as the human — see the `linearis` skill's "Comment on a ticket" section).
 - If the tooling is not available, skip silently and continue planning
