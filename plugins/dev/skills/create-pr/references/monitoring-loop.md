@@ -40,8 +40,8 @@ if command -v catalyst-events >/dev/null 2>&1; then
   echo "wake: state=${PR_STATE} CI=${CI_STATUS} event=$(echo "$EVENT_JSON" | jq -r '.attributes."event.name" // "(timeout)"')"
 else
   # Fallback when the catalyst-events CLI isn't installed — REST-only poll,
-  # 5-min intervals, 2-hour cap. See `wait-for-github` for the full two-phase
-  # diagnostic pattern.
+  # 5-min intervals, 2-hour cap. This is `wait-for-github`'s bounded-poll
+  # merge/review preset — see that skill for the full pattern and ceiling.
   COUNT=0; MAX=24; MERGED_FLAG="false"
   while [ "$MERGED_FLAG" != "true" ] && [ $COUNT -lt $MAX ]; do
     sleep 300; COUNT=$((COUNT + 1))

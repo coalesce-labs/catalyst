@@ -110,7 +110,7 @@ allowlist above:
 Or — when scoping by PR rather than orchestrator — drop the orch clause and
 use `.attributes."vcs.pr.number"` instead.
 
-See [[wait-for-github]] § Known filter pitfalls for the broader table.
+See `monitor-events` § references/filter-cookbook.md for the broader jq-filter table — `wait-for-github` no longer maintains one: its bounded-poll pattern polls GitHub REST directly and has no event-log filters to get wrong.
 
 ## Schema drift: v1 raw names vs canonical names on disk
 
