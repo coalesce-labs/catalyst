@@ -47,7 +47,7 @@ This keeps your typical session lean while having powerful tools available when 
 
 ## What's Inside
 
-**Catalyst** is a 6-plugin system for Claude Code focused on **token efficiency**, **session-aware MCP management**, and **persistent context** through parallel agent research, structured handoffs, and shared memory systems.
+**Catalyst** is a 5-plugin system for Claude Code focused on **token efficiency**, **session-aware MCP management**, and **persistent context** through parallel agent research, structured handoffs, and shared memory systems.
 
 **catalyst-dev** (Core - Always enabled)
 
@@ -65,13 +65,6 @@ This keeps your typical session lean while having powerful tools available when 
 - 4 specialized agents: cycle-analyzer, milestone-analyzer, backlog-analyzer, github-linear-analyzer
 - Cycle health, milestone tracking, backlog grooming, PR↔issue sync
 - Daily/weekly cadence, status updates, Slack drafting
-
-**catalyst-discovery** (Optional - Enable for user research and metrics)
-
-- 14 skills for understanding users and validating hypotheses
-- User interviews, research synthesis, journey maps, competitor analysis
-- Metrics framework (STEDII), activation/retention analysis, experiment planning
-- Prototyping via Artifacts, Lovable, v0, or Bolt
 
 **catalyst-meta** (Optional - For advanced users)
 
@@ -170,9 +163,6 @@ Alternatively, install plugins manually via Claude Code plugin system:
 
 # Optional: Install PM ops plugin (cycle/backlog/cadence operations)
 /plugin install catalyst-pm-ops
-
-# Optional: Install discovery plugin (user research, metrics, prototyping)
-/plugin install catalyst-discovery
 
 # Optional: Install meta plugin (workflow discovery)
 /plugin install catalyst-meta

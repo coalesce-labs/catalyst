@@ -9,9 +9,6 @@
     "plugins/playground/pm-ops": {
       "component": "catalyst-pm-ops"
     },
-    "plugins/playground/discovery": {
-      "component": "catalyst-discovery"
-    },
     "plugins/legacy": {
       "component": "catalyst-legacy"
     },

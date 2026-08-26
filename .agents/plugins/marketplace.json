@@ -90,36 +90,6 @@
       ]
     },
     {
-      "name": "catalyst-discovery",
-      "source": {
-        "source": "local",
-        "path": "./plugins/playground/discovery"
-      },
-      "policy": {
-        "installation": "AVAILABLE",
-        "authentication": "ON_INSTALL"
-      },
-      "description": "User research, metrics, experimentation, and prototyping skills — the discovery/research companion to catalyst-pm",
-      "author": {
-        "name": "Coalesce Labs",
-        "email": "hello@coalesce.dev"
-      },
-      "homepage": "https://github.com/coalesce-labs/catalyst",
-      "repository": "https://github.com/coalesce-labs/catalyst.git",
-      "license": "MIT",
-      "category": "productivity",
-      "keywords": [
-        "user-research",
-        "metrics",
-        "experimentation",
-        "prototyping",
-        "discovery",
-        "jtbd",
-        "analytics",
-        "pm"
-      ]
-    },
-    {
       "name": "catalyst-legacy",
       "source": {
         "source": "local",
