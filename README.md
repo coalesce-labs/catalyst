@@ -462,7 +462,7 @@ Personal refinement over hundreds of hours on real projects.
 - [Documentation Site](https://catalyst.coalescelabs.ai) - Comprehensive guides, reference, and tutorials
 - [Architecture](docs/architecture.md) - Three-layer system and memory model
 - [ADRs](docs/adrs.md) - Architecture decision records
-- [Releases](docs/releases.md) - Release Please workflow
+- [Releases](docs/releases.md) - Versioning and changelog conventions
 
 ## Brand Assets
 
