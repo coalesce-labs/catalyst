@@ -1,0 +1,19 @@
+{
+  "packId": "fixture-plugin-a",
+  "identity": {
+    "description": "Synthetic single-plugin fixture proving the packaging pipeline makes no assumption about Catalyst's specific inventory.",
+    "author": { "name": "Fixture", "email": "fixture@example.com" },
+    "homepage": "https://example.com",
+    "repository": "https://example.com/fixture.git",
+    "keywords": ["fixture"],
+    "license": "MIT"
+  },
+  "distribution": {
+    "claude": {
+      "enabled": true,
+      "marketplace": { "description": "Fixture plugin", "category": "development", "keywords": ["fixture"] }
+    },
+    "codex": { "enabled": true },
+    "agentsSkills": { "enabled": true }
+  }
+}

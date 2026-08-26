@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 
 import { readPackManifest } from "../core/pack-manifest.mjs";
-import { listPluginRelPaths } from "../providers/local-provisional.mjs";
+import { listPluginRelPaths } from "../providers/local.mjs";
 import { renderPluginJson, renderMarketplaceJson, readExistingVersion, buildMarketplaceJson } from "../emitters/claude.mjs";
 
 const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));

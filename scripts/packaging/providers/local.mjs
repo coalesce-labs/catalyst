@@ -1,11 +1,11 @@
-// local-provisional.mjs — PROVISIONAL. The CTL-1463 adapter seam.
+// local.mjs — the real render interface (CTL-1461 Phase 1).
 //
-// Replaced wholesale by CTL-1461's render interface. Nothing outside cli.mjs
-// may import this module — enforced by
-// scripts/packaging/__tests__/packaging-seam.test.mjs's
-// countProviderImporters() check. This is the ONE module CTL-1461 swaps out;
-// everything downstream (core/, emitters/) only ever sees the RenderedPack
-// this returns, never plugins/*/ directly.
+// The CTL-1461 adapter seam. Nothing outside cli.mjs may import this module —
+// enforced by scripts/packaging/__tests__/packaging-seam.test.mjs's
+// countProviderImporters() check. This is the ONE module CTL-1461 replaces
+// (it was providers/local-provisional.mjs); everything downstream (core/,
+// emitters/) only ever sees the RenderedPack this returns, never plugins/*/
+// directly.
 //
 // Real YAML, not a regex. The ratified design names "YAML structures are
 // flattened or corrupted" as a risk whose mitigation IS a real parser —
@@ -16,20 +16,27 @@
 // the file and the key — not a silent pass-through. `model:`/`color:` on a
 // SKILL.md are already real drift from docs/frontmatter-standard.md; an
 // unknown-key error is what surfaces the NEXT drift instead of laundering it.
+//
+// The one thing that changed from the provisional adapter: `neutral` is read
+// from `<skillDir>/agents/portability.yaml`, not from an injected
+// `skillNeutralOverrides` parameter (pack.json's now-deleted `skills` block).
+// Everything else is carried over verbatim — this is a pure relocation, not a
+// schema change (see the plan's "relocation-identity" test).
 
 import { readdirSync, readFileSync, existsSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, relative, sep } from "node:path";
 
 import { SUPPORTED_CONTRACT_VERSION } from "../core/contract.mjs";
+import { validateNeutralDeclaration } from "../core/neutral-schema.mjs";
 
-// NOTE on `version`: the RenderedPack contract (Phase 1, already shipped) has
-// no per-skill/per-agent version slot — the plugin's own version is owned
-// exclusively by release-please via plugin.json (see docs/releases.md). A
-// SKILL.md/agent `version: 1.0.0` field is decorative per-file metadata, not
-// a portable identity field, so it is classified Claude-only here (and
-// Phase 3's loss table drops it as cosmetic, same bucket as `model`/`color`)
-// rather than added to the contract as a second, competing version source.
+// NOTE on `version`: the RenderedPack contract has no per-skill/per-agent
+// version slot — the plugin's own version is owned exclusively by
+// release-please via plugin.json (see docs/releases.md). A SKILL.md/agent
+// `version: 1.0.0` field is decorative per-file metadata, not a portable
+// identity field, so it is classified Claude-only here (and the loss table
+// drops it as cosmetic, same bucket as `model`/`color`) rather than added to
+// the contract as a second, competing version source.
 const SKILL_PORTABLE_KEYS = new Set(["name", "description"]);
 const SKILL_CLAUDE_ONLY_KEYS = new Set([
   "allowed-tools",
@@ -80,17 +87,24 @@ function listFilesRecursive(absDir) {
 }
 
 // The portable file surface named by the plan is exactly SKILL.md plus
-// scripts/references/assets — never the whole skill directory. A skill's own
-// `__tests__/` fixtures (e.g. plugins/foundry/skills/setup-catalyst/__tests__/)
-// are Claude-repo-internal test tooling, not distributable skill content;
-// including them silently would ship test scripts into a non-Claude target's
-// bundle.
-const PORTABLE_FILE_DIRS = new Set(["scripts", "references", "assets"]);
+// scripts/references/assets — never the whole skill directory, and
+// deliberately never `agents/` (the sidecar directory this module reads
+// portability.yaml from). A skill's own `__tests__/` fixtures (e.g.
+// plugins/foundry/skills/setup-catalyst/__tests__/) are Claude-repo-internal
+// test tooling, not distributable skill content; including them silently
+// would ship test scripts into a non-Claude target's bundle. This exclusion
+// set is asserted by a dedicated test (local-provider.test.mjs) with a
+// mutation control that injects a widened set into `isPortableSkillFile`
+// directly — it is load-bearing (a portability.yaml copied into a generated
+// bundle alongside the emitter's own openai.yaml would be confusing at best)
+// and one edit away from silently breaking.
+export const PORTABLE_FILE_DIRS = new Set(["scripts", "references", "assets"]);
 
-function isPortableSkillFile(relPath) {
+/** isPortableSkillFile(relPath, portableDirs?) — exported so a test can inject a mutated `portableDirs` and observe real behavior change, not just assert the constant's contents. */
+export function isPortableSkillFile(relPath, portableDirs = PORTABLE_FILE_DIRS) {
   if (relPath === "SKILL.md") return true;
   const topDir = relPath.split("/")[0];
-  return PORTABLE_FILE_DIRS.has(topDir);
+  return portableDirs.has(topDir);
 }
 
 function readFilesManifest(absSkillDir) {
@@ -123,7 +137,7 @@ function splitFrontmatterKeys(parsed, portableKeys, claudeOnlyKeys, fileLabel) {
       claudeOnly[key] = value;
     } else {
       throw new Error(
-        `local-provisional: ${fileLabel} has an unrecognized frontmatter key "${key}" — every key must be classified as portable or Claude-only, never silently passed through`
+        `local: ${fileLabel} has an unrecognized frontmatter key "${key}" — every key must be classified as portable or Claude-only, never silently passed through`
       );
     }
   }
@@ -139,13 +153,35 @@ function listSkillDirNames(pluginAbsPath) {
     .sort();
 }
 
-function renderSkill(pluginAbsPath, skillDirName, neutralOverride) {
+/**
+ * readNeutralDeclaration(skillDir, skillMdPath) → the parsed, validated
+ * `agents/portability.yaml` object, or null if the sidecar does not exist.
+ * `neutral: null` is legal (the skill simply cannot reach a non-Claude
+ * target); a PRESENT sidecar that is malformed YAML or fails schema
+ * validation is a hard error naming the sidecar file.
+ */
+function readNeutralDeclaration(skillDir, skillMdPath) {
+  const sidecarPath = join(skillDir, "agents", "portability.yaml");
+  if (!existsSync(sidecarPath)) return null;
+
+  const contents = readFileSync(sidecarPath, "utf8");
+  let parsed;
+  try {
+    parsed = Bun.YAML.parse(contents);
+  } catch (err) {
+    throw new Error(`local: ${sidecarPath} (sidecar for ${skillMdPath}) is not valid YAML: ${err.message}`);
+  }
+  validateNeutralDeclaration(parsed, sidecarPath);
+  return parsed;
+}
+
+function renderSkill(pluginAbsPath, skillDirName) {
   const skillDir = join(pluginAbsPath, "skills", skillDirName);
   const skillMdPath = join(skillDir, "SKILL.md");
   const contents = readFileSync(skillMdPath, "utf8");
   const split = splitFrontmatter(contents);
   if (!split) {
-    throw new Error(`local-provisional: ${skillMdPath} has no frontmatter block`);
+    throw new Error(`local: ${skillMdPath} has no frontmatter block`);
   }
   const parsed = Bun.YAML.parse(split.yamlText);
   const { portable, claudeOnly } = splitFrontmatterKeys(
@@ -161,7 +197,7 @@ function renderSkill(pluginAbsPath, skillDirName, neutralOverride) {
     description: portable.description ?? "",
     body: split.body,
     files: readFilesManifest(skillDir),
-    neutral: neutralOverride ?? null,
+    neutral: readNeutralDeclaration(skillDir, skillMdPath),
     claudeOnly,
   };
 }
@@ -214,20 +250,16 @@ function readMcpServers(pluginAbsPath) {
 }
 
 /**
- * renderPluginPack({ repoRoot, pluginRelPath, packId, skillNeutralOverrides }) → RenderedPack
+ * renderPluginPack({ repoRoot, pluginRelPath, packId }) → RenderedPack
  *
- * `skillNeutralOverrides` is the pack manifest's per-skill opt-in block
- * (Phase 3's `pack.json` "skills" object, keyed by skill directory name) —
- * the ONE field whose SOURCE moves when CTL-1461 lands (to
- * agents/portability.yaml sidecars). Everything else here is read straight
- * off disk.
+ * Everything is read straight off disk — a skill's neutral classification
+ * comes from its own `agents/portability.yaml` sidecar (or `null` if absent),
+ * never from a caller-supplied override.
  */
-export function renderPluginPack({ repoRoot, pluginRelPath, packId, skillNeutralOverrides = {} }) {
+export function renderPluginPack({ repoRoot, pluginRelPath, packId }) {
   const pluginAbsPath = join(repoRoot, pluginRelPath);
 
-  const skills = listSkillDirNames(pluginAbsPath).map((name) =>
-    renderSkill(pluginAbsPath, name, skillNeutralOverrides[name] ?? null)
-  );
+  const skills = listSkillDirNames(pluginAbsPath).map((name) => renderSkill(pluginAbsPath, name));
   const agents = listAgentFileNames(pluginAbsPath).map((name) => renderAgent(pluginAbsPath, name));
 
   return {
@@ -241,7 +273,7 @@ export function renderPluginPack({ repoRoot, pluginRelPath, packId, skillNeutral
   };
 }
 
-/** listPluginRelPaths(repoRoot) → the 10 plugin directories (provenance helper, not part of the contract). */
+/** listPluginRelPaths(repoRoot) → the plugin directories (provenance helper, not part of the contract). */
 export function listPluginRelPaths(repoRoot) {
   const roots = [];
   const topDir = join(repoRoot, "plugins");

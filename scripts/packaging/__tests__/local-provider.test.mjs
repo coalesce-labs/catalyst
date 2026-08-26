@@ -1,6 +1,6 @@
-// local-provisional.test.mjs — CTL-1463 Phase 2.
+// local-provider.test.mjs — CTL-1461 Phase 1: the real render interface.
 //
-// Run: bun test scripts/packaging/__tests__/local-provisional.test.mjs
+// Run: bun test scripts/packaging/__tests__/local-provider.test.mjs
 
 import { describe, test, expect, afterEach } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync, statSync, existsSync } from "node:fs";
@@ -8,14 +8,24 @@ import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { validateRenderedPack } from "../core/contract.mjs";
-import { renderPluginPack, listPluginRelPaths, splitFrontmatter } from "../providers/local-provisional.mjs";
+import {
+  validateRenderedPack,
+  isPortableFileRelPath,
+  PORTABLE_FILE_DIRS as CONTRACT_PORTABLE_FILE_DIRS,
+} from "../core/contract.mjs";
+import {
+  renderPluginPack,
+  listPluginRelPaths,
+  splitFrontmatter,
+  isPortableSkillFile,
+  PORTABLE_FILE_DIRS as LOCAL_PORTABLE_FILE_DIRS,
+} from "../providers/local.mjs";
 
 const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
 
 let _tmpDirs = [];
 function fixtureDir() {
-  const dir = mkdtempSync(resolve(tmpdir(), "local-provisional-test-"));
+  const dir = mkdtempSync(resolve(tmpdir(), "local-provider-test-"));
   _tmpDirs.push(dir);
   return dir;
 }
@@ -188,5 +198,98 @@ describe("files[] is scoped to SKILL.md + scripts/references/assets — real rep
     const pack = renderPluginPack({ repoRoot: dir, pluginRelPath: "plugins/x", packId: "x" });
     const relPaths = pack.skills[0].files.map((f) => f.relPath).sort();
     expect(relPaths).toEqual(["SKILL.md", "assets/logo.svg", "references/notes.md", "scripts/run.sh"]);
+  });
+
+  test("a sidecar (agents/portability.yaml) sitting beside SKILL.md is NOT copied into files[] — real repo fixture", () => {
+    const pack = renderPluginPack({ repoRoot, pluginRelPath: "plugins/dev", packId: "catalyst-dev" });
+    const skill = pack.skills.find((s) => s.id === "linearis");
+    expect(skill).toBeDefined();
+    expect(skill.files.some((f) => f.relPath.startsWith("agents/"))).toBe(false);
+  });
+
+  test("the same exclusion, via a synthetic fixture with scripts/ present too", () => {
+    const dir = fixtureDir();
+    writeFile(dir, "plugins/x/skills/s/SKILL.md", "---\nname: s\ndescription: d\n---\n\nbody\n");
+    writeFile(dir, "plugins/x/skills/s/agents/portability.yaml", 'effects: []\ninvocation: auto\nexposure: ["catalog"]\n');
+    writeFile(dir, "plugins/x/skills/s/scripts/run.sh", "echo hi\n");
+    const pack = renderPluginPack({ repoRoot: dir, pluginRelPath: "plugins/x", packId: "x" });
+    const relPaths = pack.skills[0].files.map((f) => f.relPath).sort();
+    expect(relPaths).toEqual(["SKILL.md", "scripts/run.sh"]);
+    // The sidecar was read for classification, not silently dropped:
+    expect(pack.skills[0].neutral).toEqual({ effects: [], invocation: "auto", exposure: ["catalog"] });
+  });
+
+  test("mutation control: isPortableSkillFile with 'agents' injected into portableDirs treats the sidecar as portable — proving the real exclusion is membership-based, not incidental", () => {
+    expect(isPortableSkillFile("agents/portability.yaml")).toBe(false);
+    const widened = new Set([...LOCAL_PORTABLE_FILE_DIRS, "agents"]);
+    expect(isPortableSkillFile("agents/portability.yaml", widened)).toBe(true);
+  });
+
+  test("mutation control: isPortableFileRelPath with 'agents' injected into portableDirs treats the sidecar as a valid portable path", () => {
+    expect(isPortableFileRelPath("agents/portability.yaml")).toBe(false);
+    const widened = new Set([...CONTRACT_PORTABLE_FILE_DIRS, "agents"]);
+    expect(isPortableFileRelPath("agents/portability.yaml", widened)).toBe(true);
+  });
+});
+
+describe("relocation identity — the provider's neutral output equals the frozen literals transcribed from pack.json before this ticket deleted it", () => {
+  // These three objects are HAND-TRANSCRIBED from the plan's "What is already
+  // true" table, never derived by reading pack.json (deleted) or by running
+  // the code under test — an expected value produced by the code under test
+  // can only ever confirm itself.
+  const EXPECTED = {
+    "plugins/dev": { packId: "catalyst-dev", skillId: "linearis", neutral: { effects: [], invocation: "auto", exposure: ["catalog"] } },
+    "plugins/foundry": {
+      packId: "catalyst-foundry",
+      skillId: "setup-catalyst",
+      neutral: { effects: ["file-read", "file-write", "shell-exec"], invocation: "explicit", exposure: ["catalog"] },
+    },
+    "plugins/meta": {
+      packId: "catalyst-meta",
+      skillId: "validate-frontmatter",
+      // invocation is "explicit" here (not the pre-CTL-1461 "auto") — the
+      // Phase 2 invocation-parity fix landed together with the sidecar so the
+      // tree is never in a state that violates the safety gate.
+      neutral: { effects: ["file-read", "file-write"], invocation: "explicit", exposure: ["catalog"] },
+    },
+  };
+
+  for (const [pluginRelPath, { packId, skillId, neutral }] of Object.entries(EXPECTED)) {
+    test(`${pluginRelPath}/${skillId}: neutral deep-equals the transcribed literal`, () => {
+      const pack = renderPluginPack({ repoRoot, pluginRelPath, packId });
+      const skill = pack.skills.find((s) => s.id === skillId);
+      expect(skill).toBeDefined();
+      expect(skill.neutral).toEqual(neutral);
+    });
+  }
+});
+
+describe("neutral classification — sidecar absence, malformed YAML, and unknown key", () => {
+  test("a skill with no sidecar yields neutral: null (legal — it simply cannot reach a non-Claude target)", () => {
+    const dir = fixtureDir();
+    writeFile(dir, "plugins/x/skills/s/SKILL.md", "---\nname: s\ndescription: d\n---\n\nbody\n");
+    const pack = renderPluginPack({ repoRoot: dir, pluginRelPath: "plugins/x", packId: "x" });
+    expect(pack.skills[0].neutral).toBeNull();
+    expect(validateRenderedPack(pack).ok).toBe(true);
+  });
+
+  test("a sidecar with malformed YAML is a hard error naming the sidecar file", () => {
+    const dir = fixtureDir();
+    writeFile(dir, "plugins/x/skills/s/SKILL.md", "---\nname: s\ndescription: d\n---\n\nbody\n");
+    writeFile(dir, "plugins/x/skills/s/agents/portability.yaml", "effects: [\nunterminated");
+    expect(() => renderPluginPack({ repoRoot: dir, pluginRelPath: "plugins/x", packId: "x" })).toThrow(
+      /portability\.yaml/
+    );
+  });
+
+  test("a sidecar with an unknown key is a hard error naming the key", () => {
+    const dir = fixtureDir();
+    writeFile(dir, "plugins/x/skills/s/SKILL.md", "---\nname: s\ndescription: d\n---\n\nbody\n");
+    writeFile(
+      dir,
+      "plugins/x/skills/s/agents/portability.yaml",
+      'effects: []\ninvocation: auto\nexposure: ["catalog"]\nbogus: true\n'
+    );
+    expect(() => renderPluginPack({ repoRoot: dir, pluginRelPath: "plugins/x", packId: "x" })).toThrow(/bogus/);
   });
 });
