@@ -29,6 +29,25 @@ never assume the handoff's state still matches the codebase; verify first.
 if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" ]]; then
   "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" || exit 1
 fi
+
+# Auto-discover the most recent handoff. CTL-2104: guard the discovered path —
+# workflow-context.sh returns a REMEMBERED path, and a remembered path is
+# exactly what goes stale (thoughts/shared is a per-project symlink). An
+# unguarded read of a phantom path yields an empty document that reads like
+# an empty handoff.
+RECENT_HANDOFF=""
+if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ]]; then
+  RECENT_HANDOFF=$("${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent handoffs)
+fi
+if [[ -n "$RECENT_HANDOFF" && ! -f "$RECENT_HANDOFF" ]]; then
+  echo "⚠️ Cited handoff is not on disk: $RECENT_HANDOFF"
+  echo "   The channel is authoritative — recover from the last turn's text, see references/discovery.md."
+  RECENT_HANDOFF=""
+elif [[ -n "$RECENT_HANDOFF" ]]; then
+  echo "📋 Auto-discovered recent handoff: $RECENT_HANDOFF"
+else
+  echo "⚠️ No recent handoff found in workflow context or filesystem"
+fi
 ```
 
 ## Configuration note
