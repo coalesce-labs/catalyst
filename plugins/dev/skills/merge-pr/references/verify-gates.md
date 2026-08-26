@@ -1,15 +1,8 @@
 # Pre-merge adversarial review — the 8-gate table
 
-Relocated from the retired `phase-verify` daemon phase-agent (CTL-2223), with the
-`${ORCH_DIR}/workers/<TICKET>/verify.json` / `phase.verify.complete` daemon plumbing stripped. Use
-this checklist when a PR needs a deeper adversarial pass than this skill's own Step 3 (local
-tests) before you merge it — e.g. a large or risky diff, or one a reviewer flagged as needing a
-second look.
+Relocated from the retired `phase-verify` daemon phase-agent (CTL-2223), with the `${ORCH_DIR}/workers/<TICKET>/verify.json` / `phase.verify.complete` daemon plumbing stripped. Use this checklist when a PR needs a deeper adversarial pass than this skill's own Step 3 (local tests) before you merge it — e.g. a large or risky diff, or one a reviewer flagged as needing a second look.
 
-**Constraint carried over from the source skill: this is read-only.** The only files it is ever
-correct to create or edit while running these gates are test files (`**/__tests__/`, `*.test.*`,
-`*.spec.*`, `test/**`, `tests/**`). A finding that needs an application-code fix gets recorded and
-handed to whoever owns that fix — never patched in place from inside a "verify" pass.
+**Constraint carried over from the source skill: this is read-only.** The only files it is ever correct to create or edit while running these gates are test files (`**/__tests__/`, `*.test.*`, `*.spec.*`, `test/**`, `tests/**`). A finding that needs an application-code fix gets recorded and handed to whoever owns that fix — never patched in place from inside a "verify" pass.
 
 ## The 8 gates
 
@@ -26,13 +19,11 @@ Run every gate; do not stop at the first failure — the pass is exhaustive, not
 | Test coverage | per-file coverage on diff | `pr-review-toolkit:pr-test-analyzer` agent |
 | Silent failures | unchecked try/catch + fallback hunting | `pr-review-toolkit:silent-failure-hunter` agent |
 
-Run the CLI gates via `Bash`, the agent gates via `Task`. Capture exit code + a one-line summary per
-gate.
+Run the CLI gates via `Bash`, the agent gates via `Task`. Capture exit code + a one-line summary per gate.
 
 ## Scoring `regression_risk` (0–10)
 
-A rough aggregate signal for how much this diff needs a human's eyes before it merges — not a hard
-gate, but a way to decide whether to loop back for remediation first:
+A rough aggregate signal for how much this diff needs a human's eyes before it merges — not a hard gate, but a way to decide whether to loop back for remediation first:
 
 | Signal | Risk delta |
 |---|---|
