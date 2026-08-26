@@ -16,11 +16,9 @@ version: 1.0.0
 
 # Research Codebase
 
-You are tasked with conducting comprehensive research across the codebase to answer user questions
-by spawning parallel sub-agents and synthesizing their findings.
+You are tasked with conducting comprehensive research across the codebase to answer user questions by spawning parallel sub-agents and synthesizing their findings.
 
-**You are a documentarian, not a critic.** Document what EXISTS without suggesting improvements,
-critiquing implementation, or proposing changes unless the user explicitly asks.
+**You are a documentarian, not a critic.** Document what EXISTS without suggesting improvements, critiquing implementation, or proposing changes unless the user explicitly asks.
 
 **CRITICAL REQUIREMENTS — read these before doing anything else:**
 
@@ -63,9 +61,7 @@ Then wait for the user's research query.
 
 ## Pull-Before-Read (CTL-1236)
 
-Before the first thoughts read, fast-forward all HumanLayer thoughts checkouts so
-research picks up the freshest peer state. Roster-gated, ff-only, non-fatal — skips
-on single-host setups and never blocks research if offline:
+Before the first thoughts read, fast-forward all HumanLayer thoughts checkouts so research picks up the freshest peer state. Roster-gated, ff-only, non-fatal — skips on single-host setups and never blocks research if offline:
 
 ```bash
 # Pull-before-read (CTL-1236): roster-gated, ff-only, non-fatal.
@@ -76,21 +72,13 @@ on single-host setups and never blocks research if offline:
 
 ### Step 0: Orient with Serena (ALWAYS attempt this first)
 
-Before reading files or spawning sub-agents, get a fast semantic map of the codebase from Serena —
-Catalyst's self-hosted, local code-understanding MCP (the DeepWiki replacement). This is free and
-usually answers "where does X live / how is Y wired" in one call instead of many `Grep`s, so your
-sub-agent prompts come out specific rather than exploratory.
+Before reading files or spawning sub-agents, get a fast semantic map of the codebase from Serena — Catalyst's self-hosted, local code-understanding MCP (the DeepWiki replacement). This is free and usually answers "where does X live / how is Y wired" in one call instead of many `Grep`s, so your sub-agent prompts come out specific rather than exploratory.
 
-**Prerequisite check** — only do this if the `mcp__serena__*` tools are available (Serena MCP is
-installed). If they are not, skip straight to Step 1 — do not retry or warn the user.
+**Prerequisite check** — only do this if the `mcp__serena__*` tools are available (Serena MCP is installed). If they are not, skip straight to Step 1 — do not retry or warn the user.
 
-1. **Activate the project** so the language servers target this repo:
-   `mcp__serena__activate_project` with the repo root (the current working directory, or `.`).
-2. **Read the persisted orientation**: `mcp__serena__list_memories`, then
-   `mcp__serena__read_memory("codebase_map")` for the directory map and key concepts.
-3. **Map the relevant area** instead of broad grepping: `mcp__serena__get_symbols_overview` on a key
-   file, `mcp__serena__find_symbol` to jump to a definition, and
-   `mcp__serena__find_referencing_symbols` to see its callers.
+1. **Activate the project** so the language servers target this repo: `mcp__serena__activate_project` with the repo root (the current working directory, or `.`).
+2. **Read the persisted orientation**: `mcp__serena__list_memories`, then `mcp__serena__read_memory("codebase_map")` for the directory map and key concepts.
+3. **Map the relevant area** instead of broad grepping: `mcp__serena__get_symbols_overview` on a key file, `mcp__serena__find_symbol` to jump to a definition, and `mcp__serena__find_referencing_symbols` to see its callers.
 
 Serena's results are a starting point — always verify against live code via the sub-agents below.
 
@@ -105,8 +93,7 @@ Serena's results are a starting point — always verify against live code via th
 - Break down the user's query into composable research areas
 - Think deeply about underlying patterns, connections, and architectural implications
 - Create a research plan using TodoWrite to track all subtasks
-- If a Linear ticket is provided, update it to the configured research state via Linearis CLI (from
-  `stateMap.research`)
+- If a Linear ticket is provided, update it to the configured research state via Linearis CLI (from `stateMap.research`)
 
 ### Step 3: Spawn parallel sub-agent tasks for comprehensive research
 
@@ -242,8 +229,7 @@ source_ticket: { TICKET-ID or null }
 
 ### Step 7: Add GitHub permalinks (if applicable)
 
-- If on main/master or commit is pushed, generate GitHub permalinks:
-  `https://github.com/{owner}/{repo}/blob/{commit}/{file}#L{line}`
+- If on main/master or commit is pushed, generate GitHub permalinks: `https://github.com/{owner}/{repo}/blob/{commit}/{file}#L{line}`
 - If on unpushed feature branch, keep local file references
 
 ### Step 8: Sync, track, and present findings
@@ -256,8 +242,7 @@ source_ticket: { TICKET-ID or null }
 humanlayer thoughts sync
 ```
 
-**8b. Linear comment** (if ticket detected): Add a comment noting research is complete and
-linking the document path. Use Linearis CLI (run `linearis comments usage` for syntax).
+**8b. Linear comment** (if ticket detected): Add a comment noting research is complete and linking the document path. Use Linearis CLI (run `linearis comments usage` for syntax).
 
 **8e. Present summary to user:**
 
@@ -283,8 +268,7 @@ if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
 fi
 ```
 
-**STOP HERE. Do NOT offer to create plans, use EnterPlanMode, or start implementing. Research is
-complete.**
+**STOP HERE. Do NOT offer to create plans, use EnterPlanMode, or start implementing. Research is complete.**
 
 ### Step 9: Handle follow-up questions
 
@@ -313,10 +297,6 @@ State names (`stateMap.*`) come from the `linearis` skill's single-source transi
 
 If a ticket is detected (provided as argument, mentioned in query, or from context):
 
-- **At research start**: Update ticket status to `stateMap.research` from config
-  using Linearis CLI (run `linearis issues usage` for syntax).
-- **After document saved**: Add a comment with the document link — this is an agent-authored
-  comment, so post it through the app actor (`linear-reply.mjs --as <role>`, or the
-  `linear-comment-post.sh` helper), never bare `linearis issues discuss`/`reply` (those post as
-  the human — see the `linearis` skill's "Comment on a ticket" section).
+- **At research start**: Update ticket status to `stateMap.research` from config using Linearis CLI (run `linearis issues usage` for syntax).
+- **After document saved**: Add a comment with the document link — this is an agent-authored comment, so post it through the app actor (`linear-reply.mjs --as <role>`, or the `linear-comment-post.sh` helper), never bare `linearis issues discuss`/`reply` (those post as the human — see the `linearis` skill's "Comment on a ticket" section).
 - If the tooling is not available, skip silently and continue research
