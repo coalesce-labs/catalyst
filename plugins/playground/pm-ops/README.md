@@ -1,38 +1,17 @@
 # Catalyst PM Ops Plugin
 
-Linear / GitHub project-management mechanics — cycle health, backlog grooming, PR-to-issue sync, daily and weekly cadence, status updates, and Slack drafting.
+Linear backlog grooming — orphan, stale, and duplicate ticket detection.
 
-> Handles the day-to-day operational tooling: Linear cycle/backlog/PR ops, daily and weekly cadence, status updates, and team comms.
+> CTL-2237 removed the other 11 skills in this plugin (cycle/milestone analysis, ticket creation, PR↔issue sync, daily/weekly cadence, status updates, Slack drafting, MCP setup): they hard-coded team/assignee assumptions this solo-dev repo doesn't have, or duplicated more shallowly what `catalyst-dev` already does. `groom-backlog` is the one skill that survived triage.
 
-## Skills (12)
+## Skills (1)
 
-### Linear cycle / backlog
-- `/catalyst-pm-ops:analyze-cycle` — Cycle health with risk + recommendations
-- `/catalyst-pm-ops:analyze-milestone` — Milestone health with target-date feasibility
 - `/catalyst-pm-ops:groom-backlog` — Orphan / stale / duplicate detection
 
-### GitHub ↔ Linear
-- `/catalyst-pm-ops:create-tickets` — PRD → tickets via Linear MCP
-- `/catalyst-pm-ops:sync-prs` — PR ↔ issue correlation gaps
-
-### Cadence
-- `/catalyst-pm-ops:daily-plan` — Forward-looking PM day plan
-- `/catalyst-pm-ops:report-daily` — Backward-looking standup snapshot
-- `/catalyst-pm-ops:weekly-plan` — OKR-tied weekly priorities
-- `/catalyst-pm-ops:weekly-review` — Plan-vs-actual retro
-- `/catalyst-pm-ops:status-update` — Audience-shaped stakeholder updates
-
-### Comms / setup
-- `/catalyst-pm-ops:slack-message` — PM-voice Slack drafting
-- `/catalyst-pm-ops:connect-mcps` — MCP setup for Linear/PostHog/Gmail/Calendar
-
-## Agents (4)
+## Agents (1)
 
 Registered globally via `plugin.json`:
-- `cycle-analyzer` — sonnet
-- `milestone-analyzer` — sonnet
-- `backlog-analyzer` — sonnet
-- `github-linear-analyzer` — sonnet
+- `catalyst-pm-ops:backlog-analyzer` — sonnet
 
 ## Prerequisites
 
