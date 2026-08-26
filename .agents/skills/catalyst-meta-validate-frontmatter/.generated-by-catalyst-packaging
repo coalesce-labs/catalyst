@@ -2,6 +2,6 @@
   "generatedBy": "catalyst-packaging",
   "pack": "catalyst-meta",
   "skill": "validate-frontmatter",
-  "sourceFileCount": 1,
-  "sourceHash": "sha256:6b849a6b01da9d54922db69d87931eab94361a534f84ae59fdd08cfcc14e278c"
+  "sourceFileCount": 2,
+  "sourceHash": "sha256:d7822aaba167ffabf2b2ba4a836d9e8e2ae2fef831b0acf2f96fc51680457543"
 }
