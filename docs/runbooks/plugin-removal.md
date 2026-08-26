@@ -194,3 +194,7 @@ failure, and **uninstall/enable guidance for anyone with the plugin currently in
 > catalyst-<name>` if you'd rather keep the marketplace registration and just stop loading it).
 > Reinstalling after this PR merges will fail — the plugin no longer exists in the marketplace
 > catalog.
+
+---
+
+_Last CI-verified against this exact removal: 2026-08-26 (CTL-2222, PR #4035)._
