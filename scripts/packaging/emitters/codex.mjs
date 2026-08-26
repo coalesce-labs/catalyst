@@ -34,9 +34,21 @@ import { formatJson, orderedObject } from "../core/json-format.mjs";
 /** GENERATED_MARKER_FILENAME — the drift-gate marker cli.mjs's stale-prune pass keys off of (CTL-1461 Phase 3). A SIBLING of plugin.json, never a key inside it — the installed Codex plugin validator whitelists an exact top-level key set and rejects anything outside it. */
 export const GENERATED_MARKER_FILENAME = ".generated-by-catalyst-packaging";
 
-/** buildCodexGeneratedMarker(packManifest, version) → { generatedBy, pack, sourceHash }. `sourceHash` covers exactly the inputs that produced plugin.json — packManifest (read fresh off disk every render) plus the resolved version. */
+/**
+ * buildCodexGeneratedMarker(packManifest, version) → { generatedBy, pack, sourceHash }.
+ * `sourceHash` covers exactly the inputs that produced plugin.json — packManifest
+ * (read fresh off disk every render) plus the resolved version.
+ *
+ * Hashed as an EXPLICIT UTF-8 Buffer, never a bare string handed to
+ * `Hash.update()` — several real plugin descriptions contain literal non-ASCII
+ * bytes (e.g. catalyst-dev's `→`), and `Hash.update(string)`'s encoding
+ * default is exactly the kind of runtime-version-dependent behavior this
+ * hash must NOT depend on: a mismatch here reads as real drift and fails the
+ * CI drift gate on a byte-identical tree, on infra nobody touched.
+ */
 export function buildCodexGeneratedMarker(packManifest, version) {
-  const sourceHash = `sha256:${createHash("sha256").update(JSON.stringify({ packManifest, version })).digest("hex")}`;
+  const payload = Buffer.from(JSON.stringify({ packManifest, version }), "utf8");
+  const sourceHash = `sha256:${createHash("sha256").update(payload).digest("hex")}`;
   return orderedObject([
     ["generatedBy", "catalyst-packaging"],
     ["pack", packManifest.packId],

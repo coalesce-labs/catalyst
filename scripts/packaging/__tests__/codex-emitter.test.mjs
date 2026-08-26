@@ -15,6 +15,7 @@ import {
   buildCodexCatalog,
   renderCodexCatalog,
   renderCodexPluginJson,
+  buildCodexGeneratedMarker,
 } from "../emitters/codex.mjs";
 import { readPackManifest } from "../core/pack-manifest.mjs";
 import { readExistingVersion } from "../emitters/claude.mjs";
@@ -58,6 +59,42 @@ function packManifest(overrides = {}) {
     ...overrides,
   };
 }
+
+// buildCodexGeneratedMarker's sourceHash — CTL-1461 Phase 3 regression.
+//
+// PR #4015's first CI run failed the drift gate on plugins/dev's marker even
+// though nothing about plugins/dev changed: CI (a fresh `bun-version: latest`
+// install) computed a DIFFERENT sourceHash than this exact commit's own
+// pre-computed value for the exact same packManifest + version. Root cause:
+// `createHash().update(aBareString)` relies on Hash.update's DEFAULT string
+// encoding, which is exactly the kind of thing that can drift across a
+// runtime's own versions — and plugins/dev's real description contains a
+// literal non-ASCII `→`, so this was live, not theoretical. The fix hashes
+// an explicit `Buffer.from(str, "utf8")`, which has no encoding to default.
+//
+// The expected hash below is HAND-COMPUTED independently via
+// `printf '%s' '<the exact JSON>' | shasum -a 256` — never derived by running
+// the code under test, so it can only confirm the fixed behavior, not the
+// bug that produced a different answer.
+describe("buildCodexGeneratedMarker — sourceHash is a runtime-independent UTF-8 byte hash", () => {
+  test("a manifest containing a literal non-ASCII character hashes to the independently-computed value", () => {
+    const packManifest = { packId: "x", description: "research → plan" };
+    const marker = buildCodexGeneratedMarker(packManifest, "1.0.0");
+    expect(marker.sourceHash).toBe("sha256:0a2b6ed536816a6b8bfd0cdef6b1daa998da57ba8ce614bb05d45cac9420e7f2");
+  });
+
+  test("the same inputs, rebuilt from scratch (no shared object reference), hash identically", () => {
+    const a = buildCodexGeneratedMarker({ packId: "x", description: "research → plan" }, "1.0.0");
+    const b = buildCodexGeneratedMarker(JSON.parse('{"packId":"x","description":"research → plan"}'), "1.0.0");
+    expect(a.sourceHash).toBe(b.sourceHash);
+  });
+
+  test("mutation control: a different description hashes differently", () => {
+    const a = buildCodexGeneratedMarker({ packId: "x", description: "research → plan" }, "1.0.0");
+    const b = buildCodexGeneratedMarker({ packId: "x", description: "research → plan → implement" }, "1.0.0");
+    expect(a.sourceHash).not.toBe(b.sourceHash);
+  });
+});
 
 describe("resolveCodexVersion", () => {
   test("CREATE: no existing .codex-plugin/plugin.json — seeds from claudeVersion", () => {
