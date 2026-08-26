@@ -2,8 +2,16 @@
 
 The callable check for merge-pr acceptance: confirm a squash-merged change actually **deployed**
 and passes a **live smoke check**, without depending on the broker/event-log `filter.wake`
-mechanism. Invoke after Step 13 in [post-merge.md](post-merge.md), or standalone by a coordinator
-given a merge SHA and PR number.
+mechanism. Invoke after Step 13 in [post-merge.md](post-merge.md), passing the REST-confirmed
+`merge_commit_sha` (never a local `git rev-parse HEAD` — see the Step 9 note in
+[worktree-safe-merge.md](worktree-safe-merge.md)), or standalone by a coordinator given that SHA
+and a PR number.
+
+⚠️ `merge-pr` is a portable skill installed across many repos, and this file documents **catalyst's
+own** deploy surfaces specifically (Codex P1, PR #4043). `verify_post_merge_deploy` gates on repo
+identity first and returns `NO_DEPLOY_CONFIG` — not `NOT_APPLICABLE` — for every other repo, so a
+consuming repo without an equivalent mapping gets an honest "unconfigured" answer instead of a
+silently wrong one.
 
 ## What "deployed" means in THIS repo — two surfaces, not one
 
@@ -26,6 +34,17 @@ there is nothing live to poll beyond the squash-merge readback `merge-pr` alread
 verify_post_merge_deploy() {
   local sha="$1" repo
   repo=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
+
+  # 0. This reference maps CATALYST'S OWN two deploy surfaces (below). A repo that isn't
+  #    catalyst has no website/** docs site or catalyst.coalescelabs.ai to check — assuming
+  #    every non-website merge there is NOT_APPLICABLE would be silently wrong. Gate on repo
+  #    identity; a different repo needs its own equivalent mapping (see config-safety.md's
+  #    `.catalyst/config.json` as the natural place to declare one — not built here, since no
+  #    second repo's mapping exists yet to design against).
+  if [[ "$repo" != "coalesce-labs/catalyst" ]]; then
+    echo "NO_DEPLOY_CONFIG"
+    return 0
+  fi
 
   # 1. Is this merge docs-relevant? Same predicate CF's own watch paths use.
   local files; files=$(gh api "repos/${repo}/commits/${sha}" --jq '.files[].filename' 2>/dev/null)

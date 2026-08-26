@@ -60,11 +60,14 @@ fi
 
 `gh run list` above only shows *workflow runs*; it says nothing about whether the merged change
 reached a live surface. Call `verify_post_merge_deploy "$merge_sha"` from
-[post-merge-deploy-verify.md](post-merge-deploy-verify.md) — it decides whether this merge even has
-a deploy surface to check (most don't; the plugin marketplace is git-native), and where one exists
-(the `website/**` docs site), bounded-polls the CF Pages status plus a live HTTP smoke check.
-Report the returned sentinel (`DEPLOYED` / `NOT_APPLICABLE` / `DEPLOY_PENDING` / `DEPLOY_FAILED` /
-`SMOKE_FAILED`) alongside the success summary below — never silently skip it.
+[post-merge-deploy-verify.md](post-merge-deploy-verify.md) — using the REST-confirmed
+`merge_commit_sha` from Step 9 ([worktree-safe-merge.md](worktree-safe-merge.md)), never a local
+`git rev-parse HEAD`, which `gh pr merge` never updates. The function decides whether the *current
+repo* even has a known deploy surface to check (`NO_DEPLOY_CONFIG` outside catalyst itself), and
+within catalyst, whether *this merge* has one (most don't; the plugin marketplace is git-native),
+then bounded-polls the CF Pages status plus a live HTTP smoke check where one applies. Report the
+returned sentinel (`DEPLOYED` / `NOT_APPLICABLE` / `NO_DEPLOY_CONFIG` / `DEPLOY_PENDING` /
+`DEPLOY_FAILED` / `SMOKE_FAILED`) alongside the success summary below — never silently skip it.
 
 Display success summary:
 
