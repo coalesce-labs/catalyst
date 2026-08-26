@@ -321,8 +321,8 @@ retire_catalyst_marketplace() {
 	done < <(catalog_plugin_names "$checkout")
 	if [[ ${#plugin_ids[@]} -eq 0 ]]; then
 		# No manifests discovered (e.g. an incomplete checkout) — fall back to the
-		# two plugins every node has always had, so retirement still runs.
-		plugin_ids=(catalyst-dev@catalyst catalyst-pm@catalyst)
+		# one plugin every node has always had, so retirement still runs.
+		plugin_ids=(catalyst-dev@catalyst)
 	fi
 	# 1. Clear user-scope enabledPlugins entries (atomic same-dir tmp + mv).
 	if [[ -f "$settings" ]] && command -v jq >/dev/null 2>&1; then

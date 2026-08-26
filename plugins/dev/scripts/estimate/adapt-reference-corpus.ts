@@ -8,7 +8,7 @@
  *
  * Defaults:
  *   --in  thoughts/shared/pm/analyses/reference-corpus.json
- *   --out plugins/pm/scripts/estimate/reference-class-corpus.json
+ *   --out plugins/dev/scripts/estimate/reference-class-corpus.json
  */
 
 import { readFileSync, writeFileSync } from "node:fs";

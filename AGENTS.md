@@ -73,7 +73,7 @@ No build process — this is markdown files and bash scripts.
 
 ## Skill & Agent References
 
-Skills are namespaced `plugin-name:skill-name` (e.g. `catalyst-dev:create-plan`, `catalyst-pm:prd-draft`). When instructing a reader to invoke a skill, use the fully-qualified name; bare names are acceptable in explanatory prose describing workflow relationships. Agent (subagent) references always use the full `plugin-name:agent-name` form.
+Skills are namespaced `plugin-name:skill-name` (e.g. `catalyst-dev:create-plan`, `catalyst-pm-ops:groom-backlog`). When instructing a reader to invoke a skill, use the fully-qualified name; bare names are acceptable in explanatory prose describing workflow relationships. Agent (subagent) references always use the full `plugin-name:agent-name` form.
 
 ## Knowledge Store
 
@@ -93,10 +93,10 @@ Coding agents orient on this codebase through **Serena** — a self-hosted, loca
 ## Commit Conventions
 
 - `feat(dev): add new skill` — catalyst-dev minor bump
-- `fix(pm): correct cycle calculation` — catalyst-pm patch bump
+- `fix(pm-ops): correct cycle calculation` — catalyst-pm-ops patch bump
 - `feat(dev)!: breaking change` — catalyst-dev MAJOR bump
 - `chore(meta): update docs` — no version bump
-- Valid scopes (one per plugin): `dev`, `pm`, `meta`, `analytics`, `debugging`, `pm-ops`, `meeting-hygiene`, `discovery`, `legacy`, `foundry`
+- Valid scopes (one per plugin): `dev`, `meta`, `analytics`, `debugging`, `pm-ops`, `meeting-hygiene`, `discovery`, `legacy`, `foundry`
 
 **Versioning (post release-please, CTL-2220):** release-please — which used to auto-bump `version.txt`/`plugin.json` and generate changelogs on merge — was removed at Ryan's request. No replacement mechanism has been specified; this is an open decision, not an assumption that hand-semver is fine. See `docs/releases.md` → "Versioning (post release-please)" for what actually enforces the conventional-commit format now (`scripts/check-plugin-version.sh`, the `check-versions` PR check) and what it does and does not do — it is a gate, not a bumper. If a plugin change should ship a new version, bump `version.txt` and both `plugin.json` files by hand in the same PR.
 

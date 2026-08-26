@@ -142,7 +142,6 @@ findings to `thoughts/shared/research/`.
 Catalyst is a set of plugins. Install only what you need:
 
 ```bash
-/plugin install catalyst-pm           # product strategy
 /plugin install catalyst-pm-ops       # cycle, backlog, and cadence ops
 /plugin install catalyst-analytics    # PostHog analytics
 /plugin install catalyst-debugging    # Sentry error monitoring

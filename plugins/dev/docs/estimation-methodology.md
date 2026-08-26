@@ -6,7 +6,7 @@ sources, the pipeline stages, the calibrated heuristic table, the T-shirt → st
 mapping, the calibration approach, and how the orchestrator's `phase-triage` agent and the
 execution-core scheduler should consume the output.
 
-The scripts live in [`plugins/pm/scripts/estimate/`](../scripts/estimate/):
+The scripts live in [`plugins/dev/scripts/estimate/`](../scripts/estimate/):
 
 | Stage | Script | Role |
 |---|---|---|
@@ -196,8 +196,8 @@ corpus entry carries both the T-shirt and the point value.
    are inert against them until refreshed):
 
    ```bash
-   plugins/pm/scripts/estimate/refresh-corpus.sh           # Extract → Collect → Score → merge
-   plugins/pm/scripts/estimate/refresh-corpus.sh --dry-run # preview the old→new summary
+   plugins/dev/scripts/estimate/refresh-corpus.sh           # Extract → Collect → Score → merge
+   plugins/dev/scripts/estimate/refresh-corpus.sh --dry-run # preview the old→new summary
    ```
 
    - **Merge semantics**: fresh entries REPLACE same-ticket entries; entries not re-scored

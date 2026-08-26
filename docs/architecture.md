@@ -4,7 +4,7 @@ For the local Linear writer, freshness gate, read tiers, configuration order, an
 
 ## Three-Layer System
 
-1. **Plugin Source** (`plugins/dev/`, `plugins/meta/`, `plugins/playground/pm/`, `plugins/legacy/`, …) — canonical agent/skill definitions; edit these.
+1. **Plugin Source** (`plugins/dev/`, `plugins/meta/`, `plugins/playground/pm-ops/`, `plugins/legacy/`, …) — canonical agent/skill definitions; edit these.
 2. **Installation Layer** — `.claude/` (symlinks Claude Code reads plugins from) + `.catalyst/` (workflow state: `config.json`, `.workflow-context.json`).
 3. **Thoughts System** — external git-backed context at `~/thoughts/`, shared across worktrees, initialized per-project via `init-project.sh`.
 

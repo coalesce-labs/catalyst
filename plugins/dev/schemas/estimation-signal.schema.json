@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://catalyst.coalescelabs.ai/schemas/pm/estimation-signal.schema.json",
   "title": "AI-Native Ticket Estimation Signal (v1)",
-  "description": "Schema for the `estimation:` block emitted by any skill with ticket context and consumed by any skill that needs to estimate or forecast. Carried as YAML frontmatter in the ticket description, mirrored by Linear labels and the built-in Issue.estimate integer. See plugins/pm/docs/estimation-signal-schema.md for field-by-field rationale.",
+  "description": "Schema for the `estimation:` block emitted by any skill with ticket context and consumed by any skill that needs to estimate or forecast. Carried as YAML frontmatter in the ticket description, mirrored by Linear labels and the built-in Issue.estimate integer. See plugins/dev/docs/estimation-signal-schema.md for field-by-field rationale.",
   "$comment": "Bump $id when adding new fields — `additionalProperties: false` is enforced at every level.",
   "type": "object",
   "additionalProperties": false,

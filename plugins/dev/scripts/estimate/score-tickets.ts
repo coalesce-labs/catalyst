@@ -18,7 +18,7 @@
  * Calibration vs the ADV original (this corpus, re-derived 2026-06):
  *   - AI-native anchor bands (COST_USD, TURNS, WALL_HOURS) re-derived as the
  *     GEOMETRIC MIDPOINTS of the observed per-size actuals cluster medians on
- *     this transcript corpus. See plugins/pm/docs/estimation-methodology.md.
+ *     this transcript corpus. See plugins/dev/docs/estimation-methodology.md.
  *   - The `commits` signal is DROPPED: squash-merge makes it degenerate
  *     (318 / 444 tickets = exactly 1 commit), so it carries near-zero signal.
  *   - LOC and changed-files bands are kept AS-IS from ADV-424 (they calibrated
@@ -393,7 +393,7 @@ export function detectTier(row: SignalRow): Tier {
 // cluster medians on this transcript corpus (CTL-746 calibration, 2026-06).
 // A geometric-midpoint boundary b between adjacent size medians m_lo and m_hi
 // is b = sqrt(m_lo * m_hi), which is the natural split on the log scale these
-// metrics live on. See plugins/pm/docs/estimation-methodology.md for the
+// metrics live on. See plugins/dev/docs/estimation-methodology.md for the
 // derivation table.
 //
 // LOC and changed-files rows are KEPT AS-IS from ADV-424 (merge-strategy

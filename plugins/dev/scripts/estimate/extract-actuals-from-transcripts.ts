@@ -130,15 +130,13 @@ interface PricingJson {
 
 /** Default search paths for claude-pricing.json relative to this script. */
 export function defaultPricingPaths(): string[] {
-  // .../plugins/pm/scripts/estimate/extract-actuals-from-transcripts.ts
-  // → .../plugins/dev/scripts/claude-pricing.json
-  const here = dirname(new URL(import.meta.url).pathname);
-  const pmRoot = resolve(here, "..", ".."); // plugins/pm
-  const pluginsRoot = resolve(pmRoot, ".."); // plugins
-  return [
-    resolve(pluginsRoot, "dev", "scripts", "claude-pricing.json"),
-    resolve(pmRoot, "scripts", "claude-pricing.json"),
-  ];
+  // .../plugins/dev/scripts/estimate/extract-actuals-from-transcripts.ts
+  // → .../plugins/dev/scripts/claude-pricing.json (CTL-2222: relocated from
+  // plugins/playground/pm/scripts/estimate/ when catalyst-pm was removed —
+  // the script now lives inside plugins/dev itself, so there is only one
+  // candidate path, not a dev/pm fallback pair.)
+  const here = dirname(new URL(import.meta.url).pathname); // plugins/dev/scripts/estimate
+  return [resolve(here, "..", "claude-pricing.json")]; // plugins/dev/scripts/claude-pricing.json
 }
 
 /**

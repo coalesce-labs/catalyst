@@ -182,7 +182,7 @@ cat > /tmp/example.json <<'EOF'
 EOF
 
 npx ajv-cli validate \
-  -s plugins/pm/schemas/estimation-signal.schema.json \
+  -s plugins/dev/schemas/estimation-signal.schema.json \
   -d /tmp/example.json \
   --spec=draft2020 --all-errors
 # → /tmp/example.json valid
