@@ -70,7 +70,10 @@ async function main() {
     return i !== -1 && i + 1 < args.length ? args[i + 1] : null;
   };
 
-  const repoRoot = resolve(import.meta.dir, "../../../../..");
+  // CTL-2222: relocated from plugins/playground/pm/scripts/estimate/ to
+  // plugins/dev/scripts/estimate/ — one directory shallower, so one fewer
+  // ".." to reach the repo root.
+  const repoRoot = resolve(import.meta.dir, "../../../..");
   const inPath = resolve(
     getFlag("--in") ?? `${repoRoot}/thoughts/shared/pm/analyses/reference-corpus.json`
   );

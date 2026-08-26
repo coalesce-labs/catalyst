@@ -37,7 +37,10 @@ fatal() { err "$*"; exit 1; }
 note()  { echo "[refresh-corpus] $*"; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../../.." && pwd)"
+# CTL-2222: relocated from plugins/playground/pm/scripts/estimate/ to
+# plugins/dev/scripts/estimate/ — one directory shallower, so one fewer ".."
+# to reach the repo root (estimate -> scripts -> dev -> plugins -> root).
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 COMPOUND_LOG="${REPO_ROOT}/plugins/dev/scripts/compound-log.sh"
 
 TEAM="CTL"

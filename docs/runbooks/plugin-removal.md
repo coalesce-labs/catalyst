@@ -36,11 +36,21 @@ separate from the plugin's own `skills/` directory. CTL-2222 found this the hard
 `plugins/dev/skills/compound-estimate/SKILL.md` and `plugins/dev/skills/phase-triage/SKILL.md` —
 two `catalyst-dev` skills with no other connection to `catalyst-pm`.
 
-Before deleting, run:
+Before deleting, run — same instrument as the reference sweep in §5 (absolute `/usr/bin/grep`,
+never bare `grep`, plus a positive control proving it actually scanned the files it claims to):
 
 ```bash
-grep -rln "plugins/playground/<name>\b" --include="*.md" --include="*.ts" --include="*.sh" \
-  --include="*.mjs" --include="*.json" . 2>/dev/null | grep -v "^\./thoughts/" | grep -v "^\./plugins/playground/<name>/"
+mapfile -t FILES < <(git ls-files \
+  | grep -v '^thoughts/' \
+  | grep -v '^\.agents/skills/' \
+  | grep -v '/\.codex-plugin/' \
+  | grep -v '^scripts/packaging/dist/')
+
+/usr/bin/grep -l -F -- "plugins/playground/<name>" "${FILES[@]}" 2>/dev/null | grep -v "^plugins/playground/<name>/"
+
+# Positive control — prove the instrument fires on a file you KNOW references the plugin
+# (its own pack.json, or a sibling plugin's "extracted from" changelog note):
+/usr/bin/grep -l -F -- "plugins/playground/<name>" "${FILES[@]}" 2>/dev/null | grep "^plugins/playground/<name>/"
 ```
 
 Every hit outside the plugin's own tree is a real dependency, not noise. For each one, decide:
