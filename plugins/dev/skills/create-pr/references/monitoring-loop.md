@@ -1,15 +1,10 @@
 # Post-PR Monitoring & Resolution Loop (Step 12)
 
-**Creating the PR is NOT the end of this skill.** Monitor CI, wait for automated reviewer comments,
-address them, and only report success once the PR is clean/mergeable or genuinely blocked on a
-human gate. Don't just say "PR created" and stop.
+**Creating the PR is NOT the end of this skill.** Monitor CI, wait for automated reviewer comments, address them, and only report success once the PR is clean/mergeable or genuinely blocked on a human gate. Don't just say "PR created" and stop.
 
 ## Step 12a — Wait for CI checks and automated reviewers (event-driven)
 
-Automated reviewers (Codex, security scanners, linters) typically post within 3–5 minutes; CI needs
-time too. Use the canonical "Reactive PR lifecycle" pattern from `monitor-events` § Pattern 3
-(CTL-228) — one multi-event subscription that wakes on PR merged, PR closed, CI completed, review
-submitted, or a push to the base branch — instead of polling on a sleep loop.
+Automated reviewers (Codex, security scanners, linters) typically post within 3–5 minutes; CI needs time too. Use the canonical "Reactive PR lifecycle" pattern from `monitor-events` § Pattern 3 (CTL-228) — one multi-event subscription that wakes on PR merged, PR closed, CI completed, review submitted, or a push to the base branch — instead of polling on a sleep loop.
 
 ```bash
 REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
@@ -62,27 +57,18 @@ else
 fi
 ```
 
-The `--timeout 300` floor keeps this from blocking indefinitely if the event feed has nothing to
-say. `gh api` REST is the source of truth on every wake-up; the event is only the trigger.
+The `--timeout 300` floor keeps this from blocking indefinitely if the event feed has nothing to say. `gh api` REST is the source of truth on every wake-up; the event is only the trigger.
 
 ## Step 12b — Address all review comments
 
-If any comments/reviews exist, run `/review-comments $pr_number`: fetch and categorize (inline,
-threads, issue comments), implement requested changes, resolve threads via GraphQL, push one
-addressing commit.
+If any comments/reviews exist, run `/review-comments $pr_number`: fetch and categorize (inline, threads, issue comments), implement requested changes, resolve threads via GraphQL, push one addressing commit.
 
 ## Step 12c — Diagnose and resolve merge blockers
 
-Read `"${CLAUDE_PLUGIN_ROOT}/references/merge-blocker-diagnosis.md"` and run the full loop (max 3
-rounds): `ci-failing` → fix + push + re-poll; `unresolved-threads` → `/review-comments`;
-`branch-behind` → rebase + push; `draft` → `gh pr ready`; `changes-requested` → check/attempt fix.
+Read `"${CLAUDE_PLUGIN_ROOT}/references/merge-blocker-diagnosis.md"` and run the full loop (max 3 rounds): `ci-failing` → fix + push + re-poll; `unresolved-threads` → `/review-comments`; `branch-behind` → rebase + push; `draft` → `gh pr ready`; `changes-requested` → check/attempt fix.
 
-**Don't confuse "unresolved review threads" with "needs approving reviewer."** Automated-reviewer
-threads are yours to resolve by addressing the feedback. Only `review-required` (no approving
-reviews at all) is a genuine human gate.
+**Don't confuse "unresolved review threads" with "needs approving reviewer."** Automated-reviewer threads are yours to resolve by addressing the feedback. Only `review-required` (no approving reviews at all) is a genuine human gate.
 
 ## Step 12d — Re-poll until clean or genuinely human-blocked
 
-Continue until `mergeStateStatus` is `CLEAN` (report success), the only blocker is
-`review-required` (report what's needed), or 3 attempts are exhausted (report exactly what's still
-blocking).
+Continue until `mergeStateStatus` is `CLEAN` (report success), the only blocker is `review-required` (report what's needed), or 3 attempts are exhausted (report exactly what's still blocking).

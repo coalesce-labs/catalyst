@@ -18,9 +18,7 @@
 ---
 ```
 
-Each subsequent call detects new commits since the last update, appends changes to the right
-sections, reruns verification, preserves manual edits (reviewer notes, screenshots, checked boxes),
-and adds an entry to the update history log.
+Each subsequent call detects new commits since the last update, appends changes to the right sections, reruns verification, preserves manual edits (reviewer notes, screenshots, checked boxes), and adds an entry to the update history log.
 
 ## Step 14 — Communicate the outcome
 

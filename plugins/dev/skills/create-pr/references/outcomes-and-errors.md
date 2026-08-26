@@ -37,19 +37,15 @@ Still blocking:
 
 ## Error handling
 
-**On main/master:** `❌ Cannot create PR from main branch.` — suggest `git checkout -b
-TICKET-123-feature-name`.
+**On main/master:** `❌ Cannot create PR from main branch.` — suggest `git checkout -b TICKET-123-feature-name`.
 
-**Rebase conflicts:** list conflicting files; instruct `git add <resolved-files>`, `git rebase
---continue`, then re-run `/catalyst-dev:create-pr`.
+**Rebase conflicts:** list conflicting files; instruct `git add <resolved-files>`, `git rebase --continue`, then re-run `/catalyst-dev:create-pr`.
 
 **GitHub CLI not configured:** `gh auth login`, then `gh repo set-default`.
 
-**Linearis CLI not found:** warn, PR still created successfully; `npm install -g linearis` +
-`export LINEAR_API_TOKEN=...` to fix.
+**Linearis CLI not found:** warn, PR still created successfully; `npm install -g linearis` + `export LINEAR_API_TOKEN=...` to fix.
 
-**Linear ticket not found:** warn, PR still created successfully; update manually or check the
-ticket ID.
+**Linear ticket not found:** warn, PR still created successfully; update manually or check the ticket ID.
 
 ## Examples
 
@@ -82,8 +78,7 @@ Calling /describe-pr... ⚠️  No Linear ticket to update
 
 ## Remember
 
-- **Never stop at "PR created"** — poll (event-driven, 3-min minimum wait) checking CI, reviews,
-  and PR state; address comments, fix CI failures, confirm clean merge state.
+- **Never stop at "PR created"** — poll (event-driven, 3-min minimum wait) checking CI, reviews, and PR state; address comments, fix CI failures, confirm clean merge state.
 - **"PR created with auto-merge" is NOT done** — poll until MERGED or genuinely human-blocked.
 - Automated reviewer comments are yours to address, not the human's.
 - Minimize prompts — only ask when a PR already exists. Auto-rebase, auto-link Linear, auto-describe.

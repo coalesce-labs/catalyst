@@ -2,16 +2,11 @@
 
 ## Step 6 — Merge descriptions intelligently
 
-**Auto-generated sections (always regenerate from ALL changes):** Summary, Changes Made, How to
-Verify It, Changelog Entry.
+**Auto-generated sections (always regenerate from ALL changes):** Summary, Changes Made, How to Verify It, Changelog Entry.
 
-**Preserve manual edits in:** Reviewer Notes, Screenshots/Videos, manually checked boxes, Post-Merge
-Tasks (append new, keep existing).
+**Preserve manual edits in:** Reviewer Notes, Screenshots/Videos, manually checked boxes, Post-Merge Tasks (append new, keep existing).
 
-Merge new content into existing sections rather than overwriting them wholesale — e.g. append a
-"**New changes** (since last update):" subsection under each area that changed. Add a change-summary
-block at the top listing what happened in each update (see the metadata format in
-[metadata-and-errors.md](metadata-and-errors.md)).
+Merge new content into existing sections rather than overwriting them wholesale — e.g. append a "**New changes** (since last update):" subsection under each area that changed. Add a change-summary block at the top listing what happened in each update (see the metadata format in [metadata-and-errors.md](metadata-and-errors.md)).
 
 ## Step 7 — Add the Linear reference
 
@@ -22,13 +17,9 @@ block at the top listing what happened in each update (see the metadata format i
 - Related to #NNN (reference sibling work by its **GitHub PR number**)
 ```
 
-**Never** reference a sibling ticket by a bare Linear token or issue URL in prose — see
-[linear-sibling-guard.md](linear-sibling-guard.md) for why, and for the mechanical guard
-block that neutralizes any sibling tokens the description still ends up carrying. The own ticket's
-`Fixes` line above is correct and intentional; only sibling references need this treatment.
+**Never** reference a sibling ticket by a bare Linear token or issue URL in prose — see [linear-sibling-guard.md](linear-sibling-guard.md) for why, and for the mechanical guard block that neutralizes any sibling tokens the description still ends up carrying. The own ticket's `Fixes` line above is correct and intentional; only sibling references need this treatment.
 
-Get the ticket's title/description via direct SQL against the replica (see the `linearis` skill's
-"Reading Linear" section) for context.
+Get the ticket's title/description via direct SQL against the replica (see the `linearis` skill's "Reading Linear" section) for context.
 
 ## Step 8 — Generate the updated title
 
@@ -46,5 +37,4 @@ else
 fi
 ```
 
-`linear_read_ticket` is replica-first with a loud `linearis` fallback (CTL-1397) — never a bare
-`linearis issues read`. Title is an auto-generated section: update it without prompting.
+`linear_read_ticket` is replica-first with a loud `linearis` fallback (CTL-1397) — never a bare `linearis issues read`. Title is an auto-generated section: update it without prompting.

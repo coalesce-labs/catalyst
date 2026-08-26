@@ -12,8 +12,7 @@ version: 1.0.0
 
 # Create Pull Request
 
-Orchestrates the complete PR creation flow: commit → rebase → push → create → describe → link Linear
-ticket.
+Orchestrates the complete PR creation flow: commit → rebase → push → create → describe → link Linear ticket.
 
 ## Prerequisites
 
@@ -25,28 +24,18 @@ fi
 
 ## No Claude attribution
 
-The PR is authored solely by the git user. Never add "Generated with Claude Code",
-"Co-Authored-By: Claude", or any AI-assistance reference to its title or body.
+The PR is authored solely by the git user. Never add "Generated with Claude Code", "Co-Authored-By: Claude", or any AI-assistance reference to its title or body.
 
 ## Process overview
 
-1. **Preflight** — uncommitted changes, not on main/master, detect base branch, rebase if behind,
-   check for an existing PR, extract the ticket from the branch name. See
-   [preflight.md](references/preflight.md).
-2. **Title, push, create, link Linear** — `draft_pr_title` (CTL-783), `draft_pr_push_verify`
-   (CTL-1051), then create the PR with the CTL-623/633 sibling-skip guard appended to its body (full
-   rationale: `../describe-pr/references/linear-sibling-guard.md`), auto-call `/describe-pr`, update
-   Linear. See [push-and-create.md](references/push-and-create.md).
-3. **Monitor to a clean merge state** — CI, automated reviewers, blocker resolution; this is NOT
-   optional. See [monitoring-loop.md](references/monitoring-loop.md).
-4. **Report the real outcome, not just "PR created."** See
-   [outcomes-and-errors.md](references/outcomes-and-errors.md), which also covers error handling,
-   examples, and integration with `/commit`/`/describe-pr`/`/merge-pr`.
+1. **Preflight** — uncommitted changes, not on main/master, detect base branch, rebase if behind, check for an existing PR, extract the ticket from the branch name. See [preflight.md](references/preflight.md).
+2. **Title, push, create, link Linear** — title prefers the first commit subject via `git log --no-merges` and `draft_pr_title` (the `<type>(<scope>): <ticket>` convention, CTL-783); the no-commit fallback runs `tr '-' ' '` on the branch slug. Push goes through `draft_pr_push_verify` (`git fetch`-verified, `--force-with-lease` retry, CTL-1051). The PR body gets the CTL-623/633 sibling-skip guard via `linear-pr-skip.sh`'s `linear_sibling_skip_block_from_branch` — siblings are referenced by **PR number**, never a bare token; full rationale: `../describe-pr/references/linear-sibling-guard.md`. Then auto-call `/describe-pr` and update Linear (skip the transition under `CATALYST_PHASE`). See [push-and-create.md](references/push-and-create.md).
+3. **Monitor to a clean merge state** — CI, automated reviewers, blocker resolution; this is NOT optional. See [monitoring-loop.md](references/monitoring-loop.md).
+4. **Report the real outcome, not just "PR created."** See [outcomes-and-errors.md](references/outcomes-and-errors.md), which also covers error handling, examples, and integration with `/commit`/`/describe-pr`/`/merge-pr`.
 
 ## Configuration
 
-Uses `.catalyst/config.json` (`linear.teamKey`, `linear.stateMap.inReview`). State names have
-sensible defaults; see `.catalyst/config.json` for all keys.
+Uses `.catalyst/config.json` (`linear.teamKey`, `linear.stateMap.inReview`). State names have sensible defaults; see `.catalyst/config.json` for all keys.
 
 ## Load on demand
 

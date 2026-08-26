@@ -11,8 +11,7 @@ version: 2.0.0
 
 # Generate/Update PR Description
 
-Generates or updates a PR description with incremental information, auto-updates the title, and
-links the Linear ticket — fully automated, no interactive prompts.
+Generates or updates a PR description with incremental information, auto-updates the title, and links the Linear ticket — fully automated, no interactive prompts.
 
 ## Prerequisites
 
@@ -24,29 +23,18 @@ fi
 
 ## No Claude attribution
 
-Never write "Generated with Claude Code", "Co-Authored-By: Claude", or any AI-assistance reference
-into a PR title or body. Descriptions are professional and attributed to the human author.
+Never write "Generated with Claude Code", "Co-Authored-By: Claude", or any AI-assistance reference into a PR title or body. Descriptions are professional and attributed to the human author.
 
 ## Process overview
 
-1. **Read the template, identify the PR, extract its ticket, gather its diff/commits/checks.** See
-   [process.md](references/process.md).
-2. **Merge the new analysis into the existing description** (regenerate auto-generated sections,
-   preserve manual edits), **add the Linear reference, generate the title.** See
-   [merge-and-title.md](references/merge-and-title.md) — sibling tickets are referenced by GitHub
-   PR number, never a bare Linear token; see
-   [linear-sibling-guard.md](references/linear-sibling-guard.md) for why.
-3. **Run verification checks, save to `thoughts/shared/prs/`, write the description and title back
-   to GitHub** (appending the CTL-623/633 sibling-skip guard block), **update the Linear ticket.**
-   See [verify-and-writeback.md](references/verify-and-writeback.md).
-4. **Report the outcome** — first-time generation vs. incremental update. See
-   [metadata-and-errors.md](references/metadata-and-errors.md), which also covers error handling
-   and configuration.
+1. **Read the template, identify the PR, extract its ticket, gather its diff/commits/checks.** See [process.md](references/process.md).
+2. **Merge the new analysis into the existing description** (regenerate auto-generated sections, preserve manual edits), **add the Linear reference, generate the title.** Sibling tickets are referenced by GitHub PR number, never a bare Linear token — the own ticket's `Fixes https://linear.app/{workspace}/issue/{ticket}` line stays. See [merge-and-title.md](references/merge-and-title.md); why: [linear-sibling-guard.md](references/linear-sibling-guard.md).
+3. **Run verification checks, save to `thoughts/shared/prs/`, write the description and title back to GitHub** via `linear-pr-skip.sh`'s `linear_sibling_skip_block_from_branch` + `linear_sibling_skip_block_from_body` (CTL-623/633 sibling-skip guard block), **update the Linear ticket** (skip the transition under `CATALYST_PHASE`). See [verify-and-writeback.md](references/verify-and-writeback.md).
+4. **Report the outcome** — first-time generation vs. incremental update. See [metadata-and-errors.md](references/metadata-and-errors.md), which also covers error handling and configuration.
 
 ## Configuration
 
-Uses `.catalyst/config.json` (`teamKey`, `stateMap.inReview`, `pr.testCommand` etc.) — see
-[metadata-and-errors.md](references/metadata-and-errors.md) for the full schema.
+Uses `.catalyst/config.json` (`teamKey`, `stateMap.inReview`, `pr.testCommand` etc.) — see [metadata-and-errors.md](references/metadata-and-errors.md) for the full schema.
 
 ## Load on demand
 
@@ -61,5 +49,4 @@ Uses `.catalyst/config.json` (`teamKey`, `stateMap.inReview`, `pr.testCommand` e
 ## Remember
 
 - Fully automated — no interactive prompts, incremental updates preserve manual edits.
-- For Linearis CLI syntax and the direct-SQLite read rule (reads → replica, writes → linearis),
-  see the `linearis` skill's "Reading Linear" section.
+- For Linearis CLI syntax and the direct-SQLite read rule (reads → replica, writes → linearis), see the `linearis` skill's "Reading Linear" section.
