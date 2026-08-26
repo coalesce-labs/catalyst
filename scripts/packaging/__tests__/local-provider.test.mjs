@@ -68,8 +68,8 @@ function realAgentFileCount(pluginAbsPath) {
 describe("renderPluginPack — round-trip against every real plugin", () => {
   const pluginRelPaths = listPluginRelPaths(repoRoot);
 
-  test("discovers exactly 9 plugin directories", () => {
-    expect(pluginRelPaths.length).toBe(9);
+  test("discovers exactly 8 plugin directories", () => {
+    expect(pluginRelPaths.length).toBe(8);
   });
 
   for (const pluginRelPath of listPluginRelPaths(repoRoot)) {
@@ -88,7 +88,7 @@ describe("renderPluginPack — round-trip against every real plugin", () => {
     });
   }
 
-  test("sum of per-plugin skill counts across all 9 plugins is a positive, live-computed total (not hardcoded)", () => {
+  test("sum of per-plugin skill counts across all 8 plugins is a positive, live-computed total (not hardcoded)", () => {
     let total = 0;
     for (const pluginRelPath of pluginRelPaths) {
       total += renderPluginPack({ repoRoot, pluginRelPath, packId: pluginRelPath }).skills.length;

@@ -177,6 +177,25 @@ Then `git status --porcelain` must show only the expected diffs (the two marketp
 losing the removed plugin's entries) — no untracked new files, no diffs outside what you touched
 by hand.
 
+## 6a. `packaging-gate`'s own hardcoded plugin count (easy to miss — not caught by §6)
+
+`render --write` succeeding does **not** mean `bun test scripts/packaging/__tests__/` is green.
+Three fixtures in that suite assert an exact plugin count as a literal integer, independent of the
+render step above — a removal that changes the total plugin count fails them even when the render
+diff itself is clean:
+
+```
+scripts/packaging/__tests__/cli-render.test.mjs:      expect(results.length).toBe(<N>);
+scripts/packaging/__tests__/local-provider.test.mjs:  expect(pluginRelPaths.length).toBe(<N>);  (two tests)
+scripts/packaging/__tests__/pack-manifest.test.mjs:   expect(pluginRelPaths.length).toBe(<N>);
+```
+
+Update all four assertions (and their test-title strings, which also spell out the count) to the
+new total plugin count, then run `bun test scripts/packaging/__tests__/` locally and confirm
+**0 fail** before opening the PR — this is what CI's `packaging-gate` job runs, and it is a
+separate step from `render --write`. (`inventory-fixture.test.mjs` and `inventory-guard.test.mjs`
+use a synthetic 2-plugin fixture, not the real count — don't touch those.)
+
 ## 7. Gates
 
 Run before opening the PR: `skills-gate`, `audit-references`, `docs-gate`, `check-versions` (né
