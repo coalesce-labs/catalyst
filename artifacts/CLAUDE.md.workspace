@@ -38,10 +38,9 @@ This project uses the ryan-claude-workspace for AI-assisted development workflow
 
 ### Meta Commands
 
-- `/discover-workflows` - Discover workflows from external repos
-- `/import-workflow` - Import workflow from external repo
-- `/create-workflow` - Create new workflow using templates
 - `/validate-frontmatter` - Validate command/agent frontmatter
+- `/audit-references` - Audit plugin health: find broken skill references, dead agent invocations, missing scripts
+- `/reorganize` - Analyze and reorganize directory structures (move skills/agents, update references)
 
 ## Linear Integration Behavior
 

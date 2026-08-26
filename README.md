@@ -66,10 +66,8 @@ This keeps your typical session lean while having powerful tools available when 
 
 **catalyst-meta** (Optional - For advanced users)
 
-- 6 skills for workflow management
-- Discover workflows from community repos
-- Import and adapt patterns
-- Create new workflows
+- 3 skills for workflow management
+- Frontmatter validation across skills and agents
 - Plugin health auditing and directory reorganization
 
 ## Quick Setup (5 Minutes)
@@ -162,7 +160,7 @@ Alternatively, install plugins manually via Claude Code plugin system:
 # Optional: Install PM ops plugin (cycle/backlog/cadence operations)
 /plugin install catalyst-pm-ops
 
-# Optional: Install meta plugin (workflow discovery)
+# Optional: Install meta plugin (frontmatter validation, reference auditing, reorganization)
 /plugin install catalyst-meta
 ```
 

@@ -32,7 +32,7 @@
     {
       "name": "catalyst-meta",
       "source": "./plugins/meta",
-      "description": "Workflow discovery and creation: learn from community patterns and extend Catalyst. Optional plugin for advanced users.",
+      "description": "Frontmatter validation, reference auditing, and directory reorganization for Catalyst plugin developers. Optional plugin for advanced users.",
       "author": {
         "name": "Coalesce Labs",
         "email": "hello@coalesce.dev"
@@ -43,9 +43,9 @@
       "category": "development",
       "keywords": [
         "meta",
-        "discovery",
-        "creation",
-        "best-practices"
+        "frontmatter",
+        "validation",
+        "audit"
       ]
     },
     {
