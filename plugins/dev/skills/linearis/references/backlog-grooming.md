@@ -1,9 +1,6 @@
 # Backlog grooming
 
-Cookbook for a grooming pass: lay of the land, pull by project, find orphans, triage by priority,
-find stale tickets. All reads here are bulk `linearis` calls (not the replica) because they cross
-many tickets at once — the replica has no bulk-query CLI form yet (see the `linearis` skill's
-"Reading Linear" → "Still needs `linearis`").
+Cookbook for a grooming pass: lay of the land, pull by project, find orphans, triage by priority, find stale tickets. All reads here are bulk `linearis` calls (not the replica) because they cross many tickets at once — the replica has no bulk-query CLI form yet (see the `linearis` skill's "Reading Linear" → "Still needs linearis").
 
 ## Get the lay of the land
 

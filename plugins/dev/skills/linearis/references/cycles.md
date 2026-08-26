@@ -31,5 +31,4 @@ linearis cycles read "$CYCLE" --team ENG --limit 100 | jq '
 linearis cycles list --team ENG --window 2
 ```
 
-`cycles list --active`/`--window <n>` are team-scoped — always pair with `--team` or you may grab
-another team's cycle (linearis skill Gotcha #7).
+`cycles list --active`/`--window <n>` are team-scoped — always pair with `--team` or you may grab another team's cycle (linearis skill Gotcha #7).

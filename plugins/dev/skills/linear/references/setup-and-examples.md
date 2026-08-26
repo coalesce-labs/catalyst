@@ -62,5 +62,4 @@ THOUGHTS_URL=$(jq -r '.catalyst.linear.thoughtsRepoUrl // "https://github.com/or
 # Ticket moves to stateMap.done
 ```
 
-State names throughout come from the `linearis` skill's single-source `stateMap` table — this
-example does not restate it.
+State names throughout come from the `linearis` skill's single-source `stateMap` table — this example does not restate it.

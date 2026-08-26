@@ -1,16 +1,12 @@
 ---
 name: linearis-cli
 description:
-  Linear access rule + Linearis CLI reference. READS → query the local replica by direct SQL
-  (`~/catalyst/catalyst-replica.db`); WRITES and list/search → the `linearis` CLI. Use when working with Linear tickets, cycles, projects, milestones, or ticket IDs like TEAM-123.
+  Linear access rule + Linearis CLI reference. READS → query the local replica by direct SQL (`~/catalyst/catalyst-replica.db`); WRITES and list/search → the `linearis` CLI. Use when working with Linear tickets, cycles, projects, milestones, or ticket IDs like TEAM-123.
 ---
 
 # Linearis CLI Reference
 
-> Verified against Linearis v2026.4.9 (2026-05-31). ⚠️ **READ vs WRITE.** Linear **READS** → the
-> local replica by direct SQL, or `linear_read_ticket <ID>`. **Never** shell `linearis issues
-> read` for a routine read — it 429s the shared fleet quota. **WRITES** → `linearis`. Read
-> [Gotchas](#gotchas--traps) before scripting.
+> Verified against Linearis v2026.4.9 (2026-05-31). ⚠️ **READ vs WRITE.** Linear **READS** → the local replica by direct SQL, or `linear_read_ticket <ID>`. **Never** shell `linearis issues read` for a routine read — it 429s the shared fleet quota. **WRITES** → `linearis`. Read [Gotchas](#gotchas--traps) before scripting.
 
 ## Reading Linear
 > **Single source of the Linear read rule** — other skills point here, they don't restate it.
@@ -22,31 +18,28 @@ description:
    source "${CLAUDE_PLUGIN_ROOT:?}/scripts/lib/plugin-dirs.sh"
    marker="$(plugin_dirs_repo_config_path)"  # "" if no .catalyst/config.json found
    ```
-   Either failing → **no cloud mirror**: say so **loudly** (never silent) and fall back to direct
-   `linearis`/API reads — the **non-fleet path** (protects the 2500/hr quota), wrong to recommend
-   on the fleet. Same pattern: `steward`'s `references/cloud-detection.md`.
+   Either failing → **no cloud mirror**: say so **loudly** (never silent) and fall back to direct `linearis`/API reads — the **non-fleet path** (protects the 2500/hr quota), wrong to recommend on the fleet. Same pattern: `steward`'s `references/cloud-detection.md`.
 2. **Cloud mode confirmed → query the replica and TRUST it.** Don't re-verify against live Linear.
 3. **Row missing / not fresh → an ALARM, not a silent reroute.** Loud fallback, file a ticket.
 
+**The only reads you should shell directly are through the helper — it is the freshness gate, not a convenience wrapper.** Never run a bare `sqlite3` query against the replica yourself: it skips the `$rf`/`$marker` checks above and can return stale data (or an empty DB) with no fallback.
+
 ```bash
-DB="${CATALYST_REPLICA_DB:-${CATALYST_DIR:-$HOME/catalyst}/catalyst-replica.db}"
-sqlite3 -json "$DB" "SELECT identifier, title, state, estimate FROM issues
-  WHERE identifier='ENG-123' AND removed_at IS NULL;"
-json=$(linear_read_ticket ENG-123) || return 1   # freshness-gate → SQL → loud fallback, one call
+json=$(linear_read_ticket ENG-123) || return 1   # freshness-gate → SQL → loud fallback, ONE call
+title=$(printf '%s' "$json" | jq -r '.title // empty')
 ```
 
-Schema discovery, apply-drift caveat, deprecated wrapper: [`references/reading-linear-detail.md`](references/reading-linear-detail.md).
+Raw SQL syntax (only after the helper's gate already ran), schema discovery, apply-drift caveat, deprecated wrapper: [`references/reading-linear-detail.md`](references/reading-linear-detail.md).
 
 ## Core Operations
-Reads → direct SQL (above); writes always `linearis` — run `linearis usage` / `linearis <domain> usage` for authoritative, current flag syntax.
+Reads → direct SQL via the gated helper above; writes always `linearis` — run `linearis usage` / `linearis <domain> usage` for authoritative, current flag syntax. **`linear_read_ticket` covers a single ticket only** — a scope-wide list/search still goes through `linearis` (no bulk-query replica form yet; see [Reading Linear](references/reading-linear-detail.md#still-needs-linearis)).
 
 ```bash
 linearis issues search "auth bug" --team ENG --status "Todo"
 linearis issues update ENG-123 --status "In Progress" --labels "bug" --label-mode add
 ```
 
-> ⛔ **Agent comments → `linear-reply.mjs`, never `issues discuss`/`reply`** — those post AS THE
-> HUMAN (personal token; ask-resolution gate reads that as the human deciding, CTL-1567).
+> ⛔ **Agent comments → `linear-reply.mjs`, never `issues discuss`/`reply`** — those post AS THE HUMAN (personal token; ask-resolution gate reads that as the human deciding, CTL-1567).
 ```bash
 direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" ENG-123 --as <AGENT> --body-file <path> --top
 #   --body-file <path>  for anything longer than a one-line body; --body REFUSES a path (CTL-2204)
@@ -54,8 +47,7 @@ direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" ENG-123 --as <
 `issues discussions <id>` (read-only) is safe. Full CRUD, comment-thread commands, common mistakes, other domains: [`references/core-operations.md`](references/core-operations.md).
 
 ## Workflow: Status Transitions
-> **Single source of the Linear `stateMap` table** — `linear`, `create-plan`, `implement-plan`,
-> `create-pr`, `research-codebase` point here; none restates it.
+> **Single source of the Linear `stateMap` table** — `linear`, `create-plan`, `implement-plan`, `create-pr`, `research-codebase` point here; none restates it.
 
 | Workflow Phase | Default State | Config Key |
 | --- | --- | --- |
@@ -63,6 +55,7 @@ direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" ENG-123 --as <
 | Acknowledged | Todo | `stateMap.todo` |
 | Research / Planning started | In Progress | `stateMap.research` / `.planning` |
 | Implementation | In Progress | `stateMap.inProgress` |
+| Verify / Review phase | In Progress | `stateMap.verifying` / `.reviewing` |
 | PR created | In Review | `stateMap.inReview` |
 | Completed / Canceled | Done / Canceled | `stateMap.done` / `.canceled` |
 

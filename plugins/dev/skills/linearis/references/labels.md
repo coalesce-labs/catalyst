@@ -27,15 +27,11 @@ linearis issues update ENG-123 --labels "bug,P1" --label-mode overwrite
 linearis issues update ENG-123 --clear-labels
 ```
 
-> **`--labels` defaults to OVERWRITE.** Omitting `--label-mode` replaces every label on the
-> ticket, silently dropping the ones you did not name. Pass `--label-mode add` unless you
-> positively intend a full replacement.
+> **`--labels` defaults to OVERWRITE.** Omitting `--label-mode` replaces every label on the ticket, silently dropping the ones you did not name. Pass `--label-mode add` unless you positively intend a full replacement.
 
 ## Trap: a label name can exist on more than one team
 
-A team-scoped label is identified by `(name, team)`, and a workspace can hold **two different
-labels with the same name on different teams**. A migration or a team split leaves exactly that.
-Applying the label **by name** then fails even though the label plainly exists on the issue's team:
+A team-scoped label is identified by `(name, team)`, and a workspace can hold **two different labels with the same name on different teams**. A migration or a team split leaves exactly that. Applying the label **by name** then fails even though the label plainly exists on the issue's team:
 
 ```
 linearis issues update PROJ-123 --labels orchestrator
@@ -43,12 +39,9 @@ linearis issues update PROJ-123 --labels orchestrator
       associated with the same team as the issue."
 ```
 
-The failure is **name→id resolution**, not a missing vocabulary: the name resolved to the other
-team's twin. `labels list --team <TEAM>` is *correct* and lists only applicable labels, which is
-exactly why this is easy to misread as "discovery and write disagree."
+The failure is **name→id resolution**, not a missing vocabulary: the name resolved to the other team's twin. `labels list --team <TEAM>` is *correct* and lists only applicable labels, which is exactly why this is easy to misread as "discovery and write disagree."
 
-**Step 1 — replica first (free, no API quota).** Confirm which team's issues actually carry the
-name, and get the label id, without touching Linear:
+**Step 1 — replica first (free, no API quota).** This is a label-id lookup, not a ticket read, so it is outside `linear_read_ticket`'s scope — confirm cloud detection has already passed (SKILL.md → "Reading Linear") before running this, then find which team's issues actually carry the name, and get the label id, without touching Linear:
 
 ```bash
 sqlite3 -separator '  ' ~/catalyst/catalyst-replica.db "
@@ -62,9 +55,7 @@ sqlite3 -separator '  ' ~/catalyst/catalyst-replica.db "
 
 This answers "which id is in use on MY team's issues" — usually all you need.
 
-**Step 2 — only if step 1 is inconclusive.** The replica **cannot** prove a duplicate exists (its
-`labels` table carries no team column and mirrors only this team's issues), so this is the
-documented single-bounded-check last resort — run **once**, never in a loop or script:
+**Step 2 — only if step 1 is inconclusive.** The replica **cannot** prove a duplicate exists (its `labels` table carries no team column and mirrors only this team's issues), so this is the documented single-bounded-check last resort — run **once**, never in a loop or script:
 
 ```bash
 # LAST RESORT — one call, one label name, during an active diagnosis only.
@@ -82,10 +73,5 @@ linearis issues update PROJ-123 --labels <label-uuid> --label-mode add
 
 Two things that make this trap hard to see:
 
-- **Workspace-scoped labels are immune.** A label with no team (`team=WORKSPACE`) has no twin to
-  disambiguate against, so type vocabularies like `bug`/`feature`/`chore` keep resolving by name
-  while every component label fails. Half your labels working is not evidence the rest are broken
-  differently — it is evidence they are team-scoped.
-- **The error names the label, not the team.** It reads as "this label is on the wrong team", when
-  the truth is "the name you gave me resolved to a label on the wrong team, and the right one
-  exists too."
+- **Workspace-scoped labels are immune.** A label with no team (`team=WORKSPACE`) has no twin to disambiguate against, so type vocabularies like `bug`/`feature`/`chore` keep resolving by name while every component label fails. Half your labels working is not evidence the rest are broken differently — it is evidence they are team-scoped.
+- **The error names the label, not the team.** It reads as "this label is on the wrong team", when the truth is "the name you gave me resolved to a label on the wrong team, and the right one exists too."

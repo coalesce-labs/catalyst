@@ -45,6 +45,4 @@ linearis issues list --project "Auth System" --limit 100 | jq '.nodes[] | select
 
 ## Gotcha: milestone/cycle name resolution isn't globally unique
 
-Milestone names can collide across projects — always pass `--project` (or a UUID) on
-`milestones read`/`update`. `cycles list --active`/`--window <n>` are team-scoped — always pair
-with `--team` or you may grab another team's cycle (linearis skill Gotcha #7).
+Milestone names can collide across projects — always pass `--project` (or a UUID) on `milestones read`/`update`. `cycles list --active`/`--window <n>` are team-scoped — always pair with `--team` or you may grab another team's cycle (linearis skill Gotcha #7).
