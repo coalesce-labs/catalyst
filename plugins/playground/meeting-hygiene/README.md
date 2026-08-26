@@ -2,7 +2,7 @@
 
 Meeting workflow skills — agenda creation, transcript processing, end-of-day batch cleanup, and post-meeting effectiveness retros.
 
-> **Companion to [catalyst-pm](../pm/README.md)** which focuses on strategy, PRDs, priorities, and release sequencing. This plugin handles the meeting-workflow layer that runs *alongside* the product work.
+> Handles the meeting-workflow layer that runs *alongside* the product work — agenda prep, structured notes, cleanup automation, and effectiveness feedback.
 
 ## Skills (4)
 
