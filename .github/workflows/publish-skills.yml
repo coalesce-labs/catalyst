@@ -1,0 +1,142 @@
+name: publish-skills
+
+# CTL-2215 Phase 3 — publishes the portable agentsSkills pack
+# (`.agents/skills/`) to the generated-artifact repo
+# `coalesce-labs/catalyst-skills`, under `skills/` (D1 — the CLI's own
+# convention, and not subject to the `.agents/skills/`-scoped
+# `isInstalledProjectSkill` lock filter — see the plan's Key Discoveries).
+#
+# D2 — history: an ordinary accumulating commit on `main`, NEVER a
+# force-push and NEVER an orphan rewrite. A rewritten history would make a
+# previously-recorded pack SHA unreachable, breaking CTC-977's image-label
+# pinning.
+#
+# D3 — idempotency, loudly: a byte-identical regeneration reports
+# `no-change` in the job summary and pushes nothing. `published` and
+# `no-change` are distinguishable outcomes, never the same success path
+# wearing two names.
+#
+# D4 — refuses to publish an ungraded tree: agentskills.io conformance runs
+# BEFORE the push and aborts the job on `violations` or `inconclusive`.
+#
+# D5 — a missing SKILLS_PUBLISH_TOKEN or an unresolvable target repo FAILS
+# the job with a named error pointing at CTL-2215 Phase 4 (the
+# coordinator-gated repo-creation + token-provisioning step). It never
+# skips — a publish step that silently no-ops on a missing credential is how
+# a fleet ships a stale pack for a month.
+#
+# The decision of WHETHER/WHAT to publish is a pure, unit-tested function
+# (scripts/packaging/publish/plan-publish.mjs, exercised by
+# run-publish.mjs) — git mechanics (clone/commit/push/tag) stay bash steps
+# here, and SKILLS_PUBLISH_TOKEN is scoped to only the two steps that need
+# it (clone, push) — never threaded through the JS driver's environment.
+#
+# Until CTL-2215 Phase 4 runs, the "Require SKILLS_PUBLISH_TOKEN" step below
+# is EXPECTED to fail loudly — that is the correct pre-Phase-4 state, not a
+# bug in this workflow.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Perform every step including the publish plan and materialization, but stop before committing/pushing."
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  PACK_REPO: coalesce-labs/catalyst-skills
+
+jobs:
+  publish-skills:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # A release-triggered run must publish exactly the released ref,
+          # not whatever `main` has drifted to since — the pack SHA recorded
+          # on CTL-2215 (Phase 4 step 5) and CTC-977's image label must trace
+          # back to a real, checked-out release commit.
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref }}
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Regenerate the agentsSkills target
+        run: bun scripts/packaging/cli.mjs render --write --target agentsSkills --allow-losses
+
+      - name: agentskills.io conformance (D4 — refuse to publish an ungraded tree)
+        run: bun scripts/packaging/cli.mjs conformance --target agentsSkills
+
+      - name: Require SKILLS_PUBLISH_TOKEN (D5 — fail loudly, never skip)
+        env:
+          SKILLS_PUBLISH_TOKEN: ${{ secrets.SKILLS_PUBLISH_TOKEN }}
+        run: |
+          if [[ -z "${SKILLS_PUBLISH_TOKEN}" ]]; then
+            echo "::error::SKILLS_PUBLISH_TOKEN is not set. This is the CTL-2215 Phase 4 coordinator gate: create coalesce-labs/catalyst-skills and provision a repository secret named SKILLS_PUBLISH_TOKEN in coalesce-labs/catalyst with push access scoped to that repo, then re-run this workflow. See docs/releases.md."
+            exit 1
+          fi
+
+      - name: Clone coalesce-labs/catalyst-skills
+        env:
+          SKILLS_PUBLISH_TOKEN: ${{ secrets.SKILLS_PUBLISH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if ! git clone --depth 1 "https://x-access-token:${SKILLS_PUBLISH_TOKEN}@github.com/${PACK_REPO}.git" /tmp/catalyst-skills; then
+            echo "::error::Could not clone ${PACK_REPO} — either it does not exist yet (CTL-2215 Phase 4) or the token lacks access to it."
+            exit 1
+          fi
+          git -C /tmp/catalyst-skills config user.name "catalyst-release-bot"
+          git -C /tmp/catalyst-skills config user.email "release-bot@users.noreply.github.com"
+
+      - name: Compute the publish plan and materialize it (git-free — see the script header)
+        id: publish
+        run: bun scripts/packaging/publish/run-publish.mjs --pack-dir /tmp/catalyst-skills
+
+      - name: Commit
+        if: steps.publish.outputs.action == 'publish'
+        working-directory: /tmp/catalyst-skills
+        env:
+          SOURCE_REPO: ${{ github.repository }}
+          SOURCE_REF: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref_name }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git add -A -- skills
+          git commit -m "sync: portable skills pack from ${SOURCE_REPO}@${SOURCE_REF} (${SOURCE_SHA})" \
+            -m "Generated by scripts/packaging/cli.mjs render --target agentsSkills — never hand-edit this repo. See ${SOURCE_REPO}'s docs/releases.md."
+
+      - name: Push (real run only — dry_run stops here)
+        if: steps.publish.outputs.action == 'publish' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+        working-directory: /tmp/catalyst-skills
+        env:
+          SOURCE_REF: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref_name }}
+        run: |
+          set -euo pipefail
+          git push origin HEAD:main
+          # Mirror the source release tag so a consumer can pin by tag or by
+          # SHA (D2). A workflow_dispatch run (no release tag) skips the tag
+          # push — there is nothing meaningful to mirror.
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            git tag "${SOURCE_REF}"
+            git push origin "refs/tags/${SOURCE_REF}"
+          fi
+
+      - name: Dry run — report the plan without pushing
+        if: steps.publish.outputs.action == 'publish' && github.event_name == 'workflow_dispatch' && inputs.dry_run
+        run: |
+          echo "::notice::dry_run=true — plan computed and materialized locally in the runner; nothing committed or pushed. Re-run with dry_run=false to publish for real."
+
+      - name: Emit the resulting pack SHA
+        if: steps.publish.outputs.action == 'publish' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+        working-directory: /tmp/catalyst-skills
+        run: |
+          sha="$(git rev-parse HEAD)"
+          echo "sha=${sha}" >>"$GITHUB_OUTPUT"
+          echo "### Published pack SHA: \`${sha}\`" >>"$GITHUB_STEP_SUMMARY"
+          echo "This is the pinning unit CTC-977's runner image label records."  >>"$GITHUB_STEP_SUMMARY"
