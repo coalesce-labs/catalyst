@@ -24,17 +24,6 @@ Catalyst integrates with your development tools through both **CLI-based** (toke
 - **GitHub** - Pull requests, code review, repository management (CLI via `gh`)
   - `catalyst-dev`: PR creation, branch management, worktree workflows
 
-### Error Monitoring & Debugging
-
-- **Sentry** - Production error monitoring, stack traces, root cause analysis (MCP + CLI)
-  - `catalyst-debugging`: Sentry MCP integration (~20k tokens when enabled)
-  - Supports single-project and multi-project configurations
-
-### Product Analytics
-
-- **PostHog** - User behavior, conversion funnels, feature analytics (MCP)
-  - `catalyst-analytics`: PostHog MCP integration (~40k tokens when enabled)
-
 ### Documentation & Code Search
 
 - **Context7** - Library documentation lookup (MCP, ~2k tokens)
@@ -52,15 +41,13 @@ Catalyst integrates with your development tools through both **CLI-based** (toke
 **Why CLI + lightweight MCP?** Most development sessions don't need heavy integrations:
 
 - Start with `catalyst-dev` (~3.5k tokens): Core workflow + Linear + GitHub
-- Enable `catalyst-analytics` when analyzing user behavior (~+40k tokens)
-- Enable `catalyst-debugging` when investigating production errors (~+20k tokens)
-- Disable when done to free context for code and conversation
+- Disable optional plugins when done to free context for code and conversation
 
 This keeps your typical session lean while having powerful tools available when needed.
 
 ## What's Inside
 
-**Catalyst** is an 8-plugin system for Claude Code focused on **token efficiency**, **session-aware MCP management**, and **persistent context** through parallel agent research, structured handoffs, and shared memory systems.
+**Catalyst** is a 5-plugin system for Claude Code focused on **token efficiency**, **session-aware MCP management**, and **persistent context** through parallel agent research, structured handoffs, and shared memory systems.
 
 **catalyst-dev** (Core - Always enabled)
 
@@ -78,25 +65,6 @@ This keeps your typical session lean while having powerful tools available when 
 - 4 specialized agents: cycle-analyzer, milestone-analyzer, backlog-analyzer, github-linear-analyzer
 - Cycle health, milestone tracking, backlog grooming, PR↔issue sync
 - Daily/weekly cadence, status updates, Slack drafting
-
-**catalyst-meeting-hygiene** (Optional - Enable for meeting workflows)
-
-- 4 skills for meeting lifecycle management
-- Agenda creation, transcript-to-action-items, end-of-day batch cleanup, effectiveness retros
-
-**catalyst-analytics** (Optional - Enable when needed)
-
-- PostHog MCP integration (~40k context)
-- Product analytics and user behavior analysis
-- Conversion funnels and cohort analysis
-- 3 specialized analytics skills
-
-**catalyst-debugging** (Optional - Enable when needed)
-
-- Sentry MCP integration (~20k context)
-- Production error monitoring and debugging
-- Stack trace analysis and root cause detection
-- 3 specialized debugging skills
 
 **catalyst-meta** (Optional - For advanced users)
 
@@ -196,15 +164,6 @@ Alternatively, install plugins manually via Claude Code plugin system:
 # Optional: Install PM ops plugin (cycle/backlog/cadence operations)
 /plugin install catalyst-pm-ops
 
-# Optional: Install meeting hygiene plugin (agendas, notes, cleanup)
-/plugin install catalyst-meeting-hygiene
-
-# Optional: Install analytics plugin (if you use PostHog)
-/plugin install catalyst-analytics
-
-# Optional: Install debugging plugin (if you use Sentry)
-/plugin install catalyst-debugging
-
 # Optional: Install meta plugin (workflow discovery)
 /plugin install catalyst-meta
 ```
@@ -217,20 +176,11 @@ Plugins automatically load/unload MCPs when enabled/disabled:
 # Enable PM ops tools for sprint planning and cycle reviews
 /plugin enable catalyst-pm-ops  # Lightweight CLI-based, minimal context
 
-# Enable analytics when analyzing user behavior
-/plugin enable catalyst-analytics  # Loads PostHog MCP (+40k context)
-
 # Disable when done to free context
-/plugin disable catalyst-analytics  # Unloads PostHog MCP (-40k context)
-
-# Enable debugging for incident response
-/plugin enable catalyst-debugging  # Loads Sentry MCP (+20k context)
-
-# Can enable multiple plugins simultaneously
-/plugin enable catalyst-pm-ops catalyst-analytics catalyst-debugging
+/plugin disable catalyst-pm-ops
 ```
 
-**Why this matters**: Most development sessions don't need analytics or debugging MCPs. Starting with just `catalyst-dev` keeps your context at ~3.5k tokens instead of ~65k, leaving more room for code and conversation.
+**Why this matters**: Starting with just `catalyst-dev` keeps your context at ~3.5k tokens, leaving more room for code and conversation.
 
 ### Updating Plugins
 
@@ -360,8 +310,6 @@ When possible, uses CLIs instead of MCPs for token efficiency:
 **MCP Tools** (bundled with plugins):
 
 - Context7 - Built into `catalyst-dev` (~3.5k tokens)
-- PostHog - Built into `catalyst-analytics` (~40k tokens when enabled)
-- Sentry - Built into `catalyst-debugging` (~20k tokens when enabled)
 
 Run the prerequisite check:
 
