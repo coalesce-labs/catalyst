@@ -36,62 +36,6 @@
       ]
     },
     {
-      "name": "catalyst-analytics",
-      "source": {
-        "source": "local",
-        "path": "./plugins/playground/analytics"
-      },
-      "policy": {
-        "installation": "AVAILABLE",
-        "authentication": "ON_INSTALL"
-      },
-      "description": "Product analytics with PostHog MCP integration. Enable when analyzing user behavior, conversion metrics, and product usage. ~40k context tokens when enabled.",
-      "author": {
-        "name": "Coalesce Labs",
-        "email": "hello@coalesce.dev"
-      },
-      "homepage": "https://github.com/coalesce-labs/catalyst",
-      "repository": "https://github.com/coalesce-labs/catalyst.git",
-      "license": "MIT",
-      "category": "analytics",
-      "keywords": [
-        "analytics",
-        "posthog",
-        "metrics",
-        "product",
-        "conversion",
-        "funnel"
-      ]
-    },
-    {
-      "name": "catalyst-debugging",
-      "source": {
-        "source": "local",
-        "path": "./plugins/playground/debugging"
-      },
-      "policy": {
-        "installation": "AVAILABLE",
-        "authentication": "ON_INSTALL"
-      },
-      "description": "Production error monitoring with Sentry MCP integration. Enable when debugging errors, analyzing stack traces, and investigating incidents. ~20k context tokens when enabled.",
-      "author": {
-        "name": "Coalesce Labs",
-        "email": "hello@coalesce.dev"
-      },
-      "homepage": "https://github.com/coalesce-labs/catalyst",
-      "repository": "https://github.com/coalesce-labs/catalyst.git",
-      "license": "MIT",
-      "category": "debugging",
-      "keywords": [
-        "debugging",
-        "sentry",
-        "errors",
-        "monitoring",
-        "incidents",
-        "production"
-      ]
-    },
-    {
       "name": "catalyst-meta",
       "source": {
         "source": "local",
@@ -140,33 +84,6 @@
         "project-management",
         "linear",
         "backlog"
-      ]
-    },
-    {
-      "name": "catalyst-meeting-hygiene",
-      "source": {
-        "source": "local",
-        "path": "./plugins/playground/meeting-hygiene"
-      },
-      "policy": {
-        "installation": "AVAILABLE",
-        "authentication": "ON_INSTALL"
-      },
-      "description": "Meeting workflow skills: agenda creation, transcript processing, end-of-day batch cleanup, and effectiveness retros — extracted from catalyst-pm",
-      "author": {
-        "name": "Coalesce Labs",
-        "email": "hello@coalesce.dev"
-      },
-      "homepage": "https://github.com/coalesce-labs/catalyst",
-      "repository": "https://github.com/coalesce-labs/catalyst.git",
-      "license": "MIT",
-      "category": "productivity",
-      "keywords": [
-        "meetings",
-        "agenda",
-        "notes",
-        "transcripts",
-        "productivity"
       ]
     },
     {

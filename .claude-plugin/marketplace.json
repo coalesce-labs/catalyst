@@ -30,48 +30,6 @@
       ]
     },
     {
-      "name": "catalyst-analytics",
-      "source": "./plugins/playground/analytics",
-      "description": "Product analytics with PostHog MCP integration. Enable when analyzing user behavior, conversion funnels, and product metrics. ~40k context when enabled.",
-      "author": {
-        "name": "Coalesce Labs",
-        "email": "hello@coalesce.dev"
-      },
-      "homepage": "https://github.com/coalesce-labs/catalyst",
-      "repository": "https://github.com/coalesce-labs/catalyst.git",
-      "license": "MIT",
-      "category": "analytics",
-      "keywords": [
-        "analytics",
-        "posthog",
-        "metrics",
-        "product",
-        "conversion",
-        "funnel"
-      ]
-    },
-    {
-      "name": "catalyst-debugging",
-      "source": "./plugins/playground/debugging",
-      "description": "Production error monitoring with Sentry MCP integration. Enable when debugging errors, analyzing stack traces, and investigating incidents. ~20k context when enabled.",
-      "author": {
-        "name": "Coalesce Labs",
-        "email": "hello@coalesce.dev"
-      },
-      "homepage": "https://github.com/coalesce-labs/catalyst",
-      "repository": "https://github.com/coalesce-labs/catalyst.git",
-      "license": "MIT",
-      "category": "debugging",
-      "keywords": [
-        "debugging",
-        "sentry",
-        "errors",
-        "monitoring",
-        "incidents",
-        "production"
-      ]
-    },
-    {
       "name": "catalyst-meta",
       "source": "./plugins/meta",
       "description": "Workflow discovery and creation: learn from community patterns and extend Catalyst. Optional plugin for advanced users.",
@@ -106,26 +64,6 @@
         "project-management",
         "linear",
         "backlog"
-      ]
-    },
-    {
-      "name": "catalyst-meeting-hygiene",
-      "source": "./plugins/playground/meeting-hygiene",
-      "description": "Meeting workflow skills: agenda creation, transcript processing, end-of-day batch cleanup, and effectiveness retros",
-      "author": {
-        "name": "Coalesce Labs",
-        "email": "hello@coalesce.dev"
-      },
-      "homepage": "https://github.com/coalesce-labs/catalyst",
-      "repository": "https://github.com/coalesce-labs/catalyst.git",
-      "license": "MIT",
-      "category": "productivity",
-      "keywords": [
-        "meetings",
-        "agenda",
-        "notes",
-        "transcripts",
-        "productivity"
       ]
     },
     {
