@@ -3,9 +3,6 @@
     "plugins/dev": {
       "component": "catalyst-dev"
     },
-    "plugins/playground/pm": {
-      "component": "catalyst-pm"
-    },
     "plugins/playground/analytics": {
       "component": "catalyst-analytics"
     },

@@ -2,7 +2,7 @@
 
 Linear / GitHub project-management mechanics — cycle health, backlog grooming, PR-to-issue sync, daily and weekly cadence, status updates, and Slack drafting.
 
-> **Companion to [catalyst-pm](../pm/README.md)** which focuses on strategy, PRDs, priorities, and release sequencing. This plugin handles the day-to-day operational tooling that runs *on top of* the strategy.
+> Handles the day-to-day operational tooling: Linear cycle/backlog/PR ops, daily and weekly cadence, status updates, and team comms.
 
 ## Skills (12)
 

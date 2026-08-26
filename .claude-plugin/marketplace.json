@@ -30,28 +30,6 @@
       ]
     },
     {
-      "name": "catalyst-pm",
-      "source": "./plugins/playground/pm",
-      "description": "Linear-focused project management: cycle tracking, milestone planning, backlog grooming, daily standups, GitHub-Linear sync. Enable when managing Linear projects. ~5k context when enabled.",
-      "author": {
-        "name": "Coalesce Labs",
-        "email": "hello@coalesce.dev"
-      },
-      "homepage": "https://github.com/coalesce-labs/catalyst",
-      "repository": "https://github.com/coalesce-labs/catalyst.git",
-      "license": "MIT",
-      "category": "productivity",
-      "keywords": [
-        "pm",
-        "linear",
-        "project-management",
-        "cycles",
-        "milestones",
-        "backlog",
-        "github"
-      ]
-    },
-    {
       "name": "catalyst-analytics",
       "source": "./plugins/playground/analytics",
       "description": "Product analytics with PostHog MCP integration. Enable when analyzing user behavior, conversion funnels, and product metrics. ~40k context when enabled.",

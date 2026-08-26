@@ -10,7 +10,7 @@ description:
   estimate_at_start, estimate_actual, cost_usd, wall_time_hours, what_worked, what_surprised_me)
   to thoughts/shared/retros/estimate/YYYY-WW-compound-log.md — one file per ISO week, appends."
 disable-model-invocation: false
-allowed-tools: Bash(gh *), Bash(linearis *), Bash(jq *), Bash(git *), Bash(./plugins/dev/scripts/compound-log.sh *), Bash(plugins/dev/scripts/compound-log.sh *), Bash(./plugins/playground/pm/scripts/estimate/refresh-corpus.sh *), Bash(plugins/playground/pm/scripts/estimate/refresh-corpus.sh *), Read, Write
+allowed-tools: Bash(gh *), Bash(linearis *), Bash(jq *), Bash(git *), Bash(./plugins/dev/scripts/compound-log.sh *), Bash(plugins/dev/scripts/compound-log.sh *), Bash(./plugins/dev/scripts/estimate/refresh-corpus.sh *), Bash(plugins/dev/scripts/estimate/refresh-corpus.sh *), Read, Write
 version: 1.1.0
 ---
 
