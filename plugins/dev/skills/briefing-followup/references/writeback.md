@@ -9,7 +9,7 @@ briefing can surface yesterday's decisions as carryovers.
 ```bash
 WRITEBACK_RESULT=$(bash "$SCRIPT_DIR/writeback.sh" \
   --briefing "$BRIEFING_PATH" \
-  --resolutions "$LOG_DIR/$DATE-resolutions.json" \
+  --resolutions "$LOG_DIR/briefing-followup-$DATE-resolutions.json" \
   --date "$DATE" 2>&1)
 
 WRITEBACK_STATUS=$(echo "$WRITEBACK_RESULT" | jq -r '.status // "failed"')

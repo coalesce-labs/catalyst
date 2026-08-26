@@ -42,8 +42,7 @@ Slack DM, Slack channel, Notion page, and a Loom recording script.
 2. **Gather** — five sources in parallel, each degrading silently to `{}` if its credentials are absent (`references/gather.md`).
 3. **Decisions + digests** — ADR drift, blocked PRs, judgment calls, compound proposals, friction/learnings windows (`references/decisions.md`, `references/digests.md`).
 4. **Suggest relay-dispatch candidates** — tickets that look ready for `/relay-ticket` (`references/suggest-dispatch.md`).
-5. **Render + fan out** — merge fragments, render the markdown, append the digests, fan out (`references/render-fanout.md`).
-6. **End the session.**
+5. **Render + fan out** — merge fragments, render the markdown, append the digests, fan out, and end the session (`references/render-fanout.md` — this is the last step; do not end the session again after it).
 
 ## Invariants
 

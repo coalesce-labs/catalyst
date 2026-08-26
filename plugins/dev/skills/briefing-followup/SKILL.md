@@ -56,7 +56,7 @@ user chose.
 
 - **Input**: `thoughts/briefings/YYYY-MM-DD.md`, produced by `morning-briefing`, validated against `plugins/dev/templates/briefing-frontmatter.schema.json`.
 - **Scratch log**: `${TMPDIR:-/tmp}/catalyst-briefing-followup/<date>.log`, one TSV line per resolved decision.
-- **Resolutions JSON**: `<log-dir>/<date>-resolutions.json`, one entry per action-handler invocation — `{decision_id, action, timestamp, result}`. Consumed by the write-back step.
+- **Resolutions JSON**: `<log-dir>/briefing-followup-<date>-resolutions.json`, one entry per action-handler invocation — `{decision_id, action, timestamp, result}`. Consumed by the write-back step.
 
 ## Pointers
 
