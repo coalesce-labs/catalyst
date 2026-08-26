@@ -1,7 +1,7 @@
 {
   "packId": "catalyst-pm-ops",
   "identity": {
-    "description": "Linear cycle/backlog/PR ops, daily and weekly cadence, status updates, and team comms — extracted from catalyst-pm",
+    "description": "Linear backlog grooming — orphan, stale, and duplicate ticket detection",
     "author": {
       "name": "Coalesce Labs",
       "email": "hello@coalesce.dev",
@@ -12,32 +12,23 @@
     "keywords": [
       "project-management",
       "linear",
-      "github",
-      "standup",
-      "cadence",
-      "operations"
+      "backlog"
     ],
     "license": "MIT",
     "agents": [
-      "./agents/cycle-analyzer.md",
-      "./agents/milestone-analyzer.md",
-      "./agents/backlog-analyzer.md",
-      "./agents/github-linear-analyzer.md"
+      "./agents/backlog-analyzer.md"
     ]
   },
   "distribution": {
     "claude": {
       "enabled": true,
       "marketplace": {
-        "description": "Linear cycle/backlog/PR ops, daily and weekly cadence, status updates, and team comms",
+        "description": "Linear backlog grooming — orphan, stale, and duplicate ticket detection",
         "category": "productivity",
         "keywords": [
           "project-management",
           "linear",
-          "github",
-          "standup",
-          "cadence",
-          "operations"
+          "backlog"
         ]
       }
     },
