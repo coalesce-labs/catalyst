@@ -87,7 +87,7 @@ Check every one of these. Not all will have a hit for every plugin; report which
 | `AGENTS.md` | The `plugin-name:skill-name` example, the commit-convention example, the "Valid scopes" list |
 | `docs/architecture.md` | The "Plugin Source" bullet's example directory list |
 | `docs/releases.md` | Any plugin-specific versioning callouts |
-| `.serena/memories/codebase_map.md` | The "other plugins" directory list |
+| `.serena/memories/codebase_map.md` | The "other plugins" directory list. ⚠️ No gate asserts on this file, and CTL-2235 missed it — a deleted plugin sat listed as live until a post-batch sweep caught it. Serena serves this map to agents for navigation, so a stale entry actively misdirects them. Check it by hand. |
 | `website/astro.config.mjs` | The `plugins` changelog array |
 | `website/src/content.config.ts` | The `changelogsLoader` entries array |
 | `website/src/content/docs/reference/plugins.md` | The plugin table row + install command |
