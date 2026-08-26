@@ -185,6 +185,28 @@ if ! render && grep -q 'release-please-config.json lists "plugins/plugin-c" but 
 else
 	fail "config-lists-but-disk-missing should produce the named error" "$(cat "$RENDER_LOG")"
 fi
+
+echo ""
+echo "=== Codex #4015 P2 regression: the SAME disagreement is also caught on invocation shapes that don't dispatch the claude/codex writers ==="
+if (cd "$ROOT" && bun scripts/packaging/cli.mjs render --dry-run) >"$SCRATCH/dry-run.log" 2>&1; then
+	fail "render --dry-run should also fail loudly on a config/disk disagreement" "$(cat "$SCRATCH/dry-run.log")"
+else
+	if grep -q 'release-please-config.json lists "plugins/plugin-c" but no plugin exists there' "$SCRATCH/dry-run.log"; then
+		pass "render --dry-run (no target, no write) catches the disagreement"
+	else
+		fail "render --dry-run should name the disagreement" "$(cat "$SCRATCH/dry-run.log")"
+	fi
+fi
+
+if (cd "$ROOT" && bun scripts/packaging/cli.mjs render --target agentsSkills --write --allow-losses) >"$SCRATCH/agents-skills-target.log" 2>&1; then
+	fail "render --target agentsSkills should also fail loudly on a config/disk disagreement" "$(cat "$SCRATCH/agents-skills-target.log")"
+else
+	if grep -q 'release-please-config.json lists "plugins/plugin-c" but no plugin exists there' "$SCRATCH/agents-skills-target.log"; then
+		pass "render --target agentsSkills catches the disagreement (previously this writer never checked at all)"
+	else
+		fail "render --target agentsSkills should name the disagreement" "$(cat "$SCRATCH/agents-skills-target.log")"
+	fi
+fi
 git -C "$ROOT" checkout -q -- .
 git -C "$ROOT" clean -qfd
 

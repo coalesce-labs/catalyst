@@ -35,19 +35,25 @@ import { formatJson, orderedObject } from "../core/json-format.mjs";
 export const GENERATED_MARKER_FILENAME = ".generated-by-catalyst-packaging";
 
 /**
- * buildCodexGeneratedMarker(packManifest, version) → { generatedBy, pack, sourceHash }.
- * `sourceHash` covers exactly the inputs that produced plugin.json — packManifest
- * (read fresh off disk every render) plus the resolved version.
+ * buildCodexGeneratedMarker(packManifest) → { generatedBy, pack, sourceHash }.
+ * `sourceHash` covers `packManifest` ONLY (read fresh off disk every render)
+ * — deliberately NOT the resolved version. Version is externally owned by
+ * Release Please and bumped on every release, independent of any packaging-
+ * relevant source change; that content is already visible and diffed
+ * directly in plugin.json itself. Folding it into this hash too (Codex #4015
+ * P1) would invalidate every committed marker on every routine release PR —
+ * a real, recurring failure, not hypothetical: it reproduced on this PR's
+ * own first CI run, when an unrelated release-please bump landed on `main`
+ * between branch and merge-check.
  *
  * Hashed as an EXPLICIT UTF-8 Buffer, never a bare string handed to
  * `Hash.update()` — several real plugin descriptions contain literal non-ASCII
- * bytes (e.g. catalyst-dev's `→`), and `Hash.update(string)`'s encoding
- * default is exactly the kind of runtime-version-dependent behavior this
- * hash must NOT depend on: a mismatch here reads as real drift and fails the
- * CI drift gate on a byte-identical tree, on infra nobody touched.
+ * bytes (e.g. catalyst-dev's `→`), and relying on a string's implicit default
+ * encoding is exactly the kind of ambiguity a byte-for-byte hash must not
+ * depend on.
  */
-export function buildCodexGeneratedMarker(packManifest, version) {
-  const payload = Buffer.from(JSON.stringify({ packManifest, version }), "utf8");
+export function buildCodexGeneratedMarker(packManifest) {
+  const payload = Buffer.from(JSON.stringify(packManifest), "utf8");
   const sourceHash = `sha256:${createHash("sha256").update(payload).digest("hex")}`;
   return orderedObject([
     ["generatedBy", "catalyst-packaging"],
@@ -56,8 +62,8 @@ export function buildCodexGeneratedMarker(packManifest, version) {
   ]);
 }
 
-export function renderCodexGeneratedMarker(packManifest, version) {
-  return formatJson(buildCodexGeneratedMarker(packManifest, version), { escapeNonAscii: false });
+export function renderCodexGeneratedMarker(packManifest) {
+  return formatJson(buildCodexGeneratedMarker(packManifest), { escapeNonAscii: false });
 }
 
 /**

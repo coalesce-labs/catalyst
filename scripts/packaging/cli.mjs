@@ -124,7 +124,6 @@ export function assertPluginInventoryAgreement(order, diskRelPaths) {
 /** writeClaudeTarget(repoRootPath, results, { write }) → { pluginJsonPaths, marketplacePath } */
 function writeClaudeTarget(repoRootPath, results, { write }) {
   const order = readConfigPackageOrder(repoRootPath);
-  assertPluginInventoryAgreement(order, results.map((r) => r.pluginRelPath));
   const byRelPath = new Map(results.map((r) => [r.pluginRelPath, r]));
   const pluginJsonPaths = [];
 
@@ -201,7 +200,6 @@ export function pruneStaleCodexPluginDirs(repoRootPath, emittedPluginRelPaths) {
 /** writeCodexTarget(repoRootPath, results, { write }) → { pluginJsonPaths, catalogPath, prunedPluginRelPaths } */
 function writeCodexTarget(repoRootPath, results, { write }) {
   const order = readConfigPackageOrder(repoRootPath);
-  assertPluginInventoryAgreement(order, results.map((r) => r.pluginRelPath));
   const byRelPath = new Map(results.map((r) => [r.pluginRelPath, r]));
   const pluginJsonPaths = [];
   const codexEntries = [];
@@ -220,7 +218,7 @@ function writeCodexTarget(repoRootPath, results, { write }) {
     emittedPluginRelPaths.push(pluginRelPath);
 
     const markerPath = resolve(repoRootPath, pluginRelPath, `.codex-plugin/${CODEX_GENERATED_MARKER_FILENAME}`);
-    if (write) writeFileEnsuringDir(markerPath, renderCodexGeneratedMarker(r.packManifest, version) + "\n");
+    if (write) writeFileEnsuringDir(markerPath, renderCodexGeneratedMarker(r.packManifest) + "\n");
   }
 
   const catalogText = renderCodexCatalog(codexEntries) + "\n";
@@ -299,6 +297,13 @@ function cmdRender(args) {
   const targetIdx = args.indexOf("--target");
   const target = targetIdx >= 0 ? args[targetIdx + 1] : null;
   const results = renderAllPacks(repoRoot);
+
+  // Runs unconditionally, for every invocation shape (Codex #4015 P2): a
+  // config/disk disagreement must be loud on a bare `--dry-run` census and
+  // on `--target agentsSkills` too, not only on the two writers that happen
+  // to consult readConfigPackageOrder() themselves. One call site, ahead of
+  // all target dispatch, rather than duplicated into a third writer.
+  assertPluginInventoryAgreement(readConfigPackageOrder(repoRoot), results.map((r) => r.pluginRelPath));
 
   let totalSkills = 0;
   let totalAgents = 0;

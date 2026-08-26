@@ -60,17 +60,21 @@ function packManifest(overrides = {}) {
   };
 }
 
-// buildCodexGeneratedMarker's sourceHash — CTL-1461 Phase 3 regression.
+// buildCodexGeneratedMarker's sourceHash — CTL-1461 Phase 3 regressions.
 //
 // PR #4015's first CI run failed the drift gate on plugins/dev's marker even
-// though nothing about plugins/dev changed: CI (a fresh `bun-version: latest`
-// install) computed a DIFFERENT sourceHash than this exact commit's own
-// pre-computed value for the exact same packManifest + version. Root cause:
-// `createHash().update(aBareString)` relies on Hash.update's DEFAULT string
-// encoding, which is exactly the kind of thing that can drift across a
-// runtime's own versions — and plugins/dev's real description contains a
-// literal non-ASCII `→`, so this was live, not theoretical. The fix hashes
-// an explicit `Buffer.from(str, "utf8")`, which has no encoding to default.
+// though nothing about plugins/dev changed. Two things came out of
+// diagnosing it: (1) hashing a bare JS string via `Hash.update()` relies on
+// its default string encoding, which is needless ambiguity for content that
+// can contain non-ASCII bytes (plugins/dev's real description has a literal
+// `→`) — fixed by hashing an explicit `Buffer.from(str, "utf8")`. (2) the
+// ACTUAL failure that day was unrelated to encoding: `main` had moved (an
+// unrelated release-please version bump) between branch and CI's merge
+// check, and `version` was part of the hash input — so Codex's own review of
+// this PR (#4015, P1) correctly flagged that folding `version` into
+// `sourceHash` would repeat this failure on every future release PR. Fixed
+// by hashing `packManifest` alone; version's own content is already visible
+// and diffed directly in plugin.json.
 //
 // The expected hash below is HAND-COMPUTED independently via
 // `printf '%s' '<the exact JSON>' | shasum -a 256` — never derived by running
@@ -79,20 +83,28 @@ function packManifest(overrides = {}) {
 describe("buildCodexGeneratedMarker — sourceHash is a runtime-independent UTF-8 byte hash", () => {
   test("a manifest containing a literal non-ASCII character hashes to the independently-computed value", () => {
     const packManifest = { packId: "x", description: "research → plan" };
-    const marker = buildCodexGeneratedMarker(packManifest, "1.0.0");
-    expect(marker.sourceHash).toBe("sha256:0a2b6ed536816a6b8bfd0cdef6b1daa998da57ba8ce614bb05d45cac9420e7f2");
+    const marker = buildCodexGeneratedMarker(packManifest);
+    expect(marker.sourceHash).toBe("sha256:985e4e4b340e1a29db7fdeee3a182951f150a15e0644863c14efde1b31163fbe");
   });
 
   test("the same inputs, rebuilt from scratch (no shared object reference), hash identically", () => {
-    const a = buildCodexGeneratedMarker({ packId: "x", description: "research → plan" }, "1.0.0");
-    const b = buildCodexGeneratedMarker(JSON.parse('{"packId":"x","description":"research → plan"}'), "1.0.0");
+    const a = buildCodexGeneratedMarker({ packId: "x", description: "research → plan" });
+    const b = buildCodexGeneratedMarker(JSON.parse('{"packId":"x","description":"research → plan"}'));
     expect(a.sourceHash).toBe(b.sourceHash);
   });
 
   test("mutation control: a different description hashes differently", () => {
-    const a = buildCodexGeneratedMarker({ packId: "x", description: "research → plan" }, "1.0.0");
-    const b = buildCodexGeneratedMarker({ packId: "x", description: "research → plan → implement" }, "1.0.0");
+    const a = buildCodexGeneratedMarker({ packId: "x", description: "research → plan" });
+    const b = buildCodexGeneratedMarker({ packId: "x", description: "research → plan → implement" });
     expect(a.sourceHash).not.toBe(b.sourceHash);
+  });
+
+  test("Codex #4015 P1 regression: sourceHash does NOT vary with version — a routine release-please bump must never invalidate a committed marker", () => {
+    const packManifest = { packId: "x", description: "research → plan" };
+    expect(buildCodexGeneratedMarker(packManifest).sourceHash).toBe(buildCodexGeneratedMarker(packManifest).sourceHash);
+    // buildCodexGeneratedMarker no longer even accepts a version argument —
+    // asserted structurally too: the function's arity is 1.
+    expect(buildCodexGeneratedMarker.length).toBe(1);
   });
 });
 
