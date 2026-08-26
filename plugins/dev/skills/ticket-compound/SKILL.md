@@ -6,8 +6,12 @@ description:
   structured entry to the shared learnings store (thoughts/shared/learnings/), prunes/amends stale
   notes there autonomously, captures new domain vocabulary to thoughts/shared/CONCEPTS.md, and PROPOSES (for
   human approval) any ADR change. Non-blocking — runs after a ticket ships or fails, never on the
-  critical path. Use when the user says "compound this ticket", "capture learnings", "what did we
-  learn", or run as /catalyst-dev:ticket-compound <TICKET> [mode:headless].
+  critical path. **Trigger (CTL-2244):** invoke once merge-pr's post-merge deploy-verification
+  (CTL-2232) resolves a terminal sentinel for the ticket's merge — the same relay-native signal
+  `compound-estimate` and `ticket-retro` use, see
+  ../compound-estimate/references/trigger.md. Also use when the user says "compound this ticket",
+  "capture learnings", "what did we learn", or run as /catalyst-dev:ticket-compound <TICKET>
+  [mode:headless].
 disable-model-invocation: true
 user-invocable: true
 allowed-tools: Read, Write, Edit, Bash, Grep, Glob, Task, AskUserQuestion
@@ -138,6 +142,10 @@ ticket-compound complete
 ```
 
 ## Out of scope (this slice)
-- The daemon firing this automatically after `monitor-deploy` (manual / morning-ritual triggered for now).
 - The estimation loop (separate slice — `compound-estimate` owns estimation numbers).
 - `ticket-retro` (the cross-ticket view — separate slice).
+
+Superseded: this section used to defer the automatic trigger to "the daemon firing this
+automatically after `monitor-deploy` (manual / morning-ritual triggered for now)" — that daemon
+hook was never built, and `monitor-deploy` (`phase-monitor-deploy`) is itself retiring. CTL-2244
+fulfills that deferred wiring with the relay-native trigger above instead.

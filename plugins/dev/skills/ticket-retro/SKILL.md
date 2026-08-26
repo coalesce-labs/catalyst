@@ -2,8 +2,10 @@
 name: ticket-retro
 description:
   "Cross-ticket retrospective VIEW (CTL-789 Loop C / CTL-814). **ALWAYS use when** a ticket's PR
-  has just merged (the workflow's compound closing step — runs automatically per ticket, CTL-831),
-  or when the user says 'ticket retro', 'run a retro', 'retrospective', 'what did we learn lately',
+  has merged and merge-pr's post-merge deploy-verification (CTL-2232) has resolved a terminal
+  sentinel for it (the workflow's compound closing step — relay-native trigger, CTL-2244; see
+  `../compound-estimate/references/trigger.md`), or when the user says 'ticket retro', 'run a
+  retro', 'retrospective', 'what did we learn lately',
   or 'how are the estimates calibrating'. Synthesizes everything the compound loops captured since
   the last retro — friction logs, learnings, compound-log calibration, catalyst.db / merged-PR
   actuals — into thoughts/shared/retros/ticket/<date>.md with a persisted watch-items block, and
@@ -17,11 +19,14 @@ Loop C of compound engineering: a human-readable reflection across a SET of tick
 **reads** what Loop B (friction logs, learnings) and Loop A (compound-log, estimation corpus)
 captured, then writes ONE artifact: the retro document.
 
-**Runs automatically per ticket (CTL-831):** `merge-pr` step 12b and `phase-monitor-merge` invoke
-this skill right after the compound-log entry lands, so the system learns from every ticket it
-ships without being asked. Best-effort in those contexts — a retro failure never blocks a merge
-or a phase. Several merges per day are normal: same-day re-runs REGENERATE today's file
-cumulatively (the gather floor skips today — see Step 3).
+**Runs automatically per ticket, relay-native (CTL-2244):** fires once merge-pr's post-merge
+deploy-verification (`merge-pr/references/post-merge-deploy-verify.md`, CTL-2232) resolves a
+terminal sentinel for the merge, so the system learns from every ticket it ships without being
+asked — see [`../compound-estimate/references/trigger.md`](../compound-estimate/references/trigger.md)
+for the shared trigger contract and why this no longer depends on the retiring daemon-era
+`phase-monitor-merge` phase agent. Best-effort in that context — a retro failure never blocks a
+merge. Several merges per day are normal: same-day re-runs REGENERATE today's file cumulatively
+(the gather floor skips today — see Step 3).
 
 **Hard contract — read-only VIEW:**
 
@@ -85,7 +90,8 @@ use it for the aggregate stats; treat db cost/hours as a bonus column where pres
    `quiet` (no sighting), or `resolved` (a learning/ADR/fix landed that addresses it — cite it).
 4. **Estimation calibration** — from `calibration`: count/exact/mean-signed-delta/median-abs-delta
    plus a per-ticket start→actual table. When `calibration.entries == 0`, render `_none_` and note
-   the sink fills at merge (`merge-pr` 12b / `phase-monitor-merge`).
+   the sink fills once the post-merge deploy-verification signal resolves (see
+   `../compound-estimate/references/trigger.md`).
 5. **Next watch items** — carry forward unresolved prior items (keep their `first_seen`) and add
    new patterns from (2) worth tracking. Cap at ~7 — a watch list longer than that is a backlog,
    not a watch list.
