@@ -40,7 +40,14 @@ const KNOWN_SKILL_KEYS = new Set([
 
 const KNOWN_AGENT_KEYS = new Set(["id", "name", "description", "body", "claudeOnly"]);
 const KNOWN_FILE_KEYS = new Set(["relPath", "bytesRef", "content"]);
-const PORTABLE_FILE_DIRS = new Set(["scripts", "references", "assets"]);
+
+// Deliberately excludes "agents" — that is the sidecar directory
+// providers/local.mjs reads agents/portability.yaml from, never a copied
+// auxiliary file. Exported (with isPortableFileRelPath's injectable second
+// param below) so a test can mutate a COPY of this set and observe real
+// behavior change through the same function under test, not merely assert
+// the constant's contents.
+export const PORTABLE_FILE_DIRS = new Set(["scripts", "references", "assets"]);
 
 const KNOWN_NEUTRAL_KEYS = new Set(["effects", "invocation", "exposure"]);
 
@@ -60,12 +67,13 @@ function requireString(obj, field, label, errors) {
   }
 }
 
-function isPortableFileRelPath(relPath) {
+/** isPortableFileRelPath(relPath, portableDirs?) — exported so a test can inject a mutated `portableDirs` and observe real behavior change. */
+export function isPortableFileRelPath(relPath, portableDirs = PORTABLE_FILE_DIRS) {
   if (typeof relPath !== "string" || relPath.length === 0 || relPath.includes("\\")) return false;
   if (relPath === "SKILL.md") return true;
   if (relPath.startsWith("/") || relPath.endsWith("/")) return false;
   const parts = relPath.split("/");
-  if (!PORTABLE_FILE_DIRS.has(parts[0]) || parts.length < 2) return false;
+  if (!portableDirs.has(parts[0]) || parts.length < 2) return false;
   return parts.every((part) => part.length > 0 && part !== "." && part !== "..");
 }
 
@@ -134,14 +142,17 @@ function validateSkill(skill, index, errors) {
         errors.push(`${label} (${skillId}): neutral has unknown key(s) ${JSON.stringify(neutralExtra)}`);
       }
       // A skill with `neutral === null` is legal — it simply cannot reach a
-      // non-Claude target. A `neutral` object missing effects OR invocation is
-      // an ERROR: "missing classification is an error", and a half-declaration
-      // is worse than none because it reads as classified.
+      // non-Claude target. A `neutral` object missing effects, invocation, OR
+      // exposure is an ERROR: "missing classification is an error", and a
+      // half-declaration is worse than none because it reads as classified.
       if (!Array.isArray(skill.neutral.effects)) {
         errors.push(`${label} (${skillId}): neutral classification is missing "effects" — a half-declared neutral block is an error, not a partial pass`);
       }
       if (typeof skill.neutral.invocation !== "string" || !VALID_INVOCATIONS.has(skill.neutral.invocation)) {
         errors.push(`${label} (${skillId}): neutral classification is missing or has an invalid "invocation" (must be "explicit" or "auto")`);
+      }
+      if (!Array.isArray(skill.neutral.exposure) || skill.neutral.exposure.length === 0) {
+        errors.push(`${label} (${skillId}): neutral classification is missing or has an empty "exposure" — must be a non-empty array`);
       }
     }
   } else if (skill.neutral === undefined) {

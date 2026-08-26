@@ -19,8 +19,18 @@
 // SKILL.md itself is excluded from that copy — this emitter builds a FRESH
 // SKILL.md from the portable `name`/`description`/`body` fields, since the
 // original file's frontmatter carries Claude-only keys.
+//
+// CTL-1461 Phase 2: every emitted skill also gets a sibling
+// `agents/openai.yaml` carrying ONLY `policy.allow_implicit_invocation`,
+// derived from `neutral.invocation` — zero new authored data, the one field
+// in catalyst-cloud's real per-skill sidecar that carries safety rather than
+// presentation. `agents/` here is EMITTED output (this emitter's own
+// namespace), distinct from the skill source directory's `agents/` sidecar
+// (providers/local.mjs's portability.yaml, which Phase 1 keeps out of
+// `files[]` entirely) — the two must not be conflated.
 
 import { formatJson } from "../core/json-format.mjs";
+import { classifySkillEmission } from "../core/safety-gate.mjs";
 import { createHash } from "node:crypto";
 
 const PORTABLE_AUX_DIRS = new Set(["scripts", "references", "assets"]);
@@ -70,21 +80,31 @@ export function buildSkillMd(skill) {
   return frontmatter + skill.body;
 }
 
+/** buildOpenaiYaml(skill) → the flat bundle's per-skill `agents/openai.yaml` — the one field that carries safety (not presentation), derived from `neutral.invocation`. Zero new authored data. */
+export function buildOpenaiYaml(skill) {
+  const allowImplicitInvocation = skill.neutral.invocation !== "explicit";
+  return `---\npolicy:\n  allow_implicit_invocation: ${allowImplicitInvocation}\n`;
+}
+
 /**
  * planAgentsSkillsBundle(entries) → { files, collisions }
  *
  * `entries` is [{ packId, pack }, ...]. `files` is
  * [{ flatName, relPath, text? , base64? }] — `relPath` is relative to
  * `.agents/skills/`. Throws on any flat-name collision, naming both sources.
+ *
+ * Emit/omit is delegated to the SAME `classifySkillEmission` the loss report
+ * uses (targetName "agentsSkills") — never a hand-rolled subset of that
+ * decision — so this writer and the loss report can never disagree about
+ * which skills actually land in the bundle.
  */
 export function planAgentsSkillsBundle(entries) {
   const seen = new Map(); // flatName -> "packId/skillId"
   const files = [];
 
   for (const { packId, pack } of entries) {
-    if (pack.hooks.present) continue;
     for (const skill of pack.skills) {
-      if (skill.neutral === null) continue;
+      if (!classifySkillEmission(skill, pack.hooks, "agentsSkills").emit) continue;
 
       const flatName = flatSkillName(packId, skill.id);
       const sourceLabel = `${packId}/${skill.id}`;
@@ -96,6 +116,7 @@ export function planAgentsSkillsBundle(entries) {
       seen.set(flatName, sourceLabel);
 
       files.push({ flatName, relPath: `${flatName}/SKILL.md`, text: buildSkillMd(skill) });
+      files.push({ flatName, relPath: `${flatName}/agents/openai.yaml`, text: buildOpenaiYaml(skill) });
 
       for (const f of skill.files) {
         if (f.relPath === "SKILL.md") continue; // regenerated above, never copied verbatim

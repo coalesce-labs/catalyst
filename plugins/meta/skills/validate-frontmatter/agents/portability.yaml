@@ -1,0 +1,4 @@
+---
+effects: ["file-read", "file-write"]
+invocation: explicit
+exposure: ["catalog"]

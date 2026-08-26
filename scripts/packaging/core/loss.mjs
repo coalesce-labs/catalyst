@@ -1,12 +1,16 @@
-// loss.mjs — the two-tier loss classifier (CTL-1463 Phase 3).
+// loss.mjs — the two-tier loss classifier (CTL-1463 Phase 3; CTL-1461 Phase 2
+// delegates the emit/omit decision to core/safety-gate.mjs).
 //
 // The enumeration below is CLOSED — it comes from the research's
 // schema-field-shaped boundary — so this is a table, not a detector. Two
-// tiers: SAFETY losses omit (a hook or an effects/invocation guard is a
-// mutation guard; shipping the constrained content without the constraint is
-// unsafe), everything else warns (a capability the target lacks, or cosmetic
-// metadata). No silent caps: a render that drops most skills and prints
-// nothing would defeat the entire point of this module.
+// tiers: SAFETY losses omit (a hook or an effects/invocation/exposure guard
+// is a mutation guard; shipping the constrained content without the
+// constraint is unsafe), everything else warns or degrades (a capability the
+// target lacks, or cosmetic metadata). No silent caps: a render that drops
+// most skills and prints nothing would defeat the entire point of this
+// module.
+
+import { classifySkillEmission } from "./safety-gate.mjs";
 
 const PRESENTATION_PATTERNS = [
   { name: "CLAUDE_PLUGIN_ROOT", regex: /\$\{CLAUDE_PLUGIN_ROOT\}/ },
@@ -41,23 +45,15 @@ export function classifyPackLosses(packId, pack, targetName) {
 
   for (const skill of pack.skills) {
     const label = skillLabel(packId, skill.id);
+    const verdict = classifySkillEmission(skill, pack.hooks, targetName);
 
-    if (pack.hooks.present) {
-      omitted.push({
-        skill: label,
-        class: "safety",
-        reason: `hooks.toml is never projected to non-Claude targets (${pack.hooks.entryCount} entr${pack.hooks.entryCount === 1 ? "y" : "ies"}) — emitting this skill would silently remove a pack-level safety guard`,
-      });
+    if (!verdict.emit) {
+      omitted.push({ skill: label, class: "safety", reasonCode: verdict.reasonCode, reason: verdict.reason });
       continue;
     }
 
-    if (skill.neutral === null) {
-      omitted.push({
-        skill: label,
-        class: "safety",
-        reason: "no neutral effects/invocation classification declared in pack.json — missing classification is an error, and a safety-bearing loss must omit, never ship silently",
-      });
-      continue;
+    if (verdict.reasonCode) {
+      degraded.push({ skill: label, class: "capability", reasonCode: verdict.reasonCode, reason: verdict.reason });
     }
 
     // Emitted: the skill declared a neutral classification, so it is safe to

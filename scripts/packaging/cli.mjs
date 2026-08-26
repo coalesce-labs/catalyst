@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 // cli.mjs — the packaging pipeline entrypoint (CTL-1463).
 //
-// The ONE file outside providers/local-provisional.mjs itself that may import
-// it — enforced by packaging-seam.test.mjs's countProviderImporters() check.
+// The ONE file outside providers/local.mjs itself that may import it —
+// enforced by packaging-seam.test.mjs's countProviderImporters() check.
 // Subcommands grow phase by phase: Phase 2 ships `render --dry-run` (a census,
 // no writes); Phase 3 adds loss reporting; Phase 4 adds `--target`/`--write`;
 // Phase 6 adds `extraction-readiness`.
@@ -13,10 +13,17 @@ import { resolve } from "node:path";
 
 import { validateRenderedPack } from "./core/contract.mjs";
 import { readPackManifest } from "./core/pack-manifest.mjs";
-import { renderPluginPack, listPluginRelPaths } from "./providers/local-provisional.mjs";
+import { renderPluginPack, listPluginRelPaths } from "./providers/local.mjs";
 import { buildLossReport, hasUnacknowledgedLosses, lossCounts, renderLossReportMarkdown } from "./core/loss.mjs";
+import { checkInvocationParity } from "./core/safety-gate.mjs";
 import { renderPluginJson, renderMarketplaceJson, readExistingVersion } from "./emitters/claude.mjs";
-import { resolveCodexVersion, renderCodexPluginJson, renderCodexCatalog } from "./emitters/codex.mjs";
+import {
+  resolveCodexVersion,
+  renderCodexPluginJson,
+  renderCodexCatalog,
+  renderCodexGeneratedMarker,
+  GENERATED_MARKER_FILENAME as CODEX_GENERATED_MARKER_FILENAME,
+} from "./emitters/codex.mjs";
 import { planAgentsSkillsBundle, GENERATED_MARKER_FILENAME } from "./emitters/agents-skills.mjs";
 import { checkExtractionReadiness } from "./core/extraction-readiness.mjs";
 
@@ -30,13 +37,6 @@ function readPackId(repoRootPath, pluginRelPath) {
   return plugin.name;
 }
 
-function readSkillNeutralOverrides(repoRootPath, pluginRelPath) {
-  const packJsonPath = resolve(repoRootPath, pluginRelPath, "pack.json");
-  if (!existsSync(packJsonPath)) return {};
-  const pack = JSON.parse(readFileSync(packJsonPath, "utf8"));
-  return pack.skills ?? {};
-}
-
 /** readConfigPackageOrder(repoRootPath) → plugin rel-paths in release-please-config.json's declared order. */
 export function readConfigPackageOrder(repoRootPath) {
   const config = JSON.parse(readFileSync(resolve(repoRootPath, "release-please-config.json"), "utf8"));
@@ -46,18 +46,22 @@ export function readConfigPackageOrder(repoRootPath) {
 /**
  * renderAllPacks(repoRootPath) → [{ pluginRelPath, packId, pack, packManifest, validation }]
  *
- * Renders every real plugin directory through the provisional provider and
+ * Renders every real plugin directory through the real provider and
  * validates each against the contract. Never writes anything to disk.
+ *
+ * The invocation-parity check runs here, unconditionally, for every skill in
+ * every pack — it is a hard error at render time (throws), never a warning:
+ * the whole point of the rule is that the neutral and Claude vocabularies
+ * must not be allowed to disagree about whether a mutating skill is
+ * explicit-invocation-only.
  */
 export function renderAllPacks(repoRootPath = repoRoot) {
   return listPluginRelPaths(repoRootPath).map((pluginRelPath) => {
     const packId = readPackId(repoRootPath, pluginRelPath);
-    const pack = renderPluginPack({
-      repoRoot: repoRootPath,
-      pluginRelPath,
-      packId,
-      skillNeutralOverrides: readSkillNeutralOverrides(repoRootPath, pluginRelPath),
-    });
+    const pack = renderPluginPack({ repoRoot: repoRootPath, pluginRelPath, packId });
+    for (const skill of pack.skills) {
+      checkInvocationParity(skill, `${packId}/${skill.id}`);
+    }
     return {
       pluginRelPath,
       packId,
@@ -86,6 +90,37 @@ function writeFileEnsuringDir(absPath, contents) {
   writeFileSync(absPath, contents);
 }
 
+/**
+ * assertPluginInventoryAgreement(order, diskRelPaths) — CTL-1461 Phase 7,
+ * fixing defect 6. Throws a NAMED, actionable error the instant
+ * release-please-config.json's declared plugin set and the on-disk plugin
+ * set disagree, in EITHER direction — never a bare TypeError from a missing
+ * map entry (a config entry with no plugin on disk), and never a silent skip
+ * that drops a plugin from a catalog with no signal (a plugin on disk with
+ * no config entry). This is exactly the fragility a CTL-2218 plugin deletion
+ * would hit on its first commit if the config and the deletion land in
+ * separate commits.
+ */
+export function assertPluginInventoryAgreement(order, diskRelPaths) {
+  const diskSet = new Set(diskRelPaths);
+  const orderSet = new Set(order);
+
+  for (const pluginRelPath of order) {
+    if (!diskSet.has(pluginRelPath)) {
+      throw new Error(
+        `packaging: release-please-config.json lists "${pluginRelPath}" but no plugin exists there — delete the entry or restore the plugin.`
+      );
+    }
+  }
+  for (const pluginRelPath of diskRelPaths) {
+    if (!orderSet.has(pluginRelPath)) {
+      throw new Error(
+        `packaging: "${pluginRelPath}" has a pack.json but no release-please-config.json entry — it will be absent from both marketplace catalogs and unversioned by Release Please.`
+      );
+    }
+  }
+}
+
 /** writeClaudeTarget(repoRootPath, results, { write }) → { pluginJsonPaths, marketplacePath } */
 function writeClaudeTarget(repoRootPath, results, { write }) {
   const order = readConfigPackageOrder(repoRootPath);
@@ -94,7 +129,6 @@ function writeClaudeTarget(repoRootPath, results, { write }) {
 
   for (const pluginRelPath of order) {
     const r = byRelPath.get(pluginRelPath);
-    if (!r) continue;
     const existingVersion = readExistingVersion(repoRootPath, pluginRelPath);
     const text = renderPluginJson(r.packManifest, existingVersion) + "\n";
     const absPath = resolve(repoRootPath, pluginRelPath, ".claude-plugin/plugin.json");
@@ -110,16 +144,70 @@ function writeClaudeTarget(repoRootPath, results, { write }) {
   return { pluginJsonPaths, marketplacePath };
 }
 
-/** writeCodexTarget(repoRootPath, results, { write }) → { pluginJsonPaths, catalogPath } */
+/**
+ * listPluginDirCandidates(repoRootPath) → every directory shaped like a
+ * plugin location (`plugins/<name>` and `plugins/playground/<name>`),
+ * regardless of whether it still carries a `.claude-plugin/plugin.json`.
+ *
+ * Deliberately NOT `listPluginRelPaths` (which requires that file to exist):
+ * a plugin deleted down to a bare `.codex-plugin/` remnant (e.g. a partial
+ * manual deletion, or the CTL-2218 cut landing one file at a time) must still
+ * be visited by the stale-prune sweep below, or its orphan `.codex-plugin/`
+ * tree lingers forever and then fails the drift gate.
+ */
+function listPluginDirCandidates(repoRootPath) {
+  const roots = [];
+  const topDir = resolve(repoRootPath, "plugins");
+  if (!existsSync(topDir)) return roots;
+  for (const name of readdirSync(topDir)) {
+    const abs = resolve(topDir, name);
+    if (!statSync(abs).isDirectory()) continue;
+    if (name === "playground") {
+      for (const sub of readdirSync(abs)) {
+        const subAbs = resolve(abs, sub);
+        if (statSync(subAbs).isDirectory()) roots.push(`plugins/playground/${sub}`);
+      }
+    } else {
+      roots.push(`plugins/${name}`);
+    }
+  }
+  return roots;
+}
+
+/**
+ * pruneStaleCodexPluginDirs(repoRootPath, emittedPluginRelPaths) → the plugin
+ * rel-paths whose `.codex-plugin/` dir was actually removed.
+ *
+ * Same shape as pruneStaleAgentsSkillsDirs: only removes a `.codex-plugin/`
+ * dir that is BOTH absent from this render's emit plan AND carries this
+ * pipeline's own GENERATED_MARKER_FILENAME — never touches a directory
+ * without that marker.
+ */
+export function pruneStaleCodexPluginDirs(repoRootPath, emittedPluginRelPaths) {
+  const emitted = new Set(emittedPluginRelPaths);
+  const pruned = [];
+  for (const pluginRelPath of listPluginDirCandidates(repoRootPath)) {
+    if (emitted.has(pluginRelPath)) continue;
+    const codexDir = resolve(repoRootPath, pluginRelPath, ".codex-plugin");
+    if (!existsSync(codexDir)) continue;
+    if (!existsSync(resolve(codexDir, CODEX_GENERATED_MARKER_FILENAME))) continue;
+    rmSync(codexDir, { recursive: true, force: true });
+    pruned.push(pluginRelPath);
+  }
+  return pruned;
+}
+
+/** writeCodexTarget(repoRootPath, results, { write }) → { pluginJsonPaths, catalogPath, prunedPluginRelPaths } */
 function writeCodexTarget(repoRootPath, results, { write }) {
   const order = readConfigPackageOrder(repoRootPath);
   const byRelPath = new Map(results.map((r) => [r.pluginRelPath, r]));
   const pluginJsonPaths = [];
   const codexEntries = [];
+  const emittedPluginRelPaths = [];
 
   for (const pluginRelPath of order) {
     const r = byRelPath.get(pluginRelPath);
-    if (!r || r.packManifest.distribution.codex?.enabled !== true) continue;
+    if (r.packManifest.distribution.codex?.enabled !== true) continue;
     const claudeVersion = readExistingVersion(repoRootPath, pluginRelPath);
     const version = resolveCodexVersion({ repoRoot: repoRootPath, pluginRelPath, claudeVersion });
     const text = renderCodexPluginJson(r.packManifest, version) + "\n";
@@ -127,13 +215,22 @@ function writeCodexTarget(repoRootPath, results, { write }) {
     if (write) writeFileEnsuringDir(absPath, text);
     pluginJsonPaths.push(absPath);
     codexEntries.push({ pluginRelPath, packManifest: r.packManifest });
+    emittedPluginRelPaths.push(pluginRelPath);
+
+    const markerPath = resolve(repoRootPath, pluginRelPath, `.codex-plugin/${CODEX_GENERATED_MARKER_FILENAME}`);
+    if (write) writeFileEnsuringDir(markerPath, renderCodexGeneratedMarker(r.packManifest) + "\n");
   }
 
   const catalogText = renderCodexCatalog(codexEntries) + "\n";
   const catalogPath = resolve(repoRootPath, ".agents/plugins/marketplace.json");
   if (write) writeFileEnsuringDir(catalogPath, catalogText);
 
-  return { pluginJsonPaths, catalogPath };
+  let prunedPluginRelPaths = [];
+  if (write) {
+    prunedPluginRelPaths = pruneStaleCodexPluginDirs(repoRootPath, emittedPluginRelPaths);
+  }
+
+  return { pluginJsonPaths, catalogPath, prunedPluginRelPaths };
 }
 
 /**
@@ -201,6 +298,13 @@ function cmdRender(args) {
   const target = targetIdx >= 0 ? args[targetIdx + 1] : null;
   const results = renderAllPacks(repoRoot);
 
+  // Runs unconditionally, for every invocation shape (Codex #4015 P2): a
+  // config/disk disagreement must be loud on a bare `--dry-run` census and
+  // on `--target agentsSkills` too, not only on the two writers that happen
+  // to consult readConfigPackageOrder() themselves. One call site, ahead of
+  // all target dispatch, rather than duplicated into a third writer.
+  assertPluginInventoryAgreement(readConfigPackageOrder(repoRoot), results.map((r) => r.pluginRelPath));
+
   let totalSkills = 0;
   let totalAgents = 0;
   let invalid = 0;
@@ -262,6 +366,9 @@ function cmdRender(args) {
     if (targetOutcome.prunedNames?.length > 0) {
       console.log(`  pruned stale generated dir(s): ${targetOutcome.prunedNames.join(", ")}`);
     }
+    if (targetOutcome.prunedPluginRelPaths?.length > 0) {
+      console.log(`  pruned stale generated dir(s): ${targetOutcome.prunedPluginRelPaths.join(", ")}`);
+    }
   } else if (write) {
     targetOutcome = {};
     for (const [name, writer] of Object.entries(TARGET_WRITERS)) {
@@ -269,6 +376,9 @@ function cmdRender(args) {
       console.log(`TARGET ${name}: wrote output`);
       if (targetOutcome[name].prunedNames?.length > 0) {
         console.log(`  pruned stale generated dir(s): ${targetOutcome[name].prunedNames.join(", ")}`);
+      }
+      if (targetOutcome[name].prunedPluginRelPaths?.length > 0) {
+        console.log(`  pruned stale generated dir(s): ${targetOutcome[name].prunedPluginRelPaths.join(", ")}`);
       }
     }
   }

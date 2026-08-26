@@ -25,6 +25,7 @@ meaning of the word is the only thing stopping it drifting into a second orchest
 | deciding who answers a comment — you, a steward, or nobody | `references/routing.md` |
 | an ask is stale, unanswered, or needs re-surfacing | `references/asks.md` |
 | replying to anyone | `ask/references/threading.md` (canonical) |
+| the replica might be stale, or this host may have no cloud mirror | `steward/references/cloud-detection.md` (canonical) |
 | booting, restarting, or handing off | `references/resume.md` |
 
 ## Invariants
@@ -40,6 +41,7 @@ meaning of the word is the only thing stopping it drifting into a second orchest
 - **An ask never silently expires** — unanswered > 24 h goes to the top of the board.
 - **A steward's "I cannot enforce this" is a RISK on the board, not a decision** for the human to make.
 - **Cite an identifier only after `create` returned it.**
+- **Reads → the replica, gated by cloud-detection** (`steward/references/cloud-detection.md`); stale/absent means a loud fallback to direct `linearis` — the non-fleet path, never a silent one.
 
 ## Loop
 
@@ -48,7 +50,8 @@ meaning of the word is the only thing stopping it drifting into a second orchest
 3. **BOARD** — hourly: one row per scope from its status doc — headline, traffic light, needs-you, decider.
 4. **ASKS** — every open ask: still live? > 24 h? → top of the board (`references/asks.md`).
 5. **SCAFFOLD** — a request that is not yet a project becomes one, and a steward is launched for it.
-6. **ORPHANS** — a scope with no steward is yours until one exists; scaffold one rather than keep it.
+6. **ORPHANS** — a scope with no steward is yours until one exists: dispatch it exactly as a steward does
+   (`steward/references/dispatch.md`), confirming **phase-completion evidence** before advancing; scaffold a real steward rather than keep it.
 7. **PUSH** — P1 asks any hour; everything else batched into the next 07:00–22:00 CT window.
 8. **HAND OFF** — write the handoff your supervisor resumes from, then stop.
 
@@ -74,5 +77,4 @@ Before going quiet, check all five — each is a way this role has actually fail
 
 ## Pointers
 
-`catalyst-dev:ask` · `catalyst-dev:linearis` · `catalyst-dev:gherkin-ticket` · `catalyst-dev:create-handoff` ·
-`grilling` (the human-facing grill) · `steward` (the role you launch, never command) · `catalyst-dev:project-orchestrator` (the project-scoped steward entry point).
+`catalyst-dev:ask` · `catalyst-dev:linearis` · `catalyst-dev:gherkin-ticket` · `catalyst-dev:create-handoff` · `grilling` · `steward` (the role you launch, never command) · `catalyst-dev:project-orchestrator`.

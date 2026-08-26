@@ -98,12 +98,7 @@ Coding agents orient on this codebase through **Serena** — a self-hosted, loca
 - `chore(meta): update docs` — no version bump
 - Valid scopes (one per plugin): `dev`, `pm`, `meta`, `analytics`, `debugging`, `pm-ops`, `meeting-hygiene`, `discovery`, `legacy`, `foundry`
 
-**How release-please routes version bumps (monorepo):**
-
-- Routing is by **file paths changed**, NOT by commit message scope. A commit touching files in both `plugins/dev/` and `plugins/playground/pm/` bumps both plugins regardless of scope.
-- The `(scope)` in `fix(dev):` controls **changelog grouping**, not which plugin gets bumped.
-- Squash merges work correctly — the GitHub API provides the file list to release-please.
-- Use the scope that best describes the primary intent. Both plugins still get their version bumps.
+**Versioning (post release-please, CTL-2220):** release-please — which used to auto-bump `version.txt`/`plugin.json` and generate changelogs on merge — was removed at Ryan's request. No replacement mechanism has been specified; this is an open decision, not an assumption that hand-semver is fine. See `docs/releases.md` → "Versioning (post release-please)" for what actually enforces the conventional-commit format now (`scripts/check-plugin-version.sh`, the `check-versions` PR check) and what it does and does not do — it is a gate, not a bumper. If a plugin change should ship a new version, bump `version.txt` and both `plugin.json` files by hand in the same PR.
 
 ## Version Control
 
