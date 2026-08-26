@@ -1,10 +1,8 @@
 # Worker Phase Events — Severity Tiers and Coalescing (CTL-229)
 
-_Read this when subscribing to worker phase transitions, understanding the batched
-`phase_advanced` vs immediate `status_terminal` split, or reading coalesced event shapes._
+_Read this when subscribing to worker phase transitions, understanding the batched `phase_advanced` vs immediate `status_terminal` split, or reading coalesced event shapes._
 
-The worker emitter splits phase transitions into two topics so subscribers can
-filter by severity instead of inspecting `.detail` fields:
+The worker emitter splits phase transitions into two topics so subscribers can filter by severity instead of inspecting `.detail` fields:
 
 | Topic | Tier | When | Coalesces? | Carries `detail.pr`? |
 |---|---|---|---|---|
@@ -31,11 +29,7 @@ Coalesced `orchestrator.worker.phase_advanced` events leave
 }
 ```
 
-Stragglers (the last event in a sequence) flush via the next `emit` OR via an
-explicit `emit-worker-status-change.sh flush --orch <id>` invocation. The
-orchestrator's 10-min idle scan is the documented contract for periodic
-flushing — a worker exiting between phases does not need to flush its own
-queue.
+Stragglers (the last event in a sequence) flush via the next `emit` OR via an explicit `emit-worker-status-change.sh flush --orch <id>` invocation. The orchestrator's 10-min idle scan is the documented contract for periodic flushing — a worker exiting between phases does not need to flush its own queue.
 
 ## Subscriber recipes
 

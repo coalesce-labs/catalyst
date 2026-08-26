@@ -1,13 +1,11 @@
 # Pattern 3 Gotchas
 
-_Read this when a reactive PR lifecycle wait loop misbehaves — events not matching, filters
-silently dropping events, or a runaway fix loop._
+_Read this when a reactive PR lifecycle wait loop misbehaves — events not matching, filters silently dropping events, or a runaway fix loop._
 
 ## Gotchas
 
 - **`check_suite.completed` has no `vcs.pr.number`.** A check suite spans many
-  PRs; the affected PR numbers live in `body.payload.prNumbers`. Filter with
-  `(.body.payload.prNumbers // [] | index($PR) != null)`, not `.attributes."vcs.pr.number" == $PR`.
+  PRs; the affected PR numbers live in `body.payload.prNumbers`. Filter with `(.body.payload.prNumbers // [] | index($PR) != null)`, not `.attributes."vcs.pr.number" == $PR`.
 - **The filter is one jq expression.** Clauses are joined with `or`, not
   comma. Each clause is parenthesized.
 - **Bash quoting.** The shell-variable interpolation (`'"$PR_NUMBER"'`) is
@@ -16,8 +14,7 @@ silently dropping events, or a runaway fix loop._
   by piping a fixture event through `jq -c "select(<filter>)"` before
   trusting it in production.
 - **Iteration cap.** `MAX_ITER=20` prevents runaway loops on a stuck failure
-  mode. Apply per-failure-type fix budgets inside each handler too (e.g. give
-  up after 3 distinct fix attempts on the same CI check).
+  mode. Apply per-failure-type fix budgets inside each handler too (e.g. give up after 3 distinct fix attempts on the same CI check).
 - **All filtering belongs inside the `--filter` jq predicate (CTL-240, CTL-372).**
   Do NOT add a downstream `| grep …` / `| awk …` / `| sed …` / `| jq …`
   post-pipe to a `catalyst-events tail` invocation. The primary reason is
