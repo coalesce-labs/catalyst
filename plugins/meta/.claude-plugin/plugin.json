@@ -1,7 +1,7 @@
 {
   "name": "catalyst-meta",
   "version": "5.0.0",
-  "description": "Workflow discovery, creation, reorganization, and audit tools: learn from community patterns, extend Catalyst with new workflows, safely reorganize directory structures, and audit plugin health.",
+  "description": "Frontmatter validation, reference auditing, and directory reorganization tools for Catalyst plugin developers: keep skill and agent frontmatter consistent, find broken references, and safely reorganize directory structures.",
   "author": {
     "name": "Coalesce Labs",
     "email": "hello@coalesce.dev",
@@ -11,11 +11,9 @@
   "repository": "https://github.com/coalesce-labs/catalyst.git",
   "keywords": [
     "meta",
-    "discovery",
-    "creation",
+    "frontmatter",
+    "validation",
     "best-practices",
-    "community",
-    "workflows",
     "reorganize",
     "audit",
     "references"

@@ -1,6 +1,6 @@
 # Catalyst Meta Plugin
 
-Workflow discovery, creation, and management for Catalyst plugin developers and advanced users.
+Frontmatter validation, reference auditing, and directory reorganization for Catalyst plugin developers and advanced users.
 
 The meta plugin is for people who **build new skills and agents** or need to audit, reorganize, and validate an existing Catalyst installation. Most users don't need it — install it only when you're extending Catalyst itself.
 

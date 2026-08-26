@@ -162,7 +162,7 @@ Alternatively, install plugins manually via Claude Code plugin system:
 # Optional: Install PM ops plugin (cycle/backlog/cadence operations)
 /plugin install catalyst-pm-ops
 
-# Optional: Install meta plugin (workflow discovery)
+# Optional: Install meta plugin (frontmatter validation, reference auditing, reorganization)
 /plugin install catalyst-meta
 ```
 
