@@ -395,8 +395,18 @@ function cmdRender(args) {
  * throw on a broken source tree (missing plugins/, unreadable
  * release-please-config.json, …) — the caller degrades that to
  * `inconclusive` rather than crashing.
+ *
+ * Exported (not just conformance-internal) because run-publish.mjs
+ * (CTL-2215 Phase 3) reuses it as the publish source of truth too — it must
+ * publish exactly the entries conformance graded, never a fresh recursive
+ * walk of `.agents/skills/` on disk, which could carry a stale auxiliary
+ * file left behind under an otherwise still-emitted skill (regeneration only
+ * adds/overwrites planned files; it never deletes a file that dropped out of
+ * one skill's plan while the skill itself is still emitted — see
+ * pruneStaleAgentsSkillsDirs's doc comment, which only prunes whole stale
+ * skill DIRECTORIES, not stale files within a surviving one).
  */
-function buildAgentsSkillsConformanceEntries(repoRootPath) {
+export function buildAgentsSkillsConformanceEntries(repoRootPath) {
   const results = renderAllPacks(repoRootPath);
   const eligible = results.filter((r) => r.packManifest.distribution.agentsSkills?.enabled === true);
   const entries = eligible.map((r) => ({ packId: r.packId, pack: r.pack }));

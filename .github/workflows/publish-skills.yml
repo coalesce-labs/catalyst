@@ -118,13 +118,22 @@ jobs:
           SOURCE_REF: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref_name }}
         run: |
           set -euo pipefail
-          git push origin HEAD:main
           # Mirror the source release tag so a consumer can pin by tag or by
           # SHA (D2). A workflow_dispatch run (no release tag) skips the tag
           # push — there is nothing meaningful to mirror.
+          #
+          # The branch and the tag push as ONE atomic transaction (--atomic):
+          # if either ref update fails server-side, neither lands. A
+          # two-step push (branch, then tag) can split — a tag push failing
+          # after the branch push already succeeded leaves the pack commit
+          # permanently untagged, and a later re-run sees the tree already
+          # matches, reports no-change, and skips the push step entirely
+          # with no chance to repair the tag.
           if [[ "${{ github.event_name }}" == "release" ]]; then
             git tag "${SOURCE_REF}"
-            git push origin "refs/tags/${SOURCE_REF}"
+            git push --atomic origin HEAD:main "refs/tags/${SOURCE_REF}"
+          else
+            git push origin HEAD:main
           fi
 
       - name: Dry run — report the plan without pushing

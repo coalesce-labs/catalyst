@@ -1,15 +1,18 @@
 #!/usr/bin/env bun
 // run-publish.mjs — CTL-2215 Phase 3: the publish-skills.yml driver.
 //
-// Reads the freshly-regenerated `.agents/skills/` tree and the cloned pack
-// repo's `skills/` tree into two Maps, asks plan-publish.mjs's pure
-// planSkillsPublish() what to do, and — on `publish` — materializes the
-// decision onto disk inside the cloned pack repo, replacing `skills/`
-// wholesale (D1/D3 in the plan). It never touches git: clone, commit, push,
-// and tag stay bash steps in the workflow, so SKILLS_PUBLISH_TOKEN is never
-// threaded through this script's environment at all (minimal-touch
-// credential handling — the token only ever appears in the two bash steps
-// that actually need it).
+// Builds the SAME planned agentsSkills entries the conformance gate just
+// graded (via cli.mjs's buildAgentsSkillsConformanceEntries — never a
+// recursive disk walk of `.agents/skills/`, which can carry a stale
+// auxiliary file left behind under an otherwise still-emitted skill) and the
+// cloned pack repo's on-disk `skills/` tree into two Maps, asks
+// plan-publish.mjs's pure planSkillsPublish() what to do, and — on
+// `publish` — materializes the decision onto disk inside the cloned pack
+// repo, replacing `skills/` wholesale (D1/D3 in the plan). It never touches
+// git: clone, commit, push, and tag stay bash steps in the workflow, so
+// SKILLS_PUBLISH_TOKEN is never threaded through this script's environment
+// at all (minimal-touch credential handling — the token only ever appears
+// in the two bash steps that actually need it).
 //
 // Usage: bun scripts/packaging/publish/run-publish.mjs --pack-dir <path>
 // Exit 0 on no-change or publish (materialized onto disk, not yet
@@ -23,6 +26,7 @@ import { resolve, relative, join, dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { planSkillsPublish, renderPublishSummary } from "./plan-publish.mjs";
+import { buildAgentsSkillsConformanceEntries } from "../cli.mjs";
 
 const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
 
@@ -39,7 +43,7 @@ function listFilesRecursive(absDir) {
   return out;
 }
 
-/** readTree(absDir) → Map<relPath, Buffer> for every file under absDir, or an empty Map if absDir does not exist (a legitimate "nothing published yet" state — never conflated with "could not read"). */
+/** readTree(absDir) → Map<relPath, Buffer> for every file under absDir, or an empty Map if absDir does not exist (a legitimate "nothing published yet" state — never conflated with "could not read"). Only ever used for the ALREADY-PUBLISHED side (the cloned pack repo) — there is no planned-entries equivalent for that tree, it genuinely is whatever is on disk. */
 function readTree(absDir) {
   const map = new Map();
   if (!existsSync(absDir)) return map;
@@ -48,6 +52,20 @@ function readTree(absDir) {
     map.set(relPath, readFileSync(abs));
   }
   return map;
+}
+
+/** plannedFilesToTree(files) → Map<relPath, Buffer> from planAgentsSkillsBundle-shaped entries, mirroring the byte decoding writeAgentsSkillsTarget itself uses (f.text as utf8, else f.base64 decoded). */
+function plannedFilesToTree(files) {
+  const map = new Map();
+  for (const f of files) {
+    map.set(f.relPath, f.text !== undefined ? Buffer.from(f.text, "utf8") : Buffer.from(f.base64, "base64"));
+  }
+  return map;
+}
+
+/** readCurrentTree(repoRootPath) → Map<relPath, Buffer> of exactly the entries agentskills.io conformance graded — never a recursive disk walk of `.agents/skills/`, which can carry a stale auxiliary file that regeneration leaves behind under an otherwise still-emitted skill (see buildAgentsSkillsConformanceEntries's doc comment in cli.mjs). Publishing must never include a byte conformance never graded. */
+function readCurrentTree(repoRootPath) {
+  return plannedFilesToTree(buildAgentsSkillsConformanceEntries(repoRootPath));
 }
 
 /** materializePublish(packDir, currentFiles) — replaces packDir/skills WHOLESALE with currentFiles' contents. A replace, not a merge, so a de-classified skill cannot linger. */
@@ -91,10 +109,10 @@ function main() {
 
   let currentFiles;
   try {
-    currentFiles = readTree(resolve(repoRoot, ".agents/skills"));
+    currentFiles = readCurrentTree(repoRoot);
   } catch (err) {
     currentFiles = null;
-    console.error(`run-publish: could not read the regenerated .agents/skills/ tree: ${err.message}`);
+    console.error(`run-publish: could not build the graded agentsSkills emit set: ${err.message}`);
   }
 
   let publishedFiles;
@@ -139,4 +157,4 @@ if (import.meta.main) {
   main();
 }
 
-export { readTree, materializePublish };
+export { readTree, readCurrentTree, materializePublish };
