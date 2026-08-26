@@ -36,7 +36,7 @@ blockers legitimately or escalate with specifics. See
    merge/close) with authoritative `gh api` REST re-check on every wake-up.
 5. **Squash merge + cleanup** — checkout-free remote-ref delete (CTL-56), Linear ticket to Done,
    worktree-safe local branch delete.
-6. **Post-merge** — compound-estimate, ticket-retro, deployment detection, success summary.
+6. **Post-merge** — deployment detection + verification, then (once that verification is terminal) compound-estimate, ticket-compound, ticket-retro, and the success summary.
 
 ## Load on demand
 

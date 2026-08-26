@@ -2,11 +2,11 @@
 name: compound-estimate
 description:
   "Closing ritual for the AI-native estimation feedback loop. **ALWAYS use when** a ticket's PR
-  has just merged (today, that still runs automatically per ticket via merge-pr step 12b /
-  phase-monitor-merge, CTL-189/CTL-831 — this skill's trigger wiring is out of scope for this
-  rewrite and unchanged, see CTL-2244), or when the user says 'compound-estimate', 'close the
-  estimation loop', 'record actuals', 'compound-log', or wants to log post-merge actuals for a
-  shipped Linear ticket. Writes a structured entry (linear.key, pr_number, merged_at,
+  has merged and merge-pr's post-merge deploy-verification (CTL-2232) has resolved a terminal
+  sentinel for it — the relay-native trigger this skill now shares with `ticket-retro` and
+  `ticket-compound`, see references/trigger.md (CTL-2244) — or when the user says
+  'compound-estimate', 'close the estimation loop', 'record actuals', 'compound-log', or wants to
+  log post-merge actuals for a shipped Linear ticket. Writes a structured entry (linear.key, pr_number, merged_at,
   estimate_at_start, estimate_actual, cost_usd, wall_time_hours, what_worked, what_surprised_me)
   to thoughts/shared/retros/estimate/YYYY-WW-compound-log.md — one file per ISO week, appends."
 disable-model-invocation: false
@@ -37,13 +37,14 @@ calibration loop stays open. All mechanical work delegates to `plugins/dev/scrip
 | resolving the ticket, collecting the three inputs, invoking the helper, reporting back | `references/process.md` |
 | where `estimate_at_start` and `cost_usd` actually come from today | `references/data-source.md` |
 | the opportunistic corpus refresh, flags, entry schema, testing, troubleshooting | `references/corpus-refresh.md` |
+| what fires this skill now, and why the daemon-era `phase-monitor-merge` path is gone | `references/trigger.md` |
 
 ## Invariants
 
 - **Don't skip the re-score.** `estimate_actual` is the calibration signal; ask for it even when the ticket felt routine.
 - **Reads → the replica** (via the helper's `linear_read_ticket`, gated by cloud-detection); **writes → `linearis`**. See `references/data-source.md`.
 - **A refresh failure never fails the ritual** — the corpus refresh in `references/corpus-refresh.md` is best-effort, off the critical path.
-- **This skill owns content and data source, not the trigger.** How `compound-estimate` gets invoked after a merge is a separate concern (CTL-2244); this rewrite does not change when or how it fires.
+- **Trigger: merge-pr's post-merge deploy-verification signal (CTL-2232), not `phase-monitor-merge`.** This skill no longer depends on the retiring daemon-era `phase-monitor-merge` phase agent to fire — see `references/trigger.md` for the full contract (CTL-2244).
 
 ## Output
 
