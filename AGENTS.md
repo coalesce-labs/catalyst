@@ -98,7 +98,7 @@ Coding agents orient on this codebase through **Serena** — a self-hosted, loca
 - `chore(meta): update docs` — no version bump
 - Valid scopes (one per plugin): `dev`, `meta`, `pm-ops`, `legacy`, `foundry`
 
-**Versioning (post release-please, CTL-2220):** release-please — which used to auto-bump `version.txt`/`plugin.json` and generate changelogs on merge — was removed at Ryan's request. No replacement mechanism has been specified; this is an open decision, not an assumption that hand-semver is fine. See `docs/releases.md` → "Versioning (post release-please)" for what actually enforces the conventional-commit format now (`scripts/check-plugin-version.sh`, the `check-versions` PR check) and what it does and does not do — it is a gate, not a bumper. If a plugin change should ship a new version, bump `version.txt` and both `plugin.json` files by hand in the same PR.
+**Versioning (CTL-2263):** release-please auto-bumps `version.txt` and both `plugin.json` files, writes each `CHANGELOG.md`, and cuts a GitHub release — but only after a conventional-commit PR merges to `main`, via its own release PR, never inside the PR that changed the plugin. Do **not** hand-bump the version in the same PR as the change — a hand bump plus release-please's own bump on the next release PR is a double bump. Just use a conventional commit message; `scripts/check-plugin-version.sh` (the `check-versions` PR check) is what enforces the format, and it is a gate on the message, not a bumper itself. See `docs/releases.md` → "Versioning" for the full mechanism.
 
 ## Version Control
 

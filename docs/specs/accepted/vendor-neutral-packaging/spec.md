@@ -90,7 +90,7 @@ Separately, shipping a REAL YAML parser (`Bun.YAML.parse`, not a regex) surfaced
 > Given a release PR merges with a version bump for a plugin, when release-please updates manifests,
 > then the Claude and Codex manifests for that plugin carry the same new version.
 
-Satisfied by making **release-please itself** write both files in the same commit — a second `extra-files` entry per package in `release-please-config.json` — so the criterion holds even if the compiler never runs. `scripts/validate-release-config.sh` Checks 9–11 assert the invariant on every PR (Check 10's "0 comparisons → inconclusive, never PASS" guard is deliberately the strictest check in the set — every other check in this phase can be satisfied by a script that never compares anything).
+Satisfied by making **release-please itself** write both files in the same commit — a second `extra-files` entry per package in `release-please-config.json` — so the criterion holds even if the compiler never runs. `scripts/check-plugin-manifest-parity.sh` — the real-tree successor to the now-deleted `validate-release-config.sh`'s Checks 9–11 — asserts the invariant on every PR: its parity check's "0 comparisons → inconclusive, never PASS" guard is deliberately the strictest in the set (every other check in the script can be satisfied by a run that never compares anything), and CTL-2263 added a fourth check asserting each package's `extra-files` actually resolves to both `plugin.json` files that exist, closing the gap left when `validate-release-config.sh`'s other checks were retired without a replacement.
 
 ## CTL-2215 — the `agentsSkills` target becomes a real install channel
 
