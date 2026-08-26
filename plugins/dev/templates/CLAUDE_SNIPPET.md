@@ -37,8 +37,7 @@ This project uses [Catalyst](https://github.com/coalesce-labs/catalyst) for AI-a
 
 ### Agent Teams
 
-For complex implementations spanning multiple domains (frontend + backend + tests),
-use the `--team` flag with implement-plan:
+For complex implementations spanning multiple domains (frontend + backend + tests), use the `--team` flag with implement-plan:
 
 ```
 /implement-plan --team thoughts/shared/plans/my-plan.md

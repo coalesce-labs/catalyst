@@ -31,9 +31,7 @@
 
 ## Wave ${WAVE_NUMBER} roster
 
-This briefing is shared across every worker in Wave ${WAVE_NUMBER}. Your assigned ticket is
-the one passed as `$1` when you were dispatched — the others below are FYI only, so you
-understand what siblings are touching in parallel and can avoid scope conflicts.
+This briefing is shared across every worker in Wave ${WAVE_NUMBER}. Your assigned ticket is the one passed as `$1` when you were dispatched — the others below are FYI only, so you understand what siblings are touching in parallel and can avoid scope conflicts.
 
 - **${TICKET_ID}**: ${TITLE} (depends on ${DEPENDENCY})
 
