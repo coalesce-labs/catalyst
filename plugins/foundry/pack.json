@@ -42,12 +42,5 @@
     "agentsSkills": {
       "enabled": true
     }
-  },
-  "skills": {
-    "setup-catalyst": {
-      "effects": ["file-read", "file-write", "shell-exec"],
-      "invocation": "explicit",
-      "exposure": ["catalog"]
-    }
   }
 }

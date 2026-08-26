@@ -95,7 +95,7 @@ describe("countProviderImporters", () => {
     const result = countProviderImporters({
       repoRoot,
       packagingRoot: "scripts/packaging",
-      providerBasename: "local-provisional.mjs",
+      providerBasename: "local.mjs",
       excludeDirNames: ["__tests__"],
     });
     expect(result.count).toBe(1);

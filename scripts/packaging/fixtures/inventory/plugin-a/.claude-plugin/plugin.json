@@ -1,0 +1,10 @@
+{
+  "name": "fixture-plugin-a",
+  "version": "0.0.1",
+  "description": "Synthetic single-plugin fixture proving the packaging pipeline makes no assumption about Catalyst's specific inventory (CTL-1461 Phase 7).",
+  "author": { "name": "Fixture", "email": "fixture@example.com" },
+  "homepage": "https://example.com",
+  "repository": "https://example.com/fixture.git",
+  "keywords": ["fixture"],
+  "license": "MIT"
+}

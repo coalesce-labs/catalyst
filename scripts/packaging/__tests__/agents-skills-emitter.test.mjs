@@ -3,9 +3,15 @@
 // Run: bun test scripts/packaging/__tests__/agents-skills-emitter.test.mjs
 
 import { describe, test, expect } from "bun:test";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-import { flatSkillName, buildSkillMd, planAgentsSkillsBundle } from "../emitters/agents-skills.mjs";
-import { splitFrontmatter } from "../providers/local-provisional.mjs";
+import { flatSkillName, buildSkillMd, buildOpenaiYaml, planAgentsSkillsBundle } from "../emitters/agents-skills.mjs";
+import { splitFrontmatter } from "../providers/local.mjs";
+import { renderAllPacks } from "../cli.mjs";
+
+const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
 
 function pack(packId, skills) {
   return {
@@ -29,7 +35,7 @@ function classifiedSkill(id, overrides = {}) {
       { relPath: "SKILL.md", bytesRef: "sha256:aaa", content: Buffer.from("original SKILL.md").toString("base64") },
       { relPath: "scripts/helper.sh", bytesRef: "sha256:bbb", content: Buffer.from("#!/bin/bash\necho hi\n").toString("base64") },
     ],
-    neutral: { effects: [], invocation: "auto" },
+    neutral: { effects: [], invocation: "auto", exposure: ["catalog"] },
     claudeOnly: { "allowed-tools": "Read", model: "haiku" },
     ...overrides,
   };
@@ -67,7 +73,36 @@ describe("buildSkillMd — exactly name + description frontmatter, no Claude-onl
   });
 });
 
+describe("buildOpenaiYaml — the one safety-bearing field, derived from neutral.invocation", () => {
+  test("invocation: explicit → allow_implicit_invocation: false", () => {
+    const skill = classifiedSkill("s", { neutral: { effects: ["shell-exec"], invocation: "explicit", exposure: ["catalog"] } });
+    expect(buildOpenaiYaml(skill)).toBe("---\npolicy:\n  allow_implicit_invocation: false\n");
+  });
+
+  test("invocation: auto → allow_implicit_invocation: true", () => {
+    const skill = classifiedSkill("s", { neutral: { effects: [], invocation: "auto", exposure: ["catalog"] } });
+    expect(buildOpenaiYaml(skill)).toBe("---\npolicy:\n  allow_implicit_invocation: true\n");
+  });
+});
+
 describe("planAgentsSkillsBundle", () => {
+  test("every emitted skill carries agents/openai.yaml inside the flat skill directory", () => {
+    const entries = [{ packId: "catalyst-dev", pack: pack("catalyst-dev", [classifiedSkill("linearis")]) }];
+    const { files } = planAgentsSkillsBundle(entries);
+    const openai = files.find((f) => f.relPath === "catalyst-dev-linearis/agents/openai.yaml");
+    expect(openai).toBeDefined();
+    expect(openai.text).toContain("allow_implicit_invocation");
+  });
+
+  test("an exposure: ['internal'] skill is omitted from the bundle (same safety-gate decision as the loss report)", () => {
+    const entries = [
+      { packId: "catalyst-dev", pack: pack("catalyst-dev", [classifiedSkill("internal-only", { neutral: { effects: [], invocation: "auto", exposure: ["internal"] } })]) },
+    ];
+    const { files, emittedFlatNames } = planAgentsSkillsBundle(entries);
+    expect(emittedFlatNames).toEqual([]);
+    expect(files).toEqual([]);
+  });
+
   test("does not emit a neutral-classified skill when its pack has hooks that cannot be projected", () => {
     const guardedPack = pack("catalyst-dev", [classifiedSkill("linearis")]);
     guardedPack.hooks = { present: true, entryCount: 11 };
@@ -128,5 +163,53 @@ describe("planAgentsSkillsBundle", () => {
       expect(String(err.message)).toContain("a/b-c");
       expect(String(err.message)).toContain("a-b/c");
     }
+  });
+});
+
+// --- CTL-1461 Phase 3: round-trip against the REAL committed .agents/skills/ tree ---
+// Prior coverage here used synthetic in-memory fixtures only. This proves the
+// drift gate has something real to compare against for the flat bundle
+// target, the way claude-emitter.test.mjs already does for Claude.
+describe("agents-skills emitter — round-trip against the real committed .agents/skills/ tree", () => {
+  function realEligibleEntries() {
+    const results = renderAllPacks(repoRoot);
+    return results
+      .filter((r) => r.packManifest.distribution.agentsSkills?.enabled === true)
+      .map((r) => ({ packId: r.packId, pack: r.pack }));
+  }
+
+  test("at least one real skill is emitted into the bundle (positive control)", () => {
+    const { emittedFlatNames } = planAgentsSkillsBundle(realEligibleEntries());
+    expect(emittedFlatNames.length).toBeGreaterThan(0);
+  });
+
+  test("every emitted file's content matches the real committed file byte-for-byte", () => {
+    const { files, emittedFlatNames } = planAgentsSkillsBundle(realEligibleEntries());
+    expect(emittedFlatNames.length).toBeGreaterThan(0);
+    for (const f of files) {
+      const committedPath = resolve(repoRoot, ".agents/skills", f.relPath);
+      const committed = readFileSync(committedPath);
+      const rendered = f.text !== undefined ? Buffer.from(f.text, "utf8") : Buffer.from(f.base64, "base64");
+      expect(rendered.equals(committed)).toBe(true);
+    }
+  });
+
+  test("mutation control: perturbing one real skill's body produces a NON-empty diff against its committed SKILL.md", () => {
+    const entries = realEligibleEntries();
+    const { emittedFlatNames } = planAgentsSkillsBundle(entries);
+    expect(emittedFlatNames.length).toBeGreaterThan(0);
+    const flatName = emittedFlatNames[0];
+
+    let skill;
+    for (const { packId, pack: p } of entries) {
+      const match = p.skills.find((s) => s.neutral !== null && flatSkillName(packId, s.id) === flatName);
+      if (match) skill = match;
+    }
+    expect(skill).toBeDefined();
+
+    const committed = readFileSync(resolve(repoRoot, ".agents/skills", flatName, "SKILL.md"), "utf8");
+    const mutated = { ...skill, body: skill.body + "\nMUTATED\n" };
+    const rendered = buildSkillMd(mutated);
+    expect(rendered).not.toBe(committed);
   });
 });

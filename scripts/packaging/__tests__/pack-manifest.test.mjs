@@ -6,7 +6,7 @@ import { describe, test, expect } from "bun:test";
 import { fileURLToPath } from "node:url";
 
 import { validatePackManifest, readPackManifest } from "../core/pack-manifest.mjs";
-import { listPluginRelPaths } from "../providers/local-provisional.mjs";
+import { listPluginRelPaths } from "../providers/local.mjs";
 
 const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
 
@@ -45,7 +45,6 @@ describe("validatePackManifest — rejection rules", () => {
         codex: { enabled: true },
         agentsSkills: { enabled: true },
       },
-      skills: {},
     };
   }
 
@@ -57,27 +56,20 @@ describe("validatePackManifest — rejection rules", () => {
     expect(result.errors.some((e) => e.includes("release-please"))).toBe(true);
   });
 
+  test("a skills key is rejected naming agents/portability.yaml as the new owner", () => {
+    const pack = validPack();
+    pack.skills = { commit: { effects: [], invocation: "auto", exposure: ["catalog"] } };
+    const result = validatePackManifest(pack);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => e.includes("agents/portability.yaml"))).toBe(true);
+  });
+
   test("an unknown top-level key is rejected", () => {
     const pack = validPack();
     pack.bogus = true;
     const result = validatePackManifest(pack);
     expect(result.ok).toBe(false);
     expect(result.errors.some((e) => e.includes("bogus"))).toBe(true);
-  });
-
-  test("an unknown skill-override key is rejected", () => {
-    const pack = validPack();
-    pack.skills.commit = { effects: [], invocation: "auto", bogusField: 1 };
-    const result = validatePackManifest(pack);
-    expect(result.ok).toBe(false);
-    expect(result.errors.some((e) => e.includes("bogusField"))).toBe(true);
-  });
-
-  test("an invalid invocation value is rejected", () => {
-    const pack = validPack();
-    pack.skills.commit = { effects: [], invocation: "sometimes" };
-    const result = validatePackManifest(pack);
-    expect(result.ok).toBe(false);
   });
 
   test("the valid fixture passes (positive control)", () => {

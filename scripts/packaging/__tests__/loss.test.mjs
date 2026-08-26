@@ -31,7 +31,7 @@ function classifiedSkill(id, overrides = {}) {
     description: "d",
     body: "body text",
     files: [],
-    neutral: { effects: [], invocation: "auto" },
+    neutral: { effects: [], invocation: "auto", exposure: ["catalog"] },
     claudeOnly: {},
     ...overrides,
   };
@@ -81,6 +81,36 @@ describe("allowed-tools / disable-model-invocation — safety, omit unless class
     const pack = basePack({ skills: [classifiedSkill("commit")] });
     const result = classifyPackLosses("catalyst-x", pack, "codex");
     expect(result.omitted).toEqual([]);
+  });
+});
+
+describe("exposure not catalog — safety, omit (CTL-1461 Phase 2)", () => {
+  test("exposure ['internal'] is OMITTED with class safety and reasonCode exposure-not-catalog", () => {
+    const pack = basePack({
+      skills: [classifiedSkill("internal-only", { neutral: { effects: [], invocation: "auto", exposure: ["internal"] } })],
+    });
+    const result = classifyPackLosses("catalyst-x", pack, "codex");
+    expect(result.omitted.length).toBe(1);
+    expect(result.omitted[0].reasonCode).toBe("exposure-not-catalog");
+  });
+});
+
+describe("explicit invocation on an incapable target — degraded, emitted (CTL-1461 Phase 2, day-one policy)", () => {
+  test("an explicit-invocation skill is emitted (not omitted) and carries a named degraded entry", () => {
+    const pack = basePack({
+      skills: [classifiedSkill("mutator", { neutral: { effects: ["file-write"], invocation: "explicit", exposure: ["catalog"] } })],
+    });
+    const result = classifyPackLosses("catalyst-x", pack, "codex");
+    expect(result.omitted).toEqual([]);
+    const entry = result.degraded.find((d) => d.skill === "catalyst-x/mutator");
+    expect(entry).toBeDefined();
+    expect(entry.reasonCode).toBe("invocation-not-expressible");
+  });
+
+  test("negative control: auto invocation produces no such degraded entry", () => {
+    const pack = basePack({ skills: [classifiedSkill("s")] });
+    const result = classifyPackLosses("catalyst-x", pack, "codex");
+    expect(result.degraded.some((d) => d.reasonCode === "invocation-not-expressible")).toBe(false);
   });
 });
 

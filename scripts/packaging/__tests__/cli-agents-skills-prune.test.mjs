@@ -91,7 +91,7 @@ function renderedPack(packId, skillId) {
         description: "d",
         body: "# Title\n\nBody.\n",
         files: [{ relPath: "SKILL.md", bytesRef: `sha256:${"a".repeat(64)}`, content: Buffer.from("x").toString("base64") }],
-        neutral: { effects: [], invocation: "auto" },
+        neutral: { effects: [], invocation: "auto", exposure: ["catalog"] },
       },
     ],
     agents: [],
