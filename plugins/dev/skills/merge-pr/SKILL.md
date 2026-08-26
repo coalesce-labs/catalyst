@@ -44,7 +44,10 @@ blockers legitimately or escalate with specifics. See
 |---|---|
 | Identifying the PR, checking mergeable, rebasing, running tests | [pr-identification.md](references/pr-identification.md) |
 | Reactive blocker-wait loop (Pattern 3, ci/review/push/merge) | [blocker-loop.md](references/blocker-loop.md) |
+| Deeper CI fix-up / BEHIND-rebase technique (hooks-disabled push, bounded fix attempts, human-vs-bot threads, empty `merge_commit_sha` retry) | [ci-fixup-and-behind.md](references/ci-fixup-and-behind.md) |
 | Squash merge, CTL-56 checkout-free delete, Linear update, worktree guard | [worktree-safe-merge.md](references/worktree-safe-merge.md) |
+| Verifying a ticket is genuinely done before Linear Done (other open PRs, orphan-PR reconciliation) | [done-judgment.md](references/done-judgment.md) |
+| Deeper pre-merge adversarial review (8-gate table + regression-risk scoring) for a risky diff | [verify-gates.md](references/verify-gates.md) |
 | Post-merge tasks, compound close, deployment detection, success summary | [post-merge.md](references/post-merge.md) |
 | Flags (`--skip-tests`, `--no-update`, `--keep-branch`), errors, examples | [flags-errors.md](references/flags-errors.md) |
 | Configuration (`.catalyst/config.json` schema, safety features) | [config-safety.md](references/config-safety.md) |
