@@ -309,6 +309,8 @@ If the user has follow-up questions:
 
 ## Linear Integration
 
+State names (`stateMap.*`) come from the `linearis` skill's single-source transition table — not restated here.
+
 If a ticket is detected (provided as argument, mentioned in query, or from context):
 
 - **At research start**: Update ticket status to `stateMap.research` from config

@@ -35,7 +35,7 @@ The PR is authored solely by the git user. Never add "Generated with Claude Code
 
 ## Configuration
 
-Uses `.catalyst/config.json` (`linear.teamKey`, `linear.stateMap.inReview`). State names have sensible defaults; see `.catalyst/config.json` for all keys.
+Uses `.catalyst/config.json` (`linear.teamKey`, `linear.stateMap.inReview`). State names have sensible defaults — the `linearis` skill's single-source `stateMap` transition table is the canonical list; not restated here.
 
 ## Load on demand
 
