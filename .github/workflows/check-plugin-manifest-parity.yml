@@ -10,6 +10,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   check-plugin-manifest-parity:
     runs-on: ubuntu-latest
