@@ -26,6 +26,7 @@ import {
 } from "./emitters/codex.mjs";
 import { planAgentsSkillsBundle, GENERATED_MARKER_FILENAME } from "./emitters/agents-skills.mjs";
 import { checkExtractionReadiness } from "./core/extraction-readiness.mjs";
+import { checkAgentsSkillsConformance } from "./core/agentskills-spec.mjs";
 
 export const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 const NON_CLAUDE_TARGETS = ["codex", "agentsSkills"];
@@ -386,6 +387,86 @@ function cmdRender(args) {
   return { results, totalSkills, totalAgents, invalid, report, targetOutcome };
 }
 
+/**
+ * buildAgentsSkillsConformanceEntries(repoRootPath) → the planned file
+ * entries (from planAgentsSkillsBundle) to grade. Shares the same
+ * eligibility filter as writeAgentsSkillsTarget so the graded set and the
+ * written set can never disagree about which packs are in scope. Left to
+ * throw on a broken source tree (missing plugins/, unreadable
+ * release-please-config.json, …) — the caller degrades that to
+ * `inconclusive` rather than crashing.
+ *
+ * Exported (not just conformance-internal) because run-publish.mjs
+ * (CTL-2215 Phase 3) reuses it as the publish source of truth too — it must
+ * publish exactly the entries conformance graded, never a fresh recursive
+ * walk of `.agents/skills/` on disk, which could carry a stale auxiliary
+ * file left behind under an otherwise still-emitted skill (regeneration only
+ * adds/overwrites planned files; it never deletes a file that dropped out of
+ * one skill's plan while the skill itself is still emitted — see
+ * pruneStaleAgentsSkillsDirs's doc comment, which only prunes whole stale
+ * skill DIRECTORIES, not stale files within a surviving one).
+ */
+export function buildAgentsSkillsConformanceEntries(repoRootPath) {
+  const results = renderAllPacks(repoRootPath);
+  const eligible = results.filter((r) => r.packManifest.distribution.agentsSkills?.enabled === true);
+  const entries = eligible.map((r) => ({ packId: r.packId, pack: r.pack }));
+  return planAgentsSkillsBundle(entries).files;
+}
+
+/**
+ * runAgentsSkillsConformance(repoRootPath) → the graded verdict for the
+ * agentsSkills target. Never throws: a failure to even BUILD the entries to
+ * grade (an unreadable source tree) degrades to `inconclusive` naming the
+ * failure — the same fail-closed shape checkAgentsSkillsConformance itself
+ * uses for a single bad SKILL.md, extended to "could not read anything at
+ * all".
+ */
+export function runAgentsSkillsConformance(repoRootPath = repoRoot) {
+  let files;
+  try {
+    files = buildAgentsSkillsConformanceEntries(repoRootPath);
+  } catch (err) {
+    return {
+      verdict: "inconclusive",
+      violations: [],
+      checkedCount: 0,
+      reason: `could not build the agentsSkills emit set to grade: ${err.message}`,
+    };
+  }
+  return checkAgentsSkillsConformance(files);
+}
+
+const CONFORMANCE_RUNNERS = { agentsSkills: runAgentsSkillsConformance };
+
+/**
+ * cmdConformance(args, repoRootPath) → { exitCode, result } — pure aside
+ * from console.log, so a test can assert on the decision without spawning a
+ * process or triggering process.exit inside the test runner. `main()` is the
+ * only caller that translates `exitCode` into a real process exit.
+ */
+export function cmdConformance(args, repoRootPath = repoRoot) {
+  const targetIdx = args.indexOf("--target");
+  const target = targetIdx >= 0 ? args[targetIdx + 1] : null;
+  const runner = CONFORMANCE_RUNNERS[target];
+
+  if (!runner) {
+    console.log(`FAILED: unknown --target "${target}" for conformance (expected agentsSkills)`);
+    return { exitCode: 1, result: null };
+  }
+
+  const result = runner(repoRootPath);
+  console.log(`CONFORMANCE ${target}: verdict=${result.verdict} checkedCount=${result.checkedCount}`);
+  if (result.reason) console.log(`  reason: ${result.reason}`);
+  for (const v of result.violations) {
+    console.log(`  VIOLATION [${v.source}] ${v.field}: ${v.message}`);
+  }
+
+  // "ok" is the only exit-0 verdict — "violations" and "inconclusive" both
+  // fail the build. Publishing (or shipping) a tree that could not be graded
+  // is the same failure as publishing one that failed grading.
+  return { exitCode: result.verdict === "ok" ? 0 : 1, result };
+}
+
 function cmdExtractionReadiness() {
   const result = checkExtractionReadiness({ repoRoot });
   console.log(`${result.verdict}: ${result.reason}`);
@@ -404,9 +485,14 @@ function main() {
     case "extraction-readiness":
       cmdExtractionReadiness();
       break;
+    case "conformance": {
+      const { exitCode } = cmdConformance(args);
+      if (exitCode !== 0) process.exit(exitCode);
+      break;
+    }
     default:
       console.error(
-        `Unknown command: ${command ?? "(none)"}. Usage: cli.mjs render [--dry-run] [--allow-losses] [--write] [--target <claude|codex|agentsSkills>] | cli.mjs extraction-readiness`
+        `Unknown command: ${command ?? "(none)"}. Usage: cli.mjs render [--dry-run] [--allow-losses] [--write] [--target <claude|codex|agentsSkills>] | cli.mjs extraction-readiness | cli.mjs conformance --target agentsSkills`
       );
       process.exit(1);
   }

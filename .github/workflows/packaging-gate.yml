@@ -8,6 +8,16 @@ name: packaging-gate
 # and (CTL-1461 Phase 3) the drift gate that extends that same guarantee
 # across ALL THREE targets by literally regenerating and diffing.
 #
+# CTL-2215 Phase 2 adds a SEPARATE guard after regeneration: agentskills.io
+# conformance grades the freshly-regenerated agentsSkills pack against the
+# external `skills` CLI's own contract (frontmatter shape, no name
+# collisions, no leaked `metadata.internal`). Drift and conformance are
+# deliberately different failures with different causes — drift means "this
+# tree disagrees with what's committed"; conformance means "this tree,
+# whatever it is, would not install cleanly via `npx skills add`" — so a
+# green drift gate says nothing about whether the emitted pack is
+# spec-conformant, and this step exists to close that gap.
+#
 # Same shape as skills-gate.yml and for the same reason: every PR, no
 # `paths:` filter. execution-core-tests.yml's detect-changes step is an
 # explicit allow-list that does not include scripts/packaging/**, so scoping
@@ -36,6 +46,8 @@ jobs:
         run: bash scripts/packaging/__tests__/inventory-cut.test.sh
       - name: Regenerate all three targets
         run: bun scripts/packaging/cli.mjs render --write --allow-losses
+      - name: agentskills.io conformance (spec-check the regenerated portable pack)
+        run: bun scripts/packaging/cli.mjs conformance --target agentsSkills
       - name: Drift gate — tracked-file diff
         run: |
           FIX="Run 'bun scripts/packaging/cli.mjs render --write \
