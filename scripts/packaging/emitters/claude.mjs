@@ -68,7 +68,7 @@ export function buildPluginJson(packManifest, existingVersion) {
   ]);
 }
 
-/** renderPluginJson(packManifest, existingVersion) → formatted text (no trailing newline). Plugin.json uses LITERAL UTF-8 — confirmed against all 10 committed files, zero \u escapes. */
+/** renderPluginJson(packManifest, existingVersion) → formatted text (no trailing newline). Plugin.json uses LITERAL UTF-8 — confirmed against all committed files, zero \u escapes. */
 export function renderPluginJson(packManifest, existingVersion) {
   return formatJson(buildPluginJson(packManifest, existingVersion), { escapeNonAscii: false });
 }

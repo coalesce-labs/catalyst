@@ -59,12 +59,10 @@ This keeps your typical session lean while having powerful tools available when 
 - Handoff system for context persistence
 - ~3.5k context (lightweight MCP: Context7)
 
-**catalyst-pm-ops** (Optional - Enable for day-to-day PM operations)
+**catalyst-pm-ops** (Optional - Enable for Linear backlog grooming)
 
-- 12 skills for Linear/GitHub project-management mechanics
-- 4 specialized agents: cycle-analyzer, milestone-analyzer, backlog-analyzer, github-linear-analyzer
-- Cycle health, milestone tracking, backlog grooming, PR↔issue sync
-- Daily/weekly cadence, status updates, Slack drafting
+- 1 skill: `groom-backlog` — orphan / stale / duplicate ticket detection
+- 1 specialized agent: `catalyst-pm-ops:backlog-analyzer`
 
 **catalyst-meta** (Optional - For advanced users)
 
@@ -343,21 +341,13 @@ Monitors GitHub Actions workflow runs triggered by your merge.
 
 Refreshes the context engineering adoption dashboard once per day. Alternative to the GitHub Actions cron — useful in long-running sessions.
 
-### Cycle Health Monitoring
+### Backlog Grooming
 
 ```
-/loop 4h /analyze-cycle
+/loop 1d /catalyst-pm-ops:groom-backlog
 ```
 
-Generates a fresh cycle health report every 4 hours during a sprint.
-
-### PR/Linear Sync
-
-```
-/loop 2h /sync-prs
-```
-
-Checks for orphaned PRs and out-of-sync Linear issues every 2 hours.
+Flags orphaned, stale, and duplicate Linear tickets once per day.
 
 **Note**: `/loop` is session-scoped (max ~3 days). For persistent scheduling, use GitHub Actions cron. `/loop` is best for active monitoring during development sessions.
 
