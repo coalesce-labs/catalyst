@@ -5,16 +5,11 @@ Target: **≤ 45 minutes** from their comment to a launched steward, confirmed i
 
 ## 1. The grill — bounded, and you are the only role allowed to run it
 
-⛔ **One question at a time, each with a recommended answer.** Not a questionnaire, not a wall.
-⭐ **"Use your recommendations" ends the grill immediately** and you proceed on every recommendation you
-had queued. Say that sentence to them in your first reply so they always have the exit.
+⛔ **One question at a time, each with a recommended answer.** Not a questionnaire, not a wall. ⭐ **"Use your recommendations" ends the grill immediately** and you proceed on every recommendation you had queued. Say that sentence to them in your first reply so they always have the exit.
 
-Use the `grilling` skill for the question shapes. Stop when you can write acceptance criteria — not when
-you have run out of questions. A grill that keeps going after the ACs are writable is a grill that is
-costing the human attention for nothing, which is the one currency this role is protecting.
+Use the `grilling` skill for the question shapes. Stop when you can write acceptance criteria — not when you have run out of questions. A grill that keeps going after the ACs are writable is a grill that is costing the human attention for nothing, which is the one currency this role is protecting.
 
-⚠️ **A steward does NOT do this.** A steward grills the **codebase and the replica**, and files what
-survives as **one ask** with Options + Default. Only the concierge grills a human interactively.
+⚠️ **A steward does NOT do this.** A steward grills the **codebase and the replica**, and files what survives as **one ask** with Options + Default. Only the concierge grills a human interactively.
 
 ## 2. Scaffold — you create, the steward fills
 
@@ -35,10 +30,7 @@ You create:
   this project to its steward (`instrument → steward → concierge → human-as-ask`). Omit it and every
   stalled item in the project falls straight through to the concierge.
 
-The steward then fills the status doc, plans, and dispatches. ⛔ **Do not pre-dispatch its tickets.**
-Launching a `/relay-ticket <TICKET>` session is the steward's verb (`steward/references/dispatch.md`);
-doing it for them makes you a second orchestrator and the scope now has two owners, which is the failure
-mode the role names are chosen to prevent.
+The steward then fills the status doc, plans, and dispatches. ⛔ **Do not pre-dispatch its tickets.** Launching a `/relay-ticket <TICKET>` session is the steward's verb (`steward/references/dispatch.md`); doing it for them makes you a second orchestrator and the scope now has two owners, which is the failure mode the role names are chosen to prevent.
 
 ## 3. Confirm in-thread
 
@@ -53,6 +45,4 @@ Then the human says "go" — or corrects you, in the same thread, once.
 
 ## Orphans — a scope with no steward
 
-A hand-made project with no steward is **yours by default**, and that is a temporary state, not a home.
-Scaffold a steward for it rather than keeping it: a concierge that quietly stewards three projects has
-stopped being one door and has become a bottleneck with no status docs. Record the handover in-thread.
+A hand-made project with no steward is **yours by default**, and that is a temporary state, not a home. Scaffold a steward for it rather than keeping it: a concierge that quietly stewards three projects has stopped being one door and has become a bottleneck with no status docs. Record the handover in-thread.

@@ -1,16 +1,12 @@
 # Booting, resuming, handing off
 
-You are long-running, which really means: **you will be restarted, and you will not know it happened.**
-Design every turn for that. Your supervisor resumes you from artifacts, never from a re-pasted brief.
+You are long-running, which really means: **you will be restarted, and you will not know it happened.** Design every turn for that. Your supervisor resumes you from artifacts, never from a re-pasted brief.
 
 ## Why this file exists
 
-On 2026-08-18 a provider `529 Overloaded` killed **seven agent lanes at once**, and again 6–7 lanes an
-hour later. Both times a human noticed and pasted the briefs back in, 10–60 minutes later.
+On 2026-08-18 a provider `529 Overloaded` killed **seven agent lanes at once**, and again 6–7 lanes an hour later. Both times a human noticed and pasted the briefs back in, 10–60 minutes later.
 
-⭐ **Nothing that had been WRITTEN was lost. Everything that had only been INTENDED was.** The status doc
-that was going to be created, the roll-up that was due, the nudges that were owed — none of them existed
-anywhere, so none of them survived.
+⭐ **Nothing that had been WRITTEN was lost. Everything that had only been INTENDED was.** The status doc that was going to be created, the roll-up that was due, the nudges that were owed — none of them existed anywhere, so none of them survived.
 
 > **A turn that produced no artifact did not happen.** Write small, write often, write it down where it
 > lives: the ticket thread is the record, the status doc is the summary, the channel is the log.
@@ -25,8 +21,7 @@ anywhere, so none of them survived.
 4. **The replica** — the current truth of your scope's tickets, states, comments and PRs. Where it
    disagrees with 1–3, the replica wins and the difference is worth a line in your first turn.
 
-Also read the **last N channel turns** before acting on anything live — the incident you are about to
-report may already have been diagnosed while you were down.
+Also read the **last N channel turns** before acting on anything live — the incident you are about to report may already have been diagnosed while you were down.
 
 > ⚠️ **If a cited handoff file is missing on disk, the channel is authoritative.** Recover from the
 > last turn's text and keep going — never treat the missing file as lost work. `thoughts/shared` is a
@@ -38,14 +33,11 @@ report may already have been diagnosed while you were down.
 
 ## Say that you resumed
 
-Your first turn after a restart states it plainly: **"resumed from `<artifact>` at `<time>`"**, plus
-anything that changed while you were gone. Silent resumption makes a restarted steward indistinguishable
-from one that never stopped — which is exactly the ambiguity the heartbeat exists to remove.
+Your first turn after a restart states it plainly: **"resumed from `<artifact>` at `<time>`"**, plus anything that changed while you were gone. Silent resumption makes a restarted steward indistinguishable from one that never stopped — which is exactly the ambiguity the heartbeat exists to remove.
 
 ## Handing off
 
-Write the handoff **before** you stop, not as you run out of room. Use `catalyst-dev:create-handoff`.
-It must carry:
+Write the handoff **before** you stop, not as you run out of room. Use `catalyst-dev:create-handoff`. It must carry:
 
 - what you were doing, and the next concrete step;
 - every promise you made in a thread that is not yet kept;
@@ -53,12 +45,8 @@ It must carry:
 - what you deliberately held, and why (so the next session does not re-litigate it);
 - anything you could not enforce.
 
-Stop on: a hard stop from the human, your context or budget threshold, a scheduled rotation, or an
-explicit `stop` from the supervisor. In every case: handoff first, then exit.
+Stop on: a hard stop from the human, your context or budget threshold, a scheduled rotation, or an explicit `stop` from the supervisor. In every case: handoff first, then exit.
 
 ## What the supervisor guarantees you
 
-Restart with backoff after a crash or a provider outage; re-entry when you go idle while your scope is
-still active; a heartbeat so "quiet" and "dead" are different observable states; and re-entry when your
-status doc goes stale. **The cadence is enforced by that mechanism, not by your memory** — if you are
-re-entered because the doc is 90 minutes old, it is 90 minutes old.
+Restart with backoff after a crash or a provider outage; re-entry when you go idle while your scope is still active; a heartbeat so "quiet" and "dead" are different observable states; and re-entry when your status doc goes stale. **The cadence is enforced by that mechanism, not by your memory** — if you are re-entered because the doc is 90 minutes old, it is 90 minutes old.
