@@ -500,8 +500,8 @@ Never commit this. One file per project, linked by `projectKey`. It holds API ke
 | Integration | Required fields               | Used by                                             |
 | ----------- | ----------------------------- | --------------------------------------------------- |
 | Linear      | `apiToken`, `teamKey`         | catalyst-dev, catalyst-pm-ops, orch-monitor inbox reply |
-| Sentry      | `org`, `project`, `authToken` | catalyst-debugging                                  |
-| PostHog     | `apiKey`, `projectId`         | catalyst-analytics                                  |
+| Sentry      | `org`, `project`, `authToken` | no plugin consumer (catalyst-debugging removed, CTL-2236) |
+| PostHog     | `apiKey`, `projectId`         | no plugin consumer (catalyst-analytics removed, CTL-2236) |
 
 Only set up the integrations you use — the setup script asks about each one.
 
