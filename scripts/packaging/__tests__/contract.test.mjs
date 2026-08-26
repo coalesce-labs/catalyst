@@ -123,6 +123,20 @@ describe("validateRenderedPack — both directions of the neutral-classification
     const result = validateRenderedPack(pack);
     expect(result.ok).toBe(false);
   });
+
+  test("the same skill with exposure deleted from neutral fails (CTL-1461: exposure is now required)", () => {
+    const pack = loadFixture("valid-classified-skill.json");
+    delete pack.skills[0].neutral.exposure;
+    const result = validateRenderedPack(pack);
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => e.includes("exposure"))).toBe(true);
+  });
+
+  test("an empty exposure array fails (a half-declaration is worse than none)", () => {
+    const pack = loadFixture("valid-classified-skill.json");
+    pack.skills[0].neutral.exposure = [];
+    expect(validateRenderedPack(pack).ok).toBe(false);
+  });
 });
 
 describe("validateRenderedPack — portable file boundary", () => {

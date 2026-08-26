@@ -1,18 +1,25 @@
 // pack-manifest.mjs — reads and validates plugins/<name>/pack.json (CTL-1463 Phase 3).
 //
-// pack.json carries everything about a plugin EXCEPT its version. Release
-// Please owns the version exclusively via plugin.json's `extra-files` jsonpath
-// (see docs/releases.md's "Version Source of Truth" table); a `version` key
-// here would be a third source of truth and would reproduce exactly the drift
+// pack.json carries everything about a plugin EXCEPT its version and EXCEPT
+// per-skill neutral classification. Release Please owns the version
+// exclusively via plugin.json's `extra-files` jsonpath (see docs/releases.md's
+// "Version Source of Truth" table); a `version` key here would be a third
+// source of truth and would reproduce exactly the drift
 // `validate-release-config.sh` Check 7 exists to prevent for marketplace.json.
 // So `version` is not merely unrecognized here — it gets its own named
 // rejection pointing at the real owner, because "unknown key" alone would read
 // as a typo rather than a deliberate design constraint.
+//
+// CTL-1461 relocated the per-skill `skills` block to per-skill
+// `agents/portability.yaml` sidecars (see providers/local.mjs and
+// core/neutral-schema.mjs) — same reasoning as `version`: a `skills` key here
+// is not a typo, it names the wrong owner, so it gets the same named
+// rejection shape rather than a bare "unknown key".
 
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 
-const KNOWN_TOP_LEVEL_KEYS = new Set(["packId", "identity", "distribution", "skills"]);
+const KNOWN_TOP_LEVEL_KEYS = new Set(["packId", "identity", "distribution"]);
 const KNOWN_IDENTITY_KEYS = new Set([
   "description",
   "author",
@@ -27,8 +34,6 @@ const KNOWN_DISTRIBUTION_KEYS = new Set(["claude", "codex", "agentsSkills"]);
 const KNOWN_CLAUDE_DIST_KEYS = new Set(["enabled", "marketplace"]);
 const KNOWN_MARKETPLACE_KEYS = new Set(["description", "category", "keywords"]);
 const KNOWN_TARGET_DIST_KEYS = new Set(["enabled"]);
-const KNOWN_SKILL_OVERRIDE_KEYS = new Set(["effects", "invocation", "exposure"]);
-const VALID_INVOCATIONS = new Set(["explicit", "auto"]);
 
 function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -52,7 +57,13 @@ export function validatePackManifest(pack) {
     );
   }
 
-  const extraTop = unknownKeys(pack, KNOWN_TOP_LEVEL_KEYS).filter((k) => k !== "version");
+  if ("skills" in pack) {
+    errors.push(
+      'pack.json must not carry a "skills" field — per-skill neutral classification (effects/invocation/exposure) lives in each skill\'s own agents/portability.yaml sidecar since CTL-1461. See providers/local.mjs.'
+    );
+  }
+
+  const extraTop = unknownKeys(pack, KNOWN_TOP_LEVEL_KEYS).filter((k) => k !== "version" && k !== "skills");
   if (extraTop.length > 0) {
     errors.push(`pack.json: unknown top-level key(s) ${JSON.stringify(extraTop)}`);
   }
@@ -125,28 +136,6 @@ export function validatePackManifest(pack) {
       }
       if (typeof pack.distribution[target].enabled !== "boolean") {
         errors.push(`pack.json distribution.${target}: "enabled" must be a boolean`);
-      }
-    }
-  }
-
-  if (!isPlainObject(pack.skills)) {
-    errors.push('pack.json: "skills" must be an object (possibly empty)');
-  } else {
-    for (const [skillId, override] of Object.entries(pack.skills)) {
-      const label = `pack.json skills["${skillId}"]`;
-      if (!isPlainObject(override)) {
-        errors.push(`${label}: must be an object`);
-        continue;
-      }
-      const extra = unknownKeys(override, KNOWN_SKILL_OVERRIDE_KEYS);
-      if (extra.length > 0) {
-        errors.push(`${label}: unknown key(s) ${JSON.stringify(extra)}`);
-      }
-      if (!Array.isArray(override.effects)) {
-        errors.push(`${label}: "effects" must be an array`);
-      }
-      if (typeof override.invocation !== "string" || !VALID_INVOCATIONS.has(override.invocation)) {
-        errors.push(`${label}: "invocation" must be "explicit" or "auto"`);
       }
     }
   }

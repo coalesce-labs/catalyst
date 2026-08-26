@@ -27,8 +27,44 @@
 
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { createHash } from "node:crypto";
 
 import { formatJson, orderedObject } from "../core/json-format.mjs";
+
+/** GENERATED_MARKER_FILENAME — the drift-gate marker cli.mjs's stale-prune pass keys off of (CTL-1461 Phase 3). A SIBLING of plugin.json, never a key inside it — the installed Codex plugin validator whitelists an exact top-level key set and rejects anything outside it. */
+export const GENERATED_MARKER_FILENAME = ".generated-by-catalyst-packaging";
+
+/**
+ * buildCodexGeneratedMarker(packManifest) → { generatedBy, pack, sourceHash }.
+ * `sourceHash` covers `packManifest` ONLY (read fresh off disk every render)
+ * — deliberately NOT the resolved version. Version is externally owned by
+ * Release Please and bumped on every release, independent of any packaging-
+ * relevant source change; that content is already visible and diffed
+ * directly in plugin.json itself. Folding it into this hash too (Codex #4015
+ * P1) would invalidate every committed marker on every routine release PR —
+ * a real, recurring failure, not hypothetical: it reproduced on this PR's
+ * own first CI run, when an unrelated release-please bump landed on `main`
+ * between branch and merge-check.
+ *
+ * Hashed as an EXPLICIT UTF-8 Buffer, never a bare string handed to
+ * `Hash.update()` — several real plugin descriptions contain literal non-ASCII
+ * bytes (e.g. catalyst-dev's `→`), and relying on a string's implicit default
+ * encoding is exactly the kind of ambiguity a byte-for-byte hash must not
+ * depend on.
+ */
+export function buildCodexGeneratedMarker(packManifest) {
+  const payload = Buffer.from(JSON.stringify(packManifest), "utf8");
+  const sourceHash = `sha256:${createHash("sha256").update(payload).digest("hex")}`;
+  return orderedObject([
+    ["generatedBy", "catalyst-packaging"],
+    ["pack", packManifest.packId],
+    ["sourceHash", sourceHash],
+  ]);
+}
+
+export function renderCodexGeneratedMarker(packManifest) {
+  return formatJson(buildCodexGeneratedMarker(packManifest), { escapeNonAscii: false });
+}
 
 /**
  * resolveCodexVersion({ repoRoot, pluginRelPath, claudeVersion }) → the

@@ -1,7 +1,7 @@
 ---
 name: validate-frontmatter
 description: Validate and fix frontmatter consistency across all workflows
-disable-model-invocation: false
+disable-model-invocation: true
 allowed-tools: Read, Edit, Glob, Grep
 version: 1.0.0
 ---

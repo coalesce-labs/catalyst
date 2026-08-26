@@ -1,31 +1,24 @@
-# Dispatch — Todo is the verb
+# Dispatch — launching a relay-ticket session
 
-## Moving a ticket to Todo IS the dispatch
+## Launching `/relay-ticket <TICKET>` IS the dispatch
 
-You do not spawn anything. You change one ticket's state to **Todo**, and the fleet's existing pull-based
-scheduler picks it up. This is measured, not theoretical: on 2026-08-18 the fleet pulled two tickets
-**19 s and 36 s** after they were moved.
+There is no daemon and no pull-based scheduler to hand a ticket to — both retired 2026-08-24 (CTL-2218). You dispatch by launching a session that runs `/relay-ticket <TICKET>` yourself (a background agent / `claude --bg` session — whatever your environment's session primitive is). Three shapes, from the `relay-ticket` skill:
 
-⛔ **Never dispatch a worker directly** — no worktree, no `claude -p`, no phase agent, no `orchestrate`.
-Keeping dispatch pull-based is the architectural point of the role, not an implementation detail. If you
-find yourself wanting to spawn something, the thing you actually want is a ready ticket.
+```
+/relay-ticket PROJ-NNN                 # do the next missing phase, produce its artifact, report, STOP
+/relay-ticket PROJ-NNN --through merge # keep going, phase after phase, until merged or genuinely blocked
+/relay-ticket PROJ-NNN --phase plan    # force a specific phase (re-run after a rejected report)
+```
+
+⛔ **Never do the phase work yourself.** No hand-edited product code, no worktree you commit into directly, no phase agent you drive by hand. If you find yourself wanting to touch code, the thing you actually want is a launched relay-ticket session.
 
 ## Cap at free slots
 
-Dispatch in **priority order**, capped at the fleet's free slots. Dispatching twenty tickets into nine
-slots does not make them go faster; it makes the queue unreadable and the holds invisible.
+Dispatch in **priority order**, capped at how many concurrent sessions you can actually track. Launching twenty relay-ticket sessions when you can only watch nine does not make them go faster; it makes the queue unreadable and the holds invisible.
 
 ## ⛔ A cap is never silent
 
-**Every ticket that was ready and was not dispatched is named, with the reason.** This is the single rule
-most likely to be skipped under time pressure, and it is the one that matters most, because:
-
-> a silent truncation reads as "we covered everything" when it did not.
-
-The reader of your plan comment cannot tell the difference between *held deliberately* and *never looked
-at*. Only you can, and only in the moment. Write it down.
-
-Good holds look like this — each names the ticket and gives a reason a reader can disagree with:
+**Every ticket that was ready and was not dispatched is named, with the reason.** The reader of your plan comment cannot tell *held deliberately* from *never looked at* — only you can, and only in the moment.
 
 | held | why |
 | -- | -- |
@@ -35,14 +28,26 @@ Good holds look like this — each names the ticket and gives a reason a reader 
 
 ## Announce the dispatch on the ticket
 
-A top-level comment on each dispatched ticket: that it was dispatched, by whom, why it was judged ready,
-the trap in its ACs if there is one, and an explicit **"ask me in this thread, do not stall silently"**.
+A top-level comment on each ticket you launch a session for: that it was dispatched, by whom, why it was judged ready, the trap in its ACs if there is one, and an explicit **"ask me in this thread, do not stall silently."**
 
-⚠️ **Say "moved by `steward/<scope>` via linearis"** while state moves still write with the host's
-personal token — otherwise Linear's history records the move as the human's. See the threading reference.
+⚠️ **Say "launched by `steward/<scope>` via relay-ticket."** State moves a phase makes still write with the host's personal token in places, so an unattributed comment can read as the human's. See the threading reference.
+
+## Phase-completion evidence
+
+This is what you check **between** relay-ticket invocations to confirm a phase actually happened, before you dispatch the next one — the RELAY REPORT is one session's *claim*; the artifact it names is the *proof*, and when the two disagree the artifact wins (relay-ticket's own principle: artifacts on disk and in GitHub/Linear ARE the pipeline state).
+
+Re-read the specific artifact the report cites, matched to relay-ticket's own phase-detection table (`relay-ticket` skill, "Phase detection") — this repo's `bun run check` / `git log origin/main..origin/<TICKET>` pair is that skill's actual, current artifact contract for the implement phase, not a stand-in invented here:
+
+| phase | phase-completion evidence |
+| -- | -- |
+| research / plan | the cited `thoughts/shared/research\|plans/*<TICKET>*.md` file exists and reads as a real document, not a stub |
+| implement | `git log origin/main..origin/<TICKET>` shows commits, AND the report's gate tail is a real `bun run check` pass, not summarized as one |
+| validate | a recorded verdict, not just a claim of "looks fine" |
+| pr | an actual open PR for the branch (`gh pr view`), with the real number the report cites |
+| merge | `gh pr view <n> --json state,mergedAt` read back yourself — never the report's word alone, and never a merge command's exit code alone |
+
+A report that says `DONE` with no matching artifact, or a `gate:` line you cannot verify, is not phase-completion evidence — it is BLOCKED until you can confirm it, whatever the report's own verdict says. This is the same discipline `merge-pr` already applies to a single PR; here it applies to every phase of every ticket you are coordinating.
 
 ## State what you cannot enforce
 
-If your dispatch note asks workers to hold something — a merge, a surface, an ordering — and you have no
-gate that enforces it, **say that in the same breath**. "I have no merge gate and cannot enforce this"
-turns a false guarantee into an honest request, and lets whoever depends on it plan for the miss.
+If your dispatch note asks a relay-ticket session to hold something — a merge, a surface, an ordering — and you have no gate that enforces it, **say that in the same breath**. "I have no merge gate and cannot enforce this" turns a false guarantee into an honest request, and lets whoever depends on it plan for the miss.

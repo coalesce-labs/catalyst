@@ -42,12 +42,5 @@
     "agentsSkills": {
       "enabled": true
     }
-  },
-  "skills": {
-    "validate-frontmatter": {
-      "effects": ["file-read", "file-write"],
-      "invocation": "auto",
-      "exposure": ["catalog"]
-    }
   }
 }

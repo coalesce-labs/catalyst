@@ -9,4 +9,4 @@ Reference documentation for Catalyst contributors. User-facing docs live at [cat
 - [Orchestrator Overview](./orchestrator-overview.md) — End-to-end walkthrough of the phase-agent pipeline (dispatch modes, 10-phase state machine, broker interests, observation surfaces)
 - [ADRs](./adrs.md) — Architecture decision records
 - [Frontmatter Standard](./frontmatter-standard.md) — Skills and agent frontmatter format
-- [Releases](./releases.md) — Release Please workflow, version management
+- [Releases](./releases.md) — Versioning and changelog conventions
