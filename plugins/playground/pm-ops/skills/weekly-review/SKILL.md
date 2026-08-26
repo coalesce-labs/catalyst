@@ -702,7 +702,7 @@ After generating review, prompt user with contextual suggestions:
 **Before `/weekly-review`:**
 
 - `/daily-plan` - Ran throughout the week (provides daily context)
-- `/meeting-notes` - Captured meeting outcomes
+- `thoughts/shared/product/meeting-notes/` - Captured meeting outcomes
 - `/prd-draft` - Created/updated PRDs this week
 
 **After `/weekly-review`:**
@@ -760,7 +760,7 @@ After generating review, prompt user with contextual suggestions:
 
 - `/daily-plan` - Daily execution throughout week
 - `/weekly-plan` - Set priorities at start of week
-- `/meeting-notes` - Captured throughout week
+- `thoughts/shared/product/meeting-notes/` - Captured throughout week
 
 **After this:**
 

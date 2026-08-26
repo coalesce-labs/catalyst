@@ -48,7 +48,7 @@ When this skill is invoked, immediately check:
 
 **Cross-Skill Links:**
 
-- If action items from meetings → Reference `/meeting-notes`
+- If action items from meetings → Reference `thoughts/shared/product/meeting-notes/`
 - If progress on features → Reference `/prd-draft` or `/feature-results`
 - If metric updates → Reference `/metrics-framework` and North Star
 - If blockers → Link to relevant skill for resolution (e.g., `/prd-draft` if scope unclear)
@@ -671,7 +671,7 @@ Call out teammates who helped you. Builds goodwill and visibility for them.
 ### After Meeting Notes
 
 ```
-Use `/meeting-notes` throughout the week.
+Record notes in `thoughts/shared/product/meeting-notes/` throughout the week.
 Then use `/status-update` on Friday.
 
 I'll pull:
@@ -888,7 +888,7 @@ After creating status update:
 
 **Pulls from:**
 
-- `/meeting-notes` - Recent decisions and action items from meetings
+- `thoughts/shared/product/meeting-notes/` - Recent decisions and action items from meetings
 - `/prd-draft` - Feature status and progress on PRDs
 - `/feature-results` - Shipped feature performance
 - `/metrics-framework` - Current metric values and movement
