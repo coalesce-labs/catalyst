@@ -18,9 +18,6 @@
     "plugins/playground/meeting-hygiene": {
       "component": "catalyst-meeting-hygiene"
     },
-    "plugins/playground/discovery": {
-      "component": "catalyst-discovery"
-    },
     "plugins/legacy": {
       "component": "catalyst-legacy"
     },
