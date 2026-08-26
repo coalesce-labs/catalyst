@@ -433,6 +433,8 @@ Lead (Opus) — Coordinates implementation
 
 ## Linear Integration
 
+State names (`stateMap.*`) come from the `linearis` skill's single-source transition table — not restated here.
+
 If a ticket is detected (from plan document's `source_ticket` frontmatter or from context):
 
 - **At implementation start** (Step 3): Update ticket status to `stateMap.inProgress` from config

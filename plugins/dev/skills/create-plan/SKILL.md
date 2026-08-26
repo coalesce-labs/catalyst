@@ -381,6 +381,8 @@ compatibility → migration strategy
 
 ## Linear Integration
 
+State names (`stateMap.*`) come from the `linearis` skill's single-source transition table — not restated here.
+
 If a ticket is detected (from research document's `source_ticket` frontmatter, command argument, or
 context):
 
