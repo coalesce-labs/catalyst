@@ -1,7 +1,6 @@
 # ADR-Drift Detector
 
-`adr-drift.sh` compares ADR documents to the current code state and emits `adr_drift`
-decisions for the morning briefing. Invoked by `morning-briefing` Step 3.
+`adr-drift.sh` compares ADR documents to the current code state and emits `adr_drift` decisions for the morning briefing. Invoked by `morning-briefing` Step 3.
 
 ## What it does
 
@@ -13,9 +12,7 @@ For each ADR markdown file under the configured `adrs.directory`, the detector:
    `dist`, `build`, `.next`, `.venv`, `__pycache__`, and the ADRs directory itself)
 4. Records a drift decision when an assertion does not hold
 
-ADRs without `code_assertions` are skipped from the structured path. The acceptance
-contract is: **zero false positives** on legacy ADR sets that have no frontmatter, and
-**at least one true positive** when an assertion is intentionally violated.
+ADRs without `code_assertions` are skipped from the structured path. The acceptance contract is: **zero false positives** on legacy ADR sets that have no frontmatter, and **at least one true positive** when an assertion is intentionally violated.
 
 ## The `code_assertions` frontmatter
 
@@ -75,10 +72,7 @@ Each assertion produces at most one drift record per detector run.
 }
 ```
 
-The shape conforms to `plugins/dev/templates/briefing-frontmatter.schema.json` —
-`type: adr_drift` is already in the schema's enum and `adr` is a permitted optional
-property. The renderer surfaces these in the "Surface decisions" section of the
-canonical briefing markdown.
+The shape conforms to `plugins/dev/templates/briefing-frontmatter.schema.json` — `type: adr_drift` is already in the schema's enum and `adr` is a permitted optional property. The renderer surfaces these in the "Surface decisions" section of the canonical briefing markdown.
 
 ## Configuration
 
@@ -104,22 +98,13 @@ Example `.catalyst/config.json` fragment:
 
 ## Single-file ADR layouts
 
-Repositories that keep ADRs in a single file (e.g. `docs/adrs.md` with many `## ADR-NNN:`
-sections) cannot use the structured path because YAML frontmatter is by definition a
-file-level header. The detector treats single-file layouts as informational/legacy and
-produces zero structured drift records for them. To opt into structured drift detection,
-migrate to a directory of per-ADR files.
+Repositories that keep ADRs in a single file (e.g. `docs/adrs.md` with many `## ADR-NNN:` sections) cannot use the structured path because YAML frontmatter is by definition a file-level header. The detector treats single-file layouts as informational/legacy and produces zero structured drift records for them. To opt into structured drift detection, migrate to a directory of per-ADR files.
 
 ## `--deep-adr-check` (LLM-driven path) — future work
 
-The parent plan ([[2026-05-16-catalyst-phase-agent-architecture]] §Initiative 2 Phase 4)
-describes a second, LLM-driven path that samples each ADR alongside a code stat
-(file count, top imports) and asks the LLM whether the ADR's decision still describes
-how the code works. This path is gated behind a `--deep-adr-check` flag so it can be
-run weekly rather than daily (cost amortization).
+The parent plan ([[2026-05-16-catalyst-phase-agent-architecture]] §Initiative 2 Phase 4) describes a second, LLM-driven path that samples each ADR alongside a code stat (file count, top imports) and asks the LLM whether the ADR's decision still describes how the code works. This path is gated behind a `--deep-adr-check` flag so it can be run weekly rather than daily (cost amortization).
 
-For this MVP, the flag is parsed but emits a stderr note and does no LLM work. Wiring
-the LLM path is a follow-up.
+For this MVP, the flag is parsed but emits a stderr note and does no LLM work. Wiring the LLM path is a follow-up.
 
 ## Invocation
 
@@ -129,14 +114,10 @@ Standalone:
 bash plugins/dev/scripts/morning-briefing/adr-drift.sh --root .
 ```
 
-From a morning-briefing run, Step 3 of the skill calls the detector and merges the
-result into the `decisions:` block of the briefing's YAML frontmatter.
+From a morning-briefing run, Step 3 of the skill calls the detector and merges the result into the `decisions:` block of the briefing's YAML frontmatter.
 
 ## Testing
 
-`plugins/dev/scripts/__tests__/adr-drift-detector.test.sh` exercises the detector
-against isolated fixture projects covering: missing directory, passing assertions,
-both drift directions, ADRs without frontmatter, multiple assertions in one ADR,
-schema conformance, malformed YAML tolerance, and config-driven directory resolution.
+`plugins/dev/scripts/__tests__/adr-drift-detector.test.sh` exercises the detector against isolated fixture projects covering: missing directory, passing assertions, both drift directions, ADRs without frontmatter, multiple assertions in one ADR, schema conformance, malformed YAML tolerance, and config-driven directory resolution.
 
 Run with `bash plugins/dev/scripts/__tests__/adr-drift-detector.test.sh`.

@@ -1,7 +1,6 @@
 # Wake Reason Strings and `wake-extract` Accessor
 
-_Read this when decoding the `reason` field in a wake payload by interest type, or when using
-`catalyst-events wake-extract` to normalize source-event fields without hand-rolling jq paths._
+_Read this when decoding the `reason` field in a wake payload by interest type, or when using `catalyst-events wake-extract` to normalize source-event fields without hand-rolling jq paths._
 
 ## Wake Reason Strings by Interest Type
 
@@ -44,8 +43,7 @@ _Read this when decoding the `reason` field in a wake payload by interest type, 
 
 ## `wake-extract` — Typed Accessor
 
-`catalyst-events wake-extract` normalizes a `filter.wake.*` event into a flat JSON object
-so skills do not need to hand-roll `jq` paths into `source_events[0].payload_excerpt.*`:
+`catalyst-events wake-extract` normalizes a `filter.wake.*` event into a flat JSON object so skills do not need to hand-roll `jq` paths into `source_events[0].payload_excerpt.*`:
 
 ```bash
 EVENT=$(catalyst-events wait-for \
@@ -80,6 +78,4 @@ REASON=$(echo "$FIELDS"         | jq -r '.reason')
 }
 ```
 
-All fields are nullable. Fields not applicable to the source event type are `null`.
-When `source_events` is empty (watchdog wakes), all fields except `interest_id` and `reason` are
-`null` — treat the wake as a "go re-check" signal in that case.
+All fields are nullable. Fields not applicable to the source event type are `null`. When `source_events` is empty (watchdog wakes), all fields except `interest_id` and `reason` are `null` — treat the wake as a "go re-check" signal in that case.

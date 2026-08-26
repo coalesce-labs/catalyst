@@ -1,7 +1,6 @@
 # ticket_lifecycle Interest Type
 
-_Read this when registering to watch a ticket's Linear events and PR links, or to decode
-`wake_on` values and the wake event shape for `ticket_lifecycle` wakes._
+_Read this when registering to watch a ticket's Linear events and PR links, or to decode `wake_on` values and the wake event shape for `ticket_lifecycle` wakes._
 
 Register to watch a ticket's Linear events and PR links deterministically:
 
@@ -69,8 +68,7 @@ Omit `wake_on` (or pass `null`) to fire on all of the above.
 }
 ```
 
-See [wake-payload-reference.md](wake-payload-reference.md) for the complete field reference and
-[wake-reason-strings.md](wake-reason-strings.md) for `wake-extract` accessor usage.
+See [wake-payload-reference.md](wake-payload-reference.md) for the complete field reference and [wake-reason-strings.md](wake-reason-strings.md) for `wake-extract` accessor usage.
 
 ## Waiting for a Ticket Wake
 

@@ -7,15 +7,9 @@ Populate the `decisions:` array from four sources:
 2. **Blocked PRs** — `gh search prs --review-requested @me --state open --json …` filtered to PRs
    with no commit in the last 48h. Each becomes one `{type: blocked_pr, …}` decision.
 3. **Judgment-call Linear tickets** — `linearis issues list --team <team> --status "Triage,In
-   Progress" --label needs-decision` (label name is informational; substitute whatever signal the
-   operator uses). List-shaped, so it stays on `linearis` directly per the cloud-detection note in
-   `references/gather.md`.
+   Progress" --label needs-decision` (label name is informational; substitute whatever signal the operator uses). List-shaped, so it stays on `linearis` directly per the cloud-detection note in `references/gather.md`.
 4. **Pending compound-engineering ADR proposals** — the `ticket-compound` curator queues
-   APPROVE-gated ADR changes at `thoughts/shared/compound/pending/<TICKET>.md`. Each pending file
-   becomes one decision the morning ritual can approve via `briefing-followup`'s
-   `action-compound.sh`. Emitted as `type: judgment_call` (the frontmatter schema's `type` enum
-   has no `compound_adr` value) carrying a `pending:` path — the discriminator `briefing-followup`
-   routes on.
+   APPROVE-gated ADR changes at `thoughts/shared/compound/pending/<TICKET>.md`. Each pending file becomes one decision the morning ritual can approve via `briefing-followup`'s `action-compound.sh`. Emitted as `type: judgment_call` (the frontmatter schema's `type` enum has no `compound_adr` value) carrying a `pending:` path — the discriminator `briefing-followup` routes on.
 
 ```bash
 # ADR drift detection

@@ -1,17 +1,14 @@
 # phase_lifecycle Interest Type (CTL-447)
 
-_Read this when an orchestrator needs to wake on phase-agent boundary events (complete / failed /
-turn-cap-exhausted) to advance a ticket through the pipeline._
+_Read this when an orchestrator needs to wake on phase-agent boundary events (complete / failed / turn-cap-exhausted) to advance a ticket through the pipeline._
 
-Deterministic routing for phase-agent boundary events. The orchestrator subscribes once per
-ticket per set of phases and is woken when a phase agent emits its terminal event:
+Deterministic routing for phase-agent boundary events. The orchestrator subscribes once per ticket per set of phases and is woken when a phase agent emits its terminal event:
 
 - `phase.<name>.complete.<ticket>` — phase succeeded; orchestrator dispatches the next one.
 - `phase.<name>.failed.<ticket>` — phase failed; orchestrator runs the fix-up path.
 - `phase.<name>.turn-cap-exhausted.<ticket>` (CTL-484) — phase agent self-stopped at its `/goal` turn cap; orchestrator dispatches a continuation worker on a separate budget (the agent has already written a handoff at `body.payload.handoff_path`).
 
-The match is keyed on `(ticket, phase_name)` so a single orchestrator can run many tickets
-in parallel without cross-talk.
+The match is keyed on `(ticket, phase_name)` so a single orchestrator can run many tickets in parallel without cross-talk.
 
 ## Schema
 

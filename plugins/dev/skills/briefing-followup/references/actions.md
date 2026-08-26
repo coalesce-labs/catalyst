@@ -1,10 +1,6 @@
 # Actions — mapping user intent to a handler
 
-For each open decision, present its fields and the action set filtered by decision type
-(`blocked_pr`, `adr_drift`, a `pending:` compound proposal, or the general case) — approve /
-reject / defer / calendar / ticket / dispatch / email / update / skip / quit, as fits the type.
-When run interactively, use the model to interpret the user's natural-language response and map
-it to a handler:
+For each open decision, present its fields and the action set filtered by decision type (`blocked_pr`, `adr_drift`, a `pending:` compound proposal, or the general case) — approve / reject / defer / calendar / ticket / dispatch / email / update / skip / quit, as fits the type. When run interactively, use the model to interpret the user's natural-language response and map it to a handler:
 
 | User intent | Handler | Captures resolution? |
 |---|---|---|
@@ -25,9 +21,7 @@ The compound-engineering (`pending:`) intents are in the section below.
 
 ## Invoking a script handler
 
-Each sibling script emits one JSON line on stdout and exits 0 on success or soft-skip
-(`{"status": "skipped", "reason": "..."}`); non-zero exit is a hard failure. Capture the JSON,
-show the relevant field, then call `record_resolution`:
+Each sibling script emits one JSON line on stdout and exits 0 on success or soft-skip (`{"status": "skipped", "reason": "..."}`); non-zero exit is a hard failure. Capture the JSON, show the relevant field, then call `record_resolution`:
 
 ```bash
 RESULT=$(bash "$SCRIPT_DIR/action-schedule.sh" \
@@ -44,16 +38,11 @@ record_resolution "$ID" schedule_calendar "$RESULT"
 log_response "$ID" schedule_calendar "$STATUS"
 ```
 
-The same pattern applies to `action-ticket.sh`, `action-email.sh`, and `action-adr.sh` — only the
-script name and the action label change.
+The same pattern applies to `action-ticket.sh`, `action-email.sh`, and `action-adr.sh` — only the script name and the action label change.
 
 ## Dispatching work — launch `/relay-ticket`, not a script
 
-There is no dedicated script handler for this one, unlike the actions above. Dispatching a
-ticket's work is launching a `/relay-ticket <TICKET>` session yourself (`Task`, or your
-environment's background session primitive) — the same dispatch verb `steward` uses
-(`steward/references/dispatch.md`). The legacy single-session runner and any retired
-background-dispatch path are gone (CTL-2218); do not fall back to either.
+There is no dedicated script handler for this one, unlike the actions above. Dispatching a ticket's work is launching a `/relay-ticket <TICKET>` session yourself (`Task`, or your environment's background session primitive) — the same dispatch verb `steward` uses (`steward/references/dispatch.md`). The legacy single-session runner and any retired background-dispatch path are gone (CTL-2218); do not fall back to either.
 
 ```bash
 # TICKET comes from the decision's `.ticket` field (present on blocked_pr / judgment_call types).
@@ -69,15 +58,11 @@ record_resolution "$ID" dispatch_relay_ticket "$RESULT"
 log_response "$ID" dispatch_relay_ticket "$(echo "$RESULT" | jq -r .status)"
 ```
 
-Confirming the dispatch actually landed a phase is **phase-completion evidence**
-(`steward/references/dispatch.md`) — this skill only launches the session; it does not itself
-watch it to completion.
+Confirming the dispatch actually landed a phase is **phase-completion evidence** (`steward/references/dispatch.md`) — this skill only launches the session; it does not itself watch it to completion.
 
 ## Compound-engineering ADR proposals (`pending:`)
 
-A decision carrying a `pending:` path is a queued ADR proposal from the `ticket-compound` curator
-(`thoughts/shared/compound/pending/*.md`), surfaced by `morning-briefing` as `type: judgment_call`
-(the frontmatter schema's `type` enum has no `compound_adr` value):
+A decision carrying a `pending:` path is a queued ADR proposal from the `ticket-compound` curator (`thoughts/shared/compound/pending/*.md`), surfaced by `morning-briefing` as `type: judgment_call` (the frontmatter schema's `type` enum has no `compound_adr` value):
 
 | User intent | Handler | Captures resolution? |
 |---|---|---|
@@ -99,8 +84,7 @@ esac
 record_resolution "$ID" compound_apply "$RESULT"
 ```
 
-`action-compound.sh --mode apply` (and `edit`, which tweaks then applies) is the **only** writer
-of `docs/adrs.md` — `ticket-compound` only ever *proposes*; a human approves here.
+`action-compound.sh --mode apply` (and `edit`, which tweaks then applies) is the **only** writer of `docs/adrs.md` — `ticket-compound` only ever *proposes*; a human approves here.
 
 ## Handler reference
 
@@ -113,5 +97,4 @@ of `docs/adrs.md` — `ticket-compound` only ever *proposes*; a human approves h
 | Update / ticket / defer ADR (adr_drift) | `action-adr.sh --mode update\|ticket\|defer` | `{adr_file, adr_id, commit_sha, status}` | `$EDITOR` unset, ADR not in git, or `linearis` missing |
 | Apply / edit / defer / reject proposal (`pending:`) | `action-compound.sh --mode apply\|edit\|defer\|reject` | `{adrs_file, adr_id, target, commit_sha, status}` | proposal missing, not in git, or `$EDITOR` unset (edit) |
 
-A soft-skip's JSON is captured and recorded exactly like a success result, so the resolution log
-faithfully records what happened. Each handler accepts `--help` for its full flag set.
+A soft-skip's JSON is captured and recorded exactly like a success result, so the resolution log faithfully records what happened. Each handler accepts `--help` for its full flag set.

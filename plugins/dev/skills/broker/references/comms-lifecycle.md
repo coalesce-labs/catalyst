@@ -1,20 +1,15 @@
 # comms_lifecycle Interest Type (CTL-357)
 
-_Read this when registering orchestrator or worker interests to watch comms-channel messages, or
-when the orchestrator needs to wake on worker `attention` / `done` posts._
+_Read this when registering orchestrator or worker interests to watch comms-channel messages, or when the orchestrator needs to wake on worker `attention` / `done` posts._
 
-Deterministic routing for `comms.message.posted` events on a shared comms channel. Replaces the
-Groq prose interest the orchestrator used to register for "any of my workers posts an attention
-message". The routing is keyed on channel + sender + message-type, with no model call.
+Deterministic routing for `comms.message.posted` events on a shared comms channel. Replaces the Groq prose interest the orchestrator used to register for "any of my workers posts an attention message". The routing is keyed on channel + sender + message-type, with no model call.
 
 ## Subscriber kinds
 
 - **`subscriber_kind: "orchestrator"`** — wakes when one of the orchestrator's `owned_workers`
-  posts a message of an interesting type. Default `types_of_interest` is `["attention", "done"]`
-  (matches `attention` and `done`, ignores `info` heartbeats).
+  posts a message of an interesting type. Default `types_of_interest` is `["attention", "done"]` (matches `attention` and `done`, ignores `info` heartbeats).
 - **`subscriber_kind: "worker"`** — wakes when a peer posts a message addressed to this worker
-  (`to=<subscriber_ticket>`) or to all (`to=all`). Self-posts are ignored (self-loop guard).
-  Workers default to all message types — orchestrator → worker traffic is rare and intentional.
+  (`to=<subscriber_ticket>`) or to all (`to=all`). Self-posts are ignored (self-loop guard). Workers default to all message types — orchestrator → worker traffic is rare and intentional.
 
 ## Schema
 
@@ -69,10 +64,7 @@ jq -nc \
 
 ## Registering (worker)
 
-The worker uses interest_id `"${CATALYST_SESSION_ID}-comms"` (NOT just the session_id) so it
-coexists with the broker's auto-correlated `pr_lifecycle` interest (interest_id =
-session_id). Both share `notify_event: "filter.wake.${CATALYST_SESSION_ID}"`, so the
-existing `wait-for` predicate is unchanged.
+The worker uses interest_id `"${CATALYST_SESSION_ID}-comms"` (NOT just the session_id) so it coexists with the broker's auto-correlated `pr_lifecycle` interest (interest_id = session_id). Both share `notify_event: "filter.wake.${CATALYST_SESSION_ID}"`, so the existing `wait-for` predicate is unchanged.
 
 ```bash
 jq -nc \

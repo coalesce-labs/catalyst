@@ -1,7 +1,6 @@
 # Deregistration, Querying Agent State, and Broker Fallback
 
-_Read this when explicitly deregistering an interest, querying the broker's SQLite agent table,
-or when the broker is not running and you need a direct wait-for fallback._
+_Read this when explicitly deregistering an interest, querying the broker's SQLite agent table, or when the broker is not running and you need a direct wait-for fallback._
 
 ## 7. Deregistration
 

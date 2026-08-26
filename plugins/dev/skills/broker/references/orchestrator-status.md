@@ -1,12 +1,8 @@
 # orchestrator.status Events (CTL-405)
 
-_Read this when wiring up orchestrator liveness heartbeats, or when the HUD shows a stale orch
-session that is actually in a monitoring loop._
+_Read this when wiring up orchestrator liveness heartbeats, or when the HUD shows a stale orch session that is actually in a monitoring loop._
 
-Emitted by the orchestrate skill at each wave transition via `orchestrate-status.sh emit`. These
-events make the orchestrator's current phase visible to the broker, the HUD, and operators, and
-serve as a liveness heartbeat so the watchdog does not fire stale-session wakes for an orchestrator
-that is actively monitoring between waves.
+Emitted by the orchestrate skill at each wave transition via `orchestrate-status.sh emit`. These events make the orchestrator's current phase visible to the broker, the HUD, and operators, and serve as a liveness heartbeat so the watchdog does not fire stale-session wakes for an orchestrator that is actively monitoring between waves.
 
 ## Event shape
 
@@ -41,8 +37,7 @@ that is actively monitoring between waves.
 On `orchestrator.status`:
 - Stores the entry in `orchestratorStatusMap[orchId]` (replaces any prior entry for that orch).
 - If `detail.session_id` is present, resets `lastHeartbeat[sessionId]` to now — so the watchdog
-  treats the status event as a heartbeat and skips stale-session wakes while the orchestrator is in
-  a monitoring loop.
+  treats the status event as a heartbeat and skips stale-session wakes while the orchestrator is in a monitoring loop.
 - Calls `persistBrokerState()` to flush the update to `broker.state.json`.
 - On `orchestrator-completed` / `orchestrator-failed`, the entry is removed from `orchestratorStatusMap`.
 
@@ -82,5 +77,4 @@ ORCH_STATUS_SCRIPT="${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-status.sh"
   --summary "wave 2 monitoring" 2>/dev/null || true
 ```
 
-The `--orch` and `--session` flags fall back to `$CATALYST_ORCHESTRATOR_ID` and
-`$CATALYST_SESSION_ID` env vars when omitted.
+The `--orch` and `--session` flags fall back to `$CATALYST_ORCHESTRATOR_ID` and `$CATALYST_SESSION_ID` env vars when omitted.

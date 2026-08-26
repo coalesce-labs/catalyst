@@ -14,8 +14,7 @@ allowed-tools: Bash, Read, Write, Edit, Grep, Glob, mcp__linear__*, mcp__notion_
 
 # Morning Briefing — canonical markdown + fan-out
 
-Invoke as `/catalyst-dev:morning-briefing` to produce today's briefing locally and fan it out to
-Slack DM, Slack channel, Notion page, and a Loom recording script.
+Invoke as `/catalyst-dev:morning-briefing` to produce today's briefing locally and fan it out to Slack DM, Slack channel, Notion page, and a Loom recording script.
 
 ## Flags
 
@@ -52,21 +51,10 @@ Slack DM, Slack channel, Notion page, and a Loom recording script.
 
 ## Output contract
 
-YAML frontmatter validated against `plugins/dev/templates/briefing-frontmatter.schema.json`
-(required: `date`, `generated_by`, `decisions`; optional `output_status`). Six `## ...` body
-sections: the four `render.sh` owns (Review yesterday, Surface decisions, Plan today, and the
-relay-dispatch-candidates section — `render.sh` still hardcodes its heading as `## Suggest
-orchestrator runs`, a residual label tracked in `references/suggest-dispatch.md`, not a live
-dependency) plus the two compound digests. `Plan today` carries a `### Retro signals`
-sub-section. Empty render sources render `_no data_`; empty compound stores render `_none_`. A
-companion `<date>-loom-script.md` lands beside the briefing whenever the loom fan-out runs
-(always — it has no credential prerequisite).
+YAML frontmatter validated against `plugins/dev/templates/briefing-frontmatter.schema.json` (required: `date`, `generated_by`, `decisions`; optional `output_status`). Six `## ...` body sections: the four `render.sh` owns (Review yesterday, Surface decisions, Plan today, and the relay-dispatch-candidates section — `render.sh` still hardcodes its heading as `## Suggest orchestrator runs`, a residual label tracked in `references/suggest-dispatch.md`, not a live dependency) plus the two compound digests. `Plan today` carries a `### Retro signals` sub-section. Empty render sources render `_no data_`; empty compound stores render `_none_`. A companion `<date>-loom-script.md` lands beside the briefing whenever the loom fan-out runs (always — it has no credential prerequisite).
 
-Pending compound-engineering ADR proposals (`thoughts/shared/compound/pending/*.md`) surface as
-`decisions:` entries so `briefing-followup`'s `action-compound.sh` can apply/edit/defer/reject
-them — the human-gated ADR approval surface.
+Pending compound-engineering ADR proposals (`thoughts/shared/compound/pending/*.md`) surface as `decisions:` entries so `briefing-followup`'s `action-compound.sh` can apply/edit/defer/reject them — the human-gated ADR approval surface.
 
 ## Pointers
 
-`catalyst-dev:briefing-followup` (consumes this skill's output) · `catalyst-dev:linearis` ·
-`relay-ticket` (what "suggest relay-dispatch candidates" points at) · `catalyst-dev:ticket-retro`.
+`catalyst-dev:briefing-followup` (consumes this skill's output) · `catalyst-dev:linearis` · `relay-ticket` (what "suggest relay-dispatch candidates" points at) · `catalyst-dev:ticket-retro`.
