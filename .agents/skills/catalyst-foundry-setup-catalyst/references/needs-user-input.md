@@ -1,7 +1,6 @@
 # Needs user input / manual only
 
-For issues needing user input, explain what's needed and how to provide it — never fix these
-silently, and never write a token, account id, or machine-specific path for the user.
+For issues needing user input, explain what's needed and how to provide it — never fix these silently, and never write a token, account id, or machine-specific path for the user.
 
 | Issue | What to tell the user |
 |---|---|
@@ -15,6 +14,4 @@ silently, and never write a token, account id, or machine-specific path for the 
 | Personal git automations override team ones | Linear lets each member set *personal* git automations that shadow the team defaults — check Settings → Account → Git if drift persists after the team reconcile |
 | `catalyst.monitor.linear.botUserId` not set | Requires the app-actor's own token — see [linear-workspace.md](linear-workspace.md) |
 
-**Observability (OTel) is optional.** If Docker or OTel containers aren't found, note it as
-informational — don't treat it as an issue. Point the user to
-https://github.com/ryanrozich/claude-code-otel if they want to set it up.
+**Observability (OTel) is optional.** If Docker or OTel containers aren't found, note it as informational — don't treat it as an issue. Point the user to https://github.com/ryanrozich/claude-code-otel if they want to set it up.

@@ -70,7 +70,7 @@ assert_contains "Skill mentions source guard" "return 0 2>/dev/null"
 # 2026-08-25). The replica must never be treated as authoritative silently.
 assert_contains "Skill reuses the linearis freshness-gate helper" "linear-read-replica.sh"
 assert_contains "Skill checks the .catalyst project-config marker" "linearReplica.mode"
-assert_contains "Skill states the fallback is loud, not silent" "Falling back to direct"
+assert_contains "Skill states the fallback is loud, not silent" "Falling back for this setup session"
 assert_contains "Skill states the fallback is the non-fleet path" "non-fleet"
 assert_contains "Skill warns the fallback burns the shared quota" "2500/hr"
 

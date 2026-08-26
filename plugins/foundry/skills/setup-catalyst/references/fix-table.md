@@ -1,11 +1,6 @@
 # Auto-fixable issues
 
-**Exception: thoughts/ repair is NOT a bare `mkdir`.** The humanlayer thoughts system expects
-`thoughts/shared` and `thoughts/global` to be **symlinks** into a central thoughts repo. A bare
-`mkdir` over a clobbered symlink silently routes all subsequent agent writes to a non-syncing
-local directory. Always route thoughts repair through `catalyst-thoughts.sh`, and treat a
-regular-directory-where-a-symlink-should-be as **fatal** — surface the recovery command to the
-user rather than overwriting anything.
+**Exception: thoughts/ repair is NOT a bare `mkdir`.** The humanlayer thoughts system expects `thoughts/shared` and `thoughts/global` to be **symlinks** into a central thoughts repo. A bare `mkdir` over a clobbered symlink silently routes all subsequent agent writes to a non-syncing local directory. Always route thoughts repair through `catalyst-thoughts.sh`, and treat a regular-directory-where-a-symlink-should-be as **fatal** — surface the recovery command to the user rather than overwriting anything.
 
 | Issue | Fix |
 |-------|-----|
@@ -25,24 +20,11 @@ user rather than overwriting anything.
 
 ## Config-template drift walkthrough (CTL-489)
 
-When the template gains a key that an existing project's `.catalyst/config.json` lacks (the
-original CTL-487 silent-fallback bug — catalyst itself ran in `oneshot-legacy` for two months
-because `orchestration.dispatchMode` was absent), Phase 2 surfaces a unified diff and asks for
-confirmation before merging. Concretely:
+When the template gains a key that an existing project's `.catalyst/config.json` lacks (the original CTL-487 silent-fallback bug — catalyst itself ran in `oneshot-legacy` for two months because `orchestration.dispatchMode` was absent), Phase 2 surfaces a unified diff and asks for confirmation before merging. Concretely:
 
-1. Run `bash plugins/dev/scripts/check-config-drift.sh --json --config .catalyst/config.json
-   --template <template>` to enumerate missing leaves. The template path comes from
-   `$CLAUDE_PLUGIN_ROOT/templates/config.template.json` in production, or
-   `plugins/dev/templates/config.template.json` when dogfooding from the repo.
-2. If the array is non-empty, generate a preview merge file via
-   `bash plugins/dev/scripts/check-config-drift.sh --merge-into /tmp/merged.json` and show the user
-   the unified diff: `diff -u .catalyst/config.json /tmp/merged.json`.
-3. Ask: "Apply these template additions? [y/N]". Default is NO — drift is non-fatal and the
-   warning will keep showing on subsequent workflow invocations until the user opts in.
-4. On confirmation, write the merged file atomically to `.catalyst/config.json` (`mv` from a
-   sibling `.tmp` file). The merge uses jq's `*` operator with the project on the right —
-   existing values always win, missing keys are added.
-5. The merge **never** overwrites existing user values. If the user has a custom
-   `catalyst.filter.groqModel`, the template's default is NOT applied to that key.
-6. If the user declines, leave `.catalyst/config.json` untouched. The drift warning continues to
-   appear on subsequent workflow invocations, providing passive nagging until resolved.
+1. Run `bash plugins/dev/scripts/check-config-drift.sh --json --config .catalyst/config.json --template <template>` to enumerate missing leaves. The template path comes from `$CLAUDE_PLUGIN_ROOT/templates/config.template.json` in production, or `plugins/dev/templates/config.template.json` when dogfooding from the repo.
+2. If the array is non-empty, generate a preview merge file via `bash plugins/dev/scripts/check-config-drift.sh --merge-into /tmp/merged.json` and show the user the unified diff: `diff -u .catalyst/config.json /tmp/merged.json`.
+3. Ask: "Apply these template additions? [y/N]". Default is NO — drift is non-fatal and the warning will keep showing on subsequent workflow invocations until the user opts in.
+4. On confirmation, write the merged file atomically to `.catalyst/config.json` (`mv` from a sibling `.tmp` file). The merge uses jq's `*` operator with the project on the right — existing values always win, missing keys are added.
+5. The merge **never** overwrites existing user values. If the user has a custom `catalyst.filter.groqModel`, the template's default is NOT applied to that key.
+6. If the user declines, leave `.catalyst/config.json` untouched. The drift warning continues to appear on subsequent workflow invocations, providing passive nagging until resolved.
