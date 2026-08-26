@@ -27,14 +27,15 @@ function readRaw(relPath) {
 function committedMarketplaceOrder() {
   // The committed marketplace.json's plugin order equals
   // release-please-config.json's package key order (verified: both list
-  // dev, pm, analytics, debugging, meta, pm-ops, meeting-hygiene, discovery,
-  // legacy, foundry) — read from the config file directly rather than
-  // hardcoding that sequence, so a future reorder of the config is honored.
+  // dev, analytics, debugging, meta, pm-ops, meeting-hygiene, legacy, foundry)
+  // — read from the config file directly rather than hardcoding that
+  // sequence, so a future reorder of the config (or plugin removal) is
+  // honored.
   const config = JSON.parse(readRaw("release-please-config.json"));
   return Object.keys(config.packages);
 }
 
-describe("claude emitter — plugin.json round-trip (all 10, byte-exact)", () => {
+describe("claude emitter — plugin.json round-trip (all 8, byte-exact)", () => {
   for (const pluginRelPath of listPluginRelPaths(repoRoot)) {
     test(`${pluginRelPath}/.claude-plugin/plugin.json regenerates byte-identically`, () => {
       const packManifest = readPackManifest(repoRoot, pluginRelPath);

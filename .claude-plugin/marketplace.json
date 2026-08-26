@@ -93,7 +93,7 @@
     {
       "name": "catalyst-pm-ops",
       "source": "./plugins/playground/pm-ops",
-      "description": "Linear cycle/backlog/PR ops, daily and weekly cadence, status updates, and team comms",
+      "description": "Linear backlog grooming \u2014 orphan, stale, and duplicate ticket detection",
       "author": {
         "name": "Coalesce Labs",
         "email": "hello@coalesce.dev"
@@ -105,10 +105,7 @@
       "keywords": [
         "project-management",
         "linear",
-        "github",
-        "standup",
-        "cadence",
-        "operations"
+        "backlog"
       ]
     },
     {

@@ -65,12 +65,10 @@ When this skill is invoked, immediately check:
 3. Strategic context THIRD
 4. Historical meeting context FOURTH
 
-**Cross-Skill Links:**
+**Context Links:**
 
-- If customer interview → Auto-flag for `/user-research-synthesis` if > 3 customer conversations
-- If decision about feature → Update related PRD in `/prd-draft`
-- If action items about research → Link to `/interview-guide` or `/user-research-synthesis`
-- If strategy discussion → Update `/write-prod-strategy` context
+- If decision about feature → Update the related PRD/spec doc
+- If action items about research → Note them for the next research pass
 
 ---
 
@@ -644,49 +642,6 @@ Full notes: [Link to doc]
 
 ---
 
-## Integration With Other Commands
-
-### Flows Into PRD
-
-After meeting notes, you might:
-
-```
-These insights from the customer interview should go into a PRD.
-
-Use `/prd-draft` and I'll auto-populate:
-- User quotes → Hypothesis section
-- Pain points → Problem statement
-- Decisions made → Non-goals and trade-offs
-- Action items → Open questions
-```
-
-### Updates Status
-
-After processing meeting notes:
-
-```
-You have action items from this meeting.
-
-Use `/catalyst-pm-ops:status-update` and I'll:
-- Include completed action items in your update
-- Flag overdue items from previous meetings
-- Show progress on open questions
-```
-
-### Creates Slack Messages
-
-After any meeting:
-
-```
-Use `/catalyst-pm-ops:slack-message` to:
-- Share meeting recap with attendees
-- Loop in stakeholders who missed it
-- Ask for help on open questions
-- Confirm action item ownership
-```
-
----
-
 ## Pro Tips
 
 ### 1. Voice Memo Your Thoughts
@@ -765,7 +720,7 @@ Sometimes what WASN'T said is more important than what was.
 
 Meeting notes that sit in your private doc help no one.
 
-**Fix:** Share with attendees within 24 hours. Use `/catalyst-pm-ops:slack-message` to make it easy.
+**Fix:** Share with attendees within 24 hours.
 
 ---
 
@@ -1035,20 +990,10 @@ _→ Add to lessons-learned: VPs appreciate when PMs anticipate their questions_
 
 After processing meeting notes:
 
-- **Update PRDs** - If feature decision was made, update `/prd-draft`
-- **Create action items** - Use `/catalyst-pm-ops:create-tickets` for engineering tasks from meeting
-- **Status updates** - Reference meeting decisions in `/catalyst-pm-ops:status-update`
-- **Research synthesis** - If customer interview, add to `/user-research-synthesis` batch
-- **Slack share** - Use `/catalyst-pm-ops:slack-message` to share recap with broader team
+- **Create action items** - File a ticket for engineering tasks from the meeting (see the
+  gherkin-ticket skill for how tickets should be shaped)
 
 ### Cross-Skill Integration
-
-**Feeds into:**
-
-- `/prd-draft` - Meeting decisions go into PRD sections
-- `/catalyst-pm-ops:status-update` - Meeting action items appear in weekly updates
-- `/user-research-synthesis` - Customer interviews add to research synthesis
-- `/catalyst-pm-ops:create-tickets` - Action items become engineering tickets
 
 **Pulls from:**
 
