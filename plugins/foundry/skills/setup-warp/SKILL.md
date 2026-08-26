@@ -17,11 +17,12 @@ pattern (main + PM + new-worktree + worktree), with colors, emoji, and session-n
 wiring so Claude's in-UI session name, terminal title, and remote-control name all match the Warp
 tab.
 
-> **Execution-core note.** This skill configures *manual development* tabs only. The legacy
-> wave-orchestration tabs ("New Worktree One-Shot" → `/catalyst-legacy:oneshot`, and "Orchestrator"
-> → `/catalyst-legacy:orchestrate`) were removed: the execution-core model runs a long-lived daemon
-> (`catalyst-execution-core start`), not per-ticket Warp tabs. Monitor it via `catalyst-hud` or the
-> orch-monitor dashboard rather than a launcher tab.
+> **Note.** This skill configures *manual development* tabs only. The legacy wave-orchestration tabs
+> ("New Worktree One-Shot" → `/catalyst-legacy:oneshot`, and "Orchestrator" →
+> `/catalyst-legacy:orchestrate`) were removed. Dispatch today is relay-based, not a resident daemon
+> or a per-ticket Warp tab: a coordinator (concierge or steward) launches `/relay-ticket <TICKET>`
+> sessions and reads their RELAY REPORT text between phases. Track a ticket's progress in Linear or
+> the scope's status doc, not a launcher tab.
 
 ## Known limitations (tell the user up front)
 
