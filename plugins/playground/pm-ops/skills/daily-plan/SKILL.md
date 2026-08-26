@@ -564,7 +564,7 @@ These tasks from today's list could be handled by someone on your team:
 
 _Generated: [Timestamp]_
 _MCPs used: [List which MCPs provided data]_
-_Next: Run `/meeting-notes` after meetings to capture outcomes_
+_Next: Record outcomes in `thoughts/shared/product/meeting-notes/` after meetings_
 ```
 
 ---
@@ -944,7 +944,7 @@ Total time: 2 minutes
 
 **After `/daily-plan`:**
 
-- `/meeting-notes` - Capture outcomes from today's meetings
+- Record meeting outcomes in `thoughts/shared/product/meeting-notes/`
 - `/create-tickets` - Convert action items to Linear tasks
 - `/daily-review` - (If created) Reflect on what got done
 
@@ -994,7 +994,7 @@ Total time: 2 minutes
 
 **After this:**
 
-- `/meeting-notes` - Capture meeting outcomes
+- Record meeting outcomes in `thoughts/shared/product/meeting-notes/`
 - `/create-tickets` - Track action items
 - `/weekly-review` - End-of-week synthesis
 

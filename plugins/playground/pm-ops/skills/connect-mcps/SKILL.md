@@ -936,8 +936,6 @@ Connect these first. They provide immediate ROI for product managers.
 
 **Best for:** Feature performance analysis, A/B test results, user behavior research, session replays
 
-See also: `catalyst-analytics` plugin for analytics-focused workflows
-
 ---
 
 #### 2. Project Management (Linear, Asana)
@@ -1140,9 +1138,6 @@ Since analytics is the #1 requested integration, here are the specifics for Post
 "What's the statistical significance of our pricing experiment?"
 
 ```
-
-**Integration with catalyst-analytics plugin:**
-The `catalyst-analytics` plugin provides analytics-focused workflows that leverage the PostHog MCP. Install it for dedicated analytics commands.
 
 ---
 

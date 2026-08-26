@@ -6,8 +6,6 @@ When outputting skill invocation instructions to the user (in templates, error m
 
 - catalyst-dev skills: `/catalyst-dev:skill-name`
 - catalyst-meta skills: `/catalyst-meta:skill-name`
-- catalyst-debugging skills: `/catalyst-debugging:skill-name`
-- catalyst-analytics skills: `/catalyst-analytics:skill-name`
 
 In explanatory prose describing workflow relationships (e.g., "Called by /implement-plan as part of quality gates"), bare names are acceptable for readability since nobody types those.
 

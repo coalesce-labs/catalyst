@@ -19,18 +19,6 @@ export const collections = {
         changelog: "../plugins/meta/CHANGELOG.md",
         title: "Catalyst Meta — Change Log",
       },
-      {
-        provider: "keep-a-changelog",
-        base: "changelog/catalyst-analytics",
-        changelog: "../plugins/playground/analytics/CHANGELOG.md",
-        title: "Catalyst Analytics — Change Log",
-      },
-      {
-        provider: "keep-a-changelog",
-        base: "changelog/catalyst-debugging",
-        changelog: "../plugins/playground/debugging/CHANGELOG.md",
-        title: "Catalyst Debugging — Change Log",
-      },
     ]),
   }),
 };
