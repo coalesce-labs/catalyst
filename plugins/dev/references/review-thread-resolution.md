@@ -1,8 +1,6 @@
 # Review Thread Resolution Workflow
 
-Shared workflow for resolving GitHub review threads after addressing comments. Referenced by
-`/review-comments` (Step 5) and the `unresolved-threads` blocker strategy in
-`merge-blocker-diagnosis.md`.
+Shared workflow for resolving GitHub review threads after addressing comments. Referenced by `/review-comments` (Step 5) and the `unresolved-threads` blocker strategy in `merge-blocker-diagnosis.md`.
 
 ## Step 1: Fetch Unresolved Review Threads
 

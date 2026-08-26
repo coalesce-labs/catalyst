@@ -1,34 +1,20 @@
 # Canonical worker-event allowlist
 
-Authoritative list of canonical event names a worker should wake on, in OTel
-canonical form (`.attributes."event.name"`). Source of truth for each group is
-the broker code path that routes it — cited inline so doc and code stay in
-sync. A regression test in `plugins/dev/scripts/broker/index.test.mjs` fails
-loudly when this file and the broker's routing tables drift apart.
+Authoritative list of canonical event names a worker should wake on, in OTel canonical form (`.attributes."event.name"`). Source of truth for each group is the broker code path that routes it — cited inline so doc and code stay in sync. A regression test in `plugins/dev/scripts/broker/index.test.mjs` fails loudly when this file and the broker's routing tables drift apart.
 
-For envelope shape and the full attribute schema, see [[event-schema]].
-For writing filters by hand or registering interests, see [[monitor-events]],
-[[wait-for-github]], [[catalyst-filter]].
+For envelope shape and the full attribute schema, see [[event-schema]]. For writing filters by hand or registering interests, see [[monitor-events]], [[wait-for-github]], [[catalyst-filter]].
 
 ## Why this exists
 
-The broker's `tryDeterministicRoute` and `tryTicketLifecycleRoute` functions
-already encode the actionable subset of canonical event names. Workers that
-hand-roll `catalyst-events wait-for --filter` predicates or `filter.register`
-calls were guessing at the right names — sometimes targeting the legacy v1 raw
-names (`worker-pr-created`, `attention-raised`) that no longer appear on disk,
-sometimes writing over-broad clauses that wake on 60-70% of unrelated webhooks.
+The broker's `tryDeterministicRoute` and `tryTicketLifecycleRoute` functions already encode the actionable subset of canonical event names. Workers that hand-roll `catalyst-events wait-for --filter` predicates or `filter.register` calls were guessing at the right names — sometimes targeting the legacy v1 raw names (`worker-pr-created`, `attention-raised`) that no longer appear on disk, sometimes writing over-broad clauses that wake on 60-70% of unrelated webhooks.
 
-The allowlist below is the answer to "which event names should I filter on?"
-Anything not in this list is either non-actionable (e.g. `check_run.created`,
-`pull_request.synchronize`) or covered by a different lifecycle group.
+The allowlist below is the answer to "which event names should I filter on?" Anything not in this list is either non-actionable (e.g. `check_run.created`, `pull_request.synchronize`) or covered by a different lifecycle group.
 
 ## pr_lifecycle
 
 Source: `plugins/dev/scripts/broker/index.mjs:708-833` (`tryDeterministicRoute`).
 
-Workers registering a `pr_lifecycle` interest (or its auto-correlated form via
-`agent.checkin` with `claimed_pr`) wake on these event names:
+Workers registering a `pr_lifecycle` interest (or its auto-correlated form via `agent.checkin` with `claimed_pr`) wake on these event names:
 
 - `github.check_suite.completed` — CI finished on a watched PR (conclusion ∈ success/failure)
 - `github.pr.merged` — watched PR was merged
@@ -47,10 +33,7 @@ Workers registering a `pr_lifecycle` interest (or its auto-correlated form via
 Source: `plugins/dev/scripts/broker/index.mjs:847-849` (`TICKET_LIFECYCLE_ALL_WAKE_ON`)
 + `plugins/dev/scripts/broker/index.mjs:851-960` (`tryTicketLifecycleRoute`).
 
-The interest registration uses **kind-names** (`pr_opened`, `pr_merged`,
-`status_done`, `status_in_review`, `status_changed`, `comment_added`) — these
-are NOT event names. The broker maps them to these canonical event names on
-the wire:
+The interest registration uses **kind-names** (`pr_opened`, `pr_merged`, `status_done`, `status_in_review`, `status_changed`, `comment_added`) — these are NOT event names. The broker maps them to these canonical event names on the wire:
 
 - `linear.issue.state_changed` — drives `status_done`, `status_in_review`, `status_changed`
 - `linear.issue.updated` — drives `status_changed`
@@ -84,10 +67,7 @@ A single event drives this interest:
 
 ## Pitfall: bare `catalyst.orchestrator.id` clauses
 
-`plugins/dev/scripts/orch-monitor/lib/webhook-handler.ts:635-642` stamps
-`catalyst.orchestrator.id` on every github webhook event whose PR head-branch
-starts with an orchestrator prefix (this is the CTL-234 attribution feature,
-intentional). A filter clause like:
+`plugins/dev/scripts/orch-monitor/lib/webhook-handler.ts:635-642` stamps `catalyst.orchestrator.id` on every github webhook event whose PR head-branch starts with an orchestrator prefix (this is the CTL-234 attribution feature, intentional). A filter clause like:
 
 ```
 .attributes."catalyst.orchestrator.id" == "<orch>"
@@ -99,16 +79,14 @@ orchestrator's PRs — including non-actionable `check_run.created`,
 updates, etc. The over-wake is real: a worker introspective measured 60–70%
 of waked events as non-actionable.
 
-Always combine the orchestrator clause with an event-name guard from the
-allowlist above:
+Always combine the orchestrator clause with an event-name guard from the allowlist above:
 
 ```
 .attributes."event.name" == "github.pr.merged"
   and .attributes."catalyst.orchestrator.id" == "<orch>"
 ```
 
-Or — when scoping by PR rather than orchestrator — drop the orch clause and
-use `.attributes."vcs.pr.number"` instead.
+Or — when scoping by PR rather than orchestrator — drop the orch clause and use `.attributes."vcs.pr.number"` instead.
 
 See `monitor-events` § references/filter-cookbook.md for the broader jq-filter table — `wait-for-github` no longer maintains one: its bounded-poll pattern polls GitHub REST directly and has no event-log filters to get wrong.
 
@@ -142,8 +120,7 @@ writers MUST target canonical:
 names on disk — they are NOT prefixed with `orchestrator.` (see
 `__orch_canonical_for:146-151` for the exception).
 
-Removing the v1 writes from `catalyst-state.sh` is a separate migration
-(deferred — see CTL-370 § Out of scope).
+Removing the v1 writes from `catalyst-state.sh` is a separate migration (deferred — see CTL-370 § Out of scope).
 
 ## Quick filter examples
 
