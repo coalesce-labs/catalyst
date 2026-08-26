@@ -323,8 +323,8 @@ humanlayer thoughts sync
 
 6. **After plan approval**, provide implementation command:
 
-   **Use `--team` when:** 3+ parallel phases, distinct domains, non-overlapping files, 10+ files
-   **Use standard mode when:** sequential phases, same directory, <10 files, tightly coupled
+   - **Use `--team` when:** 3+ parallel phases, distinct domains, non-overlapping files, 10+ files
+   - **Use standard mode when:** sequential phases, same directory, <10 files, tightly coupled
 
    ```
    ## Ready to Implement

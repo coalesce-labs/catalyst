@@ -318,6 +318,49 @@ else
 fi
 
 echo ""
+echo "=== case 16: corpus census — the real plugins/dev candidate files report exactly the expected hazards ==="
+# CTL-2253 Phase 3: after the six hazard blocks were resolved by hand (five joined/reformatted,
+# one — concierge/references/scaffold.md's Trigger:/Target: pair — deliberately left as
+# line-oriented metadata), only that one block should still report as a hazard anywhere in the
+# 178-file candidate corpus. This pins the census so a future edit that reintroduces a hazard
+# (or silently "fixes" the scanner into missing one) fails loudly here instead of being
+# auto-joined on the next sweep.
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+mapfile -t CANDIDATES < <(
+	cd "$REPO_ROOT" && {
+		find plugins/dev/skills -iname "SKILL.md"
+		find plugins/dev/skills -path "*/references/*.md"
+		find plugins/dev/references -maxdepth 1 -name "*.md"
+		find plugins/dev/templates -maxdepth 1 -name "*.md"
+		find plugins/dev/agents -maxdepth 1 -name "*.md"
+	} | sort -u
+)
+CORPUS_OUT="$(cd "$REPO_ROOT" && node "$MODULE" --check "${CANDIDATES[@]}" 2>&1)"
+HAZARD_LINES="$(grep -c '^plugins/.*: hazard=' <<<"$CORPUS_OUT" || true)"
+if [[ "$HAZARD_LINES" -eq 1 ]]; then
+	pass "corpus reports exactly one remaining hazard"
+else
+	fail "corpus reports exactly one remaining hazard" "found $HAZARD_LINES" "$(grep '^plugins/.*: hazard=' <<<"$CORPUS_OUT")"
+fi
+if grep -qxF "plugins/dev/skills/concierge/references/scaffold.md: hazard=kv-metadata" <<<"$CORPUS_OUT"; then
+	pass "the one remaining hazard is scaffold.md's kv-metadata (deliberately retained)"
+else
+	fail "the one remaining hazard is scaffold.md's kv-metadata (deliberately retained)" "$CORPUS_OUT"
+fi
+for f in \
+	plugins/dev/skills/create-plan/SKILL.md \
+	plugins/dev/skills/phase-plan/SKILL.md \
+	plugins/dev/skills/phase-research/SKILL.md \
+	plugins/dev/skills/phase-review/SKILL.md \
+	plugins/dev/skills/phase-verify/SKILL.md; do
+	if grep -q "^$f: hazard=" <<<"$CORPUS_OUT"; then
+		fail "$f carries no hazard (resolved by hand in Phase 3)" "$(grep "^$f:" <<<"$CORPUS_OUT")"
+	else
+		pass "$f carries no hazard (resolved by hand in Phase 3)"
+	fi
+done
+
+echo ""
 echo "=== summary ==="
 echo "Passed: $PASSES"
 echo "Failed: $FAILURES"
