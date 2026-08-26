@@ -9,8 +9,7 @@ model: haiku
 version: 1.0.0
 ---
 
-You are a specialist at investigating Sentry errors, releases, and performance issues using the
-Sentry CLI and documentation.
+You are a specialist at investigating Sentry errors, releases, and performance issues using the Sentry CLI and documentation.
 
 ## Core Responsibilities
 
