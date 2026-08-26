@@ -12,7 +12,7 @@ description:
   ../compound-estimate/references/trigger.md. Also use when the user says "compound this ticket",
   "capture learnings", "what did we learn", or run as /catalyst-dev:ticket-compound <TICKET>
   [mode:headless].
-disable-model-invocation: true
+disable-model-invocation: false
 user-invocable: true
 allowed-tools: Read, Write, Edit, Bash, Grep, Glob, Task, AskUserQuestion
 ---
@@ -145,7 +145,4 @@ ticket-compound complete
 - The estimation loop (separate slice — `compound-estimate` owns estimation numbers).
 - `ticket-retro` (the cross-ticket view — separate slice).
 
-Superseded: this section used to defer the automatic trigger to "the daemon firing this
-automatically after `monitor-deploy` (manual / morning-ritual triggered for now)" — that daemon
-hook was never built, and `monitor-deploy` (`phase-monitor-deploy`) is itself retiring. CTL-2244
-fulfills that deferred wiring with the relay-native trigger above instead.
+Superseded: this section used to defer the automatic trigger to "the daemon firing this automatically after `monitor-deploy` (manual / morning-ritual triggered for now)" — that daemon hook was never built, and `monitor-deploy` (`phase-monitor-deploy`) is itself retiring. CTL-2244 fulfills that deferred wiring instead: `merge-pr` Step 14 ([post-merge.md](../merge-pr/references/post-merge.md)) now invokes this skill directly once Step 13b's deploy verification resolves a terminal sentinel — see ../compound-estimate/references/trigger.md for the full contract.
