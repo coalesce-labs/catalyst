@@ -6511,7 +6511,7 @@ export function classifySkillsDirPlugins({
   const marketplaceIds =
     expectedPlugins.length > 0
       ? expectedPlugins.map(({ name }) => `${name}@catalyst`)
-      : ["catalyst-dev@catalyst", "catalyst-pm@catalyst"];
+      : ["catalyst-dev@catalyst"];
   const ep = settings?.enabledPlugins || {};
   for (const k of marketplaceIds) {
     if (k in ep) problems.push(`enabledPlugins still lists ${k} — clear it`);

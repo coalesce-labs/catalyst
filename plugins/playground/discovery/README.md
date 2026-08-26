@@ -1,8 +1,8 @@
 # Catalyst Discovery Plugin
 
-User research, metrics, experimentation, and prototyping skills — the discovery and research companion to [catalyst-pm](../pm/README.md).
+User research, metrics, experimentation, and prototyping skills.
 
-> **Companion to [catalyst-pm](../pm/README.md)** which focuses on strategy, PRDs, priorities, and release sequencing. This plugin handles the upstream work: understanding users, defining the right metrics, running experiments, and rapid prototyping.
+> Handles the upstream work: understanding users, defining the right metrics, running experiments, and rapid prototyping.
 
 ## Skills (14)
 

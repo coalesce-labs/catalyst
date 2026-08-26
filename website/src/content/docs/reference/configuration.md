@@ -499,7 +499,7 @@ Never commit this. One file per project, linked by `projectKey`. It holds API ke
 
 | Integration | Required fields               | Used by                                             |
 | ----------- | ----------------------------- | --------------------------------------------------- |
-| Linear      | `apiToken`, `teamKey`         | catalyst-dev, catalyst-pm, orch-monitor inbox reply |
+| Linear      | `apiToken`, `teamKey`         | catalyst-dev, catalyst-pm-ops, orch-monitor inbox reply |
 | Sentry      | `org`, `project`, `authToken` | catalyst-debugging                                  |
 | PostHog     | `apiKey`, `projectId`         | catalyst-analytics                                  |
 
