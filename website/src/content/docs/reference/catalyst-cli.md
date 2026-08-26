@@ -225,6 +225,14 @@ Bring the Catalyst service stack up or down on this host (idempotent, dependency
 
 [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/catalyst-stack)
 
+### catalyst-enrol
+
+One-key host enrollment installer — binds a fresh machine to a Catalyst Cloud account/tenant with a single --cloud-key, generating (or accepting an existing) age keypair for local secret decryption.
+
+**Key subcommands:** _(run `catalyst-enrol --help`)_
+
+[Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/catalyst-enrol.sh)
+
 ### catalyst-install
 
 Provision or tear down this node for its class (composes setup scripts; install/uninstall/reinstall).
@@ -232,15 +240,6 @@ Provision or tear down this node for its class (composes setup scripts; install/
 **Key subcommands:** _(run `catalyst-install --help`)_
 
 [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/catalyst-install)
-
-### catalyst-enrol
-
-One-key host enrollment installer — binds a fresh machine to a Catalyst Cloud account/tenant with a
-single `--cloud-key`, generating (or accepting an existing) age keypair for local secret decryption.
-
-**Key subcommands:** _(run `catalyst-enrol --help`)_
-
-[Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/catalyst-enrol.sh)
 
 ### catalyst-doctor
 
@@ -269,14 +268,6 @@ Capture / restore a node's restorable identity + state bundle (bare backup write
 Wrapper that registers a Catalyst session around claude, then execs the interactive claude process.
 
 [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/catalyst-claude.sh)
-
-## Hooks
-
-### emit-lifecycle-event
-
-Claude Code Stop/SubagentStop hook — fallback agent.checkout emitter for the broker.
-
-[Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/hooks/emit-lifecycle-event.sh)
 
 ## Fleet & install
 
