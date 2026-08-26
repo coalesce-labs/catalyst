@@ -1,0 +1,20 @@
+name: Check Plugin Manifest Parity
+
+# Real-tree successor to the deleted validate-release-config.sh Checks 9-11
+# (CTL-2220 removed release-please and the release-please-specific script
+# those checks lived in). Asserts, on every PR, that the Claude and Codex
+# plugin.json version fields agree and that neither marketplace catalog
+# carries a stray version field — see docs/releases.md.
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  check-plugin-manifest-parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Claude/Codex plugin.json parity
+        run: bash scripts/check-plugin-manifest-parity.sh
