@@ -17,7 +17,6 @@ Catalyst integrates with your development tools through both **CLI-based** (toke
 
 - **Linear** - Issue tracking, sprint planning, ticket lifecycle (CLI via [Linearis](https://www.npmjs.com/package/linearis))
   - `catalyst-dev`: Core research agents and workflow commands
-  - `catalyst-pm`: Advanced PM workflows (PRDs, strategy, priorities)
   - `catalyst-pm-ops`: Operational PM workflows (cycle analysis, milestone tracking, backlog grooming, cadence, comms)
 
 ### Version Control & Code Hosting
@@ -72,13 +71,6 @@ This keeps your typical session lean while having powerful tools available when 
 - CI/automation commands for non-interactive workflows
 - Handoff system for context persistence
 - ~3.5k context (lightweight MCP: Context7)
-
-**catalyst-pm** (Optional - Enable for product strategy)
-
-- 12 skills for product strategy (PRDs, north star, prioritization, and release planning)
-- 7 sub-agents forming a review panel (engineering, design, executive, legal, UX, customer voice)
-- Research-first architecture (Haiku for data collection, Sonnet/Opus for analysis)
-- PRD workflows, north star definition, strategy sprints, expansion planning
 
 **catalyst-pm-ops** (Optional - Enable for day-to-day PM operations)
 
@@ -208,9 +200,6 @@ Alternatively, install plugins manually via Claude Code plugin system:
 # Install core workflow (required)
 /plugin install catalyst-dev
 
-# Optional: Install PM plugin (strategy, PRDs, prioritization)
-/plugin install catalyst-pm
-
 # Optional: Install PM ops plugin (cycle/backlog/cadence operations)
 /plugin install catalyst-pm-ops
 
@@ -235,8 +224,8 @@ Alternatively, install plugins manually via Claude Code plugin system:
 Plugins automatically load/unload MCPs when enabled/disabled:
 
 ```bash
-# Enable PM tools for sprint planning and cycle reviews
-/plugin enable catalyst-pm  # Lightweight CLI-based, minimal context
+# Enable PM ops tools for sprint planning and cycle reviews
+/plugin enable catalyst-pm-ops  # Lightweight CLI-based, minimal context
 
 # Enable analytics when analyzing user behavior
 /plugin enable catalyst-analytics  # Loads PostHog MCP (+40k context)
@@ -248,7 +237,7 @@ Plugins automatically load/unload MCPs when enabled/disabled:
 /plugin enable catalyst-debugging  # Loads Sentry MCP (+20k context)
 
 # Can enable multiple plugins simultaneously
-/plugin enable catalyst-pm catalyst-analytics catalyst-debugging
+/plugin enable catalyst-pm-ops catalyst-analytics catalyst-debugging
 ```
 
 **Why this matters**: Most development sessions don't need analytics or debugging MCPs. Starting with just `catalyst-dev` keeps your context at ~3.5k tokens instead of ~65k, leaving more room for code and conversation.

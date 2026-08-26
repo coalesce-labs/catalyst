@@ -6,7 +6,7 @@ After a successful write, check whether the committed reference-class corpus is 
 to refresh it. **Best-effort: a refresh failure never fails the ritual.**
 
 ```bash
-CORPUS="plugins/playground/pm/scripts/estimate/reference-class-corpus.json"
+CORPUS="plugins/dev/scripts/estimate/reference-class-corpus.json"
 STALE=$(jq -r '
   (.generated_at // "1970-01-01T00:00:00Z")
   | sub("\\.[0-9]+"; "")
@@ -18,7 +18,7 @@ STALE=$(jq -r '
 If `STALE` is `true` (corpus older than 7 days), tell the user and offer to run:
 
 ```bash
-plugins/playground/pm/scripts/estimate/refresh-corpus.sh
+plugins/dev/scripts/estimate/refresh-corpus.sh
 ```
 
 It re-runs Extract → Collect → Score and merges fresh entries over the committed corpus (the

@@ -12,7 +12,6 @@ Catalyst comes as separate Claude Code plugins. Install only what you need, so C
 | Plugin | What it does | Context cost | Skills | Agents |
 | --- | --- | :---: | :---: | :---: |
 | `catalyst-dev` | Core dev workflow — research, plan, build, verify, ship | ~3.5K | 50 | 9 |
-| `catalyst-pm` | Product strategy — PRDs, priorities, release planning | Minimal | 12 | 1 |
 | `catalyst-pm-ops` | PM work — cycle health, backlog, cadence, Slack | Minimal | 12 | 4 |
 | `catalyst-meta` | Find, build, and manage workflows | Minimal | 6 | — |
 | `catalyst-analytics` | Product analytics with PostHog | ~40K | 3 | — |
@@ -28,7 +27,6 @@ Catalyst comes as separate Claude Code plugins. Install only what you need, so C
 
 # Install plugins (catalyst-dev is required; the rest are optional)
 /plugin install catalyst-dev
-/plugin install catalyst-pm
 /plugin install catalyst-pm-ops
 /plugin install catalyst-analytics
 /plugin install catalyst-debugging

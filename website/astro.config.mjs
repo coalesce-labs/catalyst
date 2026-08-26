@@ -21,7 +21,6 @@ function getLatestVersion(changelogPath) {
 
 const plugins = [
   { name: "catalyst-dev", changelog: "../plugins/dev/CHANGELOG.md" },
-  { name: "catalyst-pm", changelog: "../plugins/playground/pm/CHANGELOG.md" },
   { name: "catalyst-meta", changelog: "../plugins/meta/CHANGELOG.md" },
   { name: "catalyst-analytics", changelog: "../plugins/playground/analytics/CHANGELOG.md" },
   { name: "catalyst-debugging", changelog: "../plugins/playground/debugging/CHANGELOG.md" },

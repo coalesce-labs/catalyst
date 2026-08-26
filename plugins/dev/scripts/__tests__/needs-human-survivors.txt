@@ -39,6 +39,7 @@
 1	plugins/dev/scripts/broker/system-trouble.test.mjs
 1	plugins/dev/scripts/check-project-setup.sh
 1	plugins/dev/scripts/check-setup.sh
+10	plugins/dev/scripts/estimate/reference-class-corpus.json
 3	plugins/dev/scripts/execution-core/__fixtures__/ctl-2192/CHECKSUMS.txt
 2	plugins/dev/scripts/execution-core/__fixtures__/ctl-2192/PROVENANCE.md
 1	plugins/dev/scripts/execution-core/__fixtures__/ctl-2192/workers/CTC-166/phase-recovery-pass.json.fixture
@@ -179,7 +180,6 @@
 1	plugins/dev/scripts/otel-forward/lib/normalize.test.ts
 1	plugins/dev/scripts/phase-agent-emit-complete
 5	plugins/dev/scripts/setup-execution-core-states.sh
-10	plugins/playground/pm/scripts/estimate/reference-class-corpus.json
 2	website/src/content/docs/autonomous-workflow/linear-control-room.md
 1	website/src/content/docs/autonomous-workflow/see-your-work.md
 6	website/src/content/docs/autonomous-workflow/worker-status-labels.md
