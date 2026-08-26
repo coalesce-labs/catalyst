@@ -36,8 +36,9 @@ You create:
   stalled item in the project falls straight through to the concierge.
 
 The steward then fills the status doc, plans, and dispatches. ⛔ **Do not pre-dispatch its tickets.**
-Moving something to Todo is the steward's verb; doing it for them makes you a second orchestrator and the
-scope now has two owners, which is the failure mode the role names are chosen to prevent.
+Launching a `/relay-ticket <TICKET>` session is the steward's verb (`steward/references/dispatch.md`);
+doing it for them makes you a second orchestrator and the scope now has two owners, which is the failure
+mode the role names are chosen to prevent.
 
 ## 3. Confirm in-thread
 
