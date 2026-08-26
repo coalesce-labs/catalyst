@@ -14,14 +14,9 @@ version: 1.0.0
 
 # Gherkin Ticket — Use-Case-First Ticket Authoring
 
-Every ticket must open with **a use case a stranger can understand**: who gets what outcome, under
-what condition, and why. Most tickets fail this — they dive straight into implementation ("Wire HRW
-ownership into dispatchTriage") and the reader has to reverse-engineer the point. This skill fixes
-that at authoring time.
+Every ticket must open with **a use case a stranger can understand**: who gets what outcome, under what condition, and why. Most tickets fail this — they dive straight into implementation ("Wire HRW ownership into dispatchTriage") and the reader has to reverse-engineer the point. This skill fixes that at authoring time.
 
-This skill owns **ticket format** (title voice + body structure). It does **not** own the Linear CLI
-mechanics — once a draft is ready, hand off to the `/catalyst-dev:linear` skill to actually create
-or update the issue. CLI syntax lives in `/catalyst-dev:linearis`.
+This skill owns **ticket format** (title voice + body structure). It does **not** own the Linear CLI mechanics — once a draft is ready, hand off to the `/catalyst-dev:linear` skill to actually create or update the issue. CLI syntax lives in `/catalyst-dev:linearis`.
 
 ## When this fires
 
@@ -31,8 +26,7 @@ Auto-invoked whenever a ticket is being born or rewritten — you do **not** nee
 - breaking a PRD/plan into tickets
 - "rewrite this ticket", "clean up these ticket titles", "this backlog is unreadable"
 
-If the user is mid-creation in another skill (`linear`, `phase-triage`), apply these rules to the
-title and body before the issue is written.
+If the user is mid-creation in another skill (`linear`, `phase-triage`), apply these rules to the title and body before the issue is written.
 
 ---
 
@@ -40,8 +34,7 @@ title and body before the issue is written.
 
 ### Part 1 — The title IS the use case (the scannable line)
 
-The title must let a reader who didn't write the ticket understand, in one glance, **what it is and
-what the expected outcome of doing it is** — enough to judge whether and when it should be done.
+The title must let a reader who didn't write the ticket understand, in one glance, **what it is and what the expected outcome of doing it is** — enough to judge whether and when it should be done.
 
 A useful *starting shape* (not a template to force) is:
 
@@ -49,30 +42,20 @@ A useful *starting shape* (not a template to force) is:
 <Actor> should <outcome> [when <condition>] [so that <benefit>].
 ```
 
-where the actor is whoever gets value — *not always a human*: `Operators`, `Developers`,
-`The scheduler`, `The reaper`, `A phase worker`, `The daemon`, `The dashboard`.
+where the actor is whoever gets value — *not always a human*: `Operators`, `Developers`, `The scheduler`, `The reaper`, `A phase worker`, `The daemon`, `The dashboard`.
 
 But **bias hard toward concise and scannable. Do not force the formula.**
 
 - **Prefer the shortest title that still conveys context + expected outcome.** Drop `so that…` the
-  moment the benefit is obvious; drop `when…` unless the trigger is the point. A 90-char title that
-  reads cleanly beats a 150-char one that recites every clause. Vary the phrasing — identical
-  "X should Y so that Z" scaffolding on every ticket becomes noise the reader tunes out.
+  moment the benefit is obvious; drop `when…` unless the trigger is the point. A 90-char title that reads cleanly beats a 150-char one that recites every clause. Vary the phrasing — identical "X should Y so that Z" scaffolding on every ticket becomes noise the reader tunes out.
 - **Length is earned by clarity, never spent on mechanism.** Soft cap ~120 characters. Go longer
   only if the extra words remove ambiguity.
 - **No jargon in the title — hard rule.** No symbol, function, event, file, or flag names
-  (`reap-complete`, `bootReplay`, `schedulerTick`, `layoutId`, `--label-mode`). The title is for
-  someone deciding whether to care, not implementing. **If you can't state the outcome without
-  naming an internal mechanism, you don't yet understand the outcome — go figure out what the work
-  is *for*, then write that.** The mechanism belongs in the body.
+  (`reap-complete`, `bootReplay`, `schedulerTick`, `layoutId`, `--label-mode`). The title is for someone deciding whether to care, not implementing. **If you can't state the outcome without naming an internal mechanism, you don't yet understand the outcome — go figure out what the work is *for*, then write that.** The mechanism belongs in the body.
 - **Component does NOT go in the title.** Put it in a Linear *label* (CTL uses component labels:
   orchestrator / phase-agent / broker / monitor / cli / …). No `[API]` / `[Frontend]` prefixes.
 
-The hardest case is deep-internals work (a reaper fix, a scheduler reorder). The temptation is to
-title it by its mechanism because the outcome feels invisible. It isn't — every change exists to make
-*something* better for *someone* (the operator, the daemon, the next developer). Name that. "The
-reaper should record an already-gone session as reaped so the daemon stops re-checking it every boot"
-beats "Reap echo on already-gone bg session" even though both describe the same patch.
+The hardest case is deep-internals work (a reaper fix, a scheduler reorder). The temptation is to title it by its mechanism because the outcome feels invisible. It isn't — every change exists to make *something* better for *someone* (the operator, the daemon, the next developer). Name that. "The reaper should record an already-gone session as reaped so the daemon stops re-checking it every boot" beats "Reap echo on already-gone bg session" even though both describe the same patch.
 
 #### Title: before → after
 
@@ -84,23 +67,17 @@ beats "Reap echo on already-gone bg session" even though both describe the same 
 | `Dashboard needs-attention banner` | `Humans should see an indication on the dashboard when something needs their attention so that they can react to it` |
 | `Refactor: extract dispatchAndVerify` | `Developers should change dispatch-and-verify logic in one place so that the three sweeps can't silently diverge` |
 
-Notice the actor varies (orchestrator, monitor, dispatcher, humans, developers) and the `so that`
-is present only when it adds information.
+Notice the actor varies (orchestrator, monitor, dispatcher, humans, developers) and the `so that` is present only when it adds information.
 
 ### Part 2 — The body: tiered Gherkin
 
-Match the ceremony to the work. Forcing a full `Given/When/Then` block onto a pure chore produces
-vacuous Gherkin (`Then the code is cleaner`) — a known anti-pattern. Use the tier that fits:
+Match the ceremony to the work. Forcing a full `Given/When/Then` block onto a pure chore produces vacuous Gherkin (`Then the code is cleaner`) — a known anti-pattern. Use the tier that fits:
 
-**Always wrap scenarios in a ` ```gherkin ` fenced code block.** This renders as a monospace block in
-Linear (and picks up Gherkin syntax coloring wherever the viewer supports it), keeping the
-Given/When/Then visually distinct from the prose around it. The Tier-C Context/Motivation/Outcome
-prose stays as normal text; only the scenario blocks are fenced.
+**Always wrap scenarios in a ` ```gherkin ` fenced code block.** This renders as a monospace block in Linear (and picks up Gherkin syntax coloring wherever the viewer supports it), keeping the Given/When/Then visually distinct from the prose around it. The Tier-C Context/Motivation/Outcome prose stays as normal text; only the scenario blocks are fenced.
 
 #### Tier A — Features, bugs, API/behavior changes → full scenarios
 
-A one-line intent (the title already carries it; restate only if the body needs framing) **plus one
-or more `Scenario:` blocks**:
+A one-line intent (the title already carries it; restate only if the body needs framing) **plus one or more `Scenario:` blocks**:
 
 ```gherkin
 Scenario: <one specific behavior, stated as a complete sentence>
@@ -114,8 +91,7 @@ Scenario: <one specific behavior, stated as a complete sentence>
 Rules (borrowed from gherkin-lint heuristics — these are hard rules):
 - **Exactly one `When` per scenario.** A second `When` means a second behavior → second scenario.
 - **`Then` asserts an *observable* outcome** (user-visible or caller-visible), not an internal
-  artifact — *unless* it's an explicitly technical/backend scenario where the state change IS the
-  observable outcome (then say so).
+  artifact — *unless* it's an explicitly technical/backend scenario where the state change IS the observable outcome (then say so).
 - **Declarative, not imperative.** No "click the Sign-In button", no `POST /api/v2/users`, no field
   IDs. Mechanics belong in the implementation, not the acceptance criterion.
 - **Concrete values**, never "some user" / "certain data" / "valid input".
@@ -124,8 +100,7 @@ Rules (borrowed from gherkin-lint heuristics — these are hard rules):
 
 #### Tier B — Bugs (a failing scenario)
 
-Same as Tier A, with a discipline: **`Then` states the CORRECT behavior** (the scenario must go green
-when fixed), and a `# CURRENTLY:` comment marks what's broken today.
+Same as Tier A, with a discipline: **`Then` states the CORRECT behavior** (the scenario must go green when fixed), and a `# CURRENTLY:` comment marks what's broken today.
 
 ```gherkin
 Scenario: Preflight passes when the workspace has no team-level labels
@@ -147,9 +122,7 @@ Motivation: when one copy's timeout changes, the other two silently stay wrong (
 Outcome: a single shared dispatchAndVerify() is extracted; all three sweeps import it.
 ```
 
-Add **invariant scenarios** *only* if there is behavior that must survive the change and can be
-written as a testable postcondition (e.g. "the dispatcher still assigns to the least-loaded worker").
-Do not invent a scenario whose `Then` is "the code is cleaner".
+Add **invariant scenarios** *only* if there is behavior that must survive the change and can be written as a testable postcondition (e.g. "the dispatcher still assigns to the least-loaded worker"). Do not invent a scenario whose `Then` is "the code is cleaner".
 
 ---
 
@@ -245,8 +218,7 @@ Scenario: Dispatch still waits for completion before returning  # invariant
    `/catalyst-dev:linearis`); this stays on `linearis` and is structurally outside
    the `issues read` detector.
 2. **Preserve all technical content** (file refs, repro steps, root-cause notes, SHAs). You are
-   restructuring, not deleting. Move technical detail under a `## Technical notes` section below the
-   Gherkin so it stays but doesn't lead.
+   restructuring, not deleting. Move technical detail under a `## Technical notes` section below the Gherkin so it stays but doesn't lead.
 3. Rewrite the title to outcome-first; rewrite the body into the right tier.
 4. Show a **before → after** so the user can eyeball it before you push the update.
 
@@ -282,11 +254,7 @@ Dependencies:
 
 ## Dependencies — link them, don't narrate them
 
-If you know that other work **must finish before this ticket can start**, record it as a first-class
-Linear `blocked_by` **link** at authoring time — you know the prerequisites better than any later
-pass will. **Catalyst does NOT infer dependencies from prose** (CTL-838): writing "depends on
-CTL-123" or "see CTL-456" in the description does nothing — it is not scraped into a blocker, and it
-should not be (a mention is not a dependency).
+If you know that other work **must finish before this ticket can start**, record it as a first-class Linear `blocked_by` **link** at authoring time — you know the prerequisites better than any later pass will. **Catalyst does NOT infer dependencies from prose** (CTL-838): writing "depends on CTL-123" or "see CTL-456" in the description does nothing — it is not scraped into a blocker, and it should not be (a mention is not a dependency).
 
 ```bash
 # After the ticket exists, link each genuine prerequisite (see /catalyst-dev:linearis for syntax):
@@ -297,18 +265,15 @@ Rules of thumb:
 - Link only **true** prerequisites — work that must reach Done/Canceled first. A shared topic,
   prior-art reference, or "related" ticket is **not** a blocker.
 - Never link across teams for auto-sequencing (a `CTL` ticket on an `OTL`/`ADV` ticket): the
-  execution-core daemon only works its own team, so a cross-team blocker just deadlocks. Coordinate
-  cross-team work out-of-band.
+  execution-core daemon only works its own team, so a cross-team blocker just deadlocks. Coordinate cross-team work out-of-band.
 - A blocker you miss is fine — the relay's triage step does a semantic second pass over the backlog
-  and can add genuine ones it finds. But a **false** blocker you add stalls real work, so when in
-  doubt, leave it out.
+  and can add genuine ones it finds. But a **false** blocker you add stalls real work, so when in doubt, leave it out.
 
 ---
 
 ## Per-project criteria (override hook)
 
-Catalyst ships these defaults, but **other teams write tickets differently**. Before drafting, check
-for a project override and layer it on top of (it wins over) the defaults here:
+Catalyst ships these defaults, but **other teams write tickets differently**. Before drafting, check for a project override and layer it on top of (it wins over) the defaults here:
 
 ```bash
 # Optional project-specific ticket style — actor vocabulary, extra sections, stricter tiers
@@ -316,10 +281,7 @@ OVERRIDE=".catalyst/ticket-style.md"
 [[ -f "$OVERRIDE" ]] && echo "Applying project ticket-style overrides from $OVERRIDE"
 ```
 
-If `.catalyst/ticket-style.md` exists, read it and honor its actor list, required sections, and any
-stricter rules (e.g. "every ticket including chores must carry one literal Given/When/Then"). Absent
-that file, use the defaults above. This is how the same shipped skill serves teams with different
-conventions.
+If `.catalyst/ticket-style.md` exists, read it and honor its actor list, required sections, and any stricter rules (e.g. "every ticket including chores must carry one literal Given/When/Then"). Absent that file, use the defaults above. This is how the same shipped skill serves teams with different conventions.
 
 ---
 

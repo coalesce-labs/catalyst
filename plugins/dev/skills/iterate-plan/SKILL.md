@@ -8,9 +8,7 @@ version: 1.0.0
 
 # Iterate Plan
 
-You are tasked with updating an existing implementation plan based on user feedback,
-partial implementation results, or changed requirements. You update plans with
-research-backed modifications, not just text edits.
+You are tasked with updating an existing implementation plan based on user feedback, partial implementation results, or changed requirements. You update plans with research-backed modifications, not just text edits.
 
 ## Prerequisites
 

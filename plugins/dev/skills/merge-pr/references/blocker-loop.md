@@ -1,17 +1,11 @@
 # Step 6 — Diagnose and Resolve Merge Blockers (Reactive PR Lifecycle)
 
-_The canonical Pattern 3 loop from [[monitor-events]]: a single `wait-for` fires on any of PR
-merged, PR closed, CI failure, review changes-requested, or push to the base branch. Each
-wake-up is paired with an authoritative `gh api` REST re-check._
+_The canonical Pattern 3 loop from [[monitor-events]]: a single `wait-for` fires on any of PR merged, PR closed, CI failure, review changes-requested, or push to the base branch. Each wake-up is paired with an authoritative `gh api` REST re-check._
 
 Read and follow the full workflow in
 `"${CLAUDE_PLUGIN_ROOT}/references/merge-blocker-diagnosis.md"`.
 
-The wake-up mechanism here is the **canonical "Reactive PR lifecycle" pattern from
-`monitor-events` (Pattern 3, CTL-228)**: each wake-up tells the agent *what changed*;
-`gh api` tells it *the current truth*. Subscribe only to `github.pr.merged` is wrong —
-most of the interval between PR-create and PR-merge is spent on CI, review, and
-base-branch churn; the disjunctive filter restores event-driven dispatch for those cases.
+The wake-up mechanism here is the **canonical "Reactive PR lifecycle" pattern from `monitor-events` (Pattern 3, CTL-228)**: each wake-up tells the agent *what changed*; `gh api` tells it *the current truth*. Subscribe only to `github.pr.merged` is wrong — most of the interval between PR-create and PR-merge is spent on CI, review, and base-branch churn; the disjunctive filter restores event-driven dispatch for those cases.
 
 ```bash
 # Two-phase compliant cadence loop. The 600s timeout serves as a fallback cadence;
@@ -71,9 +65,7 @@ while [ $ITER -lt $MAX_ITER ]; do
 done
 ```
 
-**Why every wake-up runs `gh api`:** if orch-monitor is down, no events flow and `wait-for`
-blocks until the timeout. The REST call is the safety net for merge confirmation when the event
-stream has dropped. Events are wake-up triggers; `gh api` REST is the source of truth.
+**Why every wake-up runs `gh api`:** if orch-monitor is down, no events flow and `wait-for` blocks until the timeout. The REST call is the safety net for merge confirmation when the event stream has dropped. Events are wake-up triggers; `gh api` REST is the source of truth.
 
 Blocker resolution table (full details in `merge-blocker-diagnosis.md`):
 
@@ -91,8 +83,7 @@ Blocker resolution table (full details in `merge-blocker-diagnosis.md`):
 
 When the loop confirms `state == "MERGED"`, capture `mergedAt` and proceed to Step 7.
 
-**Signal file write (worker context):** if `$SIGNAL_FILE` is set, write `pr.mergedAt`,
-`pr.ciStatus = "merged"`, and `status = "done"` as soon as `state == MERGED` is observed:
+**Signal file write (worker context):** if `$SIGNAL_FILE` is set, write `pr.mergedAt`, `pr.ciStatus = "merged"`, and `status = "done"` as soon as `state == MERGED` is observed:
 
 ```bash
 if [ -n "$SIGNAL_FILE" ] && [ -f "$SIGNAL_FILE" ]; then

@@ -12,8 +12,7 @@ version: 2.0.0
 
 # Commit Changes
 
-You are tasked with creating git commits using conventional commit format for the changes made
-during this session.
+You are tasked with creating git commits using conventional commit format for the changes made during this session.
 
 ## Process:
 

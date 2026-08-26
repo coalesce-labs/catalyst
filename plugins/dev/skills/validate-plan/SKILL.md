@@ -8,8 +8,7 @@ version: 1.0.0
 
 # Validate Plan
 
-You are tasked with validating that an implementation plan was correctly executed, verifying all
-success criteria and identifying any deviations or issues.
+You are tasked with validating that an implementation plan was correctly executed, verifying all success criteria and identifying any deviations or issues.
 
 ## Prerequisites
 
@@ -239,8 +238,6 @@ Recommended workflow:
 3. `/validate-plan` - Verify implementation correctness
 4. `/describe-pr` - Generate PR description
 
-The validation works best after commits are made, as it can analyze the git history to understand
-what was implemented.
+The validation works best after commits are made, as it can analyze the git history to understand what was implemented.
 
-Remember: Good validation catches issues before they reach production. Be constructive but thorough
-in identifying gaps or improvements.
+Remember: Good validation catches issues before they reach production. Be constructive but thorough in identifying gaps or improvements.

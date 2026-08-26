@@ -10,11 +10,7 @@ user-invocable: true
 
 # Project orchestrator — move ready tickets to Todo, watch, and speak in threads
 
-This is the **project-scoped invocation of `catalyst-dev:steward`**, which is the canonical
-implementation of this role (its `SKILL.md` is CTL-1974's spec). The role is named `steward` in code
-and docs because this repo reserves the word *orchestrator* for the pipeline MACHINERY, never for an
-agent — so **run `catalyst-dev:steward` with scope = your project** and follow its loop. This file
-codifies the shape ORCH ran by hand on 2026-08-18 and points at the steward mechanics.
+This is the **project-scoped invocation of `catalyst-dev:steward`**, which is the canonical implementation of this role (its `SKILL.md` is CTL-1974's spec). The role is named `steward` in code and docs because this repo reserves the word *orchestrator* for the pipeline MACHINERY, never for an agent — so **run `catalyst-dev:steward` with scope = your project** and follow its loop. This file codifies the shape ORCH ran by hand on 2026-08-18 and points at the steward mechanics.
 
 ## The shape you run (from CTL-1974; steward implements each step)
 
@@ -29,8 +25,7 @@ codifies the shape ORCH ran by hand on 2026-08-18 and points at the steward mech
    proceed on the default → `steward/references/threads.md`, `ask/references/threading.md`.
 8. **CLOSE** — a merged PR's ticket goes to **Done**, stated in the project thread.
 
-(Steward adds STATUS DOC and HAND OFF — `steward/references/{status-doc,resume}.md`. A stalled ticket
-gets a nudge in its own thread — `steward/references/stalls.md`.)
+(Steward adds STATUS DOC and HAND OFF — `steward/references/{status-doc,resume}.md`. A stalled ticket gets a nudge in its own thread — `steward/references/stalls.md`.)
 
 ## Invariants (must survive codification)
 
@@ -46,5 +41,4 @@ gets a nudge in its own thread — `steward/references/stalls.md`.)
 
 ## Pointers
 
-`catalyst-dev:steward` (canonical engine) · `catalyst-dev:ask` · `catalyst-dev:linearis` ·
-`catalyst-dev:gherkin-ticket`.
+`catalyst-dev:steward` (canonical engine) · `catalyst-dev:ask` · `catalyst-dev:linearis` · `catalyst-dev:gherkin-ticket`.

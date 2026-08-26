@@ -1,7 +1,6 @@
 # PR Identification and Pre-Merge Verification (Steps 1–5)
 
-_Steps to identify the target PR, verify it is open and mergeable, rebase if behind, and run
-local tests before entering the blocker-diagnosis loop._
+_Steps to identify the target PR, verify it is open and mergeable, rebase if behind, and run local tests before entering the blocker-diagnosis loop._
 
 ## Step 1 — Identify PR to merge
 

@@ -19,9 +19,7 @@ allowed-tools: Read, Write, Edit, Bash, Grep, Glob, Task, AskUserQuestion
 
 # ticket-compound — engineering compound loop
 
-Capture what a ticket taught us into the **shared** store (`thoughts/` + ADRs), so future agents on
-any machine make better decisions. This is `research-curate` evolved from *inventory* to *action*.
-Read `reference.md` (this dir) for the learnings-store schema before writing anything.
+Capture what a ticket taught us into the **shared** store (`thoughts/` + ADRs), so future agents on any machine make better decisions. This is `research-curate` evolved from *inventory* to *action*. Read `reference.md` (this dir) for the learnings-store schema before writing anything.
 
 **Two authority levels (hard rule):**
 - **Autonomous** — write/append/update/delete in `thoughts/shared/learnings/` and
@@ -37,38 +35,31 @@ Read `reference.md` (this dir) for the learnings-store schema before writing any
 
 - `<TICKET>` — Linear key (e.g. `CTL-619`). If omitted, detect from the branch / `CATALYST_TICKET`.
 - `mode:headless` — non-interactive: apply all unambiguous autonomous actions silently, mark
-  ambiguous learnings `status: stale`, never block on a prompt, end with the sentinel line. This is
-  what the morning ritual (and, later, the daemon) use. Default is interactive.
+  ambiguous learnings `status: stale`, never block on a prompt, end with the sentinel line. This is what the morning ritual (and, later, the daemon) use. Default is interactive.
 
 ## Step 1 — Gather raw signal (the orchestrator reads; do NOT delegate writes)
 
 For `<TICKET>`, collect:
 1. **Friction** — every `## Friction` / `friction:` block the phase agents left in their artifacts:
-   `thoughts/shared/{research,plans}/*<TICKET>*.md` and the worker signal files
-   `~/catalyst/workers/<TICKET>/*.json`.
+   `thoughts/shared/{research,plans}/*<TICKET>*.md` and the worker signal files `~/catalyst/workers/<TICKET>/*.json`.
    - `thoughts/shared/friction/<TICKET>.md` — the dedicated per-phase friction log (primary friction source).
 2. **The diff** — `git log --oneline origin/main..HEAD` and `git diff --stat origin/main..HEAD`
    (or the merged SHA from `phase-monitor-merge.json`).
 3. **Ticket** — read via direct SQL against the replica (title, description, final state, estimate); see the `linearis` skill's "Reading Linear" section.
 4. **Event trail** (optional) — the ticket's lines in `~/catalyst/events/YYYY-MM.jsonl`.
 
-Capture learnings from **failed/abandoned** tickets too — the dead-ends are high-signal ("what
-didn't work" is a first-class section).
+Capture learnings from **failed/abandoned** tickets too — the dead-ends are high-signal ("what didn't work" is a first-class section).
 
 ## Step 2 — Three TEXT-ONLY sub-agents (parallel; they return text, never write files)
 
-Spawn via Task, all at once. Each returns text to you; **you** do the single write in Step 3 (avoids
-partial-write races):
+Spawn via Task, all at once. Each returns text to you; **you** do the single write in Step 3 (avoids partial-write races):
 
 - **Context Analyzer** — from the diff + ticket + friction, pick the track (bug vs knowledge),
-  `problem_type`, `category` (subdir), `component`, `severity`, and a filename slug. Returns the
-  frontmatter skeleton (validate against `reference.md`).
+  `problem_type`, `category` (subdir), `component`, `severity`, and a filename slug. Returns the frontmatter skeleton (validate against `reference.md`).
 - **Solution Extractor** — write the entry body per the track's template (bug: Problem/Symptoms/What
-  Didn't Work/Solution/Why This Works/Prevention; knowledge: Context/Guidance/Why This Matters/When
-  to Apply/Examples). Ground every claim in the diff/friction — no invention.
+  Didn't Work/Solution/Why This Works/Prevention; knowledge: Context/Guidance/Why This Matters/When to Apply/Examples). Ground every claim in the diff/friction — no invention.
 - **Related-Learnings Finder** — `rg -li "<keywords>" thoughts/shared/learnings/**/*.md`, read the
-  frontmatter of hits, and score overlap (problem, root cause, component, files, prevention). Returns
-  HIGH (4–5) / MODERATE (2–3) / LOW (0–1) plus the matched paths.
+  frontmatter of hits, and score overlap (problem, root cause, component, files, prevention). Returns HIGH (4–5) / MODERATE (2–3) / LOW (0–1) plus the matched paths.
 
 ## Step 3 — Assemble + write ONE learnings entry (overlap routing)
 
@@ -84,8 +75,7 @@ bash "${CLAUDE_PLUGIN_ROOT:-plugins/dev}/scripts/compound/validate-learnings.sh"
 
 ## Step 4 — Curate the store (five outcomes, autonomous in thoughts/)
 
-For the related entries the Finder surfaced, classify and act — **autonomously** (this is the
-`thoughts/` layer):
+For the related entries the Finder surfaced, classify and act — **autonomously** (this is the `thoughts/` layer):
 | Outcome | When | Action |
 |---|---|---|
 | Keep | accurate, refs valid | none |
@@ -94,33 +84,25 @@ For the related entries the Finder surfaced, classify and act — **autonomously
 | Replace | core guidance now misleading | write successor, delete old |
 | Delete | implementation gone AND domain gone AND no inbound links | remove (git history preserves) |
 
-Same five-outcome pass applies to stale `thoughts/shared/{research,plans}/` notes this ticket
-contradicted (the "off-track context that got us redirected"). In `mode:headless`, only act on
-unambiguous cases; mark the rest `status: stale` + `stale_reason`.
+Same five-outcome pass applies to stale `thoughts/shared/{research,plans}/` notes this ticket contradicted (the "off-track context that got us redirected"). In `mode:headless`, only act on unambiguous cases; mark the rest `status: stale` + `stale_reason`.
 
 ## Step 5 — Vocabulary → CONCEPTS.md (autonomous)
 
-Scan the diff + friction for Catalyst domain terms not yet in `thoughts/shared/CONCEPTS.md` (e.g. "reclaim",
-"revive-budget", "orphan", "signal ownership"). Append concise definitions. Create the file if absent.
+Scan the diff + friction for Catalyst domain terms not yet in `thoughts/shared/CONCEPTS.md` (e.g. "reclaim", "revive-budget", "orphan", "signal ownership"). Append concise definitions. Create the file if absent.
 
 ## Step 6 — ADR changes → PROPOSE, never apply
 
-If a learning rises to a standing rule (something *every* agent must always do/avoid), do NOT edit
-`docs/adrs.md`. Append a proposal to the approval queue:
+If a learning rises to a standing rule (something *every* agent must always do/avoid), do NOT edit `docs/adrs.md`. Append a proposal to the approval queue:
 
 ```
 thoughts/shared/compound/pending/<TICKET>.md
 ```
 
-Each proposal: the target ADR (new / amend `ADR-NNN` / supersede `ADR-NNN`), the exact proposed text,
-and a one-line rationale + evidence (ticket + learning path). The morning ritual surfaces these; a
-human approves via `briefing-followup`'s `action-compound` handler, which is the only thing that
-writes `docs/adrs.md`.
+Each proposal: the target ADR (new / amend `ADR-NNN` / supersede `ADR-NNN`), the exact proposed text, and a one-line rationale + evidence (ticket + learning path). The morning ritual surfaces these; a human approves via `briefing-followup`'s `action-compound` handler, which is the only thing that writes `docs/adrs.md`.
 
 ## Step 7 — Discoverability check (pointer only)
 
-Confirm `CLAUDE.md` teaches agents that the learnings store exists, its shape, and when to grep it. If
-not, propose (interactive) / apply (headless) a **minimal pointer** — never the learnings themselves:
+Confirm `CLAUDE.md` teaches agents that the learnings store exists, its shape, and when to grep it. If not, propose (interactive) / apply (headless) a **minimal pointer** — never the learnings themselves:
 
 ```
 thoughts/shared/learnings/ — past problem→solution entries (grep by component/tags/problem_type).

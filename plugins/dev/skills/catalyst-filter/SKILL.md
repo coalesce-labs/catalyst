@@ -19,10 +19,7 @@ description:
 
 # catalyst-filter — Semantic Event Routing Protocol
 
-The `catalyst-filter` daemon sits between the raw catalyst event log and orchestrators. Instead
-of requiring a precise jq filter at registration time, callers describe their intent in plain
-language. The daemon batches incoming events, calls Groq Llama 3.1 8B to classify relevance, and
-emits `filter.wake.{id}` events that orchestrators wait for with `catalyst-events wait-for`.
+The `catalyst-filter` daemon sits between the raw catalyst event log and orchestrators. Instead of requiring a precise jq filter at registration time, callers describe their intent in plain language. The daemon batches incoming events, calls Groq Llama 3.1 8B to classify relevance, and emits `filter.wake.{id}` events that orchestrators wait for with `catalyst-events wait-for`.
 
 ## When to Use
 
@@ -55,8 +52,7 @@ catalyst-filter start
 catalyst-filter logs
 ```
 
-`GROQ_API_KEY` is read from the environment. Set it in your shell profile or Layer 2 config
-(`~/.config/catalyst/config-{projectKey}.json`).
+`GROQ_API_KEY` is read from the environment. Set it in your shell profile or Layer 2 config (`~/.config/catalyst/config-{projectKey}.json`).
 
 ## Protocol Overview
 
@@ -130,35 +126,24 @@ STATE_SCRIPT="/path/to/plugins/dev/scripts/catalyst-state.sh"
 | `detail.session_id` | string | Optional session ID (`$CATALYST_SESSION_ID`). The daemon's watchdog uses this to clean up registrations whose session has gone stale (>3 min without heartbeat). Set this for any non-orchestrator agent. |
 | `detail.interest_type` | string | Optional discriminator for built-in deterministic routing. When set (e.g. `"pr_lifecycle"`), `prompt` is ignored and the daemon uses typed field comparison instead of Groq classification. See "Built-in interest types" below. |
 
-The daemon picks up `filter.register` from the live log within one poll cycle (~200ms).
-On daemon restart, it scans the last 1000 lines of the log to recover active registrations,
-and emits a `filter.daemon.startup` event so subscribers can re-register if they want
-belt-and-suspenders coverage.
+The daemon picks up `filter.register` from the live log within one poll cycle (~200ms). On daemon restart, it scans the last 1000 lines of the log to recover active registrations, and emits a `filter.daemon.startup` event so subscribers can re-register if they want belt-and-suspenders coverage.
 
 **Choosing `persistent`:**
 
 - Use `persistent: true` for continuous monitoring — the orchestrator's Phase 4 loop where you want
   to be woken on every CI event, every PR update, every worker status change throughout the run.
 - Use `persistent: false` (the default) for one-shot waits — "tell me when this specific PR merges"
-  or "wake me when the next CI run completes". The interest is removed automatically after the first
-  wake, so no explicit `filter.deregister` is needed.
+  or "wake me when the next CI run completes". The interest is removed automatically after the first wake, so no explicit `filter.deregister` is needed.
 
 ### Built-in interest types (CTL-284)
 
-Some interest categories are common enough that the daemon ships with deterministic
-routing for them — no Groq round-trip, no semantic prompt required. Set
-`detail.interest_type` to opt in.
+Some interest categories are common enough that the daemon ships with deterministic routing for them — no Groq round-trip, no semantic prompt required. Set `detail.interest_type` to opt in.
 
-When `interest_type` is set, the daemon ignores `detail.prompt` for that interest and
-matches events using pure field comparison against the schema-v2 envelope. Unmatched
-events still fall through to Groq for any prose-prompt interests in the same table —
-so you can mix typed and prose interests freely.
+When `interest_type` is set, the daemon ignores `detail.prompt` for that interest and matches events using pure field comparison against the schema-v2 envelope. Unmatched events still fall through to Groq for any prose-prompt interests in the same table — so you can mix typed and prose interests freely.
 
 #### `pr_lifecycle`
 
-Built-in deterministic routing for the PR lifecycle: CI events, reviews, comments,
-thread resolution, merges, deployments, and base-branch pushes that would put a PR
-BEHIND. Replaces hand-written prose prompts for the common case.
+Built-in deterministic routing for the PR lifecycle: CI events, reviews, comments, thread resolution, merges, deployments, and base-branch pushes that would put a PR BEHIND. Replaces hand-written prose prompts for the common case.
 
 ```jsonc
 {
@@ -210,18 +195,11 @@ on `deployment.created`), and removed on `filter.deregister` or
 `orchestrator-completed`/`orchestrator-failed`. The daemon never queries GitHub for SHA
 information — everything comes from event detail fields.
 
-**Mixing with prose interests.** A single agent (e.g. the orchestrator) may register
-two interests: a `pr_lifecycle` one for the typed PR-lifecycle events, and a prose one
-under a different `interest_id` for residual concerns like comms-attention or
-Linear-ticket status changes that aren't covered by the deterministic table. Both
-interests use the same `notify_event`, so the wait-for filter is unchanged.
+**Mixing with prose interests.** A single agent (e.g. the orchestrator) may register two interests: a `pr_lifecycle` one for the typed PR-lifecycle events, and a prose one under a different `interest_id` for residual concerns like comms-attention or Linear-ticket status changes that aren't covered by the deterministic table. Both interests use the same `notify_event`, so the wait-for filter is unchanged.
 
 #### `phase_lifecycle` (CTL-447)
 
-Deterministic routing for phase-agent boundary events. The orchestrator registers one
-interest per ticket that names every phase it cares about; the broker wakes it whenever
-a matching `phase.<name>.complete.<ticket>` or `phase.<name>.failed.<ticket>` event
-lands in the log.
+Deterministic routing for phase-agent boundary events. The orchestrator registers one interest per ticket that names every phase it cares about; the broker wakes it whenever a matching `phase.<name>.complete.<ticket>` or `phase.<name>.failed.<ticket>` event lands in the log.
 
 ```jsonc
 {
@@ -244,13 +222,11 @@ lands in the log.
 | `ticket` | string | Linear ticket the orchestrator is shepherding (e.g. `"CTL-100"`). Matched against the `<ticket>` segment of the event name. |
 | `phase_names` | `string[]` | Phase names the orchestrator cares about. Events for phases not in this list are ignored. |
 
-Wake reason takes the form `"Phase <name> complete on <ticket>"` or `"Phase <name> failed
-on <ticket>"`. See [[broker]] §4b for the full event-name grammar.
+Wake reason takes the form `"Phase <name> complete on <ticket>"` or `"Phase <name> failed on <ticket>"`. See [[broker]] §4b for the full event-name grammar.
 
 ### Per-agent-type registration patterns
 
-The same registration mechanism serves three distinct agent profiles. Pick the one that
-matches your agent's lifecycle.
+The same registration mechanism serves three distinct agent profiles. Pick the one that matches your agent's lifecycle.
 
 #### Orchestrator (long-lived, multi-PR scope)
 
@@ -276,8 +252,7 @@ Routing key is the orchestrator name; one registration covers every active worke
 
 #### Worker / oneshot (single-ticket scope, single PR)
 
-Routing key is the session ID. `context.workers: [$sid]` lets the daemon's heartbeat
-watchdog match this registration when the session goes stale.
+Routing key is the session ID. `context.workers: [$sid]` lets the daemon's heartbeat watchdog match this registration when the session goes stale.
 
 ```jsonc
 {
@@ -299,22 +274,15 @@ watchdog match this registration when the session goes stale.
 }
 ```
 
-A graceful trap on `EXIT/INT/TERM` should emit `filter.deregister` so the in-memory
-table doesn't carry the entry until daemon restart. The watchdog cleanup at
-`HEARTBEAT_STALE_MS` (default 3 min) is the crash-safety net.
+A graceful trap on `EXIT/INT/TERM` should emit `filter.deregister` so the in-memory table doesn't carry the entry until daemon restart. The watchdog cleanup at `HEARTBEAT_STALE_MS` (default 3 min) is the crash-safety net.
 
 #### Long-lived utility (e.g., monitor, custom wait scripts)
 
-Same shape as the worker pattern — routing by `$CATALYST_SESSION_ID` with a
-utility-specific prompt. Set `persistent: true` so the registration survives across
-many wakes; deregister explicitly at exit.
+Same shape as the worker pattern — routing by `$CATALYST_SESSION_ID` with a utility-specific prompt. Set `persistent: true` so the registration survives across many wakes; deregister explicitly at exit.
 
 ### Daemon restarts
 
-On boot the daemon emits `filter.daemon.startup` with `pid`, `recovered_interests`,
-`watchdog_interval_ms`, and `heartbeat_stale_ms`. Persistent interests are also
-recovered automatically from the last 1000 log lines, so a re-register on this event
-is belt-and-suspenders rather than required.
+On boot the daemon emits `filter.daemon.startup` with `pid`, `recovered_interests`, `watchdog_interval_ms`, and `heartbeat_stale_ms`. Persistent interests are also recovered automatically from the last 1000 log lines, so a re-register on this event is belt-and-suspenders rather than required.
 
 ```bash
 # Optional: re-register on daemon restart
@@ -339,8 +307,7 @@ PR_JSON=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}")
 # ... inspect PR_JSON for ground truth
 ```
 
-**The authoritative check is non-negotiable.** `wait-for` is a wake-up trigger, not a source
-of truth. Always follow it with a REST/CLI check before acting on the result.
+**The authoritative check is non-negotiable.** `wait-for` is a wake-up trigger, not a source of truth. Always follow it with a REST/CLI check before acting on the result.
 
 ## Step 3 — Read the Wake Event
 
@@ -376,8 +343,7 @@ Deregistration happens automatically in three cases:
    after emitting the first wake event. No explicit deregister needed.
 
 2. **Orchestrator termination** — when `orchestrator-completed` or `orchestrator-failed` appears
-   in the event log for an orchestrator ID that has active interests, the daemon removes all of
-   that orchestrator's interests automatically.
+   in the event log for an orchestrator ID that has active interests, the daemon removes all of that orchestrator's interests automatically.
 
 3. **Explicit deregister** — emit `filter.deregister` at any time to remove the interest
    immediately (useful for `persistent: true` interests or early cancellation):
@@ -388,15 +354,11 @@ Deregistration happens automatically in three cases:
   '{event: "filter.deregister", detail: {interest_id: $id}}')"
 ```
 
-If a `persistent: true` orchestrator exits without emitting `filter.deregister` or
-`orchestrator-completed`/`orchestrator-failed`, the daemon's in-memory table retains the entry
-until the daemon restarts (on restart it replays the last 1000 log lines and applies all
-register, deregister, and completion events in order).
+If a `persistent: true` orchestrator exits without emitting `filter.deregister` or `orchestrator-completed`/`orchestrator-failed`, the daemon's in-memory table retains the entry until the daemon restarts (on restart it replays the last 1000 log lines and applies all register, deregister, and completion events in order).
 
 ## Prompt Writing Guide
 
-The prompt is the only input the LLM uses to decide relevance. Be explicit about conditions,
-not detection mechanics.
+The prompt is the only input the LLM uses to decide relevance. Be explicit about conditions, not detection mechanics.
 
 **Good prompts:**
 
@@ -430,8 +392,7 @@ Only wake me on github.check_suite.completed       ← use jq directly instead
 
 ## Context Fields
 
-The `context` object focuses the LLM on your specific resources, reducing false positives
-when multiple orchestrators are registered simultaneously:
+The `context` object focuses the LLM on your specific resources, reducing false positives when multiple orchestrators are registered simultaneously:
 
 | Field | Type | Effect |
 |-------|------|--------|
@@ -439,13 +400,11 @@ when multiple orchestrators are registered simultaneously:
 | `tickets` | `string[]` | Linear ticket IDs (e.g., `["CTL-253", "CTL-254"]`). Helps filter `linear.*` events and worker lifecycle events scoped to those tickets. |
 | `branches` | `string[]` | Branch names. Used to distinguish `github.push` and `github.check_suite` events by branch. |
 
-All fields are optional but strongly recommended. Without context, the LLM must infer scope
-from the event payload alone and is more likely to produce false positives.
+All fields are optional but strongly recommended. Without context, the LLM must infer scope from the event payload alone and is more likely to produce false positives.
 
 ## Fallback: Daemon Not Running
 
-If `catalyst-filter status` returns "stopped" (or if `GROQ_API_KEY` is not set), fall back to
-a direct `catalyst-events wait-for` with a jq predicate:
+If `catalyst-filter status` returns "stopped" (or if `GROQ_API_KEY` is not set), fall back to a direct `catalyst-events wait-for` with a jq predicate:
 
 ```bash
 FILTER_STATUS=$(catalyst-filter status 2>/dev/null || echo "stopped")
@@ -464,19 +423,13 @@ else
 fi
 ```
 
-The jq fallback has higher noise (more events will wake the orchestrator) but zero external
-dependencies. Always follow any wake event — semantic or syntactic — with an authoritative
-REST check.
+The jq fallback has higher noise (more events will wake the orchestrator) but zero external dependencies. Always follow any wake event — semantic or syntactic — with an authoritative REST check.
 
 ## Multi-Tenant Behavior
 
-The daemon maintains one in-memory routing table for all active registrations. Each event
-batch is classified against all registered interests in a single Groq call. Adding more
-orchestrators does not increase per-orchestrator cost or latency — all interests are evaluated
-simultaneously.
+The daemon maintains one in-memory routing table for all active registrations. Each event batch is classified against all registered interests in a single Groq call. Adding more orchestrators does not increase per-orchestrator cost or latency — all interests are evaluated simultaneously.
 
-`filter.wake.{id}` events are per-interest: orchestrator A never receives orchestrator B's
-wake events.
+`filter.wake.{id}` events are per-interest: orchestrator A never receives orchestrator B's wake events.
 
 ## Batching and Latency
 
@@ -485,10 +438,7 @@ Events are batched with:
 - **500ms hard cap**: batch flushes regardless of arrival rate after 500ms
 - **20-event batch limit**: flushes immediately when batch reaches 20 events
 
-Effective latency from a GitHub webhook arriving to the wake event appearing in the log:
-approximately 300–600ms under normal load. At higher burst volume (GitHub CI fires multiple
-`check_run.completed` events simultaneously), all fire in the same batch — 1 Groq call for N
-simultaneous CI events.
+Effective latency from a GitHub webhook arriving to the wake event appearing in the log: approximately 300–600ms under normal load. At higher burst volume (GitHub CI fires multiple `check_run.completed` events simultaneously), all fire in the same batch — 1 Groq call for N simultaneous CI events.
 
 ## Quick Reference
 

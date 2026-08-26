@@ -1,32 +1,19 @@
 # Post-merge deploy verification (CTL-2232)
 
-The callable check for merge-pr acceptance: confirm a squash-merged change actually **deployed**
-and passes a **live smoke check**, without depending on the broker/event-log `filter.wake`
-mechanism. Invoke after Step 13 in [post-merge.md](post-merge.md), passing the REST-confirmed
-`merge_commit_sha` (never a local `git rev-parse HEAD` — see the Step 9 note in
-[worktree-safe-merge.md](worktree-safe-merge.md)), or standalone by a coordinator given that SHA
-and a PR number.
+The callable check for merge-pr acceptance: confirm a squash-merged change actually **deployed** and passes a **live smoke check**, without depending on the broker/event-log `filter.wake` mechanism. Invoke after Step 13 in [post-merge.md](post-merge.md), passing the REST-confirmed `merge_commit_sha` (never a local `git rev-parse HEAD` — see the Step 9 note in [worktree-safe-merge.md](worktree-safe-merge.md)), or standalone by a coordinator given that SHA and a PR number.
 
-⚠️ `merge-pr` is a portable skill installed across many repos, and this file documents **catalyst's
-own** deploy surfaces specifically (Codex P1, PR #4043). `verify_post_merge_deploy` gates on repo
-identity first and returns `NO_DEPLOY_CONFIG` — not `NOT_APPLICABLE` — for every other repo, so a
-consuming repo without an equivalent mapping gets an honest "unconfigured" answer instead of a
-silently wrong one.
+⚠️ `merge-pr` is a portable skill installed across many repos, and this file documents **catalyst's own** deploy surfaces specifically (Codex P1, PR #4043). `verify_post_merge_deploy` gates on repo identity first and returns `NO_DEPLOY_CONFIG` — not `NOT_APPLICABLE` — for every other repo, so a consuming repo without an equivalent mapping gets an honest "unconfigured" answer instead of a silently wrong one.
 
 ## What "deployed" means in THIS repo — two surfaces, not one
 
-`catalyst` is a plugin/skills repo. It has no Worker API to smoke-test. Its deploy surface splits
-in two, and only one of them has a live check available — say so honestly rather than fabricating
-a check for the other:
+`catalyst` is a plugin/skills repo. It has no Worker API to smoke-test. Its deploy surface splits in two, and only one of them has a live check available — say so honestly rather than fabricating a check for the other:
 
 | Surface | Trigger | Live signal |
 |---|---|---|
 | Docs/marketing site (`website/**`), Astro Starlight on Cloudflare Pages | CF's **native GitHub integration** — no `.github/workflows/*.yml` for it. Build watch paths = `website/**` only (see `docs/ci-required-checks-rollout.md`). CF posts **no status at all** when a push doesn't match the watch paths — that's a documented CF behavior, not a gap in this check. | The `Cloudflare Pages` commit **status** (Statuses API, not check-runs) on the merge commit, then a live fetch of `https://catalyst.coalescelabs.ai`. |
 | Everything else — `plugins/**`, `scripts/**`, non-website docs (the overwhelming majority of merges, including this ticket's own PR) | The plugin marketplace (`.claude-plugin/marketplace.json`) points `source` at `./plugins/<name>` **in this same git repo**. There is no build, publish, or CDN step — a consumer's marketplace refresh reads straight from `main`. | **None distinct from the merge itself.** Landing on `main` *is* the deploy. |
 
-The second row is the honest answer for most merges (including CTL-2232's and CTL-2244's own PRs):
-there is nothing live to poll beyond the squash-merge readback `merge-pr` already does
-(`worktree-safe-merge.md`). Do not invent a smoke check here.
+The second row is the honest answer for most merges (including CTL-2232's and CTL-2244's own PRs): there is nothing live to poll beyond the squash-merge readback `merge-pr` already does (`worktree-safe-merge.md`). Do not invent a smoke check here.
 
 ## The callable procedure
 
@@ -86,16 +73,8 @@ re-deriving it here.
 
 ## Why the Statuses API, not check-runs
 
-`gh pr checks` merges both check-runs and legacy commit statuses into one display, which hides
-which API a given context actually uses. Cloudflare's GitHub integration posts via the older
-**Statuses API** (`GET /commits/{sha}/status`, not `/check-runs`) — confirmed against
-`docs/ci-required-checks-rollout.md`'s own read recipe. Reading `/check-runs` for `Cloudflare Pages`
-would silently return nothing and read as "no evidence," which is a different failure than
-`DEPLOY_PENDING` above and should not be confused with it.
+`gh pr checks` merges both check-runs and legacy commit statuses into one display, which hides which API a given context actually uses. Cloudflare's GitHub integration posts via the older **Statuses API** (`GET /commits/{sha}/status`, not `/check-runs`) — confirmed against `docs/ci-required-checks-rollout.md`'s own read recipe. Reading `/check-runs` for `Cloudflare Pages` would silently return nothing and read as "no evidence," which is a different failure than `DEPLOY_PENDING` above and should not be confused with it.
 
 ## No `filter.wake` / broker / daemon dependency
 
-This procedure is pure `gh api` REST plus one `curl`. It does not call `catalyst-events`,
-`catalyst-broker`, or anything that requires the retiring daemon's event log — the loop runs
-foreground, in the calling session, exactly like `wait-for-github`'s bounded-poll. The PR body
-cites a `/usr/bin/grep` proof (with a positive control) rather than asserting this from prose alone.
+This procedure is pure `gh api` REST plus one `curl`. It does not call `catalyst-events`, `catalyst-broker`, or anything that requires the retiring daemon's event log — the loop runs foreground, in the calling session, exactly like `wait-for-github`'s bounded-poll. The PR body cites a `/usr/bin/grep` proof (with a positive control) rather than asserting this from prose alone.

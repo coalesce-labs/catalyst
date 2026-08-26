@@ -2,8 +2,7 @@
 
 ## Opportunistic corpus refresh (off the critical path)
 
-After a successful write, check whether the committed reference-class corpus is stale and offer
-to refresh it. **Best-effort: a refresh failure never fails the ritual.**
+After a successful write, check whether the committed reference-class corpus is stale and offer to refresh it. **Best-effort: a refresh failure never fails the ritual.**
 
 ```bash
 CORPUS="plugins/dev/scripts/estimate/reference-class-corpus.json"
@@ -21,10 +20,7 @@ If `STALE` is `true` (corpus older than 7 days), tell the user and offer to run:
 plugins/dev/scripts/estimate/refresh-corpus.sh
 ```
 
-It re-runs Extract → Collect → Score and merges fresh entries over the committed corpus (the
-just-written `estimate_actual` flows in as the human ground-truth override). The refresh leaves
-the change in the working tree — show the summary line and let the user commit/PR it (or re-run
-with `--commit`). If the user declines or the refresh fails, log and move on.
+It re-runs Extract → Collect → Score and merges fresh entries over the committed corpus (the just-written `estimate_actual` flows in as the human ground-truth override). The refresh leaves the change in the working tree — show the summary line and let the user commit/PR it (or re-run with `--commit`). If the user declines or the refresh fails, log and move on.
 
 ## Flags the helper accepts (power users, or auto-trigger from other skills)
 
@@ -63,8 +59,7 @@ what_surprised_me: "Prometheus integration wasn't plumbed; local state.json suff
 ​```
 ```
 
-Read entries back with `compound-log.sh read` (JSON Lines) or `... aggregate` (per-ticket latest +
-calibration stats).
+Read entries back with `compound-log.sh read` (JSON Lines) or `... aggregate` (per-ticket latest + calibration stats).
 
 ## Testing
 
@@ -72,8 +67,7 @@ calibration stats).
 bash plugins/dev/scripts/__tests__/compound-log.test.sh
 ```
 
-Covers ISO-week derivation, happy-path writes, append-idempotence, dedup + `--force`, fail-loud
-paths for each required field, wall-time computation, and mergedAt-based week routing.
+Covers ISO-week derivation, happy-path writes, append-idempotence, dedup + `--force`, fail-loud paths for each required field, wall-time computation, and mergedAt-based week routing.
 
 ## Troubleshooting
 

@@ -27,13 +27,10 @@ fi
 
 ## 3. Collect the three human-authored inputs
 
-Prompt the user interactively, one at a time. Keep prompts short and concrete — the estimate
-re-scoring is the calibration signal, so don't skip it.
+Prompt the user interactively, one at a time. Keep prompts short and concrete — the estimate re-scoring is the calibration signal, so don't skip it.
 
 - **estimate_actual** — re-score on the CTL-746 T-shirt → points scale (XS=1, S=3, M=5, L=8,
-  XL=13 — the same Fibonacci mirror `phase-triage` writes to `Issue.estimate`). Ask: "After
-  shipping, what T-shirt would you set this ticket to? (XS/S/M/L/XL or integer 1/3/5/8/13)".
-  Off-scale integers are accepted by the helper, but the corpus-refresh override ignores them.
+  XL=13 — the same Fibonacci mirror `phase-triage` writes to `Issue.estimate`). Ask: "After shipping, what T-shirt would you set this ticket to? (XS/S/M/L/XL or integer 1/3/5/8/13)". Off-scale integers are accepted by the helper, but the corpus-refresh override ignores them.
 - **what_worked** — "What worked? (one or two sentences)"
 - **what_surprised_me** — "What surprised you? (one or two sentences — the highest-signal
   calibration input)"
@@ -49,13 +46,10 @@ plugins/dev/scripts/compound-log.sh write "$TICKET_ID" \
   --what-surprised-me "$WHAT_SURPRISED"
 ```
 
-The helper resolves the rest — `pr_number` / `merged_at` / `created_at` via `gh pr view`,
-`estimate_at_start` and `cost_usd` per `references/data-source.md`, and `wall_time_hours` computed
-from PR `createdAt` → `mergedAt`.
+The helper resolves the rest — `pr_number` / `merged_at` / `created_at` via `gh pr view`, `estimate_at_start` and `cost_usd` per `references/data-source.md`, and `wall_time_hours` computed from PR `createdAt` → `mergedAt`.
 
 ## 5. Report back
 
 On success, the helper prints the target file and a one-line summary. Show that to the user.
 
-On failure, surface the helper's error verbatim — don't paraphrase it; see
-`references/corpus-refresh.md` for the troubleshooting table.
+On failure, surface the helper's error verbatim — don't paraphrase it; see `references/corpus-refresh.md` for the troubleshooting table.

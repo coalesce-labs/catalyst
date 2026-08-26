@@ -16,10 +16,7 @@ version: 1.1.0
 
 # Compound Estimate — Closing Ritual at PR Merge
 
-Write a compound-log entry for a just-shipped ticket. This is the Phase 1 exit gate for AI-native
-estimation: without this closer, cost/wall-time signals never feed future estimates and the
-calibration loop stays open. All mechanical work delegates to `plugins/dev/scripts/compound-log.sh`
-— your job is collecting the three human-authored inputs and invoking it.
+Write a compound-log entry for a just-shipped ticket. This is the Phase 1 exit gate for AI-native estimation: without this closer, cost/wall-time signals never feed future estimates and the calibration loop stays open. All mechanical work delegates to `plugins/dev/scripts/compound-log.sh` — your job is collecting the three human-authored inputs and invoking it.
 
 ## Invocation
 
@@ -27,8 +24,7 @@ calibration loop stays open. All mechanical work delegates to `plugins/dev/scrip
 /compound-estimate <TICKET-ID>
 ```
 
-`<TICKET-ID>` is required unless it can be detected from the current branch name
-(`gh pr view --json headRefName` → parse the ticket prefix).
+`<TICKET-ID>` is required unless it can be detected from the current branch name (`gh pr view --json headRefName` → parse the ticket prefix).
 
 ## Load on demand
 
@@ -48,13 +44,11 @@ calibration loop stays open. All mechanical work delegates to `plugins/dev/scrip
 
 ## Output
 
-Appends an entry to `thoughts/shared/retros/estimate/YYYY-WW-compound-log.md` (creating the
-weekly file if needed). Weeks are ISO-8601, derived from the PR's `mergedAt`, not today's date.
+Appends an entry to `thoughts/shared/retros/estimate/YYYY-WW-compound-log.md` (creating the weekly file if needed). Weeks are ISO-8601, derived from the PR's `mergedAt`, not today's date.
 
 ## Related
 
 - Spec/plan: `thoughts/shared/research/2026-04-24-CTL-159-compound-closing-ritual.md`,
   `thoughts/shared/plans/2026-04-24-CTL-159-compound-closing-ritual.md`
 - Consumers: `compound-log.sh read`/`aggregate` → `refresh-corpus.sh` feeds `estimate_actual` into
-  `reference-class-corpus.json`; `/catalyst-dev:ticket-retro` reads the weekly files for the
-  estimation-calibration summary.
+  `reference-class-corpus.json`; `/catalyst-dev:ticket-retro` reads the weekly files for the estimation-calibration summary.

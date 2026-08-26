@@ -1,7 +1,6 @@
 # Steps 7–11a — Execute Squash Merge and Cleanup (CTL-56)
 
-_Covers ticket extraction, merge summary, squash merge, checkout-free remote-ref delete,
-Linear update, and worktree-safe local cleanup. All CTL-56 guard strings live here._
+_Covers ticket extraction, merge summary, squash merge, checkout-free remote-ref delete, Linear update, and worktree-safe local cleanup. All CTL-56 guard strings live here._
 
 ## Step 7 — Extract ticket reference
 
@@ -16,8 +15,7 @@ if [[ -z "$ticket" ]] && [[ "$title" =~ ($TEAM_KEY-[0-9]+) ]]; then ticket="${BA
 
 ## Step 8 — Show merge summary
 
-Print a summary (PR number, title, from/to branch, commit count, file count, merge state,
-review status, CI status, test result, ticket) and ask "Proceed? [Y/n]:".
+Print a summary (PR number, title, from/to branch, commit count, file count, merge state, review status, CI status, test result, ticket) and ask "Proceed? [Y/n]:".
 
 ## Step 9 — Execute squash merge
 
@@ -33,8 +31,7 @@ By the end of that step, `head_ref`, `head_repo`, and `merge_sha` are set exactl
 
 ## Step 9b — Delete remote head ref (checkout-free)
 
-After verifying the merge via REST, delete the remote head branch via API — no `git checkout`
-required, safe from any worktree (CTL-56):
+After verifying the merge via REST, delete the remote head branch via API — no `git checkout` required, safe from any worktree (CTL-56):
 
 ```bash
 # Confirm the merge landed via REST BEFORE deleting anything. `gh pr merge` returning success
