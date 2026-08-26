@@ -56,6 +56,16 @@ if [[ -n "$DEPLOY_RUNS" ]]; then
 fi
 ```
 
+## Step 13b — Verify the merge actually deployed (CTL-2232)
+
+`gh run list` above only shows *workflow runs*; it says nothing about whether the merged change
+reached a live surface. Call `verify_post_merge_deploy "$merge_sha"` from
+[post-merge-deploy-verify.md](post-merge-deploy-verify.md) — it decides whether this merge even has
+a deploy surface to check (most don't; the plugin marketplace is git-native), and where one exists
+(the `website/**` docs site), bounded-polls the CF Pages status plus a live HTTP smoke check.
+Report the returned sentinel (`DEPLOYED` / `NOT_APPLICABLE` / `DEPLOY_PENDING` / `DEPLOY_FAILED` /
+`SMOKE_FAILED`) alongside the success summary below — never silently skip it.
+
 Display success summary:
 
 ```
