@@ -2,14 +2,10 @@
 
 ## How the codebase can have diverged from the handoff
 
-- **Clean continuation** — all handoff changes present, no conflicts, clear next steps: proceed
-  with the handoff's recommended actions as-is.
-- **Diverged codebase** — some changes missing or modified, new related code landed since the
-  handoff: reconcile the differences, then adapt the plan to the current state.
-- **Incomplete handoff work** — tasks still marked `in_progress`: finish those first; you may need
-  to re-understand a partial implementation before continuing it.
-- **Stale handoff** — significant time passed, a major refactor happened since: the original
-  approach may no longer apply — re-evaluate strategy rather than following it literally.
+- **Clean continuation** — all handoff changes present, no conflicts, clear next steps: proceed with the handoff's recommended actions as-is.
+- **Diverged codebase** — some changes missing or modified, new related code landed since the handoff: reconcile the differences, then adapt the plan to the current state.
+- **Incomplete handoff work** — tasks still marked `in_progress`: finish those first; you may need to re-understand a partial implementation before continuing it.
+- **Stale handoff** — significant time passed, a major refactor happened since: the original approach may no longer apply — re-evaluate strategy rather than following it literally.
 
 ## Worked example
 

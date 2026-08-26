@@ -1,8 +1,6 @@
 # Command catalog — navigation, interaction, inspection
 
-Every command below takes the global flags — `--headed --session <name>` on every one, see
-SKILL.md's session-hygiene rule. State/auth, cookies/storage, tabs, frames, JS, console, dialogs,
-settings, network, and debug/recording commands are a separate reference, linked from SKILL.md.
+Every command below takes the global flags — `--headed --session <name>` on every one, see SKILL.md's session-hygiene rule. State/auth, cookies/storage, tabs, frames, JS, console, dialogs, settings, network, and debug/recording commands are a separate reference, linked from SKILL.md.
 
 ### Navigation
 ```bash

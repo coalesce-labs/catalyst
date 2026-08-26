@@ -1,8 +1,6 @@
 # Command catalog — state, auth, tabs, network, debug
 
-Every command below takes the global flags — `--headed --session <name>` on every one, see
-SKILL.md's session-hygiene rule. Core navigation/interaction/snapshot commands are a separate
-reference, linked from SKILL.md.
+Every command below takes the global flags — `--headed --session <name>` on every one, see SKILL.md's session-hygiene rule. Core navigation/interaction/snapshot commands are a separate reference, linked from SKILL.md.
 
 ### State management (auth persistence)
 ```bash

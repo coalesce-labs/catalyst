@@ -2,10 +2,8 @@
 
 ## Step 1: Read and analyze
 
-1. **Read the handoff document completely** — the Read tool, no `limit`/`offset` — and extract:
-   task(s) and status, recent changes, learnings, artifacts, action items/next steps, other notes.
-2. **Spawn parallel research tasks to verify current state** (do NOT use sub-agents for the handoff
-   itself — only for this verification):
+1. **Read the handoff document completely** — the Read tool, no `limit`/`offset` — and extract: task(s) and status, recent changes, learnings, artifacts, action items/next steps, other notes.
+2. **Spawn parallel research tasks to verify current state** (do NOT use sub-agents for the handoff itself — only for this verification):
 
    ```
    Task 1 - Verify recent changes:
@@ -44,24 +42,17 @@ Shall I proceed with [recommended action 1], or would you like to adjust the app
 
 ## Step 3: Create the action plan
 
-Use TodoWrite: convert the handoff's action items into todos, add anything newly discovered,
-prioritize by dependency and the handoff's own guidance. Present the list and confirm before
-starting.
+Use TodoWrite: convert the handoff's action items into todos, add anything newly discovered, prioritize by dependency and the handoff's own guidance. Present the list and confirm before starting.
 
 ## Step 4: Begin implementation
 
-Start the first approved task; reference the handoff's learnings and patterns throughout; update
-todos as work completes; consider writing a new handoff when the session ends
-(`/catalyst-dev:create-handoff`).
+Start the first approved task; reference the handoff's learnings and patterns throughout; update todos as work completes; consider writing a new handoff when the session ends (`/catalyst-dev:create-handoff`).
 
 ## Guidelines throughout
 
-- **Be thorough**: read the whole handoff first, verify every claimed change, check for
-  regressions, read every referenced artifact.
+- **Be thorough**: read the whole handoff first, verify every claimed change, check for regressions, read every referenced artifact.
 - **Be interactive**: present findings before acting, get buy-in, allow course corrections.
-- **Leverage the handoff's learnings**: apply its documented patterns, avoid repeating its
-  mistakes, build on what it already solved.
-- **Never assume handoff state matches current state** — verify file references, breaking changes,
-  and pattern validity before acting on any of it.
+- **Leverage the handoff's learnings**: apply its documented patterns, avoid repeating its mistakes, build on what it already solved.
+- **Never assume handoff state matches current state** — verify file references, breaking changes, and pattern validity before acting on any of it.
 
 See [`scenarios.md`](scenarios.md) for what typically diverges and one worked example end to end.

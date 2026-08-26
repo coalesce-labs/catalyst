@@ -1,7 +1,6 @@
 # Global flags and environment variables
 
-These flags apply to every command and go before the command name. `--headed` and `--session
-<name>` are required on every invocation — see SKILL.md's session-hygiene rule.
+These flags apply to every command and go before the command name. `--headed` and `--session <name>` are required on every invocation — see SKILL.md's session-hygiene rule.
 
 ```bash
 --headed                    # Show visible browser window (default: headless) — ALWAYS USE THIS
