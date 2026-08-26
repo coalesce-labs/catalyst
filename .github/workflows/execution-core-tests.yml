@@ -119,6 +119,10 @@ on:
       # (check-plugin-version.test.sh, run below); without this path a PR touching only
       # scripts/check-plugin-version.sh would skip the job that runs it.
       - "scripts/check-plugin-version.sh"
+      # CTL-2253: the hard-wrap scanner/joiner ships its own bash test (already covered via
+      # scripts/__tests__/** above), but the module itself lives outside that glob — a PR
+      # touching only scripts/md-reflow.mjs would otherwise skip the job that tests it.
+      - "scripts/md-reflow.mjs"
       - "plugins/dev/scripts/gen-cli-reference.sh"
       - "website/src/content/docs/reference/catalyst-cli.md"
       # CTL-1530: the dual-harness migrator and its checkup §10 wiring — a change to
@@ -222,6 +226,9 @@ jobs:
               # CTL-2266: mirror the push-path entry above — check-plugin-version.test.sh
               # guards this script and must run whenever a PR touches only it.
               - "scripts/check-plugin-version.sh"
+              # CTL-2253: mirror the push-path entry above — the module lives outside
+              # scripts/__tests__/**, so a PR touching only it would skip this job.
+              - "scripts/md-reflow.mjs"
               - "plugins/dev/scripts/gen-cli-reference.sh"
               - "website/src/content/docs/reference/catalyst-cli.md"
               - "plugins/dev/scripts/migrate-dual-harness.sh"
@@ -352,6 +359,10 @@ jobs:
         # can't be read at all (a brand-new plugin).
         working-directory: .
         run: bash scripts/__tests__/check-plugin-version.test.sh
+
+      - name: markdown reflow tool test (CTL-2253)
+        working-directory: .
+        run: bash scripts/__tests__/md-reflow.test.sh
 
       - name: account-usage pager test (CTL-1908)
         # Pages before an armed Claude account exhausts its 5-hour / 7-day window. The property
