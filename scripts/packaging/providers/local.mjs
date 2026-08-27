@@ -37,8 +37,12 @@ import { validateNeutralDeclaration } from "../core/neutral-schema.mjs";
 // identity field, so it is classified Claude-only here (and the loss table
 // drops it as cosmetic, same bucket as `model`/`color`) rather than added to
 // the contract as a second, competing version source.
-const SKILL_PORTABLE_KEYS = new Set(["name", "description"]);
-const SKILL_CLAUDE_ONLY_KEYS = new Set([
+// Exported (CTL-2215 Phase 6) so docs/frontmatter-standard.md's own
+// agreement test can compare the doc's tables against this registry
+// directly, rather than re-typing the key lists a third place could drift
+// from.
+export const SKILL_PORTABLE_KEYS = new Set(["name", "description"]);
+export const SKILL_CLAUDE_ONLY_KEYS = new Set([
   "allowed-tools",
   "disable-model-invocation",
   "user-invocable",
@@ -47,8 +51,8 @@ const SKILL_CLAUDE_ONLY_KEYS = new Set([
   "version",
 ]);
 
-const AGENT_PORTABLE_KEYS = new Set(["name", "description"]);
-const AGENT_CLAUDE_ONLY_KEYS = new Set(["tools", "model", "color", "version"]);
+export const AGENT_PORTABLE_KEYS = new Set(["name", "description"]);
+export const AGENT_CLAUDE_ONLY_KEYS = new Set(["tools", "model", "color", "version"]);
 
 /** Splits `---\n<yaml>\n---\n<body>` into { yamlText, body }, or null if the file has no frontmatter block. */
 export function splitFrontmatter(contents) {
