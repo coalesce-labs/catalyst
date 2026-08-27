@@ -37,10 +37,6 @@ const REAL_PLUGIN_IDS = Object.freeze([
   "catalyst-foundry",
   "catalyst-legacy",
   "catalyst-meta",
-  "catalyst-analytics",
-  "catalyst-debugging",
-  "catalyst-discovery",
-  "catalyst-meeting-hygiene",
   "catalyst-pm-ops",
 ]);
 

@@ -87,7 +87,7 @@ Check every one of these. Not all will have a hit for every plugin; report which
 | `AGENTS.md` | The `plugin-name:skill-name` example, the commit-convention example, the "Valid scopes" list |
 | `docs/architecture.md` | The "Plugin Source" bullet's example directory list |
 | `docs/releases.md` | Any plugin-specific versioning callouts |
-| `.serena/memories/codebase_map.md` | The "other plugins" directory list |
+| `.serena/memories/codebase_map.md` | The "other plugins" directory list. ⚠️ No gate asserts on this file, and CTL-2235 missed it — a deleted plugin sat listed as live until a post-batch sweep caught it. Serena serves this map to agents for navigation, so a stale entry actively misdirects them. Check it by hand. |
 | `website/astro.config.mjs` | The `plugins` changelog array |
 | `website/src/content.config.ts` | The `changelogsLoader` entries array |
 | `website/src/content/docs/reference/plugins.md` | The plugin table row + install command |
@@ -176,6 +176,25 @@ stat -f "%Sm %N" .claude-plugin/marketplace.json .agents/plugins/marketplace.jso
 Then `git status --porcelain` must show only the expected diffs (the two marketplace.json files
 losing the removed plugin's entries) — no untracked new files, no diffs outside what you touched
 by hand.
+
+## 6a. `packaging-gate`'s own hardcoded plugin count (easy to miss — not caught by §6)
+
+`render --write` succeeding does **not** mean `bun test scripts/packaging/__tests__/` is green.
+Three fixtures in that suite assert an exact plugin count as a literal integer, independent of the
+render step above — a removal that changes the total plugin count fails them even when the render
+diff itself is clean:
+
+```
+scripts/packaging/__tests__/cli-render.test.mjs:      expect(results.length).toBe(<N>);
+scripts/packaging/__tests__/local-provider.test.mjs:  expect(pluginRelPaths.length).toBe(<N>);  (two tests)
+scripts/packaging/__tests__/pack-manifest.test.mjs:   expect(pluginRelPaths.length).toBe(<N>);
+```
+
+Update all four assertions (and their test-title strings, which also spell out the count) to the
+new total plugin count, then run `bun test scripts/packaging/__tests__/` locally and confirm
+**0 fail** before opening the PR — this is what CI's `packaging-gate` job runs, and it is a
+separate step from `render --write`. (`inventory-fixture.test.mjs` and `inventory-guard.test.mjs`
+use a synthetic 2-plugin fixture, not the real count — don't touch those.)
 
 ## 7. Gates
 

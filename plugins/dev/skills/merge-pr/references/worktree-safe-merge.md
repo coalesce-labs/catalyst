@@ -28,7 +28,17 @@ head_ref=$(gh api "repos/${REPO}/pulls/${pr_number}" --jq '.head.ref' 2>/dev/nul
 head_repo=$(gh api "repos/${REPO}/pulls/${pr_number}" --jq '.head.repo.full_name' 2>/dev/null || true)
 # Merge via REST only — no local branch-cleanup flag (CTL-56).
 gh pr merge $pr_number --squash
-merge_sha=$(git rev-parse HEAD)
+# Codex P1 (CTL-2232, PR #4043): `gh pr merge` merges on GitHub's side and never touches this
+# local checkout, so `git rev-parse HEAD` here is whatever the worktree already had checked
+# out (typically the PR branch's own pre-merge tip in a linked worktree) — NOT the new squash
+# commit that landed on the base branch. Read the authoritative merge commit back via REST
+# instead; a merge can take a moment to report `merge_commit_sha`, so retry briefly.
+merge_sha=""
+for _ in 1 2 3 4 5; do
+  merge_sha=$(gh api "repos/${REPO}/pulls/${pr_number}" --jq '.merge_commit_sha // empty' 2>/dev/null || true)
+  [[ -n "$merge_sha" ]] && break
+  sleep 2
+done
 ```
 
 ## Step 9b — Delete remote head ref (checkout-free)

@@ -3,23 +3,11 @@
     "plugins/dev": {
       "component": "catalyst-dev"
     },
-    "plugins/playground/analytics": {
-      "component": "catalyst-analytics"
-    },
-    "plugins/playground/debugging": {
-      "component": "catalyst-debugging"
-    },
     "plugins/meta": {
       "component": "catalyst-meta"
     },
     "plugins/playground/pm-ops": {
       "component": "catalyst-pm-ops"
-    },
-    "plugins/playground/meeting-hygiene": {
-      "component": "catalyst-meeting-hygiene"
-    },
-    "plugins/playground/discovery": {
-      "component": "catalyst-discovery"
     },
     "plugins/legacy": {
       "component": "catalyst-legacy"

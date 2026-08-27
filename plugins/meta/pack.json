@@ -1,7 +1,7 @@
 {
   "packId": "catalyst-meta",
   "identity": {
-    "description": "Workflow discovery, creation, reorganization, and audit tools: learn from community patterns, extend Catalyst with new workflows, safely reorganize directory structures, and audit plugin health.",
+    "description": "Frontmatter validation, reference auditing, and directory reorganization tools for Catalyst plugin developers: keep skill and agent frontmatter consistent, find broken references, and safely reorganize directory structures.",
     "author": {
       "name": "Coalesce Labs",
       "email": "hello@coalesce.dev",
@@ -11,11 +11,9 @@
     "repository": "https://github.com/coalesce-labs/catalyst.git",
     "keywords": [
       "meta",
-      "discovery",
-      "creation",
+      "frontmatter",
+      "validation",
       "best-practices",
-      "community",
-      "workflows",
       "reorganize",
       "audit",
       "references"
@@ -26,13 +24,13 @@
     "claude": {
       "enabled": true,
       "marketplace": {
-        "description": "Workflow discovery and creation: learn from community patterns and extend Catalyst. Optional plugin for advanced users.",
+        "description": "Frontmatter validation, reference auditing, and directory reorganization for Catalyst plugin developers. Optional plugin for advanced users.",
         "category": "development",
         "keywords": [
           "meta",
-          "discovery",
-          "creation",
-          "best-practices"
+          "frontmatter",
+          "validation",
+          "audit"
         ]
       }
     },

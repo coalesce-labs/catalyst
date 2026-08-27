@@ -36,7 +36,7 @@ blockers legitimately or escalate with specifics. See
    merge/close) with authoritative `gh api` REST re-check on every wake-up.
 5. **Squash merge + cleanup** — checkout-free remote-ref delete (CTL-56), Linear ticket to Done,
    worktree-safe local branch delete.
-6. **Post-merge** — compound-estimate, ticket-retro, deployment detection, success summary.
+6. **Post-merge** — deployment detection + verification, then (once that verification is terminal) compound-estimate, ticket-compound, ticket-retro, and the success summary.
 
 ## Load on demand
 
@@ -49,5 +49,6 @@ blockers legitimately or escalate with specifics. See
 | Verifying a ticket is genuinely done before Linear Done (other open PRs, orphan-PR reconciliation) | [done-judgment.md](references/done-judgment.md) |
 | Deeper pre-merge adversarial review (8-gate table + regression-risk scoring) for a risky diff | [verify-gates.md](references/verify-gates.md) |
 | Post-merge tasks, compound close, deployment detection, success summary | [post-merge.md](references/post-merge.md) |
+| Confirming a merged change actually deployed + a live smoke check (bounded-poll, no broker dependency) | [post-merge-deploy-verify.md](references/post-merge-deploy-verify.md) |
 | Flags (`--skip-tests`, `--no-update`, `--keep-branch`), errors, examples | [flags-errors.md](references/flags-errors.md) |
 | Configuration (`.catalyst/config.json` schema, safety features) | [config-safety.md](references/config-safety.md) |
