@@ -75,3 +75,36 @@ pull_request_rules:
       - label=queue:ready
     actions:
       queue: {}
+
+# CTC-1231: platform-enforced backstop for two invariants the queue already
+# keeps, so a PR merged BY HAND (outside Mergify) can't skip them either. A
+# failing active rule below surfaces as a non-required "Mergify Merge
+# Protections" check — this PR does not mark it required in branch
+# protection, so nothing is newly blocking; that flip is Ryan's call once
+# the rules prove correct.
+merge_protections:
+  # Same gate as queue_conditions' "#review-threads-unresolved=0" above,
+  # applied to every non-draft PR against main regardless of merge path.
+  - name: no unresolved review threads before merge
+    if:
+      - base=main
+      - -draft
+    success_conditions:
+      - "#review-threads-unresolved=0"
+
+  # Conventional-Commit-shaped title (type(scope): ...). Bot-authored titles
+  # are template-generated, not agent-authored, so Dependabot, Mergify's own
+  # queue-train PRs (head~=^mergify/), and release-please
+  # (head~=^release-please--, since it opens PRs under a human identity
+  # here) are exempt.
+  - name: title follows the Conventional-Commit convention
+    if:
+      - base=main
+      - -draft
+      - author!=dependabot[bot]
+      - author!=mergify[bot]
+      - -head~=^mergify/
+      - -head~=^release-please--
+    success_conditions:
+      # yamllint disable-line rule:line-length
+      - 'title~=^(feat|fix|chore|docs|style|refactor|perf|test|build|ci|revert)(\([a-zA-Z0-9 ,._/+-]+\))?!?: '
