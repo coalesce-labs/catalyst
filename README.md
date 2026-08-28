@@ -52,7 +52,7 @@ This keeps your typical session lean while having powerful tools available when 
 **catalyst-dev** (Core - Always enabled)
 
 - 9 research agents (codebase + infrastructure)
-- 17 skills covering full dev lifecycle
+- 18 skills covering full dev lifecycle
 - Three-tier model strategy (Opus for planning/implementation, Sonnet for CI/automation, Haiku for data collection)
 - Linear integration via Linearis CLI
 - Handoff system for context persistence
