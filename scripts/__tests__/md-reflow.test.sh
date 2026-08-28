@@ -361,6 +361,105 @@ for f in \
 done
 
 echo ""
+echo "=== case 17: hard-break hazard — a trailing two-space marker is quarantined ==="
+IN="$SCRATCH/case17.md"
+L1="This is a paragraph line that ends in an explicit hard break marker right here.$PAD  "
+L2="This second line must stay on its own physical line, not get folded into the first."
+printf '%s\n%s\n' "$L1" "$L2" >"$SCRATCH/case17.orig.md"
+cp "$SCRATCH/case17.orig.md" "$IN"
+OUT="$(check_file "$IN")"
+reflow_file "$IN" >/dev/null
+assert_unchanged "hard-break (two trailing spaces) block is left unchanged" "$SCRATCH/case17.orig.md" "$IN"
+if grep -q "hazard=hard-break" <<<"$OUT"; then
+	pass "hard-break hazard reported by name (two-space marker)"
+else
+	fail "hard-break hazard reported by name (two-space marker)" "$OUT"
+fi
+
+echo ""
+echo "=== case 18: hard-break hazard — a trailing backslash marker is quarantined ==="
+IN="$SCRATCH/case18.md"
+cat >"$SCRATCH/case18.orig.md" <<EOF
+This is a paragraph line that ends in a backslash hard break marker right here.$PAD\\
+This second line must stay on its own physical line, not get folded into the first.
+EOF
+cp "$SCRATCH/case18.orig.md" "$IN"
+OUT="$(check_file "$IN")"
+reflow_file "$IN" >/dev/null
+assert_unchanged "hard-break (trailing backslash) block is left unchanged" "$SCRATCH/case18.orig.md" "$IN"
+if grep -q "hazard=hard-break" <<<"$OUT"; then
+	pass "hard-break hazard reported by name (backslash marker)"
+else
+	fail "hard-break hazard reported by name (backslash marker)" "$OUT"
+fi
+
+echo ""
+echo "=== case 19: discrimination — a single trailing space is NOT a hard break and still joins ==="
+L1="This paragraph line ends in exactly one trailing space which is not a break marker.$PAD "
+L2="This second line completes the ordinary wrapped paragraph without any break intent."
+IN="$SCRATCH/case19.md"
+EXP="$SCRATCH/case19.expected.md"
+printf '%s\n%s\n' "$L1" "$L2" >"$IN"
+printf '%s %s\n' "${L1% }" "$L2" >"$EXP"
+reflow_file "$IN" >/dev/null
+assert_files_equal "a single trailing space is not treated as a hard break (not over-quarantined)" "$EXP" "$IN"
+
+echo ""
+echo "=== case 20: indented-code hazard — a uniformly >=4-column indented run is quarantined ==="
+IN="$SCRATCH/case20.md"
+cat >"$SCRATCH/case20.orig.md" <<EOF
+    this is a long command line inside an indented code block well past seventy chars wide.$PAD
+    a second long line inside the same indented code block, also past the wrap threshold.$PAD
+EOF
+cp "$SCRATCH/case20.orig.md" "$IN"
+OUT="$(check_file "$IN")"
+reflow_file "$IN" >/dev/null
+assert_unchanged "indented-code block is left unchanged" "$SCRATCH/case20.orig.md" "$IN"
+if grep -q "hazard=indented-code" <<<"$OUT"; then
+	pass "indented-code hazard reported by name"
+else
+	fail "indented-code hazard reported by name" "$OUT"
+fi
+
+echo ""
+echo "=== case 21: structural — a pipe-less table delimiter row is never joined with its header ==="
+IN="$SCRATCH/case21.md"
+cat >"$SCRATCH/case21.orig.md" <<EOF
+Column A very long header name that goes past seventy characters total width here padding | Column B
+--- | ---
+
+Body text after the table.
+EOF
+cp "$SCRATCH/case21.orig.md" "$IN"
+OUT="$(check_file "$IN")"
+RC=$?
+assert_unchanged "pipe-less table header/delimiter is left unchanged" "$SCRATCH/case21.orig.md" "$IN"
+if [[ $RC -eq 0 ]]; then
+	pass "pipe-less table header/delimiter forms no joinable block"
+else
+	fail "pipe-less table header/delimiter forms no joinable block" "rc=$RC" "$OUT"
+fi
+
+echo ""
+echo "=== case 22: structural — a setext H1 '=' underline is never joined with its title ==="
+IN="$SCRATCH/case22.md"
+cat >"$SCRATCH/case22.orig.md" <<EOF
+This Is A Setext Style Heading That Is Long Enough To Qualify For The Reflow Join Threshold
+===
+
+Body text.
+EOF
+cp "$SCRATCH/case22.orig.md" "$IN"
+OUT="$(check_file "$IN")"
+RC=$?
+assert_unchanged "setext H1 title/underline is left unchanged" "$SCRATCH/case22.orig.md" "$IN"
+if [[ $RC -eq 0 ]]; then
+	pass "setext H1 title/underline forms no joinable block"
+else
+	fail "setext H1 title/underline forms no joinable block" "rc=$RC" "$OUT"
+fi
+
+echo ""
 echo "=== summary ==="
 echo "Passed: $PASSES"
 echo "Failed: $FAILURES"

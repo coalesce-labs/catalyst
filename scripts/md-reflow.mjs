@@ -20,6 +20,11 @@
 //   html-comment         a multi-line `<!-- ... -->` block (its internal newlines carry no
 //                        rendering meaning, but collapsing them is a deliberate hand-edit, not
 //                        a mechanical one)
+//   hard-break           a non-final line ends with Markdown's explicit hard-break marker
+//                        (two-or-more trailing spaces, or a trailing backslash) — trimming and
+//                        joining would silently discard the author's forced line break
+//   indented-code        every line in the run shares a >=4-column indent, CommonMark's signal
+//                        for an indented code block; joining would collapse it into one line
 //   mixed-indent         a block whose lines don't all share the same leading whitespace,
 //                        i.e. something structurally irregular is going on
 //
@@ -36,27 +41,46 @@ const QUOTE_RE = /^\s*>/;
 const LIST_MARKER_RE = /^\s*([-*+]|\d+[.)])\s+/;
 const THEMATIC_BREAK_RE =
 	/^\s{0,3}(?:-[ \t]*){3,}$|^\s{0,3}(?:\*[ \t]*){3,}$|^\s{0,3}(?:_[ \t]*){3,}$/;
+// Setext H1 underline (one or more `=`) — the `=` counterpart to THEMATIC_BREAK_RE's `-` handling.
+const SETEXT_H1_RE = /^\s{0,3}=+\s*$/;
+// A GFM table delimiter row that omits its outer pipes, e.g. `--- | ---`. Requires at least two
+// cells (one interior `|`) so a bare `---`/`===` line is left to THEMATIC_BREAK_RE/SETEXT_H1_RE.
+const TABLE_DELIMITER_RE = /^\s*:?-+:?(?:\s*\|\s*:?-+:?)+\s*$/;
 const FENCE_OPEN_RE = /^(\s{0,3})(`{3,}|~{3,})/;
 const FENCE_CLOSE_RE = /^\s{0,3}(`+|~+)\s*$/;
 const FRONTMATTER_FENCE_RE = /^---\s*$/;
 const KV_METADATA_RE = /^[A-Za-z][\w -]*:\s/;
 
 const MIN_WRAP_LEN = 70;
+const INDENTED_CODE_WIDTH = 4;
 
 function isStructural(line) {
 	return (
 		BLANK_RE.test(line) ||
 		HEADING_RE.test(line) ||
 		TABLE_RE.test(line) ||
+		TABLE_DELIMITER_RE.test(line) ||
 		QUOTE_RE.test(line) ||
 		LIST_MARKER_RE.test(line) ||
-		THEMATIC_BREAK_RE.test(line)
+		THEMATIC_BREAK_RE.test(line) ||
+		SETEXT_H1_RE.test(line)
 	);
 }
 
 function leadingWhitespace(line) {
 	const m = line.match(/^[ \t]*/);
 	return m ? m[0] : "";
+}
+
+// Expands leading tabs to 4-column stops so a tab-indented code block is recognized the same as
+// a space-indented one.
+function indentWidth(line) {
+	const ws = leadingWhitespace(line);
+	let width = 0;
+	for (const ch of ws) {
+		width += ch === "\t" ? 4 - (width % 4) : 1;
+	}
+	return width;
 }
 
 // Walks the file structurally, splitting it into passthrough lines and candidate "runs" — 1+
@@ -135,7 +159,8 @@ function qualifies(lines) {
 	return lines.length >= 2 && lines.slice(0, -1).every((l) => l.length >= MIN_WRAP_LEN);
 }
 
-// Precedence: kv-metadata, adjacent-bold-lead, html-comment, mixed-indent, null.
+// Precedence: kv-metadata, adjacent-bold-lead, html-comment, hard-break, indented-code,
+// mixed-indent, null.
 function classifyHazard(lines) {
 	const trimmed = lines.map((l) => l.trim());
 
@@ -148,6 +173,12 @@ function classifyHazard(lines) {
 	}
 
 	if (trimmed[0].startsWith("<!--")) return "html-comment";
+
+	for (let i = 0; i < lines.length - 1; i++) {
+		if (/ {2,}$/.test(lines[i]) || /\\$/.test(lines[i])) return "hard-break";
+	}
+
+	if (lines.every((l) => indentWidth(l) >= INDENTED_CODE_WIDTH)) return "indented-code";
 
 	const indents = lines.map(leadingWhitespace);
 	if (!indents.every((w) => w === indents[0])) return "mixed-indent";
