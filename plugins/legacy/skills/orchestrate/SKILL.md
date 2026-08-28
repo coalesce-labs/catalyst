@@ -2076,11 +2076,10 @@ When all waves are complete:
 
    ```bash
    bun "${CATALYST_DEV_SCRIPTS}/orch-monitor/catalyst-archive.ts" sweep "${ORCH_NAME}"
+   SWEEP_RC=$?
    ```
 
-   The sweep is idempotent (`ON CONFLICT` upserts). Re-running is safe. If it fails, capture the
-   exit code and `stderr` but proceed with the remaining cleanup steps — artifacts can be re-swept
-   later before teardown.
+   The sweep is idempotent (`ON CONFLICT` upserts). Re-running is safe. If it fails, capture the exit code (`$SWEEP_RC`, checked by step 5 below) and `stderr` but proceed with steps 3–4 — Linear-state verification and findings filing don't depend on the archive. Step 5's deletion does: an existing archive entry for `${ORCH_NAME}` from an earlier run is not evidence this run's artifacts were archived, so a failed `$SWEEP_RC` must block deletion even when `show` finds an old entry.
 
 3. **Verify Linear states**: Check all tickets are in `stateMap.done`. If any are stuck, update them
    using the Linearis CLI (run `linearis issues usage` for update syntax).
@@ -2146,15 +2145,24 @@ When all waves are complete:
 
 5. **Clean up all worktrees** (including orchestrator worktree, unless user wants to keep it). The `teardown` skill that wrapped this step was removed with the daemon (CTL-2240); perform the archive-gated deletion directly, preserving its safety gates rather than just its archive check:
 
-   1. Confirm step 2's sweep actually archived THIS orchestrator — `list` has no `--orch` filter (it dumps every archived entry), so query the one entry by id instead:
+   1. Confirm step 2's sweep both ran clean AND actually archived THIS orchestrator. `$SWEEP_RC` alone isn't enough — a stale entry from an earlier run of the same `${ORCH_NAME}` would otherwise let a failed *current* sweep slip through — so require both:
       ```bash
+      [[ "${SWEEP_RC:-1}" -eq 0 ]] || { echo "step 2's sweep failed (rc=${SWEEP_RC:-unset}) — do not delete unarchived artifacts"; exit 1; }
       bun "${CATALYST_DEV_SCRIPTS}/orch-monitor/catalyst-archive.ts" show "${ORCH_NAME}" --json
       ```
-      and check that its `.archivePath` field is a real, existing directory. Do not proceed past this point without it.
-   2. Confirm no phase worker is still live. Signals are nested per ticket at `${ORCH_DIR}/workers/<ticket>/phase-*.json`, not flat `workers/*.json`, and the live marker is `status: "running"` (not `in_progress`/`alive`). Reap first, then check the summary rather than trusting the exit code — `reap` always exits 0 even when it left a job running:
+      `list` has no `--orch` filter (it dumps every archived entry), so `show` is the entry point that actually filters to one orchestrator by id. Check that its `.archivePath` field is a real, existing directory. Do not proceed past this point without both checks passing.
+   2. Confirm no worker is still live, in EITHER dispatch mode this skill supports. Phase-agent workers: signals are nested per ticket at `${ORCH_DIR}/workers/<ticket>/phase-*.json` (not flat `workers/*.json`), live marker is `status: "running"` (not `in_progress`/`alive`). Reap first, then check the summary rather than trusting the exit code — `reap` always exits 0 even when it left a job running:
       ```bash
       SUMMARY=$("${CATALYST_DEV_SCRIPTS}/phase-agent-watch-bg" reap --orch-dir "${ORCH_DIR}" --scope all --json)
-      echo "$SUMMARY" | jq -e '.skipped == 0' >/dev/null || { echo "live job(s) skipped, see $SUMMARY — do not delete"; exit 1; }
+      echo "$SUMMARY" | jq -e '.skipped == 0' >/dev/null || { echo "live phase job(s) skipped, see $SUMMARY — do not delete"; exit 1; }
+      ```
+      `oneshot-legacy` workers (the dispatch mechanism above, "Dispatch mechanism — `claude` CLI with streaming JSON") are invisible to that reap — they're flat `${ORCH_DIR}/workers/<ticket>.json` signals carrying a `.pid`, not a `bg_job_id`, so `phase-agent-watch-bg` reports `scanned: 0` for them even while one is alive. Probe those directly with the same `kill -0` liveness check `orchestrate-revive` uses (CTL-63):
+      ```bash
+      for f in "${ORCH_DIR}"/workers/*.json; do
+        [[ -f "$f" ]] || continue
+        PID=$(jq -r '.pid // empty' "$f")
+        [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null && { echo "live legacy worker pid=$PID ($f) — do not delete"; exit 1; }
+      done
       ```
       A nonzero `.skipped` means `executor_reap` found a job actively computing (`skipped-active`, above the CPU ceiling) and deliberately left it running — treat that as a hard blocker, not a warning, and re-run after it finishes rather than forcing the delete.
    3. **Salvage before removing** each worktree (CTL-1639) so a mistaken removal is recoverable: `source "${CATALYST_DEV_SCRIPTS}/lib/worktree-salvage.sh"` then `salvage_worktree "<worktree-path>" "<ticket>" --site interactive-teardown` for each. This snapshots unpushed commits, uncommitted diff, and untracked files to `~/catalyst/salvage/`. It is best-effort/fail-open and never blocks the removal.
