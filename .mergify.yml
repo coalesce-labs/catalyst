@@ -1,0 +1,74 @@
+# Mergify merge queue for catalyst — extends the catalyst-cloud trial (CTL-2266).
+#
+# Entry is opt-in: an agent or the coordinator applies `queue:ready` ONLY on positive
+# review evidence (CTC-1200 attestation rule — the label IS the attestation, because
+# Codex's clean pass is sometimes a 👍 reaction with no review object).
+#
+# Protection here is a REPOSITORY RULESET ("main branch protection", id 13503799), not
+# legacy branch protection. Mergify reads it natively and auto-injects all six required
+# checks as `success OR neutral OR skipped`. The explicit blocks below mirror that exact
+# three-way shape on purpose: a bare `check-success=` would be STRICTER than the ruleset
+# and would deadlock on a legitimately skipped job.
+#
+# max_parallel_checks: 3 (Ryan's decision, 2026-08-28 — deliberately NOT catalyst-cloud's
+# in-place-checks shape, CTC-1196 / catalyst-cloud #1603). Mergify computes
+# `allow_inplace_checks` automatically and only enables it when max_parallel_checks == 1,
+# every queue has batch_size == 1, and every queue's merge_conditions == queue_conditions.
+# Setting max_parallel_checks to 3 opts OUT of in-place checks: Mergify runs CI on
+# temporary merge-queue branches instead of pushing update commits onto the PR branch.
+#
+# ⚠️ Measured on the live ruleset: `required_status_checks.strict_required_status_checks_policy`
+# is `true` (GitHub's "branches must be up to date with main before merging"). For real
+# parallel throughput that needs to be OFF — with it ON, a queued PR's checks are only
+# valid against the exact current main, so batches still serialize behind rebase-and-recheck
+# even with 3 slots configured. That ruleset setting is NOT changed by this PR — branch
+# protection is a human call for Ryan, not an agent's to flip. See the PR description for
+# the measured value and what changing it would unlock.
+
+merge_queue:
+  max_parallel_checks: 3
+
+queue_rules:
+  - name: default
+    merge_method: squash
+    batch_size: 1
+    queue_conditions: &entry
+      - base=main
+      - label=queue:ready
+      - label!=hold:hand-steps
+      - -draft
+      - "#review-threads-unresolved=0"
+
+      # Hand-step / outward-facing paths — never merged unattended.
+      - -files~=^\.github/workflows/publish-
+      - -files~=^plugins/dev/scripts/db-migrations/
+      - -files~=^\.mergify\.yml$
+      - -head~=^release-please--
+
+      # The six ruleset-required checks, in the ruleset's own skip-tolerant form.
+      - or: [check-success=docs-gate, check-neutral=docs-gate, check-skipped=docs-gate]
+      - or: [check-success=gitleaks, check-neutral=gitleaks, check-skipped=gitleaks]
+      - or: [check-success=agents-md-gate, check-neutral=agents-md-gate, check-skipped=agents-md-gate]
+      - or: [check-success=audit-references, check-neutral=audit-references, check-skipped=audit-references]
+      - or: [check-success=check-versions, check-neutral=check-versions, check-skipped=check-versions]
+      - or: [check-success=execution-core-unit-tests, check-neutral=execution-core-unit-tests, check-skipped=execution-core-unit-tests]
+
+      # Non-required but always-running gates: the queue must not be weaker than a
+      # careful human merger, who would never merge these red.
+      - or: [check-success=packaging-gate, check-neutral=packaging-gate, check-skipped=packaging-gate]
+      - or: [check-success=skills-gate, check-neutral=skills-gate, check-skipped=skills-gate]
+      - or: [check-success=check-plugin-manifest-parity, check-neutral=check-plugin-manifest-parity, check-skipped=check-plugin-manifest-parity]
+
+      # `quality` is path-filtered at its `on:` trigger, so on most PRs it is ABSENT —
+      # and an absent check satisfies NONE of success/neutral/skipped (measured). The
+      # negative form is the only deadlock-free way to include it.
+      - -check-failure=quality
+    merge_conditions: *entry
+
+pull_request_rules:
+  - name: enqueue when a lane marks a PR ready
+    conditions:
+      - base=main
+      - label=queue:ready
+    actions:
+      queue: {}
