@@ -347,18 +347,20 @@ if grep -qxF "plugins/dev/skills/concierge/references/scaffold.md: hazard=kv-met
 else
 	fail "the one remaining hazard is scaffold.md's kv-metadata (deliberately retained)" "$CORPUS_OUT"
 fi
-for f in \
-	plugins/dev/skills/create-plan/SKILL.md \
-	plugins/dev/skills/phase-plan/SKILL.md \
-	plugins/dev/skills/phase-research/SKILL.md \
-	plugins/dev/skills/phase-review/SKILL.md \
-	plugins/dev/skills/phase-verify/SKILL.md; do
-	if grep -q "^$f: hazard=" <<<"$CORPUS_OUT"; then
-		fail "$f carries no hazard (resolved by hand in Phase 3)" "$(grep "^$f:" <<<"$CORPUS_OUT")"
-	else
-		pass "$f carries no hazard (resolved by hand in Phase 3)"
-	fi
-done
+# The other four files hand-resolved in Phase 3 (phase-plan/phase-research/phase-review/
+# phase-verify SKILL.md) were removed wholesale by CTL-2239 (#4071) — asserting "no hazard" on a
+# path that no longer exists would pass vacuously, so only the still-live file is checked here.
+if [[ ! -e "$REPO_ROOT/plugins/dev/skills/phase-plan/SKILL.md" ]]; then
+	pass "the four retired phase-*/SKILL.md hand-resolutions were removed by CTL-2239, not silently revived"
+else
+	fail "the four retired phase-*/SKILL.md hand-resolutions were removed by CTL-2239, not silently revived" "plugins/dev/skills/phase-plan/SKILL.md still exists"
+fi
+f="plugins/dev/skills/create-plan/SKILL.md"
+if grep -q "^$f: hazard=" <<<"$CORPUS_OUT"; then
+	fail "$f carries no hazard (resolved by hand in Phase 3)" "$(grep "^$f:" <<<"$CORPUS_OUT")"
+else
+	pass "$f carries no hazard (resolved by hand in Phase 3)"
+fi
 
 echo ""
 echo "=== case 17: hard-break hazard — a trailing two-space marker is quarantined ==="
