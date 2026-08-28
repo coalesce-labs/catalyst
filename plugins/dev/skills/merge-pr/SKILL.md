@@ -58,5 +58,7 @@ blockers legitimately or escalate with specifics. See
 | Deeper pre-merge adversarial review (8-gate table + regression-risk scoring) for a risky diff | [verify-gates.md](references/verify-gates.md) |
 | Post-merge tasks, compound close, deployment detection, success summary | [post-merge.md](references/post-merge.md) |
 | Confirming a merged change actually deployed + a live smoke check (bounded-poll, no broker dependency) | [post-merge-deploy-verify.md](references/post-merge-deploy-verify.md) |
+| Blocking on a GitHub state change (CI, review, merge) with a foreground, bounded, quota-conscious loop — the relay-era wait pattern, no daemon needed | [bounded-poll.md](references/bounded-poll.md) |
+| GitHub signal shapes that look like an answer and aren't (empty-string `conclusion`, empty check-run set, reaction-only clean review pass) | [gh-signal-traps.md](references/gh-signal-traps.md) |
 | Flags (`--skip-tests`, `--no-update`, `--keep-branch`), errors, examples | [flags-errors.md](references/flags-errors.md) |
 | Configuration (`.catalyst/config.json` schema, safety features) | [config-safety.md](references/config-safety.md) |

@@ -23,7 +23,7 @@ else
 fi
 ```
 
-The same trap applies to the PR-level rollup (`gh api repos/{o}/{r}/commits/{sha}/status`, or the `statusCheckRollup` GraphQL field — GraphQL-only, and forbidden by `wait-for-github`'s anti-pattern list on cost grounds alone): always check the aggregate `state`/`status` field first, confirm there is at least one check to aggregate, and only read a per-check `conclusion` once that check is individually `completed`.
+The same trap applies to the PR-level rollup (`gh api repos/{o}/{r}/commits/{sha}/status`, or the `statusCheckRollup` GraphQL field — GraphQL-only, and forbidden by bounded-poll's anti-pattern list on cost grounds alone): always check the aggregate `state`/`status` field first, confirm there is at least one check to aggregate, and only read a per-check `conclusion` once that check is individually `completed`.
 
 ## Trap 2: a clean automated review is a reaction, not a review object — and a stale one from a prior push isn't a current pass
 

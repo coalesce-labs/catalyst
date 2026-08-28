@@ -5,16 +5,14 @@
 # is NO `.webhookTunnel.state` field, so the old `.webhookTunnel.state` probe
 # always resolved to "unknown" and forced REST polling on every run.
 #
-# This test guards three skills:
-#   - oneshot           — must use .connected + a lastEventAt staleness check
-#   - wait-for-github   — already correct; guard against regressing to .state
-#   - monitor-events    — already correct; guard against regressing to .state
+# This test used to guard three skills: oneshot, wait-for-github, and
+# monitor-events. CTL-2240 removed wait-for-github and monitor-events with the
+# daemon they documented, so their guards retired with them; the legacy oneshot
+# skill (plugins/legacy) remains guarded.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 ONESHOT="${REPO_ROOT}/plugins/legacy/skills/oneshot/SKILL.md"
-WAIT_FOR_GITHUB="${REPO_ROOT}/plugins/dev/skills/wait-for-github/SKILL.md"
-MONITOR_EVENTS="${REPO_ROOT}/plugins/dev/skills/monitor-events/SKILL.md"
 
 FAILURES=0
 PASSES=0
@@ -39,12 +37,10 @@ assert_not_grep() {
   fi
 }
 
-for f in "$ONESHOT" "$WAIT_FOR_GITHUB" "$MONITOR_EVENTS"; do
-  if [[ ! -f "$f" ]]; then
-    echo "FATAL: skill file missing: $f" >&2
-    exit 1
-  fi
-done
+if [[ ! -f "$ONESHOT" ]]; then
+  echo "FATAL: skill file missing: $ONESHOT" >&2
+  exit 1
+fi
 
 echo "Test: oneshot SKILL probes the webhook-tunnel field that exists"
 assert_not_grep "$ONESHOT" 'webhookTunnel.state' \
@@ -53,13 +49,6 @@ assert_grep "$ONESHOT" 'webhookTunnel.connected' \
   "oneshot SKILL probes .webhookTunnel.connected"
 assert_grep "$ONESHOT" 'lastEventAt' \
   "oneshot SKILL includes a lastEventAt staleness check"
-
-echo ""
-echo "Test: already-correct skills do not regress to .webhookTunnel.state"
-assert_not_grep "$WAIT_FOR_GITHUB" 'webhookTunnel.state' \
-  "wait-for-github SKILL does not probe .webhookTunnel.state"
-assert_not_grep "$MONITOR_EVENTS" 'webhookTunnel.state' \
-  "monitor-events SKILL does not probe .webhookTunnel.state"
 
 echo ""
 echo "─────────────────────────────────────────────"

@@ -850,13 +850,16 @@ Listen for PR events using this precedence ladder (matches oneshot Phase 5):
          --filter ".attributes.\"event.name\" == \"filter.wake.${CATALYST_SESSION_ID}\"" \
          --timeout 600
      Deterministic routes (pr_lifecycle / ticket_lifecycle / comms_lifecycle)
-     cost zero LLM tokens. See plugins/dev/skills/broker/SKILL.md for the
-     full protocol and plugins/dev/skills/catalyst-filter/SKILL.md for
-     prose-based registration when the deterministic routes aren't enough.
+     cost zero LLM tokens. The broker and catalyst-filter skills that
+     documented the full protocol and prose-based registration were removed
+     with the daemon (CTL-2240); the deterministic routes above are the
+     operative statement.
 
   2. FALLBACK — catalyst-events wait-for with explicit jq (Pattern 2):
      When catalyst-broker status returns non-running, use the two-phase
-     pattern from plugins/dev/skills/wait-for-github/SKILL.md. Blocking
+     pattern (the wait-for-github skill that documented it was removed with
+     the daemon, CTL-2240; bounded-poll, its relay-era successor, lives in
+     plugins/dev/skills/merge-pr/references/bounded-poll.md). Blocking
      subprocess call; works reliably in claude -p non-interactive sessions.
      One jq predicate covers CI / reviews / push / merge for your PR.
 
@@ -881,16 +884,19 @@ phantom user message. The line shape is:
   wake: <event.name> — already addressed, no-op
 
 Include the matched filter clause / interest_id when the wake is from the
-broker (.body.payload.interest_id, .body.payload.reason). See
-plugins/dev/skills/monitor-events/SKILL.md § Narration for the full rule.
+broker (.body.payload.interest_id, .body.payload.reason). The monitor-events
+skill that carried the full narration rule was removed with the daemon
+(CTL-2240); the rule above is the operative statement.
 
 When you write a filter by hand, target the canonical event names listed in
 [[event-name-allowlist]] — anything outside that allowlist is either
 non-actionable or covered by a different lifecycle group. Do NOT use
 `.attributes."catalyst.orchestrator.id"` as a bare clause: CTL-234 stamps it
 on every github webhook tied to one of the orchestrator's PRs, so without an
-event-type guard it wakes the worker on 60-70% of unrelated webhooks. See
-[[wait-for-github]] § Known filter pitfalls.
+event-type guard it wakes the worker on 60-70% of unrelated webhooks. The
+wait-for-github skill that documented the known filter pitfalls was removed
+with the daemon (CTL-2240); the allowlist + guard above are the operative
+statement.
 
 Write these fields into your signal file as they become available:
   pr.number
@@ -910,8 +916,8 @@ remediation for stalled workers.
 Status transitions you do NOT write (orchestrator-owned fallback only):
   done   (written by orchestrator Phase 4 ONLY when worker stalled before merge)
 
-COMMS DISCIPLINE: when posting to the shared comms channel, follow the rules in the
-catalyst-comms skill (plugins/dev/skills/catalyst-comms/SKILL.md § Posting Discipline):
+COMMS DISCIPLINE: when posting to the shared comms channel, follow the rules below (the
+catalyst-comms skill that documented them was removed with the daemon, CTL-2240):
   - info = phase transitions + PR-opened only (default heartbeat, ~5-7 per session)
   - attention = orchestrator action required (0-2 per session, MANDATORY on: scope
     conflict, missing access, ambiguous spec, 3+ repeated CI failures, status=stalled)
@@ -1026,7 +1032,8 @@ unified event log via `catalyst-events tail` (wrapped in the `Monitor` tool) and
 relevant GitHub / Linear / orchestrator-lifecycle event. A 10-minute idle timer is the **safety-net
 fallback** for daemon-down or missed-event scenarios — never the primary mechanism. Do NOT self-pace
 with sleeps or "wake in N minutes" framing — that defeats the event-driven contract and burns
-context to no purpose. See `plugins/dev/skills/monitor-events/SKILL.md` for the full pattern.
+context to no purpose. The monitor-events skill that documented the full pattern was removed with
+the daemon (CTL-2240); the pattern is inlined below.
 
 **Launch the Monitor before entering the reactive scan.** Wrap this command with the `Monitor` tool
 — each emitted line is a wake-up.
@@ -1155,8 +1162,8 @@ Surface the matched interest when wake came from the broker (`filter.wake.${ORCH
 and a one-clause restatement of `.body.payload.reason`. For broad-form `catalyst-events tail` wakes,
 surface the raw `event.name` and the PR/ticket scope instead.
 
-See `plugins/dev/skills/monitor-events/SKILL.md` § Narration for the full rule and the good-vs-bad
-transcript fixture.
+The monitor-events skill that carried the full narration rule and the good-vs-bad transcript
+fixture was removed with the daemon (CTL-2240); the rule above is the operative statement.
 
 **Wake-up classification.** When a line arrives on the Monitor, classify it before re-entering the
 scan so the response stays proportional. Every reaction reads authoritative state from `gh pr view`,
@@ -2144,9 +2151,10 @@ When all waves are complete:
    fi
    ```
 
-5. **Clean up all worktrees** (including orchestrator worktree, unless user wants to keep it). Use
-   `/catalyst-dev:teardown ${ORCH_NAME}` for a safe, archive-gated deletion. Teardown refuses to run
-   unless step 2's sweep succeeded (use `--force` to override).
+5. **Clean up all worktrees** (including orchestrator worktree, unless user wants to keep it). The
+   `teardown` skill that wrapped this step was removed with the daemon (CTL-2240);
+   perform the archive-gated deletion directly: confirm step 2's sweep succeeded
+   (`catalyst-archive list` shows the run) before removing the runtime dir and worktrees.
 
 6. **Sync thoughts**: `humanlayer thoughts sync` to persist any shared documents.
 

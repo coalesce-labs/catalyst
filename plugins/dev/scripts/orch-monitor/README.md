@@ -158,7 +158,7 @@ idempotency header.
 
 ### Event log consumption (CTL-210)
 
-Long-lived consumers (orchestrators, the dashboard, operator shells) tail the unified event log via `catalyst-events tail --filter <jq>`. Short-lived `claude -p` workers block on `catalyst-events wait-for --filter <jq> --timeout <sec>` until a matching event arrives. See the `monitor-events` skill (`plugins/dev/skills/monitor-events/SKILL.md`) for the canonical patterns and the safety-net rule (every wait MUST be paired with an authoritative one-shot check, since daemon-down means no webhook events).
+Long-lived consumers (orchestrators, the dashboard, operator shells) tail the unified event log via `catalyst-events tail --filter <jq>`. Short-lived `claude -p` workers block on `catalyst-events wait-for --filter <jq> --timeout <sec>` until a matching event arrives. See the bounded-poll reference (`plugins/dev/skills/merge-pr/references/bounded-poll.md`) for the canonical bounded-wait pattern and the safety-net rule (every wait MUST be paired with an authoritative one-shot check, since daemon-down means no webhook events).
 
 ### Deploy verification (CTL-211)
 

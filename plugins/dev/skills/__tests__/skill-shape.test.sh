@@ -116,16 +116,26 @@ done
 #    reason is the load-bearing half — it is what lets a future reader tell a
 #    real collision from a name someone merely disliked.
 #
-#    ⚠️ Only reserve a name NOTHING is currently called: `broker`, `teardown`
-#    and `linear` are all live machinery words that are ALSO existing skills,
-#    so reserving them would go red on arrival and the fix would be to delete
-#    the entry, not to rename 50 call sites.
+#    ⚠️ Only reserve a name NOTHING is currently called: `linear` is a live
+#    machinery word that is ALSO an existing skill, so reserving it would go
+#    red on arrival and the fix would be to delete the entry, not to rename
+#    50 call sites. (`broker` and `teardown` were in that boat until CTL-2240
+#    removed the skills of those names with the daemon — they are reserved now.)
 RESERVED_SKILL_NAMES=(
   # execution-core machinery: worker-dir-gc, sdk-worker-registry, worker-label,
   # worker-transition-event, abort-worker, workers/<ticket>/,
   # worker.session.started. The ROLE word stays — role and code agree; it is the
   # SKILL name that collides. Use phase-agent-contract.
   "worker"
+  # The broker daemon (plugins/dev/scripts/broker — router.mjs, the namespace
+  # contract). The skill of this name was removed with the daemon (CTL-2240);
+  # the reservation keeps a same-named skill from re-colliding with the
+  # machinery word.
+  "broker"
+  # The 10th pipeline phase (phase-teardown, the orchestrate teardown step).
+  # The skill of this name was removed with the daemon (CTL-2240); the
+  # reservation keeps the phase vocabulary unambiguous.
+  "teardown"
 )
 
 echo "── naming"

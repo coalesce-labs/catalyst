@@ -727,8 +727,9 @@ After the PR is created, enter an event-driven listen loop. The preferred wake m
 is a single `filter.register` covering CI, comms inbound, reviews, BEHIND, and Linear ticket changes
 — the worker then waits on `filter.wake.${CATALYST_SESSION_ID}` and the Groq-backed filter daemon
 decides which raw events match. When the daemon is not running, the loop falls back to the
-[[wait-for-github]] two-phase pattern with per-concern jq filters. See [[catalyst-filter]] for
-registration recipes. The worker actively resolves blockers (CI failures, bot review threads,
+two-phase pattern with per-concern jq filters, implemented inline below (the wait-for-github and
+catalyst-filter skills that documented these were removed with the daemon, CTL-2240).
+The worker actively resolves blockers (CI failures, bot review threads,
 BEHIND) inline and proceeds to Step 3 only when the PR is CLEAN (CI green + reviews satisfied). On
 unrecoverable blockers (human changes-requested, persistent DIRTY) the worker writes
 `status: "stalled"` and exits; the orchestrator's Phase 4 is a safety-net fallback.
@@ -748,8 +749,9 @@ wake: rest-poll — broker down, polling gh api
 
 Surface `.body.payload.interest_id` and `.body.payload.reason` from the wake envelope when present
 (broker wakes carry both); for hand-rolled two-phase filter wakes, surface the matched `event.name`
-and `#${PR_NUMBER}` instead. See `plugins/dev/skills/monitor-events/SKILL.md` § Narration for the
-full rule and the good-vs-bad transcript fixture.
+and `#${PR_NUMBER}` instead. The monitor-events skill that carried the full narration rule and the
+good-vs-bad transcript fixture was removed with the daemon (CTL-2240); the rule above is the
+operative statement.
 
 ```bash
 REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
@@ -759,7 +761,8 @@ PR_OPENED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 jq --arg ts "$PR_OPENED_AT" '.pr.prOpenedAt = $ts | .status = "pr-created"' \
   "$SIGNAL_FILE" > "$SIGNAL_FILE.tmp" && mv "$SIGNAL_FILE.tmp" "$SIGNAL_FILE"
 
-# Pre-flight: verify event infrastructure (from [[wait-for-github]])
+# Pre-flight: verify event infrastructure (pattern inlined below; the wait-for-github skill was
+# removed with the daemon, CTL-2240)
 # CTL-572: probe .webhookTunnel.connected — the field that exists. The old
 # probe read a field catalyst-monitor never emits, so it always resolved to
 # "unknown" and forced REST polling on every run. .connected is optimistic
@@ -825,7 +828,8 @@ while [ "$PR_DONE" = "false" ]; do
     # COMMS_LAST_READ atomically) and a no-op when nothing arrived.
     comms_check
   elif [ "$USE_REST" != "true" ]; then
-    # Fallback: two-phase event wait (see [[wait-for-github]]).
+    # Fallback: two-phase event wait (wait-for-github was removed with the daemon, CTL-2240; the
+    # pattern is inlined here).
     # Filter field reference: [[event-schema]] — note check_suite/workflow_run use
     # detail.prNumbers, not scope.pr. PR/review events DO populate scope.pr.
     EVENT=$(catalyst-events wait-for \
@@ -838,7 +842,7 @@ while [ "$PR_DONE" = "false" ]; do
       --timeout 180 2>/dev/null || true)
 
     if [ -z "$EVENT" ]; then
-      # Phase 1 timed out — run diagnostics (see [[wait-for-github]] diagnostic block)
+      # Phase 1 timed out — run diagnostics (diagnostic block inlined below)
       _LOG_FILE=~/catalyst/events/$(date -u +%Y-%m).jsonl
       _LOG_LINES=$(wc -l < "$_LOG_FILE" 2>/dev/null | tr -d ' ')
       _SINCE_LINE=$(( ${_LOG_LINES:-0} > 500 ? ${_LOG_LINES:-0} - 500 : 0 ))
@@ -1014,7 +1018,7 @@ PROD_ENV=$(jq -r --arg repo "${REPO}" \
 DEPLOYMENT_URL=""
 
 if [ "$SKIP_DEPLOY" != "true" ] && [ -n "$MERGE_COMMIT_SHA" ]; then
-  # Two-phase wait for deployment_status (see [[wait-for-github]])
+  # Two-phase wait for deployment_status (wait-for-github was removed with the daemon, CTL-2240)
   DEPLOY_TIMEOUT=$(jq -r --arg repo "${REPO}" \
     '.catalyst.deploy[$repo].timeoutSec // 1800' .catalyst/config.json 2>/dev/null || echo 1800)
 
@@ -1024,7 +1028,7 @@ if [ "$SKIP_DEPLOY" != "true" ] && [ -n "$MERGE_COMMIT_SHA" ]; then
               .attributes.\"vcs.revision\" == \"${MERGE_COMMIT_SHA}\"" \
     --timeout 180 2>/dev/null || true)
 
-  # Authoritative deploy lookup (REST — see [[wait-for-github]] REST fallback pattern)
+  # Authoritative deploy lookup (REST fallback pattern inlined below)
   DEPLOY_JSON=$(gh api -X GET "/repos/${REPO}/deployments" \
     -f sha="$MERGE_COMMIT_SHA" -f environment="$PROD_ENV" --jq '.[0] // empty' 2>/dev/null || echo "")
   if [ -n "$DEPLOY_JSON" ]; then
@@ -1426,7 +1430,8 @@ error, context exhaustion):
   history via `$COMMS_LAST_READ`), logs all inbound messages, and exits on `abort`.
   `catalyst-comms send` already emits `comms.message.posted` events to the global event log
   (CTL-210), so Option B event emission is complete — extending `catalyst-events wait-for` to
-  include `comms.message` filters is tracked in CTL-247 (wait-for-github skill).
+  include `comms.message` filters is tracked in CTL-247 (the wait-for-github skill that carried it
+  was removed with the daemon, CTL-2240).
 
 **IMPORTANT: Document Storage Rules**
 
