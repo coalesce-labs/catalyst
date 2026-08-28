@@ -123,6 +123,12 @@ on:
       # scripts/__tests__/** above), but the module itself lives outside that glob — a PR
       # touching only scripts/md-reflow.mjs would otherwise skip the job that tests it.
       - "scripts/md-reflow.mjs"
+      # CTL-2253 (Codex round 2): case 16's corpus census reads plugins/dev/agents/*.md as one of
+      # its CANDIDATES globs (find plugins/dev/agents -maxdepth 1 -name "*.md"), but nothing in
+      # this filter matched that directory — the same "trigger must match the scan" defect the
+      # CTL-1998/CTL-2162 notes above already document on the skills/docs axes. A PR touching only
+      # an agents/*.md file could silently invalidate the pinned hazard census.
+      - "plugins/dev/agents/**"
       - "plugins/dev/scripts/gen-cli-reference.sh"
       - "website/src/content/docs/reference/catalyst-cli.md"
       # CTL-1530: the dual-harness migrator and its checkup §10 wiring — a change to
@@ -229,6 +235,9 @@ jobs:
               # CTL-2253: mirror the push-path entry above — the module lives outside
               # scripts/__tests__/**, so a PR touching only it would skip this job.
               - "scripts/md-reflow.mjs"
+              # CTL-2253 (Codex round 2): mirror the push-path entry above — the corpus census
+              # (case 16) reads plugins/dev/agents/*.md as a CANDIDATES source.
+              - "plugins/dev/agents/**"
               - "plugins/dev/scripts/gen-cli-reference.sh"
               - "website/src/content/docs/reference/catalyst-cli.md"
               - "plugins/dev/scripts/migrate-dual-harness.sh"

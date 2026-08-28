@@ -462,6 +462,25 @@ else
 fi
 
 echo ""
+echo "=== case 23: structural — adjacent link-reference definitions are never joined ==="
+IN="$SCRATCH/case23.md"
+cat >"$SCRATCH/case23.orig.md" <<EOF
+[label-one]: https://example.com/some/very/long/path/that/pushes/well/past/seventy/chars
+[label-two]: https://example.com/other
+
+Body text after the reference definitions.
+EOF
+cp "$SCRATCH/case23.orig.md" "$IN"
+OUT="$(check_file "$IN")"
+RC=$?
+assert_unchanged "adjacent link-reference definitions are left unchanged" "$SCRATCH/case23.orig.md" "$IN"
+if [[ $RC -eq 0 ]]; then
+	pass "adjacent link-reference definitions form no joinable block"
+else
+	fail "adjacent link-reference definitions form no joinable block" "rc=$RC" "$OUT"
+fi
+
+echo ""
 echo "=== summary ==="
 echo "Passed: $PASSES"
 echo "Failed: $FAILURES"

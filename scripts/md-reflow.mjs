@@ -46,6 +46,11 @@ const SETEXT_H1_RE = /^\s{0,3}=+\s*$/;
 // A GFM table delimiter row that omits its outer pipes, e.g. `--- | ---`. Requires at least two
 // cells (one interior `|`) so a bare `---`/`===` line is left to THEMATIC_BREAK_RE/SETEXT_H1_RE.
 const TABLE_DELIMITER_RE = /^\s*:?-+:?(?:\s*\|\s*:?-+:?)+\s*$/;
+// A link-reference-definition opener, e.g. `[label]: https://example.com "title"`. Adjacent
+// definitions with no blank line between them are otherwise two non-structural lines that
+// accumulate into one run; joining them merges two distinct `[label]: dest` block-level
+// constructs onto a single line and breaks every reference using either label.
+const LINK_REF_DEF_RE = /^\s{0,3}\[[^\]]+\]:/;
 const FENCE_OPEN_RE = /^(\s{0,3})(`{3,}|~{3,})/;
 const FENCE_CLOSE_RE = /^\s{0,3}(`+|~+)\s*$/;
 const FRONTMATTER_FENCE_RE = /^---\s*$/;
@@ -63,7 +68,8 @@ function isStructural(line) {
 		QUOTE_RE.test(line) ||
 		LIST_MARKER_RE.test(line) ||
 		THEMATIC_BREAK_RE.test(line) ||
-		SETEXT_H1_RE.test(line)
+		SETEXT_H1_RE.test(line) ||
+		LINK_REF_DEF_RE.test(line)
 	);
 }
 
