@@ -40,9 +40,7 @@ verify_post_merge_deploy() {
     return 0
   fi
 
-  # 2. bounded-poll (CI preset: 30s x 30 = 15min, see bounded-poll.md) on the CF Pages
-  #    commit status on the MERGE commit — CF's production build runs against the
-  #    new main commit, not the PR's pre-merge head SHA.
+  # 2. bounded-poll (CI preset: 30s x 30 = 15min, see bounded-poll.md) on the CF Pages commit status on the MERGE commit — CF's production build runs against the new main commit, not the PR's pre-merge head SHA.
   local count=0 state
   while [ "$count" -lt 30 ]; do
     state=$(gh api "repos/${repo}/commits/${sha}/status" \

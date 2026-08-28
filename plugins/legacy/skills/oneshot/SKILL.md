@@ -746,8 +746,7 @@ PR_OPENED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 jq --arg ts "$PR_OPENED_AT" '.pr.prOpenedAt = $ts | .status = "pr-created"' \
   "$SIGNAL_FILE" > "$SIGNAL_FILE.tmp" && mv "$SIGNAL_FILE.tmp" "$SIGNAL_FILE"
 
-# Pre-flight: verify event infrastructure (pattern inlined below; the wait-for-github skill was
-# removed with the daemon, CTL-2240)
+# Pre-flight: verify event infrastructure (pattern inlined below; the wait-for-github skill was removed with the daemon, CTL-2240)
 # CTL-572: probe .webhookTunnel.connected — the field that exists. The old
 # probe read a field catalyst-monitor never emits, so it always resolved to
 # "unknown" and forced REST polling on every run. .connected is optimistic

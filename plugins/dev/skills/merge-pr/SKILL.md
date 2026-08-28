@@ -32,8 +32,7 @@ blockers legitimately or escalate with specifics. See
 1. **Identify PR** — use argument or `gh pr view`/`gh pr list` if none given.
 2. **Verify open + mergeable** — rebase if behind, resolve conflicts or exit.
 3. **Run local tests** — skip with `--skip-tests`.
-4. **Diagnose blockers + reactive wait** — single disjunctive `wait-for` (CI, reviews, push,
-   merge/close) with authoritative `gh api` REST re-check on every wake-up.
+4. **Diagnose blockers + reactive wait** — check whether the unified event log is live first (`~/catalyst/events/YYYY-MM.jsonl` present and the daemon running): if so, [blocker-loop.md](references/blocker-loop.md)'s single disjunctive `wait-for` (CI, reviews, push, merge/close) with authoritative `gh api` REST re-check on every wake-up; if the substrate is absent — the relay default since the daemon's retirement — use [bounded-poll.md](references/bounded-poll.md)'s REST-only loop instead, so a dead event log can't turn this step into a ~200-minute string of `wait-for` timeouts.
 5. **Squash merge + cleanup** — checkout-free remote-ref delete (CTL-56), Linear ticket to Done,
    worktree-safe local branch delete. **catalyst-cloud queue-merge default (CTC-1219):** for an
    eligible catalyst-cloud PR (no `hold:hand-steps`, no schema/migration path), this step applies

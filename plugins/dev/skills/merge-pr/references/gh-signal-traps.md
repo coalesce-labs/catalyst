@@ -39,9 +39,7 @@ A THIRD trap sits inside that second one: you can't fix it by comparing the reac
 BOT_LOGIN="chatgpt-codex-connector[bot]"   # the automated reviewer configured for this repo — the GitHub App suffix is part of the login, verify with: gh api repos/{owner}/{repo}/pulls/{n}/reviews --jq '[.[].user.login] | unique'
 
 snapshot_baseline() {
-  # Call this immediately after any push this loop observes — including one that
-  # lands mid-wait, not just the push that started the wait. Sets BASELINE_HEAD_SHA
-  # and BASELINE_IDS together so they can never drift apart.
+  # Call this immediately after any push this loop observes — including one that lands mid-wait, not just the push that started the wait. Sets BASELINE_HEAD_SHA and BASELINE_IDS together so they can never drift apart.
   BASELINE_HEAD_SHA=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.head.sha')
   BASELINE_IDS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/reactions" \
     -H "Accept: application/vnd.github.squirrel-girl-preview+json" \
@@ -54,8 +52,7 @@ snapshot_baseline   # first push already landed before entering the wait
 # Bounded-poll tick (see bounded-poll.md for the ceiling/interval this sits inside):
 HEAD_SHA=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.head.sha')
 if [ "$HEAD_SHA" != "$BASELINE_HEAD_SHA" ]; then
-  # A remediation/update-branch push landed mid-wait — the old baseline no longer
-  # proves anything about this head. Re-baseline and re-request before evaluating.
+  # A remediation/update-branch push landed mid-wait — the old baseline no longer proves anything about this head. Re-baseline and re-request before evaluating.
   snapshot_baseline
 fi
 
