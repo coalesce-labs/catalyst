@@ -61,8 +61,11 @@ queue_rules:
 
       # `quality` is path-filtered at its `on:` trigger, so on most PRs it is ABSENT —
       # and an absent check satisfies NONE of success/neutral/skipped (measured). The
-      # negative form is the only deadlock-free way to include it.
+      # negative form is the only deadlock-free way to include it. `-check-pending` closes
+      # the race Codex flagged: without it a PR could merge while a triggered `quality`
+      # run is still executing (pending is not a failure).
       - -check-failure=quality
+      - -check-pending=quality
     merge_conditions: *entry
 
 pull_request_rules:
