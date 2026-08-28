@@ -2,13 +2,14 @@
 # Check if plugin files were modified but version not bumped
 # Can be used as a pre-commit hook or CI check
 #
-# CTL-2220: release-please (the tool that used to auto-bump versions on
-# merge) has been removed from this repo. There is currently no automated
-# replacement — see docs/releases.md "Versioning (post release-please)".
-# This gate still enforces the conventional-commit format as an escape
-# hatch: a plugin change with no manual version bump passes as long as the
-# branch's commits are conventional-commit-shaped. It does not bump, and
-# nothing downstream of it bumps, the version for you.
+# CTL-2263: release-please is reinstated (CTL-2220 had removed it; see
+# docs/releases.md "Versioning"). It bumps version.txt and both plugin.json
+# files AFTER merge, via the release PR — never in the same PR that changed
+# the plugin. So this gate's conventional-commit escape hatch is exactly
+# right: a plugin change with no manual version bump in THIS PR passes as
+# long as the branch's commits are conventional-commit-shaped, because
+# release-please's own PR is what bumps the version, on its own schedule.
+# This gate never bumps anything itself either way.
 
 set -e
 
@@ -33,11 +34,10 @@ fi
 # playground paths and newly added plugins covered without a second,
 # silently drifting hardcoded roster.
 #
-# NOTE: `release-please-config.json` keeps its name for now purely because
-# scripts/packaging/cli.mjs (owned by the in-flight CTL-1461 packaging work,
-# out of scope for CTL-2220) hardcodes that path as its plugin-order source.
-# It is no longer release-please's config — release-please itself is gone —
-# just a `{"packages": {"<plugin-dir>": {"component": "<name>"}}}` roster.
+# NOTE: `release-please-config.json` is release-please's real config again
+# (CTL-2263) — see docs/releases.md's "release-please-config.json" section
+# for why scripts/packaging/cli.mjs also reading it for plugin order is a
+# deliberate, resolved decision (CTL-2247), not drift.
 REPO_ROOT=$(git rev-parse --show-toplevel)
 RELEASE_CONFIG="$REPO_ROOT/release-please-config.json"
 if [[ ! -f "$RELEASE_CONFIG" ]]; then
@@ -78,12 +78,16 @@ done
 
 # Report findings
 if [[ ${#NEEDS_VERSION_BUMP[@]} -gt 0 ]]; then
-  # No automated version-bump mechanism runs after this gate (CTL-2220
-  # removed release-please and nothing has replaced it). The conventional-
-  # commit check below is only an escape hatch: it decides whether THIS gate
-  # blocks the PR, not whether some later step will bump the version for
-  # you. If a plugin actually needs a new version, bump version.txt and both
-  # plugin.json files by hand in this PR.
+  # release-please bumps version.txt and both plugin.json files AFTER this
+  # PR merges, via its own release PR (CTL-2263) — never inside this PR.
+  # The conventional-commit check below is only an escape hatch for THIS
+  # gate: it decides whether this PR is allowed to merge without a version
+  # bump already present, not whether one will ever happen. It always does,
+  # on release-please's schedule, as long as the commit message is
+  # conventional. If a plugin needs a version bump that can't wait for the
+  # next release PR, bump version.txt and both plugin.json files by hand in
+  # this PR instead — but don't do both, a hand bump plus release-please's
+  # own bump is a double bump.
   CONVENTIONAL_COMMITS=false
   if [[ -n "${BASE_REF:-}" ]]; then
     # Check commit messages for conventional commit prefixes
@@ -105,8 +109,9 @@ if [[ ${#NEEDS_VERSION_BUMP[@]} -gt 0 ]]; then
     done
     echo ""
     echo "✅ Conventional commit message(s) detected — passing without a version bump."
-    echo "   Nothing bumps the version automatically (release-please was removed,"
-    echo "   CTL-2220); if this change should ship a new version, bump it by hand."
+    echo "   release-please bumps the version after this merges, via its own release"
+    echo "   PR. If it can't wait for that, bump version.txt + both plugin.json files"
+    echo "   by hand instead (not in addition — that would double-bump)."
     exit 0
   fi
 

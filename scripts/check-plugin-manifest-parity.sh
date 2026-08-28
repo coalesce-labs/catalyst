@@ -102,6 +102,127 @@ for marketplace in ".claude-plugin/marketplace.json" ".agents/plugins/marketplac
   fi
 done
 
+# --- Check: release-please schema completeness + extra-files targets (CTL-2263) ---
+# CTL-2220 deleted validate-release-config.sh (11 checks) and replaced only
+# Checks 9-11 above; nothing asserted a package's extra-files actually point
+# at the two plugin.json files that exist. Harmless while the config was a
+# bare roster; restoring real extra-files re-opens the hole, and the failure
+# mode is silent — version.txt gets bumped while both plugin.json files stay
+# behind. Deliberately NOT an `if [[ -f ... ]]` shape that passes vacuously
+# when a target is absent — every package is checked and a zero-package
+# config is reported inconclusive, never a pass.
+SCHEMA_MISMATCHES=()
+SCHEMA_COMPARISONS=0
+for pkg in $PACKAGES; do
+  SCHEMA_COMPARISONS=$((SCHEMA_COMPARISONS + 1))
+  PKG_JSON=$(jq -c --arg pkg "$pkg" '.packages[$pkg]' "$CONFIG")
+
+  release_type=$(jq -r '.["release-type"] // empty' <<<"$PKG_JSON")
+  component=$(jq -r '.component // empty' <<<"$PKG_JSON")
+  changelog_path=$(jq -r '.["changelog-path"] // empty' <<<"$PKG_JSON")
+  include_tag=$(jq -r '.["include-component-in-tag"] // empty' <<<"$PKG_JSON")
+
+  MISSING_FIELDS=()
+  [[ -z "$release_type" ]] && MISSING_FIELDS+=("release-type")
+  [[ -z "$component" ]] && MISSING_FIELDS+=("component")
+  [[ -z "$changelog_path" ]] && MISSING_FIELDS+=("changelog-path")
+  [[ "$include_tag" != "true" ]] && MISSING_FIELDS+=("include-component-in-tag")
+
+  if [[ ${#MISSING_FIELDS[@]} -gt 0 ]]; then
+    SCHEMA_MISMATCHES+=("$pkg: missing field(s): ${MISSING_FIELDS[*]}")
+    continue
+  fi
+
+  for target in claude codex; do
+    dir=".${target}-plugin"
+    # extra-files "path" is relative to the PACKAGE directory (release-please's
+    # own convention — confirmed against the pre-removal config at
+    # 179aa5618^:release-please-config.json), not the repo root.
+    rel_path="$dir/plugin.json"
+    abs_path="$pkg/$rel_path"
+    match=$(jq -r --arg path "$rel_path" \
+      '[.["extra-files"][]? | select(.path == $path)] | length' <<<"$PKG_JSON")
+    if [[ "$match" -eq 0 ]]; then
+      SCHEMA_MISMATCHES+=("$pkg: extra-files missing entry for $rel_path")
+      continue
+    fi
+    if [[ "$match" -gt 1 ]]; then
+      SCHEMA_MISMATCHES+=("$pkg: extra-files has $match entries for $rel_path (expected exactly 1)")
+      continue
+    fi
+    entry_type=$(jq -r --arg path "$rel_path" \
+      '.["extra-files"][] | select(.path == $path) | .type' <<<"$PKG_JSON")
+    entry_jsonpath=$(jq -r --arg path "$rel_path" \
+      '.["extra-files"][] | select(.path == $path) | .jsonpath' <<<"$PKG_JSON")
+    if [[ "$entry_type" != "json" ]]; then
+      SCHEMA_MISMATCHES+=("$pkg: extra-files entry for $rel_path has type=$entry_type (expected json)")
+    fi
+    if [[ "$entry_jsonpath" != '$.version' ]]; then
+      SCHEMA_MISMATCHES+=("$pkg: extra-files entry for $rel_path has jsonpath=$entry_jsonpath (expected \$.version)")
+    fi
+    if [[ ! -f "$REPO_ROOT/$abs_path" ]]; then
+      SCHEMA_MISMATCHES+=("$pkg: extra-files path $abs_path does not resolve to a file that exists")
+    fi
+  done
+
+  # Every OTHER configured extra-files entry (beyond the required plugin.json
+  # pair just checked above) must also resolve to a real file. The loop above
+  # only ever looks up the two required rel_paths by exact match, so a third
+  # entry pointing at a nonexistent target is invisible to it — release-please
+  # would still process that entry and fail at PR-generation time. Path only,
+  # not type/jsonpath: those two fields are a convention specific to the
+  # required plugin.json pair, not a general schema rule for extra-files.
+  while IFS= read -r entry; do
+    entry_path=$(jq -r '.path' <<<"$entry")
+    if [[ "$entry_path" == ".claude-plugin/plugin.json" || "$entry_path" == ".codex-plugin/plugin.json" ]]; then
+      continue
+    fi
+    if [[ ! -f "$REPO_ROOT/$pkg/$entry_path" ]]; then
+      SCHEMA_MISMATCHES+=("$pkg: extra-files entry $entry_path does not resolve to a file that exists")
+    fi
+  done < <(jq -c '.["extra-files"][]?' <<<"$PKG_JSON")
+done
+
+if [[ "$SCHEMA_COMPARISONS" -eq 0 ]]; then
+  fail "0 packages found to check schema/extra-files completeness — inconclusive, treated as a failure"
+elif [[ ${#SCHEMA_MISMATCHES[@]} -gt 0 ]]; then
+  fail "release-please-config.json package entries missing required schema fields or extra-files targets"
+  printf '    %s\n' "${SCHEMA_MISMATCHES[@]}"
+else
+  pass "All package entries carry required schema fields and complete extra-files ($SCHEMA_COMPARISONS packages checked)"
+fi
+
+# --- Check: no .release-please-manifest.json entry survives without a matching
+# --- config package (Codex review, CTL-2263 PR #4059) ---
+# The manifest is release-please's own bootstrap/version-tracking file, keyed
+# by the same package paths as release-please-config.json's `.packages`. A
+# config package with no manifest entry yet is normal (a newly added plugin
+# awaiting its first release-please-cut release) — deliberately not checked
+# here. A MANIFEST entry with no matching config package is the opposite: it
+# references a component release-please is no longer configured to manage —
+# exactly the leftover a plugin removal produces if the manifest edit
+# (docs/runbooks/plugin-removal.md step 3) is skipped, silent because nothing
+# else in this script or in `render`'s inventory-agreement check reads the
+# manifest at all.
+MANIFEST="$REPO_ROOT/.release-please-manifest.json"
+if [[ -f "$MANIFEST" ]]; then
+  ORPHAN_MANIFEST_KEYS=()
+  while IFS= read -r key; do
+    if ! jq -e --arg k "$key" '.packages | has($k)' "$CONFIG" >/dev/null; then
+      ORPHAN_MANIFEST_KEYS+=("$key")
+    fi
+  done < <(jq -r 'keys[]' "$MANIFEST")
+
+  if [[ ${#ORPHAN_MANIFEST_KEYS[@]} -gt 0 ]]; then
+    fail ".release-please-manifest.json has entries for packages release-please-config.json no longer configures"
+    printf '    %s\n' "${ORPHAN_MANIFEST_KEYS[@]}"
+  else
+    pass "Every .release-please-manifest.json entry has a matching release-please-config.json package"
+  fi
+else
+  fail ".release-please-manifest.json not found"
+fi
+
 if [[ "$ERRORS" -gt 0 ]]; then
   echo ""
   echo "❌ $ERRORS check(s) failed"

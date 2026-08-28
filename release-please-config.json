@@ -1,19 +1,101 @@
 {
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "separate-pull-requests": false,
   "packages": {
     "plugins/dev": {
-      "component": "catalyst-dev"
+      "release-type": "simple",
+      "component": "catalyst-dev",
+      "package-name": "catalyst-dev",
+      "changelog-path": "CHANGELOG.md",
+      "include-component-in-tag": true,
+      "extra-files": [
+        {
+          "type": "json",
+          "path": ".claude-plugin/plugin.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": ".codex-plugin/plugin.json",
+          "jsonpath": "$.version"
+        }
+      ]
     },
     "plugins/meta": {
-      "component": "catalyst-meta"
+      "release-type": "simple",
+      "component": "catalyst-meta",
+      "package-name": "catalyst-meta",
+      "changelog-path": "CHANGELOG.md",
+      "include-component-in-tag": true,
+      "extra-files": [
+        {
+          "type": "json",
+          "path": ".claude-plugin/plugin.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": ".codex-plugin/plugin.json",
+          "jsonpath": "$.version"
+        }
+      ]
     },
     "plugins/playground/pm-ops": {
-      "component": "catalyst-pm-ops"
+      "release-type": "simple",
+      "component": "catalyst-pm-ops",
+      "package-name": "catalyst-pm-ops",
+      "changelog-path": "CHANGELOG.md",
+      "include-component-in-tag": true,
+      "extra-files": [
+        {
+          "type": "json",
+          "path": ".claude-plugin/plugin.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": ".codex-plugin/plugin.json",
+          "jsonpath": "$.version"
+        }
+      ]
     },
     "plugins/legacy": {
-      "component": "catalyst-legacy"
+      "release-type": "simple",
+      "component": "catalyst-legacy",
+      "package-name": "catalyst-legacy",
+      "changelog-path": "CHANGELOG.md",
+      "include-component-in-tag": true,
+      "extra-files": [
+        {
+          "type": "json",
+          "path": ".claude-plugin/plugin.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": ".codex-plugin/plugin.json",
+          "jsonpath": "$.version"
+        }
+      ]
     },
     "plugins/foundry": {
-      "component": "catalyst-foundry"
+      "release-type": "simple",
+      "component": "catalyst-foundry",
+      "package-name": "catalyst-foundry",
+      "changelog-path": "CHANGELOG.md",
+      "include-component-in-tag": true,
+      "extra-files": [
+        {
+          "type": "json",
+          "path": ".claude-plugin/plugin.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": ".codex-plugin/plugin.json",
+          "jsonpath": "$.version"
+        }
+      ]
     }
   }
 }
