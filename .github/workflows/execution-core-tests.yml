@@ -115,6 +115,10 @@ on:
       # PR touching only scripts/ would skip the job that runs it.
       - "scripts/__tests__/**"
       - "scripts/worktree-thoughts-exclude-backfill.sh"
+      # CTL-2266: the plugin-version monotonicity assertion ships its own bash test
+      # (check-plugin-version.test.sh, run below); without this path a PR touching only
+      # scripts/check-plugin-version.sh would skip the job that runs it.
+      - "scripts/check-plugin-version.sh"
       - "plugins/dev/scripts/gen-cli-reference.sh"
       - "website/src/content/docs/reference/catalyst-cli.md"
       # CTL-1530: the dual-harness migrator and its checkup §10 wiring — a change to
@@ -215,6 +219,9 @@ jobs:
               # PR touching only scripts/ would skip the job that runs it.
               - "scripts/__tests__/**"
               - "scripts/worktree-thoughts-exclude-backfill.sh"
+              # CTL-2266: mirror the push-path entry above — check-plugin-version.test.sh
+              # guards this script and must run whenever a PR touches only it.
+              - "scripts/check-plugin-version.sh"
               - "plugins/dev/scripts/gen-cli-reference.sh"
               - "website/src/content/docs/reference/catalyst-cli.md"
               - "plugins/dev/scripts/migrate-dual-harness.sh"
@@ -334,6 +341,17 @@ jobs:
         # touched) and a zero-discovery case that must exit 2, not report a clean pass.
         working-directory: .
         run: bash scripts/__tests__/worktree-thoughts-exclude-backfill.test.sh
+
+      - name: plugin version monotonicity guard test (CTL-2266)
+        # Two lanes independently bumping the SAME plugin to the SAME target version merge
+        # cleanly via a raw git merge — no conflict marker, no red check — so the merge queue's
+        # in-place update needs this assertion to surface it on the queue branch, against the
+        # current base. Covers strictly-greater/equal/lower-than-base, a version.txt vs
+        # plugin.json disagreement, the pre-existing conventional-commit escape hatch staying
+        # intact, a roster plugin absent on disk, and failing closed when $BASE_REF's value
+        # can't be read at all (a brand-new plugin).
+        working-directory: .
+        run: bash scripts/__tests__/check-plugin-version.test.sh
 
       - name: account-usage pager test (CTL-1908)
         # Pages before an armed Claude account exhausts its 5-hour / 7-day window. The property

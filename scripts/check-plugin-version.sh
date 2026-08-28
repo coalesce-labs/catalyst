@@ -50,6 +50,93 @@ while IFS= read -r plugin_dir; do
 done < <(jq -r '.packages | keys[]' "$RELEASE_CONFIG")
 NEEDS_VERSION_BUMP=()
 
+# CTL-2266: version-monotonicity assertion.
+#
+# A raw git merge of two lanes that independently bump the SAME plugin to the
+# SAME target version (e.g. both 12.66.3 -> 13.0.0) merges cleanly — no
+# conflict marker, no red check, no dequeue. Nothing above this catches that:
+# the existing loop below only asks "did plugin files change without a
+# version bump", and a conventional-commit message makes that pass with no
+# bump at all (docs/releases.md). This block closes the other half.
+#
+# Fires only when BASE_REF is set (CI mode) — the only mode with a real PR
+# base to compare against, and the mode the merge queue re-runs required
+# checks in against the current base. That's what makes "surfaces before
+# merge" true even for a lane whose branch itself was forked before the other
+# lane merged: CHANGED_FILES above already used three-dot (merge-base)
+# semantics, so a plugin's version.txt shows as changed here whenever THIS
+# lane touched it, regardless of how far $BASE_REF has since moved.
+#
+# version_gt <a> <b> — true iff semver <a> is strictly greater than <b>.
+# Reuses the repo's `sort -V` idiom (check-setup.sh's version_ge,
+# install-cli.sh's _ab_version_ge); plugin versions here are plain
+# major.minor.patch, so version-aware sort ordering is sufficient without a
+# full semver library.
+version_gt() {
+  [[ "$1" != "$2" ]] && [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" == "$1" ]]
+}
+
+MONOTONICITY_FAILURES=()
+
+if [[ -n "${BASE_REF:-}" ]]; then
+  for PLUGIN_DIR in "${PLUGIN_DIRS[@]}"; do
+    if [[ ! -d "$PLUGIN_DIR" ]]; then
+      continue
+    fi
+
+    VERSION_TXT_CHANGED=$(echo "$CHANGED_FILES" | grep -Fx "$PLUGIN_DIR/version.txt" || true)
+    if [[ -z "$VERSION_TXT_CHANGED" ]]; then
+      continue
+    fi
+
+    component=$(jq -r --arg pkg "$PLUGIN_DIR" '.packages[$pkg].component // $pkg' "$RELEASE_CONFIG" || true)
+
+    NEW_VERSION=""
+    if [[ -f "$PLUGIN_DIR/version.txt" ]]; then
+      NEW_VERSION=$(tr -d '[:space:]' < "$PLUGIN_DIR/version.txt")
+    fi
+    BASE_VERSION=$(git show "$BASE_REF:$PLUGIN_DIR/version.txt" 2>/dev/null | tr -d '[:space:]')
+
+    if [[ -z "$NEW_VERSION" ]]; then
+      MONOTONICITY_FAILURES+=("$component ($PLUGIN_DIR): version.txt is empty or unreadable in this PR")
+      continue
+    fi
+
+    if [[ -z "$BASE_VERSION" ]]; then
+      # Fail closed: an unreadable base is "could not look", never "no collision".
+      MONOTONICITY_FAILURES+=("$component ($PLUGIN_DIR): could not read version.txt at \$BASE_REF ($BASE_REF) — cannot verify monotonicity")
+      continue
+    fi
+
+    if ! version_gt "$NEW_VERSION" "$BASE_VERSION"; then
+      MONOTONICITY_FAILURES+=("$component ($PLUGIN_DIR): version.txt is $NEW_VERSION, which is not strictly greater than \$BASE_REF's $BASE_VERSION — two lanes bumping to the same (or a lower) value merge silently with no conflict")
+      continue
+    fi
+
+    for MANIFEST_REL in ".claude-plugin/plugin.json" ".codex-plugin/plugin.json"; do
+      MANIFEST_PATH="$PLUGIN_DIR/$MANIFEST_REL"
+      [[ -f "$MANIFEST_PATH" ]] || continue
+      MANIFEST_VERSION=$(jq -r '.version // empty' "$MANIFEST_PATH" 2>/dev/null || true)
+      if [[ "$MANIFEST_VERSION" != "$NEW_VERSION" ]]; then
+        MONOTONICITY_FAILURES+=("$component ($PLUGIN_DIR): $MANIFEST_REL version ($MANIFEST_VERSION) does not match version.txt ($NEW_VERSION)")
+      fi
+    done
+  done
+fi
+
+if [[ ${#MONOTONICITY_FAILURES[@]} -gt 0 ]]; then
+  echo ""
+  echo "❌ Plugin version bump is invalid:"
+  echo ""
+  for failure in "${MONOTONICITY_FAILURES[@]}"; do
+    echo "   - $failure"
+  done
+  echo ""
+  echo "   Re-derive the version from \$BASE_REF's current value — never reconcile"
+  echo "   a stale number with a raw merge. See docs/releases.md."
+  exit 1
+fi
+
 for PLUGIN_DIR in "${PLUGIN_DIRS[@]}"; do
   if [[ ! -d "$PLUGIN_DIR" ]]; then
     continue
