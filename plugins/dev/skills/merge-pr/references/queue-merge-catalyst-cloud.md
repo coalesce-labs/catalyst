@@ -20,8 +20,17 @@ already_merged=$(gh api "repos/${REPO}/pulls/${pr_number}" --jq '.merged' 2>/dev
 # retry, so post-merge (Step 9b onward — branch cleanup, Linear Done, deploy verify, compound
 # close) still runs even though nobody in this session called `gh pr merge`.
 if [[ "$already_merged" != "true" && "${REPO}" == "coalesce-labs/catalyst-cloud" ]]; then
-  labels=$(gh pr view "$pr_number" --json labels -q '[.labels[].name] | join(",")')
-  changed_files=$(gh pr view "$pr_number" --json files -q '[.files[].path] | join("\n")')
+  # Codex P1 (PR #4072): fail closed, not open, when either read fails — an empty
+  # $labels/$changed_files from a transient `gh pr view` error must never be silently
+  # interpreted as "no hold label, no schema/migration path" and auto-queued.
+  if ! labels=$(gh pr view "$pr_number" --json labels -q '[.labels[].name] | join(",")'); then
+    echo "❌ merge-pr: could not read labels for #$pr_number — not safe to auto-queue; retry or hand-merge." >&2
+    exit 1
+  fi
+  if ! changed_files=$(gh pr view "$pr_number" --json files -q '[.files[].path] | join("\n")'); then
+    echo "❌ merge-pr: could not read changed files for #$pr_number — not safe to auto-queue; retry or hand-merge." >&2
+    exit 1
+  fi
   hand_step=false
   [[ ",$labels," == *",hold:hand-steps,"* ]] && hand_step=true
   # Mirror .mergify.yml's queue_conditions path exclusions exactly: schema anchored at repo
@@ -32,7 +41,13 @@ if [[ "$already_merged" != "true" && "${REPO}" == "coalesce-labs/catalyst-cloud"
     if [[ ",$labels," == *",queue:ready,"* ]]; then
       echo "⏳ #$pr_number already labeled queue:ready — still waiting on Mergify, no gh pr merge."
     else
-      gh pr edit "$pr_number" --add-label "queue:ready" >/dev/null
+      # Codex P2 (PR #4072): propagate a failed label edit instead of falling through to the
+      # unconditional success messaging below — an unlabeled PR will never be picked up by
+      # Mergify, and reporting success here would hide that.
+      if ! gh pr edit "$pr_number" --add-label "queue:ready" >/dev/null; then
+        echo "❌ merge-pr: failed to add queue:ready label to #$pr_number — PR NOT queued, Mergify will never see it. Retry or hand-merge." >&2
+        exit 1
+      fi
       echo "⏳ catalyst-cloud queue-merge default (CTC-1219): applied queue:ready — Mergify owns"
       echo "   this merge. No gh pr merge. Re-run /merge-pr on #$pr_number (or let the"
       echo "   coordinator re-dispatch the merge phase) once mergify[bot] merges it, to finish"
@@ -63,12 +78,4 @@ for _ in 1 2 3 4 5; do
 done
 ```
 
-**Coordinator/steward responsibility:** for a queued-and-stopped catalyst-cloud PR, something outside
-this single invocation must notice the eventual `merged by mergify[bot]` and re-enter this skill (or
-re-dispatch the relay-ticket merge phase) so Steps 9b–15 actually run — the label alone does not
-transition Linear, verify the deploy, or trigger the compound sentinels. Do not assume a GitHub
-Action's PR-body text-convention (e.g. a `Closes CTC-NN` scan) substitutes for this: it is opt-in,
-silently no-ops on ordinary PR titles that don't use the magic words, and has no path to deploy
-verification or the compound closing ritual at all — this skill's own Step 10 `linear-transition.sh`
-call (and Steps 13b/14) are the reliable, repo-agnostic path and must still be the one that runs,
-regardless of who performed the actual merge.
+**Coordinator/steward responsibility:** for a queued-and-stopped catalyst-cloud PR, something outside this single invocation must notice the eventual `merged by mergify[bot]` and re-enter this skill (or re-dispatch the relay-ticket merge phase) so Steps 9b–15 actually run — the label alone does not transition Linear, verify the deploy, or trigger the compound sentinels. Do not assume a GitHub Action's PR-body text-convention (e.g. a `Closes CTC-NN` scan) substitutes for this: it is opt-in, silently no-ops on ordinary PR titles that don't use the magic words, and has no path to deploy verification or the compound closing ritual at all — this skill's own Step 10 `linear-transition.sh` call (and Steps 13b/14) are the reliable, repo-agnostic path and must still be the one that runs, regardless of who performed the actual merge.
