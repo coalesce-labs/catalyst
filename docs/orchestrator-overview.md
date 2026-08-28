@@ -3,6 +3,8 @@
 
 How a Catalyst orchestrator runs today (post-CTL-452, post-2026-05-17 ship). This doc describes what exists in `origin/main` — it is not a roadmap.
 
+> ⚠️ **Superseded in part (CTL-2239).** The twelve phase-agent skills this doc's diagrams invoke (`/catalyst-dev:phase-*` and `_phase-agent-template`) were removed with the daemon they served, so those slash commands no longer resolve. The event/signal contracts and the dispatch mechanics described below are still accurate for the surviving machinery; the skill invocations are a record of how it ran. The rest of the legacy orchestration path is removed in CTL-2218 Phase C.
+
 ## Why this exists
 
 Catalyst orchestrates AI engineering work under the constraints of LLM agents. Every design choice — phases, background dispatch, broker interests, the immutable event log — is in service of these:

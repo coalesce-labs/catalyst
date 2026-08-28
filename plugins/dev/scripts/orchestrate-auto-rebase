@@ -136,7 +136,7 @@ for SIGNAL in "${ORCH_DIR}"/workers/*.json; do
   fi
 
   # CTL-617: skip rebase dispatch while phase-monitor-merge owns the worktree.
-  # phase-monitor-merge handles BEHIND inline (plugins/dev/skills/phase-monitor-merge/SKILL.md);
+  # phase-monitor-merge handled BEHIND inline (its skill was removed in CTL-2239;
   # dispatching a parallel rebase worker into the same worktree is the
   # two-merge-owners race from CTL-133. The "dispatched|running|done" set
   # mirrors phase-agent-dispatch's idempotency guard.

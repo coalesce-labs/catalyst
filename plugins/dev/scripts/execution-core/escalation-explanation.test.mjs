@@ -25,7 +25,7 @@ const manualGood = {
     "Grant the daemon 'workflow' scope or push branch by hand, then re-run phase-pr. Which?",
   blocked_capability: "the host git token lacks the workflow OAuth scope",
   instructions: ["gh auth refresh -s workflow", "or set CATALYST_WORKFLOW_GITHUB_TOKEN"],
-  remediation_then_retry: "re-run /catalyst-dev:phase-pr after the scope is granted",
+  remediation_then_retry: "re-run the pr phase after the scope is granted",
   why_not_auto: "the daemon cannot grant itself an OAuth scope (capability boundary)",
 };
 
@@ -407,7 +407,7 @@ describe("workflow-scope escalation (CTL-1119)", () => {
         "Grant the daemon token 'workflow' scope (gh auth refresh -s workflow) or set CATALYST_WORKFLOW_GITHUB_TOKEN, then re-run phase-pr — or push branch CTL-1119 manually. Which?",
       blocked_capability: "the host git token lacks the workflow OAuth scope",
       instructions: ["gh auth refresh -s workflow", "or set CATALYST_WORKFLOW_GITHUB_TOKEN"],
-      remediation_then_retry: "re-run /catalyst-dev:phase-pr after the scope is granted",
+      remediation_then_retry: "re-run the pr phase after the scope is granted",
       why_not_auto: "the daemon cannot grant itself an OAuth scope (capability boundary)",
       observed: { branch: "CTL-1119", scope_missing: "workflow" },
     });

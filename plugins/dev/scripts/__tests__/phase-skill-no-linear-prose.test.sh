@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # CTL-558: the deterministic coordinator (execution-core scheduler /
-# orchestrate-phase-advance) owns Linear status write-back. The six shared
-# phase-* skills must NOT carry their own `linear-transition.sh --transition`
-# prose, and create-pr / describe-pr must gate their interactive inReview
-# transition on CATALYST_PHASE so the phase-agent path does not double-write.
+# orchestrate-phase-advance) owns Linear status write-back. create-pr /
+# describe-pr must gate their interactive inReview transition on
+# CATALYST_PHASE so the phase-agent path does not double-write.
+# CTL-2239: the phase-* SKILL.md assertions this file used to carry (the
+# no-Linear-prose loop, the phase-monitor-merge/phase-teardown --transition
+# done pair) were removed along with those skills (B2 of the CTL-2218
+# cleanup plan) — their customer, the execution-core phase-agent dispatch
+# loop, no longer has those skills to dispatch. create-pr/describe-pr and
+# implement-plan are standalone, surviving skills, so their coverage stays.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
@@ -13,47 +18,6 @@ FAILURES=0
 PASSES=0
 fail() { FAILURES=$((FAILURES + 1)); echo "  FAIL: $1"; [ $# -ge 2 ] && echo "    $2"; }
 pass() { PASSES=$((PASSES + 1)); echo "  PASS: $1"; }
-
-echo "Test: phase-* skills carry no linear-transition status-write prose"
-# The removed prose has two signatures: the `## Linear state transition`
-# heading, and a `--transition <statekey>` invocation. Either present means
-# the prose deliverable-4 removes still lingers.
-for skill in phase-research phase-plan phase-implement phase-verify phase-review; do
-  f="${SKILLS_DIR}/${skill}/SKILL.md"
-  if [[ ! -f "$f" ]]; then
-    fail "${skill}/SKILL.md exists"
-    continue
-  fi
-  hit=""
-  grep -qE '^## Linear state transition' "$f" && hit="heading"
-  grep -qE -- '--transition (researching|planning|inProgress|verifying|reviewing)' "$f" \
-    && hit="${hit:+$hit+}invocation"
-  if [[ -n "$hit" ]]; then
-    fail "${skill} carries no Linear status-write prose" \
-      "found: $hit — $(grep -nE '^## Linear state transition|--transition (researching|planning|inProgress|verifying|reviewing)' "$f" | head -2)"
-  else
-    pass "${skill} carries no Linear status-write prose"
-  fi
-done
-
-echo "Test: phase-monitor-merge does NOT write --transition done (CTL-703: teardown owns it)"
-# CTL-703: terminal Done write moved from monitor-merge to the new phase-teardown (10th phase).
-MM="${SKILLS_DIR}/phase-monitor-merge/SKILL.md"
-if grep -qE "linear-transition.*--transition done|--transition done" "$MM"; then
-  fail "phase-monitor-merge does NOT write --transition done (CTL-703: teardown owns it)" \
-    "phase-monitor-merge must NOT transition to done — that is phase-teardown's sole responsibility"
-else
-  pass "phase-monitor-merge does NOT write --transition done (CTL-703: teardown owns it)"
-fi
-
-echo "Test: phase-teardown is the terminal --transition done writer (CTL-703)"
-TD="${SKILLS_DIR}/phase-teardown/SKILL.md"
-if grep -qE "linear-transition.*--transition done|--transition done" "$TD"; then
-  pass "phase-teardown is the terminal --transition done writer (CTL-703)"
-else
-  fail "phase-teardown is the terminal --transition done writer (CTL-703)" \
-    "phase-teardown must contain the sole --transition done call"
-fi
 
 echo "Test: create-pr / describe-pr gate the inReview transition on CATALYST_PHASE"
 for skill in create-pr describe-pr; do

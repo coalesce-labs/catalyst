@@ -62,7 +62,7 @@ if [[ -f "$WFSCOPE" ]]; then
     --call-to-action "Grant the daemon token 'workflow' scope (gh auth refresh -s workflow) or set CATALYST_WORKFLOW_GITHUB_TOKEN, then re-run phase-pr — or push branch CTL-TEST manually. Which?" \
     --blocked-capability "the host git token lacks the workflow OAuth scope" \
     --instructions '["gh auth refresh -s workflow","or set CATALYST_WORKFLOW_GITHUB_TOKEN"]' \
-    --remediation-then-retry "re-run /catalyst-dev:phase-pr after the scope is granted" \
+    --remediation-then-retry "re-run the pr phase after the scope is granted" \
     --why-not-auto "the daemon cannot grant itself an OAuth scope (capability boundary)" \
     --can-execute false \
     --observed "$(jq -nc --arg b "CTL-TEST" '{branch:$b, scope_missing:"workflow"}' 2>/dev/null || echo '{}')" \

@@ -4,10 +4,10 @@
 #   - the ticket-compound curator skill (SKILL.md + reference.md) exists, is
 #     user-invocable, declares allowed-tools, and harvests the friction log.
 #   - the learnings validator exists + is executable, and the seed entry passes it.
-#   - all 5 phase-* artifact skills append a timestamped Friction record
-#     (the "If I'd known" bullet, the per-ticket friction log path, and a
-#     time-bearing %H:%M stamp — date+TIME, never date-only).
 #   - the briefing-followup action-compound handler + CONCEPTS.md seed exist.
+# CTL-2239: the "all 5 phase-* artifact skills append a timestamped Friction
+# record" assertions this file used to carry were removed along with those
+# skills (B2 of the CTL-2218 cleanup plan).
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 fail=0; assert(){ if ! eval "$2"; then echo "FAIL: $1"; fail=1; else echo "ok: $1"; fi; }
@@ -26,23 +26,7 @@ VALIDATOR="$ROOT/plugins/dev/scripts/compound/validate-learnings.sh"
 assert "validate-learnings.sh exists"     "test -f '$VALIDATOR'"
 assert "validate-learnings.sh is executable" "test -x '$VALIDATOR'"
 
-# 3. Friction-capture producer block in all 5 artifact phase skills.
-#    Each must reference the per-ticket friction log, carry the canonical
-#    "If I'd known" bullet, AND timestamp records with date+TIME (%H:%M),
-#    not date-only — the cross-phase header contract is date +%Y-%m-%dT%H:%M:%S%z.
-PHASES=(research plan implement verify review)
-for p in "${PHASES[@]}"; do
-  f="$ROOT/plugins/dev/skills/phase-$p/SKILL.md"
-  assert "phase-$p SKILL.md exists"                 "test -f '$f'"
-  assert "phase-$p friction block writes thoughts/shared/friction/" \
-    "grep -q 'thoughts/shared/friction/' '$f'"
-  assert "phase-$p friction block has the 'If I'\''d known' bullet" \
-    "grep -q \"If I'd known\" '$f'"
-  assert "phase-$p friction record is time-bearing (%H:%M, not date-only)" \
-    "grep -q '%H:%M' '$f'"
-done
-
-# 4. Seed thoughts artifacts (gitignored + humanlayer-synced — only present where the
+# 3. Seed thoughts artifacts (gitignored + humanlayer-synced — only present where the
 #    thoughts store is seeded). Guarded so this stays a pure repo-structure test that also
 #    passes in a bare checkout / CI; skips-with-note otherwise. CONCEPTS.md is the vocabulary
 #    seed, now in the synced shared store (thoughts/shared/CONCEPTS.md).
@@ -60,7 +44,7 @@ else
   echo "skip: thoughts store not seeded in this checkout — skipping seed-entry + CONCEPTS assertions"
 fi
 
-# 5. The approval-surface handler (repo file, always present).
+# 4. The approval-surface handler (repo file, always present).
 assert "briefing-followup action-compound.sh exists" \
   "test -f '$ROOT/plugins/dev/scripts/briefing-followup/action-compound.sh'"
 assert "action-compound.sh is executable" \
