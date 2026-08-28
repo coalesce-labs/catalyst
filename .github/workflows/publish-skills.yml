@@ -94,7 +94,7 @@ jobs:
   publish-skills:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # A release-triggered run must publish exactly the released ref,
           # not whatever `main` has drifted to since — the pack SHA recorded

@@ -8,7 +8,7 @@ jobs:
   audit-references:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Audit plugin references
         run: bash plugins/meta/scripts/audit-references.sh --ci
