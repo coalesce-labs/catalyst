@@ -2144,7 +2144,18 @@ When all waves are complete:
       ```
       A nonzero `.skipped` means `executor_reap` found a job actively computing (`skipped-active`, above the CPU ceiling) and deliberately left it running — treat that as a hard blocker, not a warning, and re-run after it finishes rather than forcing the delete.
    3. **Salvage before removing** each worktree (CTL-1639) so a mistaken removal is recoverable: `source "${CATALYST_DEV_SCRIPTS}/lib/worktree-salvage.sh"` then `salvage_worktree "<worktree-path>" "<ticket>" --site interactive-teardown` for each. This snapshots unpushed commits, uncommitted diff, and untracked files to `~/catalyst/salvage/`. It is best-effort/fail-open and never blocks the removal.
-   4. `git worktree remove <path>` for each worktree, then `rm -rf "${ORCH_DIR}"`.
+   4. Gate every removal against live handles the two probes above don't cover — a completed worker can leave a child process whose cwd is under the worktree but whose PID never appeared in any signal file, and if this session is itself running from the orchestrator's own worktree, removing it out from under the running process would break steps 6–7 below (thoughts sync, state archival). Use the repo's existing guard rather than a raw `git worktree remove`:
+      ```bash
+      source "${CATALYST_DEV_SCRIPTS}/lib/worktree-remove-guard.sh"
+      # Every worktree this run created: the orchestrator's own plus one per ticket.
+      while IFS= read -r path; do
+        [[ -n "$path" ]] || continue
+        assert_worktree_removal_safe "$path" || { echo "refusing to remove $path — see stderr above"; continue; }
+        git worktree remove "$path"
+      done < <(git worktree list --porcelain | awk -v pfx="${WORKTREES_BASE}/${ORCH_NAME}" '/^worktree /{p=$2} p==pfx || index(p, pfx"-")==1{print p; p=""}')
+      rm -rf "${ORCH_DIR}"
+      ```
+      `assert_worktree_removal_safe` refuses (fail-closed) when the caller's own cwd is at or under the target — which is exactly the orchestrator-worktree case above, so run this step from OUTSIDE any worktree being removed, or defer that one worktree's removal to a later invocation — and when `lsof` finds any live handle under the tree that isn't this session's own process ancestry. A skipped worktree is not an error; leave it for the next sweep.
    5. **Verify afterward**: re-run `bun "${CATALYST_DEV_SCRIPTS}/orch-monitor/catalyst-archive.ts" show "${ORCH_NAME}" --json` to confirm the orchestrator is still discoverable and `.archivePath` still points to a real directory.
 
 6. **Sync thoughts**: `humanlayer thoughts sync` to persist any shared documents.

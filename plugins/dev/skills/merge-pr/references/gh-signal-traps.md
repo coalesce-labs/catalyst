@@ -36,7 +36,7 @@ A THIRD trap sits inside that second one: you can't fix it by comparing the reac
 **Fix: scope to the specific automated reviewer, exclude an explicit rejection, and use a BASELINE of prior reaction ids — never a timestamp — to prove a reaction is new.** Three mechanical requirements this snippet has to get right: `gh api --jq` takes exactly one query string and has no `--arg`/`--argjson` of its own (those are `jq`'s flags, not `gh api`'s — pipe to a separate `jq` invocation instead); the baseline snapshot must be taken AFTER the push lands, not before, since a review of the still-in-flight OLD head can complete in the gap between an earlier snapshot and the push actually landing; and — because a bounded-poll wait can itself span a LATER push (a remediation or update-branch commit landing mid-wait) — the baseline must be re-captured (and review re-requested) every time `HEAD_SHA` changes, never taken once and reused for the rest of the wait.
 
 ```bash
-BOT_LOGIN="chatgpt-codex-connector"   # the automated reviewer configured for this repo
+BOT_LOGIN="chatgpt-codex-connector[bot]"   # the automated reviewer configured for this repo — the GitHub App suffix is part of the login, verify with: gh api repos/{owner}/{repo}/pulls/{n}/reviews --jq '[.[].user.login] | unique'
 
 snapshot_baseline() {
   # Call this immediately after any push this loop observes — including one that
@@ -74,7 +74,7 @@ else
 fi
 ```
 
-`BOT_REVIEW` stays SHA-scoped (`.commit_id == $sha`), which is exact — a review object really does carry the commit it reviewed. Reactions carry no such field, so id-membership-against-a-baseline-pinned-to-the-current-head is the closest available proxy for "posted after this push," and it degrades safely: worst case it treats a genuinely-new reaction that happens to collide with an old id (impossible — GitHub ids are unique and increasing) or ambiguously waits out the bounded-poll ceiling, never a false `REVIEWED`.
+`BOT_REVIEW` stays SHA-scoped (`.commit_id == $sha`), which is exact — a review object really does carry the commit it reviewed. **`NEW_REACTION` cannot reach that same guarantee, and this is a known, honest limitation rather than a solved problem**: a reaction carries no commit or request id at all, so if a review of the OLD head is still in flight when the new push lands and rebaselines, that reaction can arrive AFTER the rebaseline and be misread as evidence for the new head — id-membership only proves "posted after the rebaseline," not "reviewed this exact commit." Treat `BOT_REVIEW` as the authoritative signal and `NEW_REACTION` as a corroborating, best-effort one: the id-baseline still closes the much larger window this trap opened with (an old reaction from before the push at all), it just can't close the narrow one where a stale review request is still actively running across the rebaseline. If a caller needs a stronger guarantee than that, don't treat a reaction as sufficient on its own — wait for a SHA-scoped `BOT_REVIEW`, or confirm no review is left outstanding for a prior head before trusting a reaction.
 
 See `merge-pr`'s review-thread sweep for the fuller version of this check against `reviewThreads`/`isResolved` once a review-shaped signal has actually landed.
 
