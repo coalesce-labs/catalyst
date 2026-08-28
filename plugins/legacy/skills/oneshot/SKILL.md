@@ -813,8 +813,7 @@ while [ "$PR_DONE" = "false" ]; do
     # COMMS_LAST_READ atomically) and a no-op when nothing arrived.
     comms_check
   elif [ "$USE_REST" != "true" ]; then
-    # Fallback: two-phase event wait (wait-for-github was removed with the daemon, CTL-2240; the
-    # pattern is inlined here).
+    # Fallback: two-phase event wait (wait-for-github was removed with the daemon, CTL-2240; the pattern is inlined here).
     # Filter field reference: [[event-schema]] — note check_suite/workflow_run use
     # detail.prNumbers, not scope.pr. PR/review events DO populate scope.pr.
     EVENT=$(catalyst-events wait-for \
