@@ -445,9 +445,7 @@ that stalled or crashed before completing their own merge.
 
 **When worker reaches terminal state** (done or failed):
 
-**Mandatory `attention` on block** (per the Worker comms discipline below; the `catalyst-comms` skill was removed with the daemon, CTL-2240): in addition to
-the failure path below, the worker MUST also `comms_post attention "<reason>"` when it hits any of
-the following mid-flight, even if it is not yet writing `status: "failed"`:
+**Mandatory `attention` on block** (per the Worker comms discipline below; the `catalyst-comms` skill was removed with the daemon, CTL-2240): in addition to the failure path below, the worker MUST also `comms_post attention "<reason>"` when it hits any of the following mid-flight, even if it is not yet writing `status: "failed"`:
 
 - scope conflict with a sibling worker
 - missing required access (CLI / credential / API)
@@ -723,16 +721,7 @@ EXISTING_PR=$(gh pr list --head "$(git branch --show-current)" --json number --j
 
 **Step 2: Active PR Listen Loop — Wait for CLEAN then Merge (replaces auto-merge)**
 
-After the PR is created, enter an event-driven listen loop. The preferred wake mechanism (CTL-269)
-is a single `filter.register` covering CI, comms inbound, reviews, BEHIND, and Linear ticket changes
-— the worker then waits on `filter.wake.${CATALYST_SESSION_ID}` and the Groq-backed filter daemon
-decides which raw events match. When the daemon is not running, the loop falls back to the
-two-phase pattern with per-concern jq filters, implemented inline below (the wait-for-github and
-catalyst-filter skills that documented these were removed with the daemon, CTL-2240).
-The worker actively resolves blockers (CI failures, bot review threads,
-BEHIND) inline and proceeds to Step 3 only when the PR is CLEAN (CI green + reviews satisfied). On
-unrecoverable blockers (human changes-requested, persistent DIRTY) the worker writes
-`status: "stalled"` and exits; the orchestrator's Phase 4 is a safety-net fallback.
+After the PR is created, enter an event-driven listen loop. The preferred wake mechanism (CTL-269) is a single `filter.register` covering CI, comms inbound, reviews, BEHIND, and Linear ticket changes — the worker then waits on `filter.wake.${CATALYST_SESSION_ID}` and the Groq-backed filter daemon decides which raw events match. When the daemon is not running, the loop falls back to the two-phase pattern with per-concern jq filters, implemented inline below (the wait-for-github and catalyst-filter skills that documented these were removed with the daemon, CTL-2240). The worker actively resolves blockers (CI failures, bot review threads, BEHIND) inline and proceeds to Step 3 only when the PR is CLEAN (CI green + reviews satisfied). On unrecoverable blockers (human changes-requested, persistent DIRTY) the worker writes `status: "stalled"` and exits; the orchestrator's Phase 4 is a safety-net fallback.
 
 **Wake narration (MANDATORY, CTL-369).** Every iteration of the listen loop — both on a `wait-for`
 return AND on each `mergeable_state` re-check — must produce a single short line of assistant text
@@ -747,11 +736,7 @@ wake: <event.name> — already addressed, no-op
 wake: rest-poll — broker down, polling gh api
 ```
 
-Surface `.body.payload.interest_id` and `.body.payload.reason` from the wake envelope when present
-(broker wakes carry both); for hand-rolled two-phase filter wakes, surface the matched `event.name`
-and `#${PR_NUMBER}` instead. The monitor-events skill that carried the full narration rule and the
-good-vs-bad transcript fixture was removed with the daemon (CTL-2240); the rule above is the
-operative statement.
+Surface `.body.payload.interest_id` and `.body.payload.reason` from the wake envelope when present (broker wakes carry both); for hand-rolled two-phase filter wakes, surface the matched `event.name` and `#${PR_NUMBER}` instead. The monitor-events skill that carried the full narration rule and the good-vs-bad transcript fixture was removed with the daemon (CTL-2240); the rule above is the operative statement.
 
 ```bash
 REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
@@ -1418,20 +1403,8 @@ error, context exhaustion):
   Step 3. The orchestrator's Phase 4 handles this only for workers that stalled before completing
 - **Worker exits cleanly after writing `status: "done"`** — this is the expected success path. The
   orchestrator distinguishes this from stalls (no PR, no progress for 15+ minutes)
-- **Worker comms discipline** — when posting to the shared comms channel, follow the rules in
-  the `catalyst-comms` CLI's posting discipline (`plugins/dev/scripts/catalyst-comms`; the skill documenting it was removed with the daemon, CTL-2240): `info` is the default heartbeat (phase transitions only,
-  ~5–7 per session), `attention` is reserved for orchestrator action (0–2 per session, MANDATORY on
-  the escalation triggers listed there — scope conflict, missing access, ambiguous spec, 3+ repeated
-  CI failures, `status="stalled"`), `done` fires once at terminal success via the `done` subcommand.
-  The existing `comms_post` helper in this skill already routes correctly — these rules govern
-  _when_ you call it.
-- **Worker inbound reads (CTL-249)** — `comms_check` is called after each phase transition via the
-  signal-file update block. It polls for messages directed to `$TICKET_ID` (skipping pre-worker
-  history via `$COMMS_LAST_READ`), logs all inbound messages, and exits on `abort`.
-  `catalyst-comms send` already emits `comms.message.posted` events to the global event log
-  (CTL-210), so Option B event emission is complete — extending `catalyst-events wait-for` to
-  include `comms.message` filters is tracked in CTL-247 (the wait-for-github skill that carried it
-  was removed with the daemon, CTL-2240).
+- **Worker comms discipline** — when posting to the shared comms channel, follow the rules in the `catalyst-comms` CLI's posting discipline (`plugins/dev/scripts/catalyst-comms`; the skill documenting it was removed with the daemon, CTL-2240): `info` is the default heartbeat (phase transitions only, ~5–7 per session), `attention` is reserved for orchestrator action (0–2 per session, MANDATORY on the escalation triggers listed there — scope conflict, missing access, ambiguous spec, 3+ repeated CI failures, `status="stalled"`), `done` fires once at terminal success via the `done` subcommand. The existing `comms_post` helper in this skill already routes correctly — these rules govern _when_ you call it.
+- **Worker inbound reads (CTL-249)** — `comms_check` is called after each phase transition via the signal-file update block. It polls for messages directed to `$TICKET_ID` (skipping pre-worker history via `$COMMS_LAST_READ`), logs all inbound messages, and exits on `abort`. `catalyst-comms send` already emits `comms.message.posted` events to the global event log (CTL-210), so Option B event emission is complete — extending `catalyst-events wait-for` to include `comms.message` filters is tracked in CTL-247 (the wait-for-github skill that carried it was removed with the daemon, CTL-2240).
 
 **IMPORTANT: Document Storage Rules**
 

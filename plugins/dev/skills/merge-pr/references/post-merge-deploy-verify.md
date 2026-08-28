@@ -63,13 +63,7 @@ verify_post_merge_deploy() {
 }
 ```
 
-Sentinels follow `bounded-poll.md`'s convention exactly: a distinct value per outcome, never a bare
-success-looking string, and the ceiling-hit case (`DEPLOY_PENDING`) is a documented terminal
-answer for this phase, not silently retried. This is the bounded-poll pattern with
-the predicate swapped for a commit-status read — see
-[bounded-poll.md](bounded-poll.md) for
-the mechanism this reuses (interval/ceiling table, the `ERROR` vs `PENDING` distinction) rather than
-re-deriving it here.
+Sentinels follow `bounded-poll.md`'s convention exactly: a distinct value per outcome, never a bare success-looking string, and the ceiling-hit case (`DEPLOY_PENDING`) is a documented terminal answer for this phase, not silently retried. This is the bounded-poll pattern with the predicate swapped for a commit-status read — see [bounded-poll.md](bounded-poll.md) for the mechanism this reuses (interval/ceiling table, the `ERROR` vs `PENDING` distinction) rather than re-deriving it here.
 
 ## Why the Statuses API, not check-runs
 

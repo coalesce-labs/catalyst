@@ -1027,13 +1027,7 @@ cursor and routes each match through `orchestrate-phase-advance` (for `complete`
 # regardless. The helper exits 1 only when state.json.race is missing.
 ```
 
-**Phase 4 is event-driven, not poll-driven (CTL-210, CTL-243).** The orchestrator subscribes to the
-unified event log via `catalyst-events tail` (wrapped in the `Monitor` tool) and wakes on every
-relevant GitHub / Linear / orchestrator-lifecycle event. A 10-minute idle timer is the **safety-net
-fallback** for daemon-down or missed-event scenarios — never the primary mechanism. Do NOT self-pace
-with sleeps or "wake in N minutes" framing — that defeats the event-driven contract and burns
-context to no purpose. The monitor-events skill that documented the full pattern was removed with
-the daemon (CTL-2240); the pattern is inlined below.
+**Phase 4 is event-driven, not poll-driven (CTL-210, CTL-243).** The orchestrator subscribes to the unified event log via `catalyst-events tail` (wrapped in the `Monitor` tool) and wakes on every relevant GitHub / Linear / orchestrator-lifecycle event. A 10-minute idle timer is the **safety-net fallback** for daemon-down or missed-event scenarios — never the primary mechanism. Do NOT self-pace with sleeps or "wake in N minutes" framing — that defeats the event-driven contract and burns context to no purpose. The monitor-events skill that documented the full pattern was removed with the daemon (CTL-2240); the pattern is inlined below.
 
 **Launch the Monitor before entering the reactive scan.** Wrap this command with the `Monitor` tool
 — each emitted line is a wake-up.
@@ -1162,8 +1156,7 @@ Surface the matched interest when wake came from the broker (`filter.wake.${ORCH
 and a one-clause restatement of `.body.payload.reason`. For broad-form `catalyst-events tail` wakes,
 surface the raw `event.name` and the PR/ticket scope instead.
 
-The monitor-events skill that carried the full narration rule and the good-vs-bad transcript
-fixture was removed with the daemon (CTL-2240); the rule above is the operative statement.
+The monitor-events skill that carried the full narration rule and the good-vs-bad transcript fixture was removed with the daemon (CTL-2240); the rule above is the operative statement.
 
 **Wake-up classification.** When a line arrives on the Monitor, classify it before re-entering the
 scan so the response stays proportional. Every reaction reads authoritative state from `gh pr view`,
@@ -2151,36 +2144,22 @@ When all waves are complete:
    fi
    ```
 
-5. **Clean up all worktrees** (including orchestrator worktree, unless user wants to keep it). The
-   `teardown` skill that wrapped this step was removed with the daemon (CTL-2240); perform the
-   archive-gated deletion directly, preserving its safety gates rather than just its archive check:
+5. **Clean up all worktrees** (including orchestrator worktree, unless user wants to keep it). The `teardown` skill that wrapped this step was removed with the daemon (CTL-2240); perform the archive-gated deletion directly, preserving its safety gates rather than just its archive check:
 
-   1. Confirm step 2's sweep succeeded:
+   1. Confirm step 2's sweep actually archived THIS orchestrator — `list` has no `--orch` filter (it dumps every archived entry), so query the one entry by id instead:
       ```bash
-      bun "${CATALYST_DEV_SCRIPTS}/orch-monitor/catalyst-archive.ts" list --orch "${ORCH_NAME}" --json
+      bun "${CATALYST_DEV_SCRIPTS}/orch-monitor/catalyst-archive.ts" show "${ORCH_NAME}" --json
       ```
-      shows the run with a real `archive_path`. Do not proceed past this point without it.
-   2. Confirm no worker signal file under `${ORCH_DIR}/workers/*.json` has `status: "in_progress"`
-      or an `alive` PID. If any do, stop the remaining background jobs first (`claude stop`, never
-      `claude rm` — phase agents for one ticket share a worktree, so `rm` can delete a live
-      sibling's worktree):
+      and check that its `.archivePath` field is a real, existing directory. Do not proceed past this point without it.
+   2. Confirm no phase worker is still live. Signals are nested per ticket at `${ORCH_DIR}/workers/<ticket>/phase-*.json`, not flat `workers/*.json`, and the live marker is `status: "running"` (not `in_progress`/`alive`). Reap first, then check the summary rather than trusting the exit code — `reap` always exits 0 even when it left a job running:
       ```bash
-      "${CATALYST_DEV_SCRIPTS}/phase-agent-watch-bg" reap --orch-dir "${ORCH_DIR}" --scope all
+      SUMMARY=$("${CATALYST_DEV_SCRIPTS}/phase-agent-watch-bg" reap --orch-dir "${ORCH_DIR}" --scope all --json)
+      echo "$SUMMARY" | jq -e '.skipped == 0' >/dev/null || { echo "live job(s) skipped, see $SUMMARY — do not delete"; exit 1; }
       ```
-   3. **Salvage before removing** each worktree (CTL-1639) so a mistaken removal is recoverable:
-      ```bash
-      source "${CATALYST_DEV_SCRIPTS}/lib/worktree-salvage.sh"
-      salvage_worktree "<worktree-path>" "<ticket>" --site interactive-teardown
-      ```
-      This snapshots unpushed commits, uncommitted diff, and untracked files to
-      `~/catalyst/salvage/`. It is best-effort/fail-open and never blocks the removal.
+      A nonzero `.skipped` means `executor_reap` found a job actively computing (`skipped-active`, above the CPU ceiling) and deliberately left it running — treat that as a hard blocker, not a warning, and re-run after it finishes rather than forcing the delete.
+   3. **Salvage before removing** each worktree (CTL-1639) so a mistaken removal is recoverable: `source "${CATALYST_DEV_SCRIPTS}/lib/worktree-salvage.sh"` then `salvage_worktree "<worktree-path>" "<ticket>" --site interactive-teardown` for each. This snapshots unpushed commits, uncommitted diff, and untracked files to `~/catalyst/salvage/`. It is best-effort/fail-open and never blocks the removal.
    4. `git worktree remove <path>` for each worktree, then `rm -rf "${ORCH_DIR}"`.
-   5. **Verify afterward**: re-run
-      ```bash
-      bun "${CATALYST_DEV_SCRIPTS}/orch-monitor/catalyst-archive.ts" list --orch "${ORCH_NAME}" --json
-      ```
-      to confirm the orchestrator is still discoverable and `archive_path` still points to a real
-      directory.
+   5. **Verify afterward**: re-run `bun "${CATALYST_DEV_SCRIPTS}/orch-monitor/catalyst-archive.ts" show "${ORCH_NAME}" --json` to confirm the orchestrator is still discoverable and `.archivePath` still points to a real directory.
 
 6. **Sync thoughts**: `humanlayer thoughts sync` to persist any shared documents.
 

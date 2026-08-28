@@ -176,7 +176,6 @@ This is a normal `/oneshot`-style workflow — full research → plan → implem
   tests missed something.
 - Do NOT omit the `followUpTo` link from your signal file or PR description — traceability is
   the whole point of this pattern.
-- Do NOT run `gh pr view --json` in a loop — a tight loop burns GitHub's 5,000/hr GraphQL rate
-  limit in minutes. Use [[merge-pr]]'s bounded-poll pattern for any intermediate GitHub event waits.
+- Do NOT run `gh pr view --json` in a loop — a tight loop burns GitHub's 5,000/hr GraphQL rate limit in minutes. Use [[merge-pr]]'s bounded-poll pattern for any intermediate GitHub event waits.
 - Do NOT use `gh pr merge --auto` — the worker owns the merge directly after the listen loop
   confirms CLEAN. Write `status=done` with `pr.mergedAt` after the merge succeeds.
