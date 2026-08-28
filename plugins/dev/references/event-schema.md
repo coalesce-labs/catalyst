@@ -127,7 +127,7 @@ This shape is intentionally close to OTel `LogRecord` — it is _projectable_ to
 | `catalyst.session`      | Bash (`catalyst-session.sh`)                                                                               |
 | `catalyst.orchestrator` | Bash (`catalyst-state.sh`, `emit-worker-status-change.sh`)                                                 |
 | `catalyst.comms`        | Bash (`catalyst-comms`)                                                                                    |
-| `catalyst.broker`       | Bash/daemon (`broker/index.mjs`) — see [[broker]]. Supersedes legacy `catalyst.filter` producer (CTL-303). |
+| `catalyst.broker`       | Bash/daemon (`plugins/dev/scripts/broker/index.mjs` — the skill that documented it was removed with the daemon, CTL-2240). Supersedes legacy `catalyst.filter` producer (CTL-303). |
 
 `resource."catalyst.node.class"` (CTL-1368) is the node's ROLE — one of `developer`, `worker`, or
 `monitor` — orthogonal to `host.name`/`host.id` (WHICH machine). It is stamped last in the resource

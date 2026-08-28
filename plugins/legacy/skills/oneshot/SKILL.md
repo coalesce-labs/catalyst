@@ -445,7 +445,7 @@ that stalled or crashed before completing their own merge.
 
 **When worker reaches terminal state** (done or failed):
 
-**Mandatory `attention` on block** (per [[catalyst-comms]] § Posting Discipline §3): in addition to
+**Mandatory `attention` on block** (per the Worker comms discipline below; the `catalyst-comms` skill was removed with the daemon, CTL-2240): in addition to
 the failure path below, the worker MUST also `comms_post attention "<reason>"` when it hits any of
 the following mid-flight, even if it is not yet writing `status: "failed"`:
 
@@ -1419,7 +1419,7 @@ error, context exhaustion):
 - **Worker exits cleanly after writing `status: "done"`** — this is the expected success path. The
   orchestrator distinguishes this from stalls (no PR, no progress for 15+ minutes)
 - **Worker comms discipline** — when posting to the shared comms channel, follow the rules in
-  [[catalyst-comms]] § Posting Discipline: `info` is the default heartbeat (phase transitions only,
+  the `catalyst-comms` CLI's posting discipline (`plugins/dev/scripts/catalyst-comms`; the skill documenting it was removed with the daemon, CTL-2240): `info` is the default heartbeat (phase transitions only,
   ~5–7 per session), `attention` is reserved for orchestrator action (0–2 per session, MANDATORY on
   the escalation triggers listed there — scope conflict, missing access, ambiguous spec, 3+ repeated
   CI failures, `status="stalled"`), `done` fires once at terminal success via the `done` subcommand.
