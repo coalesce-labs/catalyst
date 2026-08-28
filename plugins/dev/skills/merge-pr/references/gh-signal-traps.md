@@ -29,32 +29,42 @@ The same trap applies to the PR-level rollup (`gh api repos/{o}/{r}/commits/{sha
 
 The automated PR reviewer (Codex, claude-code-review) signals "no issues found" by leaving a 👍 **reaction** on the PR, or posting a terse issue comment such as "No major issues" — **instead of** opening a review with `state: APPROVED` or `COMMENTED`. A wait that only watches `GET /pulls/{n}/reviews` never sees this and will sit polling for a review object that is never coming.
 
-Two more ways a naive check over-counts: (1) counting *any* review object, from *any* reviewer, in *any* state — including `CHANGES_REQUESTED` from a human — as "reviewed"; and (2) counting *any* prior 👍 reaction on the PR at all, even one left on an earlier commit before the current push, as if it certified the code sitting there right now. Reactions are PR-level, not commit-scoped, so an old clean pass does not disappear when new commits land — you have to check its timestamp against the latest push yourself.
+Two more ways a naive check over-counts: (1) counting *any* review object, from *any* reviewer, in *any* state — including `CHANGES_REQUESTED` from a human — as "reviewed"; and (2) counting *any* prior 👍 reaction on the PR at all, even one left on an earlier commit before the current push, as if it certified the code sitting there right now. Reactions are PR-level, not commit-scoped, so an old clean pass does not disappear when new commits land.
 
-**Fix: scope to the specific automated reviewer, exclude an explicit rejection, and require the signal be current.**
+A THIRD trap sits inside that second one: you can't fix it by comparing the reaction's `created_at` against the pushed commit's `.commit.committer.date` — the committer date is client-set at commit-creation time, not server-set at push time, so stacked or rebased commits routinely carry a committer date that PREDATES a reaction that already reviewed an earlier head. A stale reaction then reads as newer than the push it never saw, and the check reports `REVIEWED` on unreviewed code.
+
+**Fix: scope to the specific automated reviewer, exclude an explicit rejection, and use a BASELINE of prior reaction ids — never a timestamp — to prove a reaction is new.**
 
 ```bash
 BOT_LOGIN="chatgpt-codex-connector"   # the automated reviewer configured for this repo
-HEAD_SHA=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.head.sha')
-HEAD_PUSHED_AT=$(gh api "repos/${REPO}/commits/${HEAD_SHA}" --jq '.commit.committer.date')
 
-# A review from the bot ON THE CURRENT HEAD COMMIT that isn't a rejection.
+# 1. BEFORE pushing / requesting review: snapshot every reaction id that already exists.
+BASELINE_IDS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/reactions" \
+  -H "Accept: application/vnd.github.squirrel-girl-preview+json" --jq \
+  --arg bot "$BOT_LOGIN" '[.[] | select(.content == "+1" and .user.login == $bot) | .id]')
+
+# 2. Push, then request review explicitly (never assume an old reaction still applies):
+#    gh pr comment "$PR_NUMBER" --body "@codex review"
+
+# 3. On each bounded-poll tick, check for a review OR a reaction id NOT in the baseline set —
+#    id membership is server-assigned and monotonic, so it can't be fooled by commit-authoring skew.
+HEAD_SHA=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.head.sha')
 BOT_REVIEW=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" --jq \
   --arg sha "$HEAD_SHA" --arg bot "$BOT_LOGIN" \
   '[.[] | select(.user.login == $bot and .commit_id == $sha and .state != "CHANGES_REQUESTED")] | length')
-
-# The bot's own reaction, posted no earlier than the current head commit.
-BOT_REACTION=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/reactions" \
+NEW_REACTION=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/reactions" \
   -H "Accept: application/vnd.github.squirrel-girl-preview+json" --jq \
-  --arg bot "$BOT_LOGIN" --arg since "$HEAD_PUSHED_AT" \
-  '[.[] | select(.content == "+1" and .user.login == $bot and .created_at >= $since)] | length')
+  --argjson baseline "$BASELINE_IDS" --arg bot "$BOT_LOGIN" \
+  '[.[] | select(.content == "+1" and .user.login == $bot and ([.id] | inside($baseline) | not))] | length')
 
-if [ "$BOT_REVIEW" -gt 0 ] || [ "$BOT_REACTION" -gt 0 ]; then
+if [ "$BOT_REVIEW" -gt 0 ] || [ "$NEW_REACTION" -gt 0 ]; then
   echo "REVIEWED"
 else
   echo "PENDING"
 fi
 ```
+
+`BOT_REVIEW` stays SHA-scoped (`.commit_id == $sha`), which is exact — a review object really does carry the commit it reviewed. Reactions carry no such field, so id-membership-against-a-pre-push-baseline is the closest available proxy for "posted after this push," and it degrades safely: worst case it treats a genuinely-new reaction that happens to collide with an old id (impossible — GitHub ids are unique and increasing) or ambiguously waits out the bounded-poll ceiling, never a false `REVIEWED`.
 
 See `merge-pr`'s review-thread sweep for the fuller version of this check against `reviewThreads`/`isResolved` once a review-shaped signal has actually landed.
 
