@@ -34,7 +34,7 @@ version: 1.0.0
 | `modifies-workspace` | boolean | `false` | Claude-only | Marks a skill that writes to the working tree, for tooling that needs to know before invoking it |
 | `version` | string | — | Claude-only | Decorative per-file metadata — see the note below. Not required; most skills omit it |
 
-`version` is deliberately Claude-only rather than a portable field: a plugin's real version is owned exclusively by `plugin.json` via release-please (see `docs/releases.md`), so a per-`SKILL.md` `version:` is decorative metadata about that one file, not a second, competing version source. The packaging pipeline classifies it the same way it classifies `model`/`color` on agents below — a cosmetic field the loss report drops without treating it as a defect.
+`version` is deliberately Claude-only rather than a portable field: a plugin's real version lives exclusively in `plugin.json`, bumped by hand in the same PR as any version-worthy change now that release-please has been removed (see `docs/releases.md` → "Versioning (post release-please)"), so a per-`SKILL.md` `version:` is decorative metadata about that one file, not a second, competing version source. The packaging pipeline classifies it the same way it classifies `model`/`color` on agents below — a cosmetic field the loss report drops without treating it as a defect.
 
 ### Do NOT Include (skills)
 

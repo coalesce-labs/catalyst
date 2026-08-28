@@ -65,7 +65,7 @@ This is `core/safety-gate.mjs`'s `checkInvocationParity`, generalized from a pro
 
 **Adding a portability sidecar to a `catalyst-dev` skill will not make it appear in `catalyst-skills`.** This is the confusion this section exists to preempt: a green `render` build with a correctly-authored sidecar and zero errors can still emit nothing for that skill, because the veto operates one level above the skill. The only way out is removing `catalyst-dev`'s pack-level hooks entirely, which is a safety decision for the plugin as a whole, not a per-skill authoring choice.
 
-The measured result today: of 103 skills across 9 plugins, exactly **2** reach the portable pack — `catalyst-foundry/setup-catalyst` and `catalyst-meta/validate-frontmatter`, the only two skills that are simultaneously (a) in a hook-free pack and (b) carrying a valid `catalog`-exposed sidecar. Run `bun scripts/packaging/cli.mjs render --dry-run --target agentsSkills` to see the current census and loss counts for yourself rather than trusting this document as the census ages.
+The measured result today: exactly **2** skills reach the portable pack — `catalyst-foundry/setup-catalyst` and `catalyst-meta/validate-frontmatter`, the only two skills that are simultaneously (a) in a hook-free pack and (b) carrying a valid `catalog`-exposed sidecar. The total skill and plugin counts are deliberately omitted here — they drift with every skill or plugin added or removed, which is exactly what made an earlier version of this sentence stale the day it was written. Run `bun scripts/packaging/cli.mjs render --dry-run --target agentsSkills` to see the current census and loss counts for yourself rather than trusting a number embedded in this document.
 
 ## Practical steps to make a skill portable
 

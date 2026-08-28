@@ -149,3 +149,29 @@ describe("docs/frontmatter-standard.md agrees with providers/local.mjs's registr
     expect(setEquals(extracted.agents.claudeOnly, AGENT_CLAUDE_ONLY_KEYS)).toBe(true);
   });
 });
+
+// CTL-2215 PR #4060 review round 1 (Codex, 2026-08-27): the doc's `version`
+// field explanation claimed plugin.json's real version is "owned exclusively
+// by plugin.json via release-please" — but release-please was removed by
+// CTL-2220 in the parent commit, so that ownership claim was already false
+// when this doc was written. Versions are bumped by hand now (docs/releases.md
+// → "Versioning (post release-please)"), no automated replacement exists, and
+// a contributor trusting the old claim would leave a plugin's version
+// unbumped expecting automation that never runs. This guards against the
+// exact claim reappearing.
+describe("docs/frontmatter-standard.md does not claim release-please owns plugin.json versioning", () => {
+  const doc = readFileSync(DOC_PATH, "utf8");
+
+  test("the version-field explanation makes no release-please ownership claim", () => {
+    // The specific false claim this guards against: release-please was
+    // removed (CTL-2220), so plugin.json versions can no longer be "owned"
+    // or bumped "via release-please" — they are bumped by hand.
+    expect(doc).not.toMatch(/owned (exclusively )?by `?plugin\.json`? via release-please/i);
+    expect(doc).not.toMatch(/via release-please/i);
+  });
+
+  test("the version-field explanation reflects the current manual-bump mechanism", () => {
+    expect(doc).toMatch(/bumped by hand/i);
+    expect(doc).toMatch(/docs\/releases\.md/);
+  });
+});
