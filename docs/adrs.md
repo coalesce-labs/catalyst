@@ -48,7 +48,7 @@ Schema (`db-migrations/001_initial_schema.sql`): `sessions`, `session_events`, `
 
 ## ADR-009: Daily Release Cadence
 
-**Superseded (CTL-2220, 2026-08-26):** release-please and both workflows named below were removed at Ryan's direct request. No replacement versioning/changelog mechanism was specified — see `docs/releases.md` → "Versioning (post release-please)". Kept below as historical record of the design this repo ran with from adoption until removal.
+**Superseded (CTL-2220, 2026-08-26; release automation reinstated in part by CTL-2263, same day):** CTL-2220 removed release-please and both workflows named below at Ryan's direct request. CTL-2263 reinstated release-please itself (`release-please.yml`, scoped to the 5 plugins that survived the CTL-2218 cleanup) — see `docs/releases.md` → "Versioning". It did **not** reinstate the daily 05:00 UTC scheduled auto-merge this ADR is actually about: the release PR is merged like any other PR now, by a human or by the fleet, not by a scheduled job. This status stays Superseded, not Accepted — Accepted would claim the cadence itself came back, and it did not. Kept below as historical record of the design this repo ran with from adoption until CTL-2220's removal.
 
 Cut one release/day via scheduled merge at 05:00 UTC instead of auto-merging the release-please Release PR on every push to `main` — avoids per-merge point releases and mid-wave `update-branch` rebase cascades.
 

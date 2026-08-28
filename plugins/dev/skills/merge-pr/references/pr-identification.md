@@ -32,9 +32,12 @@ Extract: PR number, URL, title, mergeable status, base branch, head branch, revi
 ```bash
 state=$(gh pr view $pr_number --json state -q .state)
 mergeable=$(gh pr view $pr_number --json mergeable -q .mergeable)
+REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
 ```
 
-If PR is not OPEN → report current state and exit.
+If PR is not OPEN:
+- `state == "MERGED"` and `REPO == "coalesce-labs/catalyst-cloud"` → skip Steps 4–8 (rebase and local tests do not apply to an already-merged PR) and go directly to [queue-merge-catalyst-cloud.md](queue-merge-catalyst-cloud.md) Step 9, whose `already_merged` check resumes post-merge (Steps 9b–15: branch cleanup, Linear Done, deploy verify, compound close) even though this session never called `gh pr merge` — this is the re-dispatch case after Mergify merged a `queue:ready`-labeled PR (CTC-1219).
+- Any other non-OPEN state → report current state and exit.
 
 If `mergeable == "CONFLICTING"`:
 ```

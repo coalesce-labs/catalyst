@@ -21,25 +21,15 @@ review status, CI status, test result, ticket) and ask "Proceed? [Y/n]:".
 
 ## Step 9 — Execute squash merge
 
-```bash
-# CTL-56: capture head ref + head repo BEFORE merge so we can delete checkout-free after
-# a REST-confirmed merge.
-head_ref=$(gh api "repos/${REPO}/pulls/${pr_number}" --jq '.head.ref' 2>/dev/null || true)
-head_repo=$(gh api "repos/${REPO}/pulls/${pr_number}" --jq '.head.repo.full_name' 2>/dev/null || true)
-# Merge via REST only — no local branch-cleanup flag (CTL-56).
-gh pr merge $pr_number --squash
-# Codex P1 (CTL-2232, PR #4043): `gh pr merge` merges on GitHub's side and never touches this
-# local checkout, so `git rev-parse HEAD` here is whatever the worktree already had checked
-# out (typically the PR branch's own pre-merge tip in a linked worktree) — NOT the new squash
-# commit that landed on the base branch. Read the authoritative merge commit back via REST
-# instead; a merge can take a moment to report `merge_commit_sha`, so retry briefly.
-merge_sha=""
-for _ in 1 2 3 4 5; do
-  merge_sha=$(gh api "repos/${REPO}/pulls/${pr_number}" --jq '.merge_commit_sha // empty' 2>/dev/null || true)
-  [[ -n "$merge_sha" ]] && break
-  sleep 2
-done
-```
+Read and follow [queue-merge-catalyst-cloud.md](queue-merge-catalyst-cloud.md) for the full Step 9
+logic, including the CTC-1219 catalyst-cloud queue-merge default: an eligible catalyst-cloud PR
+(no `hold:hand-steps`, no schema/migration path) gets `queue:ready` applied and this session stops
+— no `gh pr merge` — because Mergify owns that merge and "merged by mergify[bot]" is the terminal
+signal a coordinator/steward watches for. Hand-step PRs and every other repo hand-merge unchanged.
+The logic is re-entrant: revisiting an already-mergify-merged PR skips straight to the REST-confirm
+retry below, so Step 9b onward (cleanup, Linear Done, deploy verify, compound close) still runs.
+
+By the end of that step, `head_ref`, `head_repo`, and `merge_sha` are set exactly as before.
 
 ## Step 9b — Delete remote head ref (checkout-free)
 

@@ -5,7 +5,9 @@
 // exclusively via plugin.json's `extra-files` jsonpath (see docs/releases.md's
 // "Version Source of Truth" table); a `version` key here would be a third
 // source of truth and would reproduce exactly the drift
-// `validate-release-config.sh` Check 7 exists to prevent for marketplace.json.
+// `check-plugin-manifest-parity.sh` exists to prevent for marketplace.json
+// (the real-tree successor to the deleted `validate-release-config.sh`'s
+// Checks 9-11, which covered the same invariant before CTL-2220).
 // So `version` is not merely unrecognized here — it gets its own named
 // rejection pointing at the real owner, because "unknown key" alone would read
 // as a typo rather than a deliberate design constraint.

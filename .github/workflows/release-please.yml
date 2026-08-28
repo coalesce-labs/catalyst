@@ -1,0 +1,30 @@
+name: Release Please
+
+# CTL-2263 — reinstated after CTL-2220 removed it. This file is
+# deliberately narrower than the pre-removal version: it does NOT restore
+# the second job that ran an AI release-notes enhancer against
+# ANTHROPIC_API_KEY, the daily 05:00 UTC auto-merge cadence for the release
+# PR (ADR-009 marked that design Superseded), or a scheduled release-health
+# issue filer. Each is a separable feature; none is required for
+# conventional commits on main to cut releases. See docs/releases.md and
+# thoughts/shared/plans/2026-08-26-CTL-2263-reinstate-release-please.md for
+# the reasoning.
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v5
+        id: release
+        with:
+          token: ${{ secrets.RELEASE_TOKEN }}
