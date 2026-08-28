@@ -1,6 +1,6 @@
 # Catalyst Dev Plugin
 
-Complete development workflow: research → plan → implement → validate → ship. 19 skills and 9
+Complete development workflow: research → plan → implement → validate → ship. 18 skills and 9
 research agents covering the full Level 1 (single-skill) and Level 2 (guided-workflow) stack.
 Phase-agent / execution-core pipeline for Level 3 multi-ticket orchestration.
 
@@ -21,7 +21,7 @@ See the [Skills Reference](https://catalyst.coalescelabs.ai/reference/skills/) a
 [Agents Reference](https://catalyst.coalescelabs.ai/reference/agents/) for detailed per-skill
 documentation. The list below is the current inventory only.
 
-## Skills (19)
+## Skills (18)
 
 ### Research & Planning
 
@@ -32,7 +32,6 @@ documentation. The list below is the current inventory only.
 
 - `/catalyst-dev:implement-plan` — Execute plans phase by phase using TDD (supports `--team`)
 - `/catalyst-dev:validate-plan` — Verify implementation against plan success criteria
-- `/catalyst-dev:code-first-draft` — Initial feature implementation from a PRD
 - `/catalyst-dev:fix-typescript` — Fix TypeScript errors with strict anti-reward-hacking rules
 - `/catalyst-dev:scan-reward-hacking` — Scan for forbidden patterns (`as any`, `@ts-ignore`, etc.)
 - `/catalyst-dev:validate-type-safety` — 5-step type safety gate (typecheck + scan + tests + lint)
@@ -56,11 +55,6 @@ documentation. The list below is the current inventory only.
 - `/catalyst-dev:linear` — Linear ticket operations (user-invocable)
 - `/catalyst-dev:linearis` — Linearis CLI reference (activates on ticket IDs)
 - `/catalyst-dev:agent-browser` — Browser automation CLI reference
-
-### CI / Automation (non-interactive)
-
-- `/catalyst-dev:ci-commit` — Non-interactive commit variant
-- `/catalyst-dev:ci-describe-pr` — Non-interactive PR description variant
 
 ## Agents (9)
 

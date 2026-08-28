@@ -41,7 +41,7 @@
 # Dir resolution must work under BOTH bash and zsh. The Catalyst Bash tool runs
 # zsh, where ${BASH_SOURCE[0]} is unset — so a BASH_SOURCE-only resolver
 # collapsed to the CWD and silently failed to source the sibling lib (CTL-633
-# phase-review finding #1). The producers (create-pr/describe-pr/ci-describe-pr)
+# phase-review finding #1). The producers (create-pr/describe-pr)
 # all source us via "${CLAUDE_PLUGIN_ROOT}/scripts/lib/linear-pr-skip.sh", so
 # CLAUDE_PLUGIN_ROOT is the reliable anchor in the real runtime; fall back to
 # BASH_SOURCE for `bash linear-pr-skip.sh` direct exec and bash sourcers.
@@ -170,7 +170,7 @@ linear_sibling_skip_block_from_body() {
 # Back-compat alias — defaults to branch mode (the original primary use case).
 # Any existing caller (e.g. third-party scripts that sourced the helper before
 # CTL-633's split) keeps its current semantics for branch-shaped inputs. The
-# producers (create-pr, describe-pr, ci-describe-pr) call the mode-specific
+# producers (create-pr, describe-pr) call the mode-specific
 # wrappers explicitly so body-mode inputs go through canonical-only extraction.
 linear_sibling_skip_block() {
 	linear_sibling_skip_block_from_branch "$@"

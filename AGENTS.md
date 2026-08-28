@@ -106,10 +106,6 @@ This workspace tracks: agent definitions, skills, documentation, scripts, config
 
 **Do NOT commit**: Specific ticket prefixes (keep "PROJ"), Linear team/project IDs (keep null), personal thoughts user (keep null).
 
-## CI/Automation
-
-CI skills (`ci-commit`, `ci-describe-pr`) follow the same conventions but skip all interactive prompts. They never commit sensitive files or add self-attribution.
-
 ## Configuration
 
 Two-layer config system:
