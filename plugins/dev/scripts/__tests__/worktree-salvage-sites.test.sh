@@ -2,7 +2,6 @@
 # Tests for the CTL-1639 salvage-before-destroy wiring at the three bash sites:
 #   1. phase-agent-dispatch  (L3 destroy+recreate)
 #   2. orphan-sweep.sh       (SAFE / SALVAGE_UNPUSHED / SALVAGE_DIRTY)
-#   3. phase-teardown/SKILL.md (worktree-removal block)
 #
 # These are DETERMINISTIC source-order invariants: each site must (a) source the
 # salvage lib and (b) place its `salvage_worktree` call BEFORE the destructive
@@ -21,7 +20,6 @@ REPO_ROOT="$(cd "${SCRIPTS_DIR}/../../.." && pwd)"
 
 DISPATCH="${SCRIPTS_DIR}/phase-agent-dispatch"
 SWEEP="${SCRIPTS_DIR}/orphan-sweep.sh"
-TEARDOWN="${REPO_ROOT}/plugins/dev/skills/phase-teardown/SKILL.md"
 
 FAILURES=0
 PASSES=0
@@ -115,17 +113,6 @@ assert_salvage_before "$SWEEP" \
   '\-\-site "orphan-sweep-dirty"' \
   'skip SALVAGE_DIRTY .snapshotted' \
   "orphan-sweep DIRTY"
-
-# ── Site 3: phase-teardown/SKILL.md ─────────────────────────────────────────
-echo "3. phase-teardown/SKILL.md"
-assert_sources_lib "$TEARDOWN" "phase-teardown"
-assert_salvage_before "$TEARDOWN" \
-  'salvage_worktree "\$WORKTREE_PATH" "\$TICKET"' \
-  'git worktree remove "\$WORKTREE_PATH"' \
-  "phase-teardown"
-if grep -qE '\-\-site "phase-teardown"' "$TEARDOWN"; then
-  pass "phase-teardown call carries --site phase-teardown"
-else fail "phase-teardown call missing --site phase-teardown"; fi
 
 echo
 echo "results: $PASSES passed, $FAILURES failed"

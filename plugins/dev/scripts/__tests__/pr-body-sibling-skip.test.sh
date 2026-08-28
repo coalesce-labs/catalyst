@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # CTL-623: contract + integration tests for wiring the linear-pr-skip guard into
-# the three PR-body producers (create-pr, describe-pr, ci-describe-pr).
+# the PR-body producers (create-pr, describe-pr).
 #
 #   1. Prose-contract tests (grep-based, mirroring
 #      phase-skill-no-linear-prose.test.sh): each SKILL.md must reference the
@@ -32,8 +32,8 @@ fail() {
 }
 
 # ─── 1. Prose-contract tests ───────────────────────────────────────────────────
-echo "Test: all three PR-body producers reference the helper + carry the format rule"
-for skill in create-pr describe-pr ci-describe-pr; do
+echo "Test: both PR-body producers reference the helper + carry the format rule"
+for skill in create-pr describe-pr; do
 	f="${SKILLS_DIR}/${skill}/SKILL.md"
 	if [[ ! -f "$f" ]]; then
 		fail "${skill}/SKILL.md exists"
@@ -157,16 +157,14 @@ else
 fi
 
 # ─── Case III-int: producer SKILL.md files reference the new API ──────────────
-echo "Test: describe-pr and ci-describe-pr call both _from_branch and _from_body"
-for skill in describe-pr ci-describe-pr; do
-	f="${SKILLS_DIR}/${skill}/SKILL.md"
-	if grep -q 'linear_sibling_skip_block_from_branch' "$f" \
-			&& grep -q 'linear_sibling_skip_block_from_body' "$f"; then
-		pass "${skill}: invokes both _from_branch and _from_body"
-	else
-		fail "${skill}: invokes both _from_branch and _from_body"
-	fi
-done
+echo "Test: describe-pr calls both _from_branch and _from_body"
+DP="${SKILLS_DIR}/describe-pr/SKILL.md"
+if grep -q 'linear_sibling_skip_block_from_branch' "$DP" \
+		&& grep -q 'linear_sibling_skip_block_from_body' "$DP"; then
+	pass "describe-pr: invokes both _from_branch and _from_body"
+else
+	fail "describe-pr: invokes both _from_branch and _from_body"
+fi
 
 echo "Test: create-pr calls only _from_branch (transient initial body has no PR body to scan)"
 CP="${SKILLS_DIR}/create-pr/SKILL.md"

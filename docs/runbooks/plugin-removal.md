@@ -29,8 +29,7 @@ The facts below were true for CTL-2222 (2026-08-26) and may have moved by the ti
 infrastructure — scripts, schemas, docs — that *other, surviving* plugins' skills actually invoke,
 separate from the plugin's own `skills/` directory. CTL-2222 found this the hard way:
 `catalyst-pm/scripts/estimate/*.ts` (a corpus-scoring toolchain) was referenced by
-`plugins/dev/skills/compound-estimate/SKILL.md` and `plugins/dev/skills/phase-triage/SKILL.md` —
-two `catalyst-dev` skills with no other connection to `catalyst-pm`.
+`plugins/dev/skills/compound-estimate/SKILL.md` — a `catalyst-dev` skill with no other connection to `catalyst-pm`.
 
 Before deleting, run — same instrument as the reference sweep in §5 (absolute `/usr/bin/grep`,
 never bare `grep`, plus a positive control proving it actually scanned the files it claims to):

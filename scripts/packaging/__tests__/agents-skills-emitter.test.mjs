@@ -171,6 +171,12 @@ describe("planAgentsSkillsBundle", () => {
 // drift gate has something real to compare against for the flat bundle
 // target, the way claude-emitter.test.mjs already does for Claude.
 describe("agents-skills emitter — round-trip against the real committed .agents/skills/ tree", () => {
+  // Each test below independently calls renderAllPacks(repoRoot), the same
+  // full-real-tree render cli-render.test.mjs's timeout was sized for
+  // (CTL-2215 Phase 0) — identical exposure to bun's default 5000ms timeout
+  // under load, so it gets the same explicit headroom here.
+  const REAL_RENDER_TIMEOUT_MS = 20000;
+
   function realEligibleEntries() {
     const results = renderAllPacks(repoRoot);
     return results
@@ -178,38 +184,50 @@ describe("agents-skills emitter — round-trip against the real committed .agent
       .map((r) => ({ packId: r.packId, pack: r.pack }));
   }
 
-  test("at least one real skill is emitted into the bundle (positive control)", () => {
-    const { emittedFlatNames } = planAgentsSkillsBundle(realEligibleEntries());
-    expect(emittedFlatNames.length).toBeGreaterThan(0);
-  });
+  test(
+    "at least one real skill is emitted into the bundle (positive control)",
+    () => {
+      const { emittedFlatNames } = planAgentsSkillsBundle(realEligibleEntries());
+      expect(emittedFlatNames.length).toBeGreaterThan(0);
+    },
+    REAL_RENDER_TIMEOUT_MS,
+  );
 
-  test("every emitted file's content matches the real committed file byte-for-byte", () => {
-    const { files, emittedFlatNames } = planAgentsSkillsBundle(realEligibleEntries());
-    expect(emittedFlatNames.length).toBeGreaterThan(0);
-    for (const f of files) {
-      const committedPath = resolve(repoRoot, ".agents/skills", f.relPath);
-      const committed = readFileSync(committedPath);
-      const rendered = f.text !== undefined ? Buffer.from(f.text, "utf8") : Buffer.from(f.base64, "base64");
-      expect(rendered.equals(committed)).toBe(true);
-    }
-  });
+  test(
+    "every emitted file's content matches the real committed file byte-for-byte",
+    () => {
+      const { files, emittedFlatNames } = planAgentsSkillsBundle(realEligibleEntries());
+      expect(emittedFlatNames.length).toBeGreaterThan(0);
+      for (const f of files) {
+        const committedPath = resolve(repoRoot, ".agents/skills", f.relPath);
+        const committed = readFileSync(committedPath);
+        const rendered = f.text !== undefined ? Buffer.from(f.text, "utf8") : Buffer.from(f.base64, "base64");
+        expect(rendered.equals(committed)).toBe(true);
+      }
+    },
+    REAL_RENDER_TIMEOUT_MS,
+  );
 
-  test("mutation control: perturbing one real skill's body produces a NON-empty diff against its committed SKILL.md", () => {
-    const entries = realEligibleEntries();
-    const { emittedFlatNames } = planAgentsSkillsBundle(entries);
-    expect(emittedFlatNames.length).toBeGreaterThan(0);
-    const flatName = emittedFlatNames[0];
+  test(
+    "mutation control: perturbing one real skill's body produces a NON-empty diff against its committed SKILL.md",
+    () => {
+      const entries = realEligibleEntries();
+      const { emittedFlatNames } = planAgentsSkillsBundle(entries);
+      expect(emittedFlatNames.length).toBeGreaterThan(0);
+      const flatName = emittedFlatNames[0];
 
-    let skill;
-    for (const { packId, pack: p } of entries) {
-      const match = p.skills.find((s) => s.neutral !== null && flatSkillName(packId, s.id) === flatName);
-      if (match) skill = match;
-    }
-    expect(skill).toBeDefined();
+      let skill;
+      for (const { packId, pack: p } of entries) {
+        const match = p.skills.find((s) => s.neutral !== null && flatSkillName(packId, s.id) === flatName);
+        if (match) skill = match;
+      }
+      expect(skill).toBeDefined();
 
-    const committed = readFileSync(resolve(repoRoot, ".agents/skills", flatName, "SKILL.md"), "utf8");
-    const mutated = { ...skill, body: skill.body + "\nMUTATED\n" };
-    const rendered = buildSkillMd(mutated);
-    expect(rendered).not.toBe(committed);
-  });
+      const committed = readFileSync(resolve(repoRoot, ".agents/skills", flatName, "SKILL.md"), "utf8");
+      const mutated = { ...skill, body: skill.body + "\nMUTATED\n" };
+      const rendered = buildSkillMd(mutated);
+      expect(rendered).not.toBe(committed);
+    },
+    REAL_RENDER_TIMEOUT_MS,
+  );
 });

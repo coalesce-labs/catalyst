@@ -140,18 +140,10 @@ OUT4="$(CLAUDE_CODE_SESSION_ID="feedface-1111-2222-3333-444455556666" \
   bash "$FOOTER" --orch-dir "${C4}/orch" --ticket CTL-449 --phase implement 2>/dev/null)"
 assert_grep 'session uuid `feedface-1111-2222-3333-444455556666`' "$OUT4" "uuid taken from CLAUDE_CODE_SESSION_ID env"
 
-# ─── Test 5: every phase mirror skill wires the footer helper ─────────────────
-echo ""
-echo "Test 5: all 9 phase mirror skills reference phase-mirror-footer.sh"
-SKILLS_DIR="${REPO_ROOT}/plugins/dev/skills"
-for phase in research plan implement verify remediate review triage pr monitor-merge; do
-  skill="${SKILLS_DIR}/phase-${phase}/SKILL.md"
-  if [[ -f "$skill" ]] && grep -q 'phase-mirror-footer\.sh' "$skill"; then
-    pass "phase-${phase} wires the footer helper"
-  else
-    fail "phase-${phase} wires the footer helper — not found in $skill"
-  fi
-done
+# Test 5 (every phase mirror skill wires the footer helper) was removed in
+# CTL-2239 — its 9 phase-*/SKILL.md subjects were deleted along with the
+# execution-core phase-agent skill set (B2 of the CTL-2218 cleanup plan). The
+# footer helper's own behavior is still covered by Tests 1-4 and 6-9 below.
 
 # ─── Test 6: CTL-666 cost segment present when JSONL + pricing resolve ────────
 echo ""

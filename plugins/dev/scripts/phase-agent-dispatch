@@ -4,8 +4,12 @@
 # The orchestrator's Phase 4 monitor calls this when a phase boundary event
 # arrives. It handles the lifecycle envelope (signal file, model/turn-cap
 # resolution, prior-artifact gate) and spawns the actual phase agent in a
-# `claude --bg` job. The phase agent itself is a short SKILL.md wrapper around
-# the canonical skill it owns — see plugins/dev/skills/_phase-agent-template/SKILL.md.
+# `claude --bg` job. The phase agent itself was a short SKILL.md wrapper around
+# the canonical skill it owned. Those wrappers (_phase-agent-template and the
+# eleven phase-* skills) were REMOVED in CTL-2239 along with the daemon they
+# served, so the `/catalyst-dev:phase-*` prompts this script builds no longer
+# resolve. The dispatcher itself is retired with the rest of the legacy
+# orchestration path (CTL-2218 Phase C).
 #
 # Usage:
 #   phase-agent-dispatch \

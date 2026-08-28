@@ -52,10 +52,9 @@ This keeps your typical session lean while having powerful tools available when 
 **catalyst-dev** (Core - Always enabled)
 
 - 9 research agents (codebase + infrastructure)
-- 21 skills covering full dev lifecycle
+- 18 skills covering full dev lifecycle
 - Three-tier model strategy (Opus for planning/implementation, Sonnet for CI/automation, Haiku for data collection)
 - Linear integration via Linearis CLI
-- CI/automation commands for non-interactive workflows
 - Handoff system for context persistence
 - ~3.5k context (lightweight MCP: Context7)
 
@@ -154,15 +153,13 @@ Alternatively, install plugins manually via Claude Code plugin system:
 # Add the marketplace repository
 /plugin marketplace add coalesce-labs/catalyst
 
-# Install core workflow (required)
+# Install the core workflow (required)
 /plugin install catalyst-dev
-
-# Optional: Install PM ops plugin (cycle/backlog/cadence operations)
-/plugin install catalyst-pm-ops
-
-# Optional: Install meta plugin (frontmatter validation, reference auditing, reorganization)
-/plugin install catalyst-meta
 ```
+
+`catalyst-dev` is the only required plugin. Everything else in the marketplace is optional — install only what you need. The optional roster changes over time (plugins get added, retired, or moved), so rather than enumerate it here and risk it going stale, browse it directly via `.claude-plugin/marketplace.json` in this repo, or the documentation site's [Plugins reference](https://catalyst.coalescelabs.ai/reference/plugins/).
+
+**Just want a couple of skills, not the whole plugin?** Catalyst also publishes a small, hook-free portable subset — `coalesce-labs/catalyst-skills` — installable into any `skills`-CLI-compatible harness with no plugin or daemon required: [Claude Code](https://catalyst.coalescelabs.ai/getting-started/install-claude/), [Codex / OpenCode](https://catalyst.coalescelabs.ai/getting-started/install-codex/), or the [portable-pack overview](https://catalyst.coalescelabs.ai/getting-started/install-portable/) for what's in it and how pinning works.
 
 ### Session-Based MCP Management
 

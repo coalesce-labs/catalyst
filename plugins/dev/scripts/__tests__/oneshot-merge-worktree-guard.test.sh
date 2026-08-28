@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Static guard: oneshot/SKILL.md uses worktree-safe merge (CTL-56).
-# Mirrors phase-monitor-merge-guard.test.sh CTL-56 block against the legacy oneshot skill.
+# Mirrored the CTL-56 block of phase-monitor-merge-guard.test.sh (removed with the
+# phase-agent skills in CTL-2239) against the legacy oneshot skill; this is now the
+# sole surviving copy of that guard.
 # Run: bash plugins/dev/scripts/__tests__/oneshot-merge-worktree-guard.test.sh
 
 set -uo pipefail
