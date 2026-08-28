@@ -164,6 +164,23 @@ for pkg in $PACKAGES; do
       SCHEMA_MISMATCHES+=("$pkg: extra-files path $abs_path does not resolve to a file that exists")
     fi
   done
+
+  # Every OTHER configured extra-files entry (beyond the required plugin.json
+  # pair just checked above) must also resolve to a real file. The loop above
+  # only ever looks up the two required rel_paths by exact match, so a third
+  # entry pointing at a nonexistent target is invisible to it — release-please
+  # would still process that entry and fail at PR-generation time. Path only,
+  # not type/jsonpath: those two fields are a convention specific to the
+  # required plugin.json pair, not a general schema rule for extra-files.
+  while IFS= read -r entry; do
+    entry_path=$(jq -r '.path' <<<"$entry")
+    if [[ "$entry_path" == ".claude-plugin/plugin.json" || "$entry_path" == ".codex-plugin/plugin.json" ]]; then
+      continue
+    fi
+    if [[ ! -f "$REPO_ROOT/$pkg/$entry_path" ]]; then
+      SCHEMA_MISMATCHES+=("$pkg: extra-files entry $entry_path does not resolve to a file that exists")
+    fi
+  done < <(jq -c '.["extra-files"][]?' <<<"$PKG_JSON")
 done
 
 if [[ "$SCHEMA_COMPARISONS" -eq 0 ]]; then
@@ -173,6 +190,37 @@ elif [[ ${#SCHEMA_MISMATCHES[@]} -gt 0 ]]; then
   printf '    %s\n' "${SCHEMA_MISMATCHES[@]}"
 else
   pass "All package entries carry required schema fields and complete extra-files ($SCHEMA_COMPARISONS packages checked)"
+fi
+
+# --- Check: no .release-please-manifest.json entry survives without a matching
+# --- config package (Codex review, CTL-2263 PR #4059) ---
+# The manifest is release-please's own bootstrap/version-tracking file, keyed
+# by the same package paths as release-please-config.json's `.packages`. A
+# config package with no manifest entry yet is normal (a newly added plugin
+# awaiting its first release-please-cut release) — deliberately not checked
+# here. A MANIFEST entry with no matching config package is the opposite: it
+# references a component release-please is no longer configured to manage —
+# exactly the leftover a plugin removal produces if the manifest edit
+# (docs/runbooks/plugin-removal.md step 3) is skipped, silent because nothing
+# else in this script or in `render`'s inventory-agreement check reads the
+# manifest at all.
+MANIFEST="$REPO_ROOT/.release-please-manifest.json"
+if [[ -f "$MANIFEST" ]]; then
+  ORPHAN_MANIFEST_KEYS=()
+  while IFS= read -r key; do
+    if ! jq -e --arg k "$key" '.packages | has($k)' "$CONFIG" >/dev/null; then
+      ORPHAN_MANIFEST_KEYS+=("$key")
+    fi
+  done < <(jq -r 'keys[]' "$MANIFEST")
+
+  if [[ ${#ORPHAN_MANIFEST_KEYS[@]} -gt 0 ]]; then
+    fail ".release-please-manifest.json has entries for packages release-please-config.json no longer configures"
+    printf '    %s\n' "${ORPHAN_MANIFEST_KEYS[@]}"
+  else
+    pass "Every .release-please-manifest.json entry has a matching release-please-config.json package"
+  fi
+else
+  fail ".release-please-manifest.json not found"
 fi
 
 if [[ "$ERRORS" -gt 0 ]]; then

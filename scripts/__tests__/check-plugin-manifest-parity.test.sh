@@ -29,18 +29,21 @@ fail() {
 	for l in "$@"; do echo "      $l"; done
 }
 
-# build_fixture DIR CONFIG_JSON — a minimal repo tree with one plugin
-# (plugins/dev), valid marketplace catalogs, and plugin.json files that
-# already satisfy Checks 1-3, so only the new extra-files check (Check 4)
-# is under test. CONFIG_JSON becomes release-please-config.json verbatim.
+# build_fixture DIR CONFIG_JSON [MANIFEST_JSON] — a minimal repo tree with one
+# plugin (plugins/dev), valid marketplace catalogs, plugin.json files that
+# already satisfy Checks 1-3, and a matching .release-please-manifest.json,
+# so only the check under test has to differ from a clean pass. CONFIG_JSON
+# becomes release-please-config.json verbatim; MANIFEST_JSON defaults to a
+# single entry matching the fixture's "plugins/dev" package.
 build_fixture() {
-	local dir="$1" config_json="$2"
+	local dir="$1" config_json="$2" manifest_json="${3:-{\"plugins/dev\":\"1.0.0\"\}}"
 	mkdir -p "$dir/plugins/dev/.claude-plugin" "$dir/plugins/dev/.codex-plugin" "$dir/.claude-plugin" "$dir/.agents/plugins"
 	echo '{"version":"1.0.0"}' >"$dir/plugins/dev/.claude-plugin/plugin.json"
 	echo '{"version":"1.0.0"}' >"$dir/plugins/dev/.codex-plugin/plugin.json"
 	echo '{"plugins":[]}' >"$dir/.claude-plugin/marketplace.json"
 	echo '{"plugins":[]}' >"$dir/.agents/plugins/marketplace.json"
 	printf '%s' "$config_json" >"$dir/release-please-config.json"
+	printf '%s' "$manifest_json" >"$dir/.release-please-manifest.json"
 }
 
 run_check() {
@@ -88,6 +91,7 @@ mkdir -p "$DIR4/.claude-plugin" "$DIR4/.agents/plugins"
 echo '{"plugins":[]}' >"$DIR4/.claude-plugin/marketplace.json"
 echo '{"plugins":[]}' >"$DIR4/.agents/plugins/marketplace.json"
 echo '{"packages":{}}' >"$DIR4/release-please-config.json"
+echo '{}' >"$DIR4/.release-please-manifest.json"
 OUT4="$(run_check "$DIR4")"
 RC4=$?
 [[ "$RC4" -ne 0 ]] && pass "exits non-zero (inconclusive, not a vacuous pass)" || fail "exits non-zero" "$OUT4"
@@ -100,12 +104,31 @@ RC5=$?
 [[ "$RC5" -eq 0 ]] && pass "exits zero on the real repo config" || fail "exits zero on the real repo config" "$OUT5"
 
 echo ""
-echo "--- ⛔ positive control: a fully valid single-package fixture passes ---"
+echo "=== fixture 6: extra-files has a third entry pointing at a nonexistent file (Codex review, PR #4059) ==="
 DIR6="$SCRATCH/f6"
-build_fixture "$DIR6" "{\"packages\":{\"plugins/dev\":{\"release-type\":\"simple\",\"component\":\"catalyst-dev\",\"changelog-path\":\"CHANGELOG.md\",\"include-component-in-tag\":true,\"extra-files\":$VALID_EXTRA_FILES}}}"
+EXTRA_FILES_WITH_ORPHAN='[{"type":"json","path":".claude-plugin/plugin.json","jsonpath":"$.version"},{"type":"json","path":".codex-plugin/plugin.json","jsonpath":"$.version"},{"type":"json","path":"DOES-NOT-EXIST.json","jsonpath":"$.version"}]'
+build_fixture "$DIR6" "{\"packages\":{\"plugins/dev\":{\"release-type\":\"simple\",\"component\":\"catalyst-dev\",\"changelog-path\":\"CHANGELOG.md\",\"include-component-in-tag\":true,\"extra-files\":$EXTRA_FILES_WITH_ORPHAN}}}"
 OUT6="$(run_check "$DIR6")"
 RC6=$?
-[[ "$RC6" -eq 0 ]] && pass "exits zero" || fail "exits zero" "$OUT6"
+[[ "$RC6" -ne 0 ]] && pass "exits non-zero" || fail "exits non-zero" "$OUT6"
+grep -q "DOES-NOT-EXIST.json does not resolve" <<<"$OUT6" && pass "names the orphaned third entry" || fail "names the orphaned third entry" "$OUT6"
+
+echo ""
+echo "=== fixture 7: manifest entry survives with no matching config package (Codex review, PR #4059) ==="
+DIR7="$SCRATCH/f7"
+build_fixture "$DIR7" "{\"packages\":{\"plugins/dev\":{\"release-type\":\"simple\",\"component\":\"catalyst-dev\",\"changelog-path\":\"CHANGELOG.md\",\"include-component-in-tag\":true,\"extra-files\":$VALID_EXTRA_FILES}}}" '{"plugins/dev":"1.0.0","plugins/removed-plugin":"3.1.4"}'
+OUT7="$(run_check "$DIR7")"
+RC7=$?
+[[ "$RC7" -ne 0 ]] && pass "exits non-zero" || fail "exits non-zero" "$OUT7"
+grep -q "plugins/removed-plugin" <<<"$OUT7" && pass "names the orphaned manifest key" || fail "names the orphaned manifest key" "$OUT7"
+
+echo ""
+echo "--- ⛔ positive control: a fully valid single-package fixture passes ---"
+DIR8="$SCRATCH/f8"
+build_fixture "$DIR8" "{\"packages\":{\"plugins/dev\":{\"release-type\":\"simple\",\"component\":\"catalyst-dev\",\"changelog-path\":\"CHANGELOG.md\",\"include-component-in-tag\":true,\"extra-files\":$VALID_EXTRA_FILES}}}"
+OUT8="$(run_check "$DIR8")"
+RC8=$?
+[[ "$RC8" -eq 0 ]] && pass "exits zero" || fail "exits zero" "$OUT8"
 
 echo ""
 echo "  PASSED: $PASSES   FAILED: $FAILURES"
