@@ -20,6 +20,15 @@ Each of these existed before CTL-2220 removed them; none was brought back, and e
 - **The release-health check** — a scheduled probe that filed a GitHub issue against a human's queue on failure. Paging a human directly is exactly what AGENTS.md's escalation rule prohibits; if release-pipeline health needs watching, it belongs in the Loki alert path.
 - **`validate-release-config.sh` as a standalone script (11 checks)** — the one check from that set the current gates genuinely lacked (extra-files completeness) was folded into `check-plugin-manifest-parity.sh` instead; the rest are covered elsewhere or no longer apply.
 
+## Plugin version-bump collision policy (CTL-2266)
+
+A plain `git merge` cannot see one collision class: two PRs independently bumping the SAME plugin to the SAME target version (e.g. both `12.66.3` → `13.0.0`) merge cleanly — no conflict marker, no red check — because git sees both sides making the identical change. Only a *different* target produces a real conflict, which `check-plugin-version.sh` and the catalyst-cloud-proven Mergify merge queue's built-in `-conflict` guard already surface. This policy, and the guard below, close the silent case.
+
+- **The queue owns rebasing; an author never pre-emptively re-bumps.** A PR is submitted (and labelled `queue:ready`) with whatever version it derived from the main it branched from.
+- **On a dequeue for a real conflict, the dequeued lane re-bumps.** It rebases onto the new main and **re-derives** the target version from main's *current* value — never a raw merge that preserves the stale number, and never `--theirs`/`--ours` on `version.txt`. Re-derivation, not reconciliation.
+- **`check-plugin-version.sh` asserts monotonicity.** For every plugin whose `version.txt` changed relative to `$BASE_REF`, the PR's value must be strictly greater (semver-compared) than `$BASE_REF`'s current value, and both `plugin.json` files must carry that same value. Because a merge queue re-runs required checks against the current base on every requeue, this fires on the queue branch — catching the identical-target (or now-stale-lower-target) collision before merge, which a raw git merge alone cannot. An unreadable base value (e.g. a brand-new plugin with no history at `$BASE_REF`) fails closed rather than passing as "no collision".
+- **Interaction with a possible release-please return (CTL-2263).** If release-please is reinstated, it owns bumps via release PRs and feature PRs stop bumping by hand, which dissolves this collision class — but introduces a different one: merging a `release-please--branches--main` PR cuts a GitHub Release, and `publish-skills.yml` triggers on `release: published`, pushing to the sibling repo `coalesce-labs/catalyst-skills` with a scoped token. That is outward-facing and must never be an unattended queue merge — a merge-queue config for this repo excludes `release-please--*` head branches by name for exactly this reason, so this policy holds correct under both futures.
+
 ## Version Source of Truth
 
 | File | Purpose | Updated By |

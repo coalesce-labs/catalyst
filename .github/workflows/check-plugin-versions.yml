@@ -16,6 +16,12 @@ jobs:
         env:
           STRICT_VERSION_CHECK: "true"
           BASE_REF: "origin/${{ github.base_ref }}"
+          # CTL-2266 P1 follow-up: actions/checkout leaves HEAD at GitHub's
+          # synthetic pull_request merge commit, not the PR's own tip. Give
+          # the script the real head SHA (same pattern as gitleaks.yml's
+          # PR_HEAD_SHA) so it diffs/reads the PR's own content instead of a
+          # merge tree that can silently fold a value back to match base.
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           git fetch origin ${{ github.base_ref }}
           bash scripts/check-plugin-version.sh

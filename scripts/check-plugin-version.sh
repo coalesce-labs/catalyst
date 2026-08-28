@@ -14,9 +14,20 @@
 set -e
 
 # Get list of changed files
+#
+# DIFF_HEAD is the ref to diff/read the PR's own content from. In CI mode
+# (BASE_REF set) it defaults to PR_HEAD_SHA when the caller supplies it —
+# actions/checkout leaves the *working tree* (and literal HEAD) at GitHub's
+# synthetic pull_request merge commit, whose tree folds a file back to
+# match base wherever the PR's own change happens to agree with base's
+# (possibly since-advanced) value. Diffing/reading against the PR's real
+# head commit instead of that merge tree avoids losing exactly the
+# collision this gate exists to catch (CTL-2266 P1 follow-up).
+DIFF_HEAD=""
 if [[ -n "${BASE_REF:-}" ]]; then
   # CI mode: compare against PR base branch
-  CHANGED_FILES=$(git diff --name-only "$BASE_REF"...HEAD 2>/dev/null || echo "")
+  DIFF_HEAD="${PR_HEAD_SHA:-HEAD}"
+  CHANGED_FILES=$(git diff --name-only "$BASE_REF"..."$DIFF_HEAD" 2>/dev/null || echo "")
 elif [[ -n "$(git diff --cached --name-only 2>/dev/null)" ]]; then
   # Pre-commit mode: staged files
   CHANGED_FILES=$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null || echo "")
@@ -49,6 +60,95 @@ while IFS= read -r plugin_dir; do
   PLUGIN_DIRS+=("$plugin_dir")
 done < <(jq -r '.packages | keys[]' "$RELEASE_CONFIG")
 NEEDS_VERSION_BUMP=()
+
+# CTL-2266: version-monotonicity assertion.
+#
+# A raw git merge of two lanes that independently bump the SAME plugin to the
+# SAME target version (e.g. both 12.66.3 -> 13.0.0) merges cleanly — no
+# conflict marker, no red check, no dequeue. Nothing above this catches that:
+# the existing loop below only asks "did plugin files change without a
+# version bump", and a conventional-commit message makes that pass with no
+# bump at all (docs/releases.md). This block closes the other half.
+#
+# Fires only when BASE_REF is set (CI mode) — the only mode with a real PR
+# base to compare against, and the mode the merge queue re-runs required
+# checks in against the current base. That's what makes "surfaces before
+# merge" true even for a lane whose branch itself was forked before the other
+# lane merged: CHANGED_FILES above already used three-dot (merge-base)
+# semantics, so a plugin's version.txt shows as changed here whenever THIS
+# lane touched it, regardless of how far $BASE_REF has since moved.
+#
+# version_gt <a> <b> — true iff semver <a> is strictly greater than <b>.
+# Reuses the repo's `sort -V` idiom (check-setup.sh's version_ge,
+# install-cli.sh's _ab_version_ge); plugin versions here are plain
+# major.minor.patch, so version-aware sort ordering is sufficient without a
+# full semver library.
+version_gt() {
+  [[ "$1" != "$2" ]] && [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" == "$1" ]]
+}
+
+MONOTONICITY_FAILURES=()
+
+if [[ -n "${BASE_REF:-}" ]]; then
+  for PLUGIN_DIR in "${PLUGIN_DIRS[@]}"; do
+    if [[ ! -d "$PLUGIN_DIR" ]]; then
+      continue
+    fi
+
+    VERSION_TXT_CHANGED=$(echo "$CHANGED_FILES" | grep -Fx "$PLUGIN_DIR/version.txt" || true)
+    if [[ -z "$VERSION_TXT_CHANGED" ]]; then
+      continue
+    fi
+
+    component=$(jq -r --arg pkg "$PLUGIN_DIR" '.packages[$pkg].component // $pkg' "$RELEASE_CONFIG" || true)
+
+    # Read from $DIFF_HEAD via `git show`, never the working tree: in CI mode
+    # the working tree is the synthetic merge commit, and reading it directly
+    # here is exactly what let a same-value collision hide (see DIFF_HEAD
+    # comment above).
+    NEW_VERSION=$(git show "$DIFF_HEAD:$PLUGIN_DIR/version.txt" 2>/dev/null | tr -d '[:space:]')
+    BASE_VERSION=$(git show "$BASE_REF:$PLUGIN_DIR/version.txt" 2>/dev/null | tr -d '[:space:]')
+
+    if [[ -z "$NEW_VERSION" ]]; then
+      MONOTONICITY_FAILURES+=("$component ($PLUGIN_DIR): version.txt is empty or unreadable in this PR")
+      continue
+    fi
+
+    if [[ -z "$BASE_VERSION" ]]; then
+      # Fail closed: an unreadable base is "could not look", never "no collision".
+      MONOTONICITY_FAILURES+=("$component ($PLUGIN_DIR): could not read version.txt at \$BASE_REF ($BASE_REF) — cannot verify monotonicity")
+      continue
+    fi
+
+    if ! version_gt "$NEW_VERSION" "$BASE_VERSION"; then
+      MONOTONICITY_FAILURES+=("$component ($PLUGIN_DIR): version.txt is $NEW_VERSION, which is not strictly greater than \$BASE_REF's $BASE_VERSION — two lanes bumping to the same (or a lower) value merge silently with no conflict")
+      continue
+    fi
+
+    for MANIFEST_REL in ".claude-plugin/plugin.json" ".codex-plugin/plugin.json"; do
+      MANIFEST_PATH="$PLUGIN_DIR/$MANIFEST_REL"
+      MANIFEST_CONTENT=$(git show "$DIFF_HEAD:$MANIFEST_PATH" 2>/dev/null || true)
+      [[ -n "$MANIFEST_CONTENT" ]] || continue
+      MANIFEST_VERSION=$(echo "$MANIFEST_CONTENT" | jq -r '.version // empty' 2>/dev/null || true)
+      if [[ "$MANIFEST_VERSION" != "$NEW_VERSION" ]]; then
+        MONOTONICITY_FAILURES+=("$component ($PLUGIN_DIR): $MANIFEST_REL version ($MANIFEST_VERSION) does not match version.txt ($NEW_VERSION)")
+      fi
+    done
+  done
+fi
+
+if [[ ${#MONOTONICITY_FAILURES[@]} -gt 0 ]]; then
+  echo ""
+  echo "❌ Plugin version bump is invalid:"
+  echo ""
+  for failure in "${MONOTONICITY_FAILURES[@]}"; do
+    echo "   - $failure"
+  done
+  echo ""
+  echo "   Re-derive the version from \$BASE_REF's current value — never reconcile"
+  echo "   a stale number with a raw merge. See docs/releases.md."
+  exit 1
+fi
 
 for PLUGIN_DIR in "${PLUGIN_DIRS[@]}"; do
   if [[ ! -d "$PLUGIN_DIR" ]]; then
@@ -91,7 +191,7 @@ if [[ ${#NEEDS_VERSION_BUMP[@]} -gt 0 ]]; then
   CONVENTIONAL_COMMITS=false
   if [[ -n "${BASE_REF:-}" ]]; then
     # Check commit messages for conventional commit prefixes
-    COMMIT_MSGS=$(git log --format='%s' "$BASE_REF"...HEAD 2>/dev/null || echo "")
+    COMMIT_MSGS=$(git log --format='%s' "$BASE_REF"..."$DIFF_HEAD" 2>/dev/null || echo "")
     if echo "$COMMIT_MSGS" | grep -qE '^(feat|fix|perf|refactor|chore|docs|style|test|build|ci)(\(.+\))?!?:'; then
       CONVENTIONAL_COMMITS=true
     fi
