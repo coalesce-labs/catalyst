@@ -3,8 +3,9 @@
 // Work type (bug/feature/chore/refactor/docs/test) is a telemetry dimension so
 // DevOps/FinOps views can group cost, effort, duration, and throughput by it.
 // The single source of truth is triage.json `.classification` in the worker dir
-// (workers/<TICKET>/triage.json) — written by phase-triage (skills/phase-triage)
-// as one of feature|bug|docs|refactor|chore.
+// (workers/<TICKET>/triage.json) — written by the triage phase as one of
+// feature|bug|docs|refactor|chore. (The phase-triage SKILL.md that produced it
+// was removed in CTL-2239; the signal-file contract below is unchanged.)
 //
 // CONTRACT (gherkin, CTL-1023): the resolved value is attached to phase /
 // dispatch / linear-state events under the `catalyst.ticket.type` attribute and

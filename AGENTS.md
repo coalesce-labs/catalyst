@@ -87,7 +87,7 @@ Coding agents orient on this codebase through **Serena** — a self-hosted, loca
 
 - **Install (per machine):** `uv tool install -p 3.13 serena-agent`, then register it as a **user-scope MCP server** that runs `serena start-mcp-server`. Use the absolute path to the `serena` binary so background worker jobs with a restricted `PATH` can launch it, and run it headless on servers. It connects with no startup project and activates lazily. The exact per-agent registration command lives in the bridge file.
 - **Versioned config (committed):** `.serena/project.yml` (languages `typescript` + `bash`, `read_only: true`, ignores the harness worktree dir / `thoughts` / build output, plus an `initial_prompt` pointer) and `.serena/memories/codebase_map.md` (the directory map agents read via `read_memory("codebase_map")`). The per-machine symbol cache `.serena/cache/` is gitignored; build it with `serena project index`.
-- **Wiring:** the research/analysis agents (`codebase-analyzer`, `codebase-locator`, `codebase-pattern-finder`) and skills (`research-codebase`, `create-plan`, `phase-research`, `phase-plan`) grant the read-only `mcp__serena__*` tools; `research-codebase` Step 0 activates the project, reads the `codebase_map` memory, and maps symbols before spawning sub-agents.
+- **Wiring:** the research/analysis agents (`codebase-analyzer`, `codebase-locator`, `codebase-pattern-finder`) and skills (`research-codebase`, `create-plan`) grant the read-only `mcp__serena__*` tools; `research-codebase` Step 0 activates the project, reads the `codebase_map` memory, and maps symbols before spawning sub-agents.
 - **Use it:** `activate_project` (repo root / `.`) → `list_memories` / `read_memory` → `get_symbols_overview`, `find_symbol`, `find_referencing_symbols`, `search_for_pattern`. It is read-only — editing stays with the implement agents' `Edit`/`Write`.
 
 ## Commit Conventions
@@ -98,17 +98,13 @@ Coding agents orient on this codebase through **Serena** — a self-hosted, loca
 - `chore(meta): update docs` — no version bump
 - Valid scopes (one per plugin): `dev`, `meta`, `pm-ops`, `legacy`, `foundry`
 
-**Versioning (post release-please, CTL-2220):** release-please — which used to auto-bump `version.txt`/`plugin.json` and generate changelogs on merge — was removed at Ryan's request. No replacement mechanism has been specified; this is an open decision, not an assumption that hand-semver is fine. See `docs/releases.md` → "Versioning (post release-please)" for what actually enforces the conventional-commit format now (`scripts/check-plugin-version.sh`, the `check-versions` PR check) and what it does and does not do — it is a gate, not a bumper. If a plugin change should ship a new version, bump `version.txt` and both `plugin.json` files by hand in the same PR.
+**Versioning (CTL-2263):** release-please auto-bumps `version.txt` and both `plugin.json` files, writes each `CHANGELOG.md`, and cuts a GitHub release — but only after a conventional-commit PR merges to `main`, via its own release PR, never inside the PR that changed the plugin. Do **not** hand-bump the version in the same PR as the change — a hand bump plus release-please's own bump on the next release PR is a double bump. Just use a conventional commit message; `scripts/check-plugin-version.sh` (the `check-versions` PR check) is what enforces the format, and it is a gate on the message, not a bumper itself. See `docs/releases.md` → "Versioning" for the full mechanism.
 
 ## Version Control
 
 This workspace tracks: agent definitions, skills, documentation, scripts, configuration templates.
 
 **Do NOT commit**: Specific ticket prefixes (keep "PROJ"), Linear team/project IDs (keep null), personal thoughts user (keep null).
-
-## CI/Automation
-
-CI skills (`ci-commit`, `ci-describe-pr`) follow the same conventions but skip all interactive prompts. They never commit sensitive files or add self-attribution.
 
 ## Configuration
 

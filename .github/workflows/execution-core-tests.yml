@@ -122,11 +122,6 @@ on:
       - "plugins/dev/scripts/migrate-dual-harness.sh"
       - "plugins/dev/scripts/check-project-setup.sh"
       - ".github/workflows/execution-core-tests.yml"
-      # CTL-1639: worktree-salvage-sites.test.sh scans phase-teardown/SKILL.md for
-      # the salvage-before-destroy source-order invariant. That skill lives OUTSIDE
-      # plugins/dev/scripts/ (not covered by the scripts/** glob), so a change
-      # confined to the teardown removal block would skip this workflow and the
-      # ordering backstop couldn't catch a destroy-before-salvage regression.
       # CTL-1998: THE TRIGGER MUST MATCH THE SCAN — the same lesson as the
       # plugins/dev/scripts/** entry above, on the skills axis. 52 test files in
       # plugins/dev/scripts/__tests__/ read a SKILL.md, and
@@ -145,11 +140,9 @@ on:
       # NOTE: the two globs above SUBSUME every plugins/*/skills path listed
       # below. They are retained as documentation of WHICH STEP each path feeds,
       # not as triggers — do not read the list as the trigger set.
-      - "plugins/dev/skills/phase-teardown/**"
       # CTL-56: the three merge-worktree guard tests scan skills and templates
       # OUTSIDE plugins/dev/scripts/ for the --delete-branch invariant. A change
       # confined to any of those files would otherwise skip this workflow.
-      - "plugins/dev/skills/phase-monitor-merge/**"
       - "plugins/dev/skills/merge-pr/**"
       - "plugins/dev/skills/triage-aging-prs/**"
       - "plugins/dev/templates/**"
@@ -233,13 +226,9 @@ jobs:
               - "bun.lock"
               - "turbo.json"
               # CTL-1998: mirror the two skills globs from on.push.paths — see the
-              # long note there. This mirror had ALSO already drifted: it was
-              # missing plugins/dev/skills/phase-teardown/**, which the push list
-              # carries, so the salvage-before-destroy backstop could not fire on
-              # a PR. The globs close that gap and every future one like it.
+              # long note there.
               - "plugins/*/skills/**"
               - "plugins/*/*/skills/**"
-              - "plugins/dev/skills/phase-monitor-merge/**"
               - "plugins/dev/skills/merge-pr/**"
               - "plugins/dev/skills/triage-aging-prs/**"
               - "plugins/dev/templates/**"
@@ -750,11 +739,11 @@ jobs:
 
       - name: worktree-salvage destroy-site wiring tests (CTL-1639)
         # Deterministic source-order invariant: each destructive bash site
-        # (phase-agent-dispatch L3, orphan-sweep, phase-teardown SKILL.md) must
-        # source the salvage lib AND place its salvage_worktree call BEFORE the
-        # destructive git op. The dispatcher + teardown suites are not CI-gated
-        # (locally flaky), so this static guard is the CI backstop that a future
-        # refactor can't move a destroy ahead of its salvage.
+        # (phase-agent-dispatch L3 and orphan-sweep) must source the salvage lib
+        # AND place its salvage_worktree call BEFORE the destructive git op. The
+        # dispatcher suite is not CI-gated (locally flaky), so this static guard
+        # is the CI backstop that a future refactor can't move a destroy ahead of
+        # its salvage.
         working-directory: plugins/dev/scripts
         run: bash __tests__/worktree-salvage-sites.test.sh
 
@@ -1274,14 +1263,6 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/phase-artifact-gate.test.sh
 
-      - name: phase-monitor-merge worktree-safe merge guard (CTL-56)
-        # Guards that phase-monitor-merge/SKILL.md uses gh pr merge --squash without
-        # --delete-branch (worktree-safe) and includes a checkout-free remote-ref delete.
-        # Previously ran only via the local run-tests.sh aggregate; pinned here so a
-        # reintroduction of --delete-branch in the headless merge skill fails CI.
-        working-directory: plugins/dev/scripts
-        run: bash __tests__/phase-monitor-merge-guard.test.sh
-
       - name: oneshot worktree-safe merge guard (CTL-56)
         # Guards that plugins/legacy/skills/oneshot/SKILL.md uses worktree-safe merge
         # (no --delete-branch; checkout-free remote-ref delete after REST confirm).
@@ -1590,7 +1571,6 @@ jobs:
             fleet-health-event.test.mjs \
             fleet-health-probe.test.mjs \
             gateway-read.test.mjs \
-            halt-on-complete.test.mjs \
             heartbeat-event.test.mjs \
             loki-liveness.test.mjs \
             hrw.test.mjs \

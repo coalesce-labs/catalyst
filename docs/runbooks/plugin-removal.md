@@ -11,11 +11,7 @@ exact file or command.
 The facts below were true for CTL-2222 (2026-08-26) and may have moved by the time you run this.
 **Re-verify each one yourself before you start; do not carry these specific claims forward.**
 
-- **release-please is gone (CTL-2220).** There is no `.release-please-manifest.json`.
-  `release-please-config.json` survives only as a plain
-  `{"packages": {"<plugin-dir>": {"component": "<name>"}}}` roster, because
-  `scripts/packaging/cli.mjs`'s `readConfigPackageOrder()` hardcodes that path as its plugin-order
-  source. You still edit this file — just don't go looking for a manifest to pair it with.
+- **release-please is back (CTL-2263, reinstated after CTL-2220 removed it).** Both `release-please-config.json` and `.release-please-manifest.json` are real again — the config carries the full release-please schema (`release-type`, `component`, `extra-files`, …) and the manifest carries a `{"<plugin-dir>": "<version>"}` entry per released package. `scripts/packaging/cli.mjs`'s `readConfigPackageOrder()` still reads the config for plugin order, but you now edit **both** files when removing a plugin — see step 3. `scripts/check-plugin-manifest-parity.sh` fails the build if a manifest entry survives with no matching config package, so a removal that skips the manifest is caught in CI, not silently.
 - **CTL-1461 (packaging Phase 7) is merged.** `scripts/packaging/core/inventory-guard.mjs` and
   `assertPluginInventoryAgreement` (called from `scripts/packaging/cli.mjs`) turn a mismatch between
   `release-please-config.json`'s package list and the actual `plugins/` tree into a **named render
@@ -33,8 +29,7 @@ The facts below were true for CTL-2222 (2026-08-26) and may have moved by the ti
 infrastructure — scripts, schemas, docs — that *other, surviving* plugins' skills actually invoke,
 separate from the plugin's own `skills/` directory. CTL-2222 found this the hard way:
 `catalyst-pm/scripts/estimate/*.ts` (a corpus-scoring toolchain) was referenced by
-`plugins/dev/skills/compound-estimate/SKILL.md` and `plugins/dev/skills/phase-triage/SKILL.md` —
-two `catalyst-dev` skills with no other connection to `catalyst-pm`.
+`plugins/dev/skills/compound-estimate/SKILL.md` — a `catalyst-dev` skill with no other connection to `catalyst-pm`.
 
 Before deleting, run — same instrument as the reference sweep in §5 (absolute `/usr/bin/grep`,
 never bare `grep`, plus a positive control proving it actually scanned the files it claims to):
@@ -71,11 +66,13 @@ This takes the skills, `pack.json`, `.claude-plugin/plugin.json`, `.codex-plugin
 `CHANGELOG.md`, and `version.txt` with it — everything under the plugin's directory that step 1
 didn't relocate out.
 
-## 3. release-please-config.json
+## 3. release-please-config.json and .release-please-manifest.json
 
-Drop the plugin's `"plugins/playground/<name>": {"component": "catalyst-<name>"}` entry from the
+Drop the plugin's `"plugins/playground/<name>": {...}` entry from `release-please-config.json`'s
 `packages` object. This is the step fact 0 above depends on — skip it and `render` (step 5) fails
 with an inventory-agreement error naming the orphaned directory.
+
+Also drop the plugin's `"plugins/playground/<name>": "<version>"` entry from `.release-please-manifest.json`. Skip this and `scripts/check-plugin-manifest-parity.sh` (run in step 7) fails with an orphaned-manifest-entry error — the config and manifest rosters must agree, so removal is a two-file edit, not one.
 
 ## 4. The removal checklist — files that reference a plugin by name
 
@@ -101,8 +98,7 @@ Check every one of these. Not all will have a hit for every plugin; report which
 | Any `plugins/dev/scripts/__tests__/*.test.sh` | Test cases using the plugin's real path as example data (harmless to leave, but retarget to a surviving plugin for cleanliness — e.g. `docs-gate.test.sh`'s changelog-path case) |
 | `plugins/dev/prompts/` | A standalone kickoff/prompt file scoped entirely to the removed plugin (not linked from any `SKILL.md`, so the gates won't catch it — grep for the plugin's skill names) |
 
-Skip anything not applicable and say so — e.g. `.release-please-manifest.json` no longer exists
-post-CTL-2220, so don't go looking for it.
+Skip anything not applicable and say so. `.release-please-manifest.json` is not in this table because it is covered by step 3 above, not this checklist — don't skip it there.
 
 ## 5. Reference sweep — with a positive control
 

@@ -261,8 +261,10 @@ export function askFromExplanation(explanation) {
  * The producer's DECLARED escalation type → ask kind.
  *
  * `escalation_type` is an existing documented tagged union — `decision |
- * authorization | manual` (recovery-pass/SKILL.md, _phase-agent-template/SKILL.md)
- * — i.e. the producer's own word for what it is asking. It beats any reader-side
+ * authorization | manual`, defined by `VALID_TYPES` in
+ * execution-core/escalation-explanation.mjs (the recovery-pass and
+ * _phase-agent-template SKILL.md files that used to document it were removed in
+ * CTL-2239) — i.e. the producer's own word for what it is asking. It beats any reader-side
  * reading of the CTA prose: the live `authorization` escalations say "authorize
  * another recovery cycle …, or take it over?", which the text classifier reads as
  * `clarify` ("free-text answer needed") when the producer plainly declared it a

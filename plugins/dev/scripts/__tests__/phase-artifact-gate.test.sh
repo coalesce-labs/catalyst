@@ -125,25 +125,7 @@ else
 fi
 
 echo ""
-echo "Test 8 (divergence/contract): phase-research SKILL references match_thoughts_artifact"
-SKILL_RESEARCH="${REPO_ROOT}/plugins/dev/skills/phase-research/SKILL.md"
-if [[ -f $SKILL_RESEARCH ]] && grep -qF 'match_thoughts_artifact' "$SKILL_RESEARCH"; then
-	pass "phase-research SKILL references match_thoughts_artifact"
-else
-	fail "phase-research SKILL does NOT reference match_thoughts_artifact"
-fi
-
-echo ""
-echo "Test 9 (divergence/contract): phase-plan SKILL references match_thoughts_artifact"
-SKILL_PLAN="${REPO_ROOT}/plugins/dev/skills/phase-plan/SKILL.md"
-if [[ -f $SKILL_PLAN ]] && grep -qF 'match_thoughts_artifact' "$SKILL_PLAN"; then
-	pass "phase-plan SKILL references match_thoughts_artifact"
-else
-	fail "phase-plan SKILL does NOT reference match_thoughts_artifact"
-fi
-
-echo ""
-echo "Test 10 (contract): slugged writer name matches the gate"
+echo "Test 8 (contract): slugged writer name matches the gate"
 SLUG_DIR="${SCRATCH}/thoughts/shared/plans"
 mkdir -p "$SLUG_DIR"
 touch "${SLUG_DIR}/2026-06-12-ctl-1081-phase-artifact-gate-contracts.md"

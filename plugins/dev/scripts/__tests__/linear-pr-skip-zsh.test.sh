@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # CTL-633 phase-review regression: linear-pr-skip.sh must work when SOURCED
 # under zsh, because the Catalyst Bash tool runs /bin/zsh — that is the real
-# production runtime for the create-pr/describe-pr/ci-describe-pr producers.
+# production runtime for the create-pr/describe-pr producers.
 #
 # The original helper resolved its sibling-lib dir via ${BASH_SOURCE[0]} (unset
 # in zsh ⇒ collapsed to CWD ⇒ team-keys lib never sourced) and guarded the

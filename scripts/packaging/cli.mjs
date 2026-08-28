@@ -38,7 +38,26 @@ function readPackId(repoRootPath, pluginRelPath) {
   return plugin.name;
 }
 
-/** readConfigPackageOrder(repoRootPath) → plugin rel-paths in release-please-config.json's declared order. */
+/**
+ * readConfigPackageOrder(repoRootPath) → plugin rel-paths in
+ * release-please-config.json's declared order.
+ *
+ * CTL-2247 asked whether this coupling should be re-pointed or decoupled.
+ * CTL-2263 resolved it: keep the coupling, deliberately. It only ever read
+ * as awkward because CTL-2220 had stripped release-please's own schema out
+ * of the file while this function kept reading it for manifest-emission
+ * ordering — a real config repurposed as a bare roster. Now that CTL-2263
+ * restored the schema, this is a legitimate consumer reading the file that
+ * declares the plugin roster, not a repurposing to be undone. Renaming the
+ * file now would mean editing this function, check-plugin-version.sh,
+ * check-plugin-manifest-parity.sh, and catalyst-legacy-plugin.test.sh to
+ * *reduce* honesty about what the file is. And it is not a single point of
+ * failure for "which plugins exist" either way: `listPluginRelPaths()`
+ * derives plugin discovery from disk, and `assertPluginInventoryAgreement()`
+ * below cross-checks the two sources bidirectionally, throwing a named error
+ * on disagreement in either direction — this function supplies order, not
+ * membership.
+ */
 export function readConfigPackageOrder(repoRootPath) {
   const config = JSON.parse(readFileSync(resolve(repoRootPath, "release-please-config.json"), "utf8"));
   return Object.keys(config.packages);

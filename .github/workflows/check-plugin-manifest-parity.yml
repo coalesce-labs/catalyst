@@ -21,3 +21,12 @@ jobs:
 
       - name: Check Claude/Codex plugin.json parity
         run: bash scripts/check-plugin-manifest-parity.sh
+
+      # CTL-2263: the subject script above runs on every PR, but nothing ran
+      # its OWN test until now — so a regression that made Check 4 pass
+      # vacuously (the exact failure mode that check exists to prevent) would
+      # have gone unnoticed, because a check that cannot fail still exits 0.
+      # Same shape as packaging-gate.yml running drift-gate.test.sh alongside
+      # the drift gate itself.
+      - name: Test the parity script's own failure behaviour (fixtures, not this checkout)
+        run: bash scripts/__tests__/check-plugin-manifest-parity.test.sh
