@@ -1610,7 +1610,24 @@ describe("defaultEmitBackstop — absent signal file (CTL-2015)", () => {
     // The seed identity survives — a signal the sweep can attribute.
     expect(sig.ticket).toBe("CTL-1");
     expect(sig.phase).toBe("implement");
+    // CTL-2015 (Codex #3871 P1): isTerminalTeardownStale's sibling-freshness check
+    // reads this field directly — an absent startedAt silently fails that compare.
+    expect(sig.startedAt).toBe(sig.updatedAt);
     expect(sig.generation).toBe(3);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a seed carrying its own startedAt is PRESERVED, not overwritten by the recreate moment", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ctl2015-started-"));
+    const signalFile = join(dir, "workers", "CTL-1", "phase-implement.json");
+    defaultEmitBackstop(
+      { phase: "implement", ticket: "CTL-1", status: "failed",
+        reason: "sdk-overloaded-exhausted", orchDir: "/ec", signalFile,
+        signalSeed: { ...SEED, startedAt: "2026-01-01T00:00:00Z" } },
+      { spawn: () => ({ status: 0, error: null }), appendEventLog: () => {} },
+    );
+    const sig = JSON.parse(readFileSync(signalFile, "utf8"));
+    expect(sig.startedAt).toBe("2026-01-01T00:00:00Z");
     rmSync(dir, { recursive: true, force: true });
   });
 

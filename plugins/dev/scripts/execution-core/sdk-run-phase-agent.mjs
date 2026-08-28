@@ -498,6 +498,13 @@ function defaultWriteSignalTerminal(signalFile, status, reason, { seed = null, o
         status,
         attentionReason: reason || "sdk-backstop",
         assertedBy: ASSERTED_BY.SDK_BACKSTOP,
+        // CTL-2015 (Codex #3871 P1): a recreated signal must carry a `startedAt`
+        // matching what a normal phase-agent-dispatch "dispatched" signal stamps —
+        // isTerminalTeardownStale's sibling-freshness comparison keys off exactly
+        // this field, and an undefined value silently fails that comparison rather
+        // than proving staleness. Preserve the seed's own startedAt when the caller
+        // supplied one; otherwise this recreate moment IS the earliest known start.
+        startedAt: seed.startedAt ?? ts,
         updatedAt: ts,
         phaseTimestamps: { ...(seed.phaseTimestamps ?? {}), [status]: ts },
       };
