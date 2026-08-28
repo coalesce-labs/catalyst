@@ -299,9 +299,9 @@ Rules of thumb:
 - Never link across teams for auto-sequencing (a `CTL` ticket on an `OTL`/`ADV` ticket): the
   execution-core daemon only works its own team, so a cross-team blocker just deadlocks. Coordinate
   cross-team work out-of-band.
-- A blocker you miss is fine — `/catalyst-dev:phase-triage` does a semantic second pass over the
-  backlog and can add genuine ones it finds. But a **false** blocker you add stalls real work, so
-  when in doubt, leave it out.
+- A blocker you miss is fine — the relay's triage step does a semantic second pass over the backlog
+  and can add genuine ones it finds. But a **false** blocker you add stalls real work, so when in
+  doubt, leave it out.
 
 ---
 
@@ -327,6 +327,6 @@ conventions.
 
 - `/catalyst-dev:linear` — does the actual Linear create/update. This skill produces the title +
   body it consumes.
-- `/catalyst-dev:phase-triage` — triage reads tickets; a ticket authored to this standard makes
-  triage's classify/estimate step far more reliable.
+- `/catalyst-dev:steward` — its `references/classify-and-estimate.md` holds the classify/estimate
+  rubric triage applies; a ticket authored to this standard makes that step far more reliable.
 - `/catalyst-dev:linearis` — CLI syntax reference. Never hardcode linearis commands here.

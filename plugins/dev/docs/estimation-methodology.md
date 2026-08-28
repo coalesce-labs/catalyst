@@ -222,7 +222,8 @@ The remaining wire-up (the Todo-ready follow-up) is two seams:
 ### a. `phase-triage` reads the reference class (read-side)
 
 When the orchestrator's `phase-triage` agent classifies a ticket
-([`plugins/dev/skills/phase-triage/SKILL.md`](../../../dev/skills/phase-triage/SKILL.md)), it already
+(the phase-triage skill, removed in CTL-2239; its classify/estimate rubric now lives in
+[`plugins/dev/skills/steward/references/classify-and-estimate.md`](../skills/steward/references/classify-and-estimate.md)), it already
 writes `estimated_scope` into `triage.json`. The wire-up runs `reference-class-lookup.ts` against the
 current corpus JSON with the ticket's signals (LOC/files/domains from the description's scope block,
 or a numstat probe of a draft branch), and records the voted T-shirt + points + the neighbour
