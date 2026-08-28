@@ -1,9 +1,6 @@
 # Follow-up Worker — ${TICKET_ID} (parent: ${PARENT_TICKET})
 
-You are a **follow-up worker**. The parent ticket ${PARENT_TICKET} was already merged, but
-findings surfaced after merge (post-merge review, production observation, late security scan,
-etc.). A fix-up on the merged PR is no longer possible — `gh pr merge` cannot reopen. This ticket
-(${TICKET_ID}) is a fresh change off `main` that addresses those findings.
+You are a **follow-up worker**. The parent ticket ${PARENT_TICKET} was already merged, but findings surfaced after merge (post-merge review, production observation, late security scan, etc.). A fix-up on the merged PR is no longer possible — `gh pr merge` cannot reopen. This ticket (${TICKET_ID}) is a fresh change off `main` that addresses those findings.
 
 ## Context
 
@@ -20,8 +17,7 @@ ${FINDINGS}
 
 ## Comms setup
 
-If the orchestrator set `CATALYST_COMMS_CHANNEL`, join it and check for inbound messages at each
-phase boundary. This is best-effort — a missing binary never crashes the worker.
+If the orchestrator set `CATALYST_COMMS_CHANNEL`, join it and check for inbound messages at each phase boundary. This is best-effort — a missing binary never crashes the worker.
 
 ```bash
 COMMS_BIN="${CLAUDE_PLUGIN_ROOT:-}/scripts/catalyst-comms"
@@ -74,18 +70,14 @@ if [ -n "${CATALYST_COMMS_CHANNEL:-}" ] && [ -n "$COMMS_BIN" ]; then
 fi
 ```
 
-Call `comms_check` at each phase boundary: after research, after planning, after implementation,
-after validation, and on each iteration of the merge-poll loop.
+Call `comms_check` at each phase boundary: after research, after planning, after implementation, after validation, and on each iteration of the merge-poll loop.
 
 ## Your contract
 
-This is a normal `/oneshot`-style workflow — full research → plan → implement → validate → ship.
-The difference from a regular ticket is that you have a focused scope (the findings above) and a
-known parent to reference.
+This is a normal `/oneshot`-style workflow — full research → plan → implement → validate → ship. The difference from a regular ticket is that you have a focused scope (the findings above) and a known parent to reference.
 
 1. **Read the parent PR first** — `gh pr view ${PARENT_PR_NUMBER} --comments` to understand what
-   the original implementation did and what the reviewers flagged. The findings list above is the
-   distilled set; the PR comments often have additional context.
+   the original implementation did and what the reviewers flagged. The findings list above is the distilled set; the PR comments often have additional context.
 
 2. **Research only what's needed for these findings** — do not re-research the whole parent
    ticket. The parent already shipped; you're amending behavior, not reinventing it.
@@ -103,8 +95,7 @@ known parent to reference.
    active listen loop (step 9) to wait for CLEAN and merge directly.
 
 7. **Signal file metadata** — your signal file at `${SIGNAL_FILE}` already has
-   `followUpTo: "${PARENT_TICKET}"` set by the orchestrator. Keep it. Update `status`, `phase`,
-   `pr.*` fields normally as you progress.
+   `followUpTo: "${PARENT_TICKET}"` set by the orchestrator. Keep it. Update `status`, `phase`, `pr.*` fields normally as you progress.
 
 8. **PR description must link to parent** — include a line like:
    ```
@@ -114,11 +105,7 @@ known parent to reference.
    ```
 
 9. **Active listen + merge** (CTL-252 contract) — after the PR is open, enter an event-driven
-   listen loop using [[wait-for-github]] to wait for the PR to be CLEAN (CI green + reviews
-   satisfied). Resolve blockers inline (CI failures up to 3 times, bot review threads via
-   GraphQL resolve). When CLEAN, execute the merge directly. On unrecoverable blockers (human
-   changes-requested, persistent DIRTY, CI exhausted), write `status=stalled` and post
-   `comms attention`. Do NOT poll `gh pr view --json` — use REST via `gh api` only.
+   listen loop using [[wait-for-github]] to wait for the PR to be CLEAN (CI green + reviews satisfied). Resolve blockers inline (CI failures up to 3 times, bot review threads via GraphQL resolve). When CLEAN, execute the merge directly. On unrecoverable blockers (human changes-requested, persistent DIRTY, CI exhausted), write `status=stalled` and post `comms attention`. Do NOT poll `gh pr view --json` — use REST via `gh api` only.
 
    ```bash
    # Wait for CLEAN state using [[wait-for-github]] two-phase pattern

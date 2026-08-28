@@ -9,9 +9,7 @@ version: 1.1.0
 
 # Scan for Reward Hacking Patterns
 
-You are scanning for "reward hacking" patterns — code that makes linters pass without actually
-fixing type safety issues. This is a verification step that MUST be run before marking TypeScript
-work complete.
+You are scanning for "reward hacking" patterns — code that makes linters pass without actually fixing type safety issues. This is a verification step that MUST be run before marking TypeScript work complete.
 
 ## What to Scan
 
@@ -32,13 +30,11 @@ Severity levels adjust based on project context:
 | `@ts-ignore` | **CRITICAL** | HIGH |
 | Non-null assertion (`!`) | **HIGH** | MEDIUM |
 
-Libraries/packages are stricter because they export types consumed by other code. Determine context
-from the file path — files under `packages/` use library severity, everything else uses app severity.
+Libraries/packages are stricter because they export types consumed by other code. Determine context from the file path — files under `packages/` use library severity, everything else uses app severity.
 
 ## Forbidden Patterns to Detect
 
-Use the **Grep tool** (not bash grep) to search for each pattern. Use glob `*.{ts,tsx}` to filter
-to TypeScript files only. Run all searches and report ALL matches:
+Use the **Grep tool** (not bash grep) to search for each pattern. Use glob `*.{ts,tsx}` to filter to TypeScript files only. Run all searches and report ALL matches:
 
 ### 1. Undocumented Double-Casts (HIGH)
 
@@ -80,9 +76,7 @@ if (user != null) {
 const name = user!.name; // Could be null at runtime
 ```
 
-When evaluating matches, read surrounding lines (use Grep with `-B 3` context) to check for
-a preceding null/undefined guard (`!= null`, `!== null`, `!== undefined`, `!= undefined`,
-truthiness check, or `if` guard).
+When evaluating matches, read surrounding lines (use Grep with `-B 3` context) to check for a preceding null/undefined guard (`!= null`, `!== null`, `!== undefined`, `!= undefined`, truthiness check, or `if` guard).
 
 ### 7. Async Correctness Issues (HIGH)
 
@@ -103,8 +97,7 @@ items.forEach(async (item) => {  // Promises silently dropped
 
 Pattern: lines that call an async function without `await`, `return`, `void`, or `.then()`.
 
-This is harder to detect via pattern matching alone. Flag `forEach(async` reliably; for other
-cases, note them as informational if spotted during the scan.
+This is harder to detect via pattern matching alone. Flag `forEach(async` reliably; for other cases, note them as informational if spotted during the scan.
 
 ### 8. Exported Unused Types (LOW — informational)
 

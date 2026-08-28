@@ -11,8 +11,7 @@ version: 1.0.0
 
 ## Configuration Note
 
-This command uses ticket references like `PROJ-123`. Replace `PROJ` with your Linear team's ticket
-prefix:
+This command uses ticket references like `PROJ-123`. Replace `PROJ` with your Linear team's ticket prefix:
 
 - Read from `.catalyst/config.json` if available
 - Otherwise use a generic format like `TICKET-XXX`
@@ -42,23 +41,13 @@ When this command is invoked:
    - Copies `.claude/` and `.catalyst/` directories
    - Falls back to auto-detected setup if no config (dependency install + thoughts init)
 
-   **Resume-from-remote (default-on, CTL-1640).** When a NEW branch is being created and
-   `origin/<worktree_name>` already exists (e.g. a pushed draft PR's commits, CTL-783), the worktree
-   is seeded from that remote tip instead of being cut fresh off the base branch — so a re-dispatch
-   or a cross-host reclaim rebuilds on the pushed work rather than orphaning it under a fresh branch.
-   This is automatic; the script prints a `🌱 Resuming from origin/<name>` banner when it fires. An
-   existing **local** branch always wins over the remote (no auto-merge); the resume applies only
-   when there is no local branch yet.
+   **Resume-from-remote (default-on, CTL-1640).** When a NEW branch is being created and `origin/<worktree_name>` already exists (e.g. a pushed draft PR's commits, CTL-783), the worktree is seeded from that remote tip instead of being cut fresh off the base branch — so a re-dispatch or a cross-host reclaim rebuilds on the pushed work rather than orphaning it under a fresh branch. This is automatic; the script prints a `🌱 Resuming from origin/<name>` banner when it fires. An existing **local** branch always wins over the remote (no auto-merge); the resume applies only when there is no local branch yet.
 
-   To opt out and force a fresh branch off the base (ignore any matching origin branch), pass
-   **`--no-from-remote`**. To suppress all origin fetches entirely (offline), pass **`--skip-fetch`**
-   (which also disables the resume). Confirm with the user which they want before overriding the
-   default when a matching origin branch may carry stale or already-merged history.
+   To opt out and force a fresh branch off the base (ignore any matching origin branch), pass **`--no-from-remote`**. To suppress all origin fetches entirely (offline), pass **`--skip-fetch`** (which also disables the resume). Confirm with the user which they want before overriding the default when a matching origin branch may carry stale or already-merged history.
 
 4. **Project setup** (handled by script based on config):
 
-   If `catalyst.worktree.setup` is defined in config, those commands run in order. Otherwise, the
-   script auto-detects: dependency install (`bun/npm`) + thoughts init.
+   If `catalyst.worktree.setup` is defined in config, those commands run in order. Otherwise, the script auto-detects: dependency install (`bun/npm`) + thoughts init.
 
    Example config for full control:
 
@@ -78,9 +67,7 @@ When this command is invoked:
    ```
 
 5. **Optional: Launch implementation session**: If a plan file path was provided, ask if the user
-   wants to launch Claude in the worktree. Note: `claude -w` takes a _name_ and creates a new
-   worktree — so `cd` into the already-created worktree instead, capture stderr to a real file for
-   post-mortem debugging, and use `--dangerously-skip-permissions` since there's no TTY.
+   wants to launch Claude in the worktree. Note: `claude -w` takes a _name_ and creates a new worktree — so `cd` into the already-created worktree instead, capture stderr to a real file for post-mortem debugging, and use `--dangerously-skip-permissions` since there's no TTY.
    ```bash
    (
      cd "<worktree_path>" || exit 1
@@ -99,8 +86,7 @@ Worktree base directory is resolved in this order:
 2. `~/catalyst/wt/<projectKey>/` (default — reads `catalyst.projectKey` from config)
 3. `~/catalyst/wt/<repo>/` (fallback if no config)
 
-**Recommended**: Add `~/catalyst` to Claude Code's `additionalDirectories` in
-`~/.claude/settings.json` so all worktrees across projects are automatically trusted.
+**Recommended**: Add `~/catalyst` to Claude Code's `additionalDirectories` in `~/.claude/settings.json` so all worktrees across projects are automatically trusted.
 
 **Example layout** (for project with `projectKey: "acme"`):
 

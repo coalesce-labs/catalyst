@@ -15,9 +15,7 @@ allowed-tools: Bash, Read, Write, Grep, Glob
 
 # Ticket Retro — the cross-ticket compound view
 
-Loop C of compound engineering: a human-readable reflection across a SET of tickets. It mostly
-**reads** what Loop B (friction logs, learnings) and Loop A (compound-log, estimation corpus)
-captured, then writes ONE artifact: the retro document.
+Loop C of compound engineering: a human-readable reflection across a SET of tickets. It mostly **reads** what Loop B (friction logs, learnings) and Loop A (compound-log, estimation corpus) captured, then writes ONE artifact: the retro document.
 
 **Runs automatically per ticket, relay-native (CTL-2244):** `merge-pr` Step 14 ([post-merge.md](../merge-pr/references/post-merge.md)) invokes this skill last — after `compound-estimate` and `ticket-compound` — once Step 13b's deploy verification (`merge-pr/references/post-merge-deploy-verify.md`, CTL-2232) resolves a terminal sentinel for the merge, so the system learns from every ticket it ships without being asked, and this ticket's own learning (just written by `ticket-compound`) is already in the store by the time this runs — see [`../compound-estimate/references/trigger.md`](../compound-estimate/references/trigger.md) for the shared trigger contract and why this no longer depends on the retiring daemon-era `phase-monitor-merge` phase agent. Best-effort in that context — a retro failure never blocks a merge. Several merges per day are normal: same-day re-runs REGENERATE today's file cumulatively (the gather floor skips today — see Step 3).
 
@@ -65,33 +63,23 @@ What it returns (see the script header for the full shape):
 | `merged_prs[]` | `gh pr list --state merged` in-window, ticket id from branch/title | `[]` |
 | `db_stats[]` | `~/catalyst/catalyst.db` sessions⋈session_metrics per ticket (SPARSE — see note) | `[]` |
 
-**Actuals note:** `db_stats` covers only orchestrator-run tickets with metrics rows (historically
-~13 of 333). `merged_prs[].additions/deletions` (diff churn) is the universal actuals fallback —
-use it for the aggregate stats; treat db cost/hours as a bonus column where present.
+**Actuals note:** `db_stats` covers only orchestrator-run tickets with metrics rows (historically ~13 of 333). `merged_prs[].additions/deletions` (diff churn) is the universal actuals fallback — use it for the aggregate stats; treat db cost/hours as a bonus column where present.
 
 ## Step 2: Synthesize (your judgment — this is the LLM half)
 
 1. **What we did** — group `merged_prs` by ticket; one line each. Failed/abandoned tickets that
    show up in friction but not in `merged_prs` belong here too (often highest-signal).
 2. **Recurring friction patterns** — cluster `friction[].line` entries that describe the same
-   underlying problem (same component, same failure shape — NOT necessarily same wording). A
-   pattern needs **≥2 records** (across tickets or phases). One-off frictions are listed only if
-   severe. For each pattern: a name, the supporting records (`ticket·phase`), and one sentence of
-   synthesis.
+   underlying problem (same component, same failure shape — NOT necessarily same wording). A pattern needs **≥2 records** (across tickets or phases). One-off frictions are listed only if severe. For each pattern: a name, the supporting records (`ticket·phase`), and one sentence of synthesis.
 3. **Watch-item recurrence** — for each `prior_retro.watch_items[]` pattern, check whether this
-   window's friction/learnings show it again. Verdict per item: `recurred` (cite evidence),
-   `quiet` (no sighting), or `resolved` (a learning/ADR/fix landed that addresses it — cite it).
+   window's friction/learnings show it again. Verdict per item: `recurred` (cite evidence), `quiet` (no sighting), or `resolved` (a learning/ADR/fix landed that addresses it — cite it).
 4. **Estimation calibration** — from `calibration`: count/exact/mean-signed-delta/median-abs-delta plus a per-ticket start→actual table. When `calibration.entries == 0`, render `_none_` and note the sink fills once the post-merge deploy-verification signal resolves (see `../compound-estimate/references/trigger.md`).
 5. **Next watch items** — carry forward unresolved prior items (keep their `first_seen`) and add
-   new patterns from (2) worth tracking. Cap at ~7 — a watch list longer than that is a backlog,
-   not a watch list.
+   new patterns from (2) worth tracking. Cap at ~7 — a watch list longer than that is a backlog, not a watch list.
 
 ## Step 3: Write the retro document
 
-Path: `thoughts/shared/retros/ticket/<YYYY-MM-DD>.md` (today UTC). **If today's file already
-exists, OVERWRITE it** — the gather floor deliberately skips today's retro (CTL-831), so a
-same-day re-run covers the same since-prior-retro window plus whatever just merged; today's file
-is always the cumulative day view, never a near-empty increment. Template:
+Path: `thoughts/shared/retros/ticket/<YYYY-MM-DD>.md` (today UTC). **If today's file already exists, OVERWRITE it** — the gather floor deliberately skips today's retro (CTL-831), so a same-day re-run covers the same since-prior-retro window plus whatever just merged; today's file is always the cumulative day view, never a near-empty increment. Template:
 
 ```markdown
 ---
@@ -164,9 +152,7 @@ humanlayer thoughts sync 2>/dev/null || true
 echo "ticket-retro: wrote thoughts/shared/retros/ticket/$(date -u +%Y-%m-%d).md"
 ```
 
-Report to the user: the retro path, top 3 recurring patterns, the calibration one-liner, and any
-recurred watch-items. The next morning briefing surfaces the watch-items automatically
-(`Plan today → Retro signals`).
+Report to the user: the retro path, top 3 recurring patterns, the calibration one-liner, and any recurred watch-items. The next morning briefing surfaces the watch-items automatically (`Plan today → Retro signals`).
 
 ## Relationship to the other compound skills
 

@@ -8,13 +8,11 @@ version: 1.0.0
 
 # Validate Type Safety
 
-Final verification gate before marking any TypeScript work complete. Combines type checking with
-reward hacking detection, test verification, and linting. ALL 5 steps must pass.
+Final verification gate before marking any TypeScript work complete. Combines type checking with reward hacking detection, test verification, and linting. ALL 5 steps must pass.
 
 ## Tooling Detection
 
-Before running any commands, detect the project's package manager and linting tool. Do NOT
-hardcode `bun`, `npm`, or `trunk` — detect from what's available.
+Before running any commands, detect the project's package manager and linting tool. Do NOT hardcode `bun`, `npm`, or `trunk` — detect from what's available.
 
 ### Package Manager
 
@@ -60,8 +58,7 @@ Read the project's `tsconfig.json` (or the tsconfig covering changed files in a 
 - `"noImplicitReturns": true` — **INFO** if missing (recommended)
 - `"exactOptionalPropertyTypes": true` — **INFO** if missing (recommended)
 
-For monorepos: use the Glob tool to find `tsconfig.json` files, then identify which one covers the
-changed files (check `include`/`exclude` paths and `references`).
+For monorepos: use the Glob tool to find `tsconfig.json` files, then identify which one covers the changed files (check `include`/`exclude` paths and `references`).
 
 This step is **informational only** — it does not cause a FAIL verdict, but findings are reported.
 
@@ -83,8 +80,7 @@ Execute the `/scan-reward-hacking` skill on the changed files.
 
 ### Step 3: Verify Test Inclusion
 
-Check that test files are NOT excluded from type checking. Use Grep to search tsconfig files
-(in changed packages for monorepos):
+Check that test files are NOT excluded from type checking. Use Grep to search tsconfig files (in changed packages for monorepos):
 
 - Pattern: `\.test\.ts` or `\.spec\.ts` in `exclude` arrays of tsconfig files
 - Pattern: test directories in `exclude` arrays
@@ -97,8 +93,7 @@ Check that test files are NOT excluded from type checking. Use Grep to search ts
 ${PM_RUN} test
 ```
 
-For monorepos with many packages, if the project has a `--filter` or `--scope` option, run tests
-only for affected packages when possible.
+For monorepos with many packages, if the project has a `--filter` or `--scope` option, run tests only for affected packages when possible.
 
 **Expected**: All tests pass. Type fixes should not break functionality.
 
@@ -115,8 +110,7 @@ If no linter was detected, skip this step and note it in the output.
 
 ### Optional: Type Coverage Metric
 
-If `type-coverage` is available (check with `which type-coverage` or `npx type-coverage --help`),
-report the numeric coverage score:
+If `type-coverage` is available (check with `which type-coverage` or `npx type-coverage --help`), report the numeric coverage score:
 
 ```bash
 npx type-coverage --at-least 0
@@ -195,8 +189,7 @@ Do NOT mark the work as complete. Instead:
 
 ## Fast-Fail Mode
 
-For efficiency, stop on the first failing step. Report which step failed and what needs fixing.
-Re-run the full validation after fixes are applied.
+For efficiency, stop on the first failing step. Report which step failed and what needs fixing. Re-run the full validation after fixes are applied.
 
 ## Integration with Other Skills
 

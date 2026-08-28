@@ -1,11 +1,8 @@
 # worker.waiting / worker.resumed Events (CTL-403)
 
-_Read this when debugging why a wait loop appears stale to the watchdog, or to understand how
-`catalyst-events wait-for` signals its wait state to the broker._
+_Read this when debugging why a wait loop appears stale to the watchdog, or to understand how `catalyst-events wait-for` signals its wait state to the broker._
 
-Emitted automatically by `catalyst-events wait-for` when `$CATALYST_SESSION_ID` is set. These
-events make wait loops visible to the broker so the watchdog can distinguish a legitimately
-waiting session from a silently dead one.
+Emitted automatically by `catalyst-events wait-for` when `$CATALYST_SESSION_ID` is set. These events make wait loops visible to the broker so the watchdog can distinguish a legitimately waiting session from a silently dead one.
 
 ## `worker.waiting` shape
 

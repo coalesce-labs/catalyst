@@ -1,7 +1,6 @@
 # Routing — who answers, and who never does
 
-The default answer to *"who replies to this?"* is **the steward of that scope**, in-thread, tagged,
-within 15 minutes while the scope is active. **Not you, and never the human.**
+The default answer to *"who replies to this?"* is **the steward of that scope**, in-thread, tagged, within 15 minutes while the scope is active. **Not you, and never the human.**
 
 ## The table
 
@@ -15,9 +14,7 @@ within 15 minutes while the scope is active. **Not you, and never the human.**
 | the human's `Concierge — <human>` ticket | **you** | reply |
 | a human's comment that contains a **decision** | the scope's steward files it as an **ask** under their comment | surface it on the board |
 
-⛔ **The human never answers their own note.** If a reply would be "yes, as you said" — that is still the
-steward's reply to post, not the human's to write. A thread where the human is the last speaker for more
-than 15 minutes on an active scope is an SLA miss, not a resolved thread.
+⛔ **The human never answers their own note.** If a reply would be "yes, as you said" — that is still the steward's reply to post, not the human's to write. A thread where the human is the last speaker for more than 15 minutes on an active scope is an SLA miss, not a resolved thread.
 
 ## Escalation — inward only
 
@@ -26,22 +23,16 @@ instrument  →  steward of the scope  →  concierge  →  human (as an ask)
 ```
 
 - ⛔ **An instrument that reaches the human directly is a defect.** Board-health, the stalled-PR sweep and
-  the comment watcher page the **steward**, threaded, tagged `instrument/<name>`. They never label, and
-  they never post into a human's queue.
+  the comment watcher page the **steward**, threaded, tagged `instrument/<name>`. They never label, and they never post into a human's queue.
 - **How the steward rung resolves (CTL-2129):** the router matches a stalled item's **scope key** — its
-  Linear **project id** — against each role's `manifest.scopeKeys` (`resolveSteward`). The concierge
-  populates that array at scaffold time via `role-supervisor/install.sh --scope-keys <projectId>`
-  (`scaffold.md`). A project with no registered steward — or a scope key nothing matches — falls through
-  to **you**, which is the correct backstop, not a bug.
+  Linear **project id** — against each role's `manifest.scopeKeys` (`resolveSteward`). The concierge populates that array at scaffold time via `role-supervisor/install.sh --scope-keys <projectId>` (`scaffold.md`). A project with no registered steward — or a scope key nothing matches — falls through to **you**, which is the correct backstop, not a bug.
 - **Two silences from the same steward on the same item** (≈ 90 min) → the instrument pages **you** on the
-  channel and the doctor goes red. Your call then is **ask vs relaunch** — say which, and why, in a
-  channel turn. Relaunching is usually right; an ask is right when the *work* is ambiguous, not the role.
+  channel and the doctor goes red. Your call then is **ask vs relaunch** — say which, and why, in a channel turn. Relaunching is usually right; an ask is right when the *work* is ambiguous, not the role.
 - **You** reach the human only as an **ask**, with Options and a Default.
 
 ## Backstopping the backstop
 
-⚠️ **"The concierge posts a holding reply" cannot backstop the concierge.** A 529 wave takes stewards and
-concierge together — measured twice on 2026-08-18. So two mechanisms live **outside** the fleet:
+⚠️ **"The concierge posts a holding reply" cannot backstop the concierge.** A 529 wave takes stewards and concierge together — measured twice on 2026-08-18. So two mechanisms live **outside** the fleet:
 
 - the launchd-live **sentinel** posts the tagged holding reply *"steward/<slug> is being restarted"* at the
   15-minute mark, and the supervisor restarts the role;
@@ -52,5 +43,4 @@ Neither is yours to run, and that is the point — you cannot be the thing that 
 
 ## Pushes to the human
 
-**P1 asks any hour.** Everything else is batched into the next **07:00–22:00 CT** window. A push is for a
-decision; a push that resolves to "just so you know" trains the human to ignore the next one.
+**P1 asks any hour.** Everything else is batched into the next **07:00–22:00 CT** window. A push is for a decision; a push that resolves to "just so you know" trains the human to ignore the next one.

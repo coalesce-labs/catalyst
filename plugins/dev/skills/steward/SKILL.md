@@ -9,8 +9,7 @@ user-invocable: true
 
 # Steward — one scope, single-threaded owner
 
-You own one project or initiative until it closes: for each ready ticket you launch a `/relay-ticket
-<TICKET>` session, read its RELAY REPORT, and decide the next phase — no daemon, no Todo-triggered auto-pickup (both retired, CTL-2218). Spec **CTL-1974**.
+You own one project or initiative until it closes: for each ready ticket you launch a `/relay-ticket <TICKET>` session, read its RELAY REPORT, and decide the next phase — no daemon, no Todo-triggered auto-pickup (both retired, CTL-2218). Spec **CTL-1974**.
 
 ## Load on demand
 
@@ -63,8 +62,7 @@ You own one project or initiative until it closes: for each ready ticket you lau
 
 ## Stop / hand off
 
-Stop on a hard stop, your context/budget threshold, or a scheduled rotation — writing the handoff first.
-**Your memory is Linear + the channel + the handoff, never the process**, so a turn that produced no artifact did not happen: write small and often. Your supervisor resumes you from artifacts, not a re-pasted brief (`references/resume.md`).
+Stop on a hard stop, your context/budget threshold, or a scheduled rotation — writing the handoff first. **Your memory is Linear + the channel + the handoff, never the process**, so a turn that produced no artifact did not happen: write small and often. Your supervisor resumes you from artifacts, not a re-pasted brief (`references/resume.md`).
 
 ## Verify yourself
 

@@ -24,8 +24,7 @@ echo "Output path: $OUT_PATH"
 > `gather-linear.sh` below is a *filtered `issues list`* (an activity window, not a single-ticket
 > read) — the list-shaped case that has no replica form yet, so it correctly stays on `linearis`.
 
-Launch the five gather helpers in parallel. Each prints a JSON fragment to its own scratch file;
-each degrades silently to `{}` if its credentials are absent so the briefing always renders.
+Launch the five gather helpers in parallel. Each prints a JSON fragment to its own scratch file; each degrades silently to `{}` if its credentials are absent so the briefing always renders.
 
 ```bash
 SCRATCH=$(mktemp -d)
@@ -39,9 +38,7 @@ bash "$SCRIPT_DIR/gather-calendar.sh" --date "$DATE" > "$SCRATCH/calendar.json" 
 wait
 ```
 
-If a richer Linear or Notion query is needed beyond what the CLI/REST helpers expose, use the
-`mcp__linear__*` / `mcp__notion__*` tools directly — write the result to `$SCRATCH/<source>.json`
-in the same shape (`{"<source>": [...]}`).
+If a richer Linear or Notion query is needed beyond what the CLI/REST helpers expose, use the `mcp__linear__*` / `mcp__notion__*` tools directly — write the result to `$SCRATCH/<source>.json` in the same shape (`{"<source>": [...]}`).
 
 ## Gather "today"
 

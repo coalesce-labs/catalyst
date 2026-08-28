@@ -16,9 +16,7 @@
 
 ## Error handling
 
-For all errors, provide clear messages with the specific error, what went wrong, and how to fix
-it. **Never give up with a generic message** — always diagnose the specific cause and provide
-actionable next steps.
+For all errors, provide clear messages with the specific error, what went wrong, and how to fix it. **Never give up with a generic message** — always diagnose the specific cause and provide actionable next steps.
 
 **Fail fast (stop execution):**
 - Rebase conflicts → show conflicting files, instructions to resolve manually, then re-run

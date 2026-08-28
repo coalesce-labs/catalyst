@@ -1,7 +1,6 @@
 # Groq Prose Registration (Env-gated off — CTL-357)
 
-_Read this when you need fuzzy / multi-condition interest matching and have confirmed the
-deterministic interest types cannot cover the use case._
+_Read this when you need fuzzy / multi-condition interest matching and have confirmed the deterministic interest types cannot cover the use case._
 
 > **Off by default.** `CATALYST_BROKER_PROSE_ENABLED=0` is the new default. Empirical evidence
 > (`orch-ctl-352-354-2026-05-12`) showed a ~95% false-positive rate on prose wakes — every
@@ -14,8 +13,7 @@ deterministic interest types cannot cover the use case._
 > Groq classification for prompt-based interests. Prefer the deterministic types
 > (`pr_lifecycle`, `ticket_lifecycle`, `comms_lifecycle`) for anything routine.
 
-For complex / multi-condition interests that genuinely need fuzzy matching, register with a
-natural-language prompt:
+For complex / multi-condition interests that genuinely need fuzzy matching, register with a natural-language prompt:
 
 ```bash
 jq -nc \

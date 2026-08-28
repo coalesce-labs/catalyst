@@ -1,7 +1,6 @@
 # Agent Lifecycle — Check-in, Auto-Correlation, Checkout
 
-_Read this when an agent needs to register itself with the broker, update its claimed PR, or
-understand how `agent.checkin` / `agent.checkout` wire up auto-correlated interests._
+_Read this when an agent needs to register itself with the broker, update its claimed PR, or understand how `agent.checkin` / `agent.checkout` wire up auto-correlated interests._
 
 ## 1. Auto-Correlation (The Common Case — No Registration Needed)
 
@@ -19,9 +18,7 @@ EOF
 # ↑ The broker sees claimed_pr → auto-registers pr_lifecycle for filter.wake.$CATALYST_SESSION_ID
 ```
 
-The `oneshot` skill now uses this pattern instead of calling `filter.register` directly. The
-explicit `filter_register_worker` function is kept for backward compat but is no longer the
-recommended path for new work.
+The `oneshot` skill now uses this pattern instead of calling `filter.register` directly. The explicit `filter_register_worker` function is kept for backward compat but is no longer the recommended path for new work.
 
 ## 2. `agent.checkin` Event
 

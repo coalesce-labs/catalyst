@@ -1,7 +1,6 @@
 # Filter Cookbook, Pattern 4, and Envelope Versions
 
-_Read this when you need a ready-made jq filter, want to tail everything for a ticket (Pattern 4),
-or need to understand v1/v2/canonical envelope differences._
+_Read this when you need a ready-made jq filter, want to tail everything for a ticket (Pattern 4), or need to understand v1/v2/canonical envelope differences._
 
 ## Filter cookbook
 
@@ -38,8 +37,7 @@ Useful for live debugging or operator dashboards:
 catalyst-events tail --filter '.attributes."linear.issue.identifier" == "CTL-210" or .attributes."catalyst.worker.ticket" == "CTL-210"'
 ```
 
-Captures GitHub PR events scoped to that ticket, Linear webhook events for the issue,
-comms posts where the ticket is the from/parent, and orchestrator/worker lifecycle events.
+Captures GitHub PR events scoped to that ticket, Linear webhook events for the issue, comms posts where the ticket is the from/parent, and orchestrator/worker lifecycle events.
 
 ## v1 vs v2 vs canonical envelopes
 
@@ -47,13 +45,8 @@ The event log carries two legacy schemas plus the new canonical shape (CTL-300):
 
 - **v1** (bash writers, `catalyst-state.sh event`): `{ ts, event, orchestrator, worker, detail }`
 - **v2** (TypeScript writers, webhook receiver, CTL-209+): adds `id`, `schemaVersion: 2`,
-  `source`, `scope` (replacing flat `orchestrator` / `worker` with a nested object;
-  v2 still emits the flat fields too as backward-compat aliases).
+  `source`, `scope` (replacing flat `orchestrator` / `worker` with a nested object; v2 still emits the flat fields too as backward-compat aliases).
 - **canonical** (CTL-300+): OTel-shaped envelope with `attributes."event.name"`, `attributes."vcs.pr.number"`,
   etc. All new producers emit canonical; filters in this doc target canonical paths.
 
-Filters that read `.attributes."vcs.repository.name"` / `.attributes."vcs.pr.number"` /
-`.attributes."linear.issue.identifier"` only match canonical envelopes. Filters that read
-`.attributes."event.name"` work for canonical; `.event` / `.worker` / `.orchestrator` work for
-v1/v2. Choose based on which sources you need to match — webhook events use canonical,
-orchestrator events may still use v1/v2.
+Filters that read `.attributes."vcs.repository.name"` / `.attributes."vcs.pr.number"` / `.attributes."linear.issue.identifier"` only match canonical envelopes. Filters that read `.attributes."event.name"` work for canonical; `.event` / `.worker` / `.orchestrator` work for v1/v2. Choose based on which sources you need to match — webhook events use canonical, orchestrator events may still use v1/v2.

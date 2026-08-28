@@ -10,10 +10,7 @@ description:
 
 # Catalyst Event Broker — Protocol Reference (CTL-303)
 
-The broker daemon evolved from the `catalyst-filter` daemon (CTL-284). It adds structured agent
-identity (`agent.checkin` / `agent.checkout`), `ticket_lifecycle` deterministic routing for Linear
-events, auto-correlation of `pr_lifecycle` from check-in data, and backward-compatible Groq prose
-classification.
+The broker daemon evolved from the `catalyst-filter` daemon (CTL-284). It adds structured agent identity (`agent.checkin` / `agent.checkout`), `ticket_lifecycle` deterministic routing for Linear events, auto-correlation of `pr_lifecycle` from check-in data, and backward-compatible Groq prose classification.
 
 ## Daemon Management
 

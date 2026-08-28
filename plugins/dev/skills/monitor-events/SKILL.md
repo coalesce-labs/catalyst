@@ -9,14 +9,11 @@ description:
 
 # monitor-events — Event-driven waits in skill prose
 
-CTL-210 unified the Catalyst event log: every GitHub webhook, Linear webhook, comms post,
-and orchestrator/worker lifecycle event flows through `~/catalyst/events/YYYY-MM.jsonl`.
-This skill documents the canonical patterns. Use as a reference — do not invoke as a slash command.
+CTL-210 unified the Catalyst event log: every GitHub webhook, Linear webhook, comms post, and orchestrator/worker lifecycle event flows through `~/catalyst/events/YYYY-MM.jsonl`. This skill documents the canonical patterns. Use as a reference — do not invoke as a slash command.
 
 ## Prerequisite — orch-monitor daemon must be running
 
-`catalyst-events tail`/`wait-for` read from `~/catalyst/events/YYYY-MM.jsonl`, populated
-by `orch-monitor`. When the daemon is down, `tail` returns empty and `wait-for` times out.
+`catalyst-events tail`/`wait-for` read from `~/catalyst/events/YYYY-MM.jsonl`, populated by `orch-monitor`. When the daemon is down, `tail` returns empty and `wait-for` times out.
 
 Liveness check:
 
@@ -25,9 +22,7 @@ plugins/dev/scripts/catalyst-monitor.sh status        # human-readable
 plugins/dev/scripts/catalyst-monitor.sh status --json # {"running":true,"pid":...}
 ```
 
-Skills that invoke `check-project-setup.sh` (orchestrate, oneshot, merge-pr) handle this
-automatically. For other callers: start with `catalyst-monitor.sh start` or plan for the
-polling fallback.
+Skills that invoke `check-project-setup.sh` (orchestrate, oneshot, merge-pr) handle this automatically. For other callers: start with `catalyst-monitor.sh start` or plan for the polling fallback.
 
 ## Pattern selection & cost tradeoffs
 
@@ -71,6 +66,4 @@ Monitor(command="catalyst-events tail --filter '<jq-predicate>'", description=".
 catalyst-events tail --since-line 0 --filter '...' | tail -5
 ```
 
-⚠️ **Safety net, every time:** pair every `wait-for` with an authoritative one-shot check after
-it returns (a `gh api` / `linearis` re-check of the actual state). When the broker or webhook
-infra is down, `wait-for` only times out — nothing rechecks the requested state for you.
+⚠️ **Safety net, every time:** pair every `wait-for` with an authoritative one-shot check after it returns (a `gh api` / `linearis` re-check of the actual state). When the broker or webhook infra is down, `wait-for` only times out — nothing rechecks the requested state for you.

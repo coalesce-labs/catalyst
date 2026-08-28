@@ -12,8 +12,7 @@ version: 1.0.0
 
 # Implement Plan
 
-You are tasked with implementing an approved technical plan from `thoughts/shared/plans/`. These
-plans contain phases with specific changes and success criteria.
+You are tasked with implementing an approved technical plan from `thoughts/shared/plans/`. These plans contain phases with specific changes and success criteria.
 
 ## Prerequisites
 
@@ -75,14 +74,7 @@ Once you have a plan path:
 - Check for any existing checkmarks (- [x]) to see what's done
 - Read the original ticket and all files mentioned in the plan
 - **Extract ticket from plan frontmatter** (`source_ticket` field) and update Linear state
-  to `stateMap.inProgress` from config using Linearis CLI (run `linearis issues usage` for syntax).
-  If Linearis CLI is not available, skip silently and continue implementation.
-  **Skip the status transition when `CATALYST_PHASE` is set** — under a phase agent
-  (e.g. `phase-implement`, or this skill invoked as a sub-task from `phase-pr` /
-  `phase-monitor-merge` during PR resolution / CI fix-up loops) the deterministic
-  coordinator (CTL-558) owns the Linear status write-back. A direct write here
-  would regress the ticket from `PR` back to `Implement`, producing operator-visible
-  state flicker (CTL-601). Mirrors the gate in `create-pr/SKILL.md:227-232`.
+  to `stateMap.inProgress` from config using Linearis CLI (run `linearis issues usage` for syntax). If Linearis CLI is not available, skip silently and continue implementation. **Skip the status transition when `CATALYST_PHASE` is set** — under a phase agent (e.g. `phase-implement`, or this skill invoked as a sub-task from `phase-pr` / `phase-monitor-merge` during PR resolution / CI fix-up loops) the deterministic coordinator (CTL-558) owns the Linear status write-back. A direct write here would regress the ticket from `PR` back to `Implement`, producing operator-visible state flicker (CTL-601). Mirrors the gate in `create-pr/SKILL.md:227-232`.
 - Think deeply about how the pieces fit together
 - Create a todo list to track your progress
 - Start implementing if you understand what needs to be done
@@ -104,8 +96,7 @@ For each phase, follow **Red → Green → Refactor**:
 1. **Red** — Write the tests specified in the plan's "Tests First" section. Run them to confirm they
    fail.
 2. **Green** — Implement the minimum code from the plan's "Implementation" section to make tests
-   pass. Then **commit the Green result**, and only after that push the draft PR, so a mid-phase
-   kill loses at most one Red→Green cycle:
+   pass. Then **commit the Green result**, and only after that push the draft PR, so a mid-phase kill loses at most one Red→Green cycle:
 
 ```bash implement-plan-commit-green
 # CTL-1490 (Codex round-2, PR #2697): commit BEFORE the draft-pr-push block below —
@@ -149,11 +140,9 @@ fi
 
 3. **Refactor** — Clean up while keeping tests green. Apply any refactoring notes from the plan.
 
-This order is non-negotiable. If a phase doesn't have a "Tests First" section, write tests for the
-phase's expected behavior before implementing. The tests serve as executable acceptance criteria.
+This order is non-negotiable. If a phase doesn't have a "Tests First" section, write tests for the phase's expected behavior before implementing. The tests serve as executable acceptance criteria.
 
-When things don't match the plan exactly, think about why and communicate clearly. The plan is your
-guide, but your judgment matters too.
+When things don't match the plan exactly, think about why and communicate clearly. The plan is your guide, but your judgment matters too.
 
 If you encounter a mismatch:
 
@@ -185,11 +174,9 @@ If you encounter a mismatch:
 - Check off completed items in the plan file itself using Edit
 - **Check context usage** - monitor token consumption
 - **Push + ensure the draft PR (phase-agent mode)** — The `implement-plan-draft-pr-early` block
-  runs automatically after each Green step (see TDD Rhythm above; CTL-1490). Interactive
-  `/catalyst-dev:implement-plan` runs skip it via the CATALYST_PHASE gate.
+  runs automatically after each Green step (see TDD Rhythm above; CTL-1490). Interactive `/catalyst-dev:implement-plan` runs skip it via the CATALYST_PHASE gate.
 
-Don't let verification interrupt your flow - batch full suite runs at natural stopping points. But
-always run the specific tests you wrote during each Red → Green cycle.
+Don't let verification interrupt your flow - batch full suite runs at natural stopping points. But always run the specific tests you wrote during each Red → Green cycle.
 
 ## Context Management During Implementation
 
@@ -255,8 +242,7 @@ When recommending a handoff, guide the user:
 
 ## Quality Gates (After All Phases Complete)
 
-After all implementation phases pass, run quality gates before marking work as done. These gates
-catch issues that per-phase testing might miss.
+After all implementation phases pass, run quality gates before marking work as done. These gates catch issues that per-phase testing might miss.
 
 **Gate execution order:**
 
@@ -272,13 +258,11 @@ Quality Gates:
 
 **Gate 1: Type Safety Validation**
 
-Invoke `/validate-type-safety`. This runs the full 5-step gate (type check, reward hacking scan,
-test inclusion, tests, lint). If it fails, fix issues and re-run before proceeding.
+Invoke `/validate-type-safety`. This runs the full 5-step gate (type check, reward hacking scan, test inclusion, tests, lint). If it fails, fix issues and re-run before proceeding.
 
 **Gate 2: Security Review**
 
-Invoke the built-in `/security-review` skill. Review findings and fix any vulnerabilities before
-proceeding.
+Invoke the built-in `/security-review` skill. Review findings and fix any vulnerabilities before proceeding.
 
 **Gate 3: Code Review**
 
@@ -304,9 +288,7 @@ If critical gaps exist, write the missing tests.
 
 ### File Improvement Findings
 
-**Recording findings during implementation.** When a phase surfaces friction worth fixing —
-a bug noticed in adjacent code, a step that shouldn't need manual intervention, a gap in
-tooling — record it the moment it's observed:
+**Recording findings during implementation.** When a phase surfaces friction worth fixing — a bug noticed in adjacent code, a step that shouldn't need manual intervention, a gap in tooling — record it the moment it's observed:
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/scripts/add-finding.sh" \
@@ -315,10 +297,7 @@ tooling — record it the moment it's observed:
   --skill implement-plan
 ```
 
-Findings go to a shared queue (under orchestrate/oneshot, that skill's queue; direct
-invocations get a per-session queue). The block below files the queue at end-of-run. It's a
-safety net: when `implement-plan` runs under `/orchestrate` or `/oneshot`, the parent's
-filing step drains the same queue first and this block finds an empty file:
+Findings go to a shared queue (under orchestrate/oneshot, that skill's queue; direct invocations get a per-session queue). The block below files the queue at end-of-run. It's a safety net: when `implement-plan` runs under `/orchestrate` or `/oneshot`, the parent's filing step drains the same queue first and this block finds an empty file:
 
 ```bash
 FEEDBACK="${CLAUDE_PLUGIN_ROOT}/scripts/file-feedback.sh"
@@ -362,14 +341,11 @@ fi
 
 ### Autofix Behavior
 
-For gates 1 and 2, attempt to fix issues automatically and re-run the gate. For gates 3 and 4,
-address findings and verify. If a gate fails after 2 fix attempts, report the remaining issues to
-the user and ask how to proceed.
+For gates 1 and 2, attempt to fix issues automatically and re-run the gate. For gates 3 and 4, address findings and verify. If a gate fails after 2 fix attempts, report the remaining issues to the user and ask how to proceed.
 
 ### Skipping Quality Gates
 
-If the plan or user specifies `--skip-quality-gates`, skip this section entirely. Report that
-quality gates were skipped in the completion summary.
+If the plan or user specifies `--skip-quality-gates`, skip this section entirely. Report that quality gates were skipped in the completion summary.
 
 ## If You Get Stuck
 
@@ -389,8 +365,7 @@ If the plan has existing checkmarks:
 - Pick up from the first unchecked item
 - Verify previous work only if something seems off
 
-Remember: You're implementing a solution, not just checking boxes. Keep the end goal in mind and
-maintain forward momentum.
+Remember: You're implementing a solution, not just checking boxes. Keep the end goal in mind and maintain forward momentum.
 
 ## Agent Team Mode (Optional)
 
@@ -440,8 +415,5 @@ If a ticket is detected (from plan document's `source_ticket` frontmatter or fro
 - **At implementation start** (Step 3): Update ticket status to `stateMap.inProgress` from config
   using Linearis CLI (run `linearis issues usage` for syntax).
 - **Skip the status transition when `CATALYST_PHASE` is set** — the deterministic coordinator
-  (CTL-558) owns Linear write-back under phase agents. See the gate at Step 3 above for
-  details. CTL-601 — without this gate, invoking this skill as a sub-task from another phase
-  agent (typical in `phase-pr` / `phase-monitor-merge` resolution loops) regresses the ticket
-  state to `Implement` and produces operator-visible flicker.
+  (CTL-558) owns Linear write-back under phase agents. See the gate at Step 3 above for details. CTL-601 — without this gate, invoking this skill as a sub-task from another phase agent (typical in `phase-pr` / `phase-monitor-merge` resolution loops) regresses the ticket state to `Implement` and produces operator-visible flicker.
 - If Linearis CLI not available, skip silently and continue implementation

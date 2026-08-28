@@ -1,10 +1,6 @@
 # Write-back — resolutions into the briefing markdown
 
-Before ending the session, persist the recorded resolutions into the briefing markdown's
-frontmatter `resolutions:` block and append a "## Decisions Made Today" section to the body. The
-script commits to the routine-scoped branch when running inside the morning-briefing routine's
-writable clone, and emits a `briefing.followup.complete.<date>` event so the next morning's
-briefing can surface yesterday's decisions as carryovers.
+Before ending the session, persist the recorded resolutions into the briefing markdown's frontmatter `resolutions:` block and append a "## Decisions Made Today" section to the body. The script commits to the routine-scoped branch when running inside the morning-briefing routine's writable clone, and emits a `briefing.followup.complete.<date>` event so the next morning's briefing can surface yesterday's decisions as carryovers.
 
 ```bash
 WRITEBACK_RESULT=$(bash "$SCRIPT_DIR/writeback.sh" \
@@ -39,9 +35,7 @@ esac
 
 ## Idempotence
 
-Re-running with the same resolutions file produces the same markdown: the previous "## Decisions
-Made Today" block is stripped before the new one is appended, and the `resolutions:` array is
-replaced rather than amended.
+Re-running with the same resolutions file produces the same markdown: the previous "## Decisions Made Today" block is stripped before the new one is appended, and the `resolutions:` array is replaced rather than amended.
 
 ## Phase history
 

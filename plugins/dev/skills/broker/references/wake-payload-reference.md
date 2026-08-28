@@ -1,11 +1,8 @@
 # Wake Event Envelope Reference
 
-_Read this when parsing a `filter.wake.*` event payload — to understand every field in the
-canonical OTel envelope and the `source_events[]` element structure._
+_Read this when parsing a `filter.wake.*` event payload — to understand every field in the canonical OTel envelope and the `source_events[]` element structure._
 
-All `filter.wake.*` events written to the event log use the canonical OTel envelope
-(CTL-300). This section documents every field so skills can extract data from the wake
-payload directly rather than making round-trip REST/GraphQL calls.
+All `filter.wake.*` events written to the event log use the canonical OTel envelope (CTL-300). This section documents every field so skills can extract data from the wake payload directly rather than making round-trip REST/GraphQL calls.
 
 ## Canonical On-Disk Shape
 

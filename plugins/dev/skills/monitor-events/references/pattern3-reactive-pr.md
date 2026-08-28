@@ -4,9 +4,7 @@ _Read this when implementing a wait loop that must react to CI failures, review 
 pushes, and PR merge/close — not just block on merge. See also
 [pattern3-gotchas.md](pattern3-gotchas.md) when the loop misbehaves._
 
-Pattern 1's single-event wait is fine for the happy path: the PR merges, the
-worker exits. But between PR-create and PR-merge, four things can happen that
-the agent should *react to*, not just sleep through:
+Pattern 1's single-event wait is fine for the happy path: the PR merges, the worker exits. But between PR-create and PR-merge, four things can happen that the agent should *react to*, not just sleep through:
 
 | Event | Means | Agent should |
 |---|---|---|
@@ -15,9 +13,7 @@ the agent should *react to*, not just sleep through:
 | `github.push` to the base branch | PR is now BEHIND | `gh pr update-branch`, re-enter the wait |
 | `github.pr.merged` / `github.pr.closed` | terminal | confirm via `gh api` REST, exit |
 
-Wrap one disjunctive `wait-for` around all of them; classify with a `case` on
-`.event`; re-enter the loop on every non-terminal event. Authoritative
-`gh api` REST check runs on every wake-up — same safety rule as Pattern 1.
+Wrap one disjunctive `wait-for` around all of them; classify with a `case` on `.event`; re-enter the loop on every non-terminal event. Authoritative `gh api` REST check runs on every wake-up — same safety rule as Pattern 1.
 
 ```bash
 # Two-phase compliant cadence loop — see [[wait-for-github]]. The 1800s timeout
@@ -77,9 +73,7 @@ done
 
 ## Bot vs human authorship
 
-Review and comment events carry `body.payload.author = { login, type }` where `type`
-is GitHub's `user.type` field — typically `"User"` or `"Bot"`. Use it to route
-review-changes-requested events without re-fetching from the GitHub API:
+Review and comment events carry `body.payload.author = { login, type }` where `type` is GitHub's `user.type` field — typically `"User"` or `"Bot"`. Use it to route review-changes-requested events without re-fetching from the GitHub API:
 
 ```bash
 AUTHOR_TYPE=$(echo "$EVENT_JSON" | jq -r '.body.payload.author.type // "User"')
@@ -94,8 +88,7 @@ case "$AUTHOR_TYPE" in
 esac
 ```
 
-The `// "User"` fallback ensures pre-CTL-228 events (no `author` field) are
-treated as human-authored — the safer default.
+The `// "User"` fallback ensures pre-CTL-228 events (no `author` field) are treated as human-authored — the safer default.
 
 ## Long-lived precedent
 

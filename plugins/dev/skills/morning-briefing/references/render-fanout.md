@@ -25,11 +25,7 @@ bash "$SCRIPT_DIR/validate-frontmatter.sh" "$OUT_PATH"
 
 ## Append the compound digests
 
-`render.sh` owns the fixed sections. The two compound digests (`references/digests.md`) are
-appended to the body here — **Friction since last briefing** first (a flat reverse-chronological
-list, one line per record as `timestamp · ticket · phase — friction`), then **Learnings since last
-briefing**. Both are body-only (no frontmatter rewrite) and degrade to `_none_` when their store
-is empty or absent:
+`render.sh` owns the fixed sections. The two compound digests (`references/digests.md`) are appended to the body here — **Friction since last briefing** first (a flat reverse-chronological list, one line per record as `timestamp · ticket · phase — friction`), then **Learnings since last briefing**. Both are body-only (no frontmatter rewrite) and degrade to `_none_` when their store is empty or absent:
 
 ```bash
 {
@@ -55,10 +51,7 @@ bash "$SCRIPT_DIR/validate-frontmatter.sh" "$OUT_PATH"
 
 ## Fan-out
 
-Run the four fan-outs in parallel against the canonical briefing file. Each writes a status JSON
-document on stdout; `write-output-status.sh` merges those into an `output_status:` block in the
-frontmatter. Each fan-out degrades silently to `{"status":"skipped"}` if its credentials or
-destination ID are missing — the briefing always lands locally regardless:
+Run the four fan-outs in parallel against the canonical briefing file. Each writes a status JSON document on stdout; `write-output-status.sh` merges those into an `output_status:` block in the frontmatter. Each fan-out degrades silently to `{"status":"skipped"}` if its credentials or destination ID are missing — the briefing always lands locally regardless:
 
 ```bash
 mkdir -p "$SCRATCH/output-status"
@@ -80,10 +73,7 @@ bash "$SCRIPT_DIR/validate-frontmatter.sh" "$OUT_PATH"
 | `fanout-notion.sh` | `NOTION_TOKEN` | `notionPageId` | `notion` |
 | `fanout-loom-script.sh` | (none — local file) | (writes `<date>-loom-script.md`) | `loom` |
 
-Sanitization profiles (`sanitize.sh`): `dm` preserves full content; `channel` / `notion` / `loom`
-strip `decisions[].summary` / `.status`, rewrite `## Surface decisions` to `_redacted_`, redact
-customer names from `.catalyst.briefing.sanitizationRedactList`, and redact PR URLs whose body
-contains a redact-list string.
+Sanitization profiles (`sanitize.sh`): `dm` preserves full content; `channel` / `notion` / `loom` strip `decisions[].summary` / `.status`, rewrite `## Surface decisions` to `_redacted_`, redact customer names from `.catalyst.briefing.sanitizationRedactList`, and redact PR URLs whose body contains a redact-list string.
 
 ## End the session
 

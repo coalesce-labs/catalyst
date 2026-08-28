@@ -1,13 +1,10 @@
 # Merge Blocker Diagnosis Workflow
 
-Shared workflow for diagnosing and resolving all merge blockers on a pull request. Referenced by
-`/merge-pr` (Step 6) and `/oneshot` (Phase 5, Step 3).
+Shared workflow for diagnosing and resolving all merge blockers on a pull request. Referenced by `/merge-pr` (Step 6) and `/oneshot` (Phase 5, Step 3).
 
 ## Rate Limit Warning
 
-GitHub's GraphQL API has a **5,000 requests/hr** rate limit. A tight polling loop without `sleep`
-can exhaust this in minutes, blocking ALL `gh` commands across every session for up to an hour.
-Every poll loop in this workflow MUST include an explicit `sleep 30` between iterations.
+GitHub's GraphQL API has a **5,000 requests/hr** rate limit. A tight polling loop without `sleep` can exhaust this in minutes, blocking ALL `gh` commands across every session for up to an hour. Every poll loop in this workflow MUST include an explicit `sleep 30` between iterations.
 
 ## Safety Rules
 
@@ -18,34 +15,27 @@ Every poll loop in this workflow MUST include an explicit `sleep 30` between ite
 - **NEVER** disable or modify branch protection rules programmatically
 - **NEVER** suggest the user disable branch protection to unblock a merge
 
-The goal is to satisfy branch protection requirements, not circumvent them. If a blocker cannot be
-resolved autonomously, tell the user **exactly** what is needed and what they need to do — not just
-"branch protection is blocking the merge."
+The goal is to satisfy branch protection requirements, not circumvent them. If a blocker cannot be resolved autonomously, tell the user **exactly** what is needed and what they need to do — not just "branch protection is blocking the merge."
 
 ## Common Misdiagnosis — READ THIS FIRST
 
-The most common agent error is **confusing unresolved review threads with "needs approving
-reviewer"** and then stopping, telling the user they need to approve the PR.
+The most common agent error is **confusing unresolved review threads with "needs approving reviewer"** and then stopping, telling the user they need to approve the PR.
 
-**Unresolved threads** (from Codex, security scanners, linters, or human reviewers) are comments
-that create review threads on specific lines of code. These block merge when branch protection
-requires conversation resolution. **The agent CAN and MUST resolve these** by:
+**Unresolved threads** (from Codex, security scanners, linters, or human reviewers) are comments that create review threads on specific lines of code. These block merge when branch protection requires conversation resolution. **The agent CAN and MUST resolve these** by:
 
 1. Reading the comment and understanding the feedback
 2. Implementing the requested code change (or drafting a reply if it's a question)
 3. Pushing the fix
 4. Resolving the thread via GraphQL `resolveReviewThread` mutation
 
-**Review required** means no approving reviews exist and branch protection requires at least one.
-This is a genuine human gate — the agent cannot approve its own PR.
+**Review required** means no approving reviews exist and branch protection requires at least one. This is a genuine human gate — the agent cannot approve its own PR.
 
 **How to tell the difference:**
 - Check `reviewThreads` — if any have `isResolved: false`, that's `unresolved-threads` (fixable)
 - Check `reviewDecision` — if it's `REVIEW_REQUIRED`, that's a human gate (not fixable)
 - These can coexist! Fix the threads first, then report the review requirement
 
-**NEVER stop and tell the user "an approving reviewer is required" when the actual blocker is an
-unresolved code comment.** Diagnose carefully using the steps below.
+**NEVER stop and tell the user "an approving reviewer is required" when the actual blocker is an unresolved code comment.** Diagnose carefully using the steps below.
 
 ## Step 1: Query Full Merge State
 
@@ -142,8 +132,7 @@ if isDraft:
   blockers += "draft"
 ```
 
-If `BLOCKED` and no specific blockers identified from the above fields, query branch protection
-rules directly to surface what's missing:
+If `BLOCKED` and no specific blockers identified from the above fields, query branch protection rules directly to surface what's missing:
 
 ```bash
 gh api graphql -f query='
@@ -170,8 +159,7 @@ Use this to explain exactly which rule is unsatisfied.
 
 ## Step 3: Resolve Each Blocker
 
-Loop through the blockers list. For each one, attempt autonomous resolution. **Never bypass — always
-resolve legitimately.**
+Loop through the blockers list. For each one, attempt autonomous resolution. **Never bypass — always resolve legitimately.**
 
 ```
 MAX_RESOLVE_ATTEMPTS=3
@@ -209,8 +197,7 @@ fi
 
 #### `conflicts` — Merge conflicts exist.
 
-*Can fix:* Attempt rebase. If conflicts are in generated files (lockfiles, etc.), try auto-resolve.
-Otherwise, report specific files.
+*Can fix:* Attempt rebase. If conflicts are in generated files (lockfiles, etc.), try auto-resolve. Otherwise, report specific files.
 
 ```
 I can regenerate lockfiles automatically. For source conflicts, you'll need to:
@@ -237,8 +224,7 @@ gh pr ready $pr_number
 
 *Can fix:* Depends on the failure. Analyze each failing check.
 
-For **pending** checks: wait and re-poll (up to 10 minutes). Always include `sleep 30` between
-iterations — never use a tight loop.
+For **pending** checks: wait and re-poll (up to 10 minutes). Always include `sleep 30` between iterations — never use a tight loop.
 
 ```bash
 MAX_POLLS=20
@@ -295,8 +281,7 @@ Do NOT suggest force-merging past a failing required check.
 # (see review-thread-resolution.md for the resolution workflow)
 ```
 
-After `/review-comments`, re-query to confirm threads are resolved. If some remain unresolved
-(couldn't be addressed automatically), report them specifically:
+After `/review-comments`, re-query to confirm threads are resolved. If some remain unresolved (couldn't be addressed automatically), report them specifically:
 
 ```
 $N unresolved thread(s) could not be resolved automatically:

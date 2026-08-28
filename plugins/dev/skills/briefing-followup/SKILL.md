@@ -15,9 +15,7 @@ allowed-tools: Read, Write, Edit, Bash, Task, mcp__*
 
 # Briefing Follow-up — walk today's agenda
 
-Invoke as `/catalyst-dev:briefing-followup` after `/catalyst-dev:morning-briefing` has produced
-today's briefing. Reads its `decisions:` block, presents each open decision, and records what the
-user chose.
+Invoke as `/catalyst-dev:briefing-followup` after `/catalyst-dev:morning-briefing` has produced today's briefing. Reads its `decisions:` block, presents each open decision, and records what the user chose.
 
 ## Flags
 

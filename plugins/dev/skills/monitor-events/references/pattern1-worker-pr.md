@@ -1,18 +1,10 @@
 # Pattern 1 — Worker waits for its PR to merge
 
-_Read this when a short-lived `claude -p` worker needs to block until its PR merges and then do
-post-merge work._
+_Read this when a short-lived `claude -p` worker needs to block until its PR merges and then do post-merge work._
 
-A `claude -p` worker that just opened PR #342 needs to block until the PR merges, then
-do post-merge work.
+A `claude -p` worker that just opened PR #342 needs to block until the PR merges, then do post-merge work.
 
-**Preferred (when `catalyst-filter` is running, CTL-269):** register a single semantic
-interest covering every concern the worker cares about (CI, comms, reviews, BEHIND,
-Linear), then wait on `filter.wake.${CATALYST_SESSION_ID}`. The Groq-backed daemon
-classifies raw events against the natural-language prompt and emits one wake per
-match. See [[catalyst-filter]] for the full registration recipe and the daemon-restart
-contract. The bounded-poll pattern below is the **fallback** for environments where the
-daemon is not running.
+**Preferred (when `catalyst-filter` is running, CTL-269):** register a single semantic interest covering every concern the worker cares about (CI, comms, reviews, BEHIND, Linear), then wait on `filter.wake.${CATALYST_SESSION_ID}`. The Groq-backed daemon classifies raw events against the natural-language prompt and emits one wake per match. See [[catalyst-filter]] for the full registration recipe and the daemon-restart contract. The bounded-poll pattern below is the **fallback** for environments where the daemon is not running.
 
 When the daemon is absent — the default for a single-session relay worker — use `[[wait-for-github]]`'s **bounded-poll** pattern instead: a foreground REST loop with a stated interval and iteration ceiling, never an event-log `wait-for` against a daemon that may not be running.
 

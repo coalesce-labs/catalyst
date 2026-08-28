@@ -25,8 +25,7 @@ if ! FRONTMATTER_JSON=$(bash "$SCRIPT_DIR/parse-briefing.sh" load "$@"); then
 fi
 ```
 
-If the briefing doesn't exist, `parse-briefing.sh` prints the resolved path and a suggestion to
-run `/catalyst-dev:morning-briefing` before failing. Surface that message verbatim to the user.
+If the briefing doesn't exist, `parse-briefing.sh` prints the resolved path and a suggestion to run `/catalyst-dev:morning-briefing` before failing. Surface that message verbatim to the user.
 
 ## Present the agenda
 
@@ -49,8 +48,7 @@ echo "$DECISION_COUNT open decision(s) to walk through."
 
 ## Resolve the scratch log dir
 
-One flat scratch dir under `$TMPDIR` — there is no run-scoped directory to nest under (the
-retired background scheduler that used to provide one is gone, CTL-2218):
+One flat scratch dir under `$TMPDIR` — there is no run-scoped directory to nest under (the retired background scheduler that used to provide one is gone, CTL-2218):
 
 ```bash
 LOG_DIR="${TMPDIR:-/tmp}/catalyst-briefing-followup"

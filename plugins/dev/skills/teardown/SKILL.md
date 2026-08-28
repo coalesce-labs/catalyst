@@ -11,16 +11,12 @@ allowed-tools: Read, Bash, Glob
 
 # Teardown
 
-Safely delete orchestrator runtime artifacts (runs directory + worktrees) **after** archiving
-them to `~/catalyst/archives/{orchId}/` and recording them in the SQLite index. The goal: once
-an orchestrator is finished, its artifacts survive even when worktrees and runtime directories
-are reaped.
+Safely delete orchestrator runtime artifacts (runs directory + worktrees) **after** archiving them to `~/catalyst/archives/{orchId}/` and recording them in the SQLite index. The goal: once an orchestrator is finished, its artifacts survive even when worktrees and runtime directories are reaped.
 
 ## When to run
 
 - After a completed orchestrator, once `orchestrate` Phase 7 has run the archive sweep. The
-  sweep is automatic; teardown is explicit — the user invokes it when they no longer need
-  the live worktree and runs directory.
+  sweep is automatic; teardown is explicit — the user invokes it when they no longer need the live worktree and runs directory.
 - Manually: `claude /catalyst-dev:teardown <orchId>` to clean up a finished orchestrator.
 - During disk cleanup: teardown refuses to delete unless the archive exists, so running it
   against an un-archived orchestrator is safe (it will archive first, then delete).
@@ -56,8 +52,7 @@ Use `--force` to bypass the preconditions (you own the consequences).
    bun plugins/dev/scripts/orch-monitor/catalyst-archive.ts sweep "<orchId>"
    ```
 
-   If the sweep exits non-zero AND `--force` is not set, abort with a message that explains
-   what's missing. The sweep is idempotent, so re-running it is safe.
+   If the sweep exits non-zero AND `--force` is not set, abort with a message that explains what's missing. The sweep is idempotent, so re-running it is safe.
 
 3. **Enumerate deletion candidates**
 
@@ -78,20 +73,14 @@ Use `--force` to bypass the preconditions (you own the consequences).
 
 5. **Stop background jobs** (CTL-567)
 
-   A `phase-agents` run spawns one `claude --bg` job per phase; a completed bg job keeps
-   its process alive until the ~1h supervisor reaper. Before deleting the runtime
-   directory, `claude stop` every remaining job of the run:
+   A `phase-agents` run spawns one `claude --bg` job per phase; a completed bg job keeps its process alive until the ~1h supervisor reaper. Before deleting the runtime directory, `claude stop` every remaining job of the run:
 
    ```bash
    plugins/dev/scripts/phase-agent-watch-bg reap \
      --orch-dir ~/catalyst/runs/<orchId> --scope all
    ```
 
-   `--scope all` is correct here — the run is terminal, so the mid-run exemptions
-   (failed-pending-revive, turn-cap-exhausted) no longer apply. Prefer `claude stop` over
-   `claude rm`: phase agents for one ticket share a worktree, so `claude rm` could delete a
-   live sibling's worktree. With `--dry-run`, pass `--dry-run` through. A missing run
-   directory or `phase-agent-watch-bg` is non-fatal — skip and continue.
+   `--scope all` is correct here — the run is terminal, so the mid-run exemptions (failed-pending-revive, turn-cap-exhausted) no longer apply. Prefer `claude stop` over `claude rm`: phase agents for one ticket share a worktree, so `claude rm` could delete a live sibling's worktree. With `--dry-run`, pass `--dry-run` through. A missing run directory or `phase-agent-watch-bg` is non-fatal — skip and continue.
 
 6. **Delete**
 

@@ -1,7 +1,6 @@
 # agents/ Directory: Specialized Research Agents
 
-This directory contains markdown files that define specialized research agents for Claude Code.
-Agents are invoked by commands using the `Task` tool to perform focused research tasks in parallel.
+This directory contains markdown files that define specialized research agents for Claude Code. Agents are invoked by commands using the `Task` tool to perform focused research tasks in parallel.
 
 ## How Agents Work
 
@@ -283,8 +282,7 @@ Agents are pure research logic with no project-specific configuration, so update
 
 ### Per-Project Availability
 
-Agents are available in any project where the catalyst-dev plugin is installed. No per-project setup
-needed.
+Agents are available in any project where the catalyst-dev plugin is installed. No per-project setup needed.
 
 ## Creating New Agents
 

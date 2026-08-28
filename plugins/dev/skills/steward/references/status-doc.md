@@ -1,8 +1,6 @@
 # The status doc — template and cadence
 
-One Linear **document per project**, attached to the project, titled exactly `Status — <project>`. It is
-the human's one screen for that scope. It exists **before your first dispatch** — a project with tickets
-in flight and no status doc reads, correctly, as "nobody is running this".
+One Linear **document per project**, attached to the project, titled exactly `Status — <project>`. It is the human's one screen for that scope. It exists **before your first dispatch** — a project with tickets in flight and no status doc reads, correctly, as "nobody is running this".
 
 > **Every status doc — initiative and every project — is REPLACED/RECREATED in full on each
 > refresh.** It is a concise exec summary of NOW, not an append log of history. Never add a new
@@ -47,14 +45,9 @@ Each with its mitigation. A risk with no mitigation is a complaint.
 | **quiet** (nothing in flight, no open ask) | once per 24 h — a dated "no change, next check `<time>`" line |
 | **stale** (active, timestamp > 2 h old) | this is a defect; the concierge flags it 🔴 and pages you |
 
-⛔ **Never write a timestamp you did not read from the clock.** `TZ=America/Chicago date` — an estimated
-timestamp on a document whose whole purpose is freshness is worse than no timestamp, because the stale
-check then silently passes.
+⛔ **Never write a timestamp you did not read from the clock.** `TZ=America/Chicago date` — an estimated timestamp on a document whose whole purpose is freshness is worse than no timestamp, because the stale check then silently passes.
 
-⚠️ **The cadence is enforced by the supervisor, not by your memory.** A steward that held exactly this
-cadence as a brief instruction produced **zero** status docs in 90 minutes while dispatching five
-tickets. If your supervisor re-enters you saying the doc is stale, it is stale — update it, don't argue
-with the clock.
+⚠️ **The cadence is enforced by the supervisor, not by your memory.** A steward that held exactly this cadence as a brief instruction produced **zero** status docs in 90 minutes while dispatching five tickets. If your supervisor re-enters you saying the doc is stale, it is stale — update it, don't argue with the clock.
 
 ## Announcing it
 

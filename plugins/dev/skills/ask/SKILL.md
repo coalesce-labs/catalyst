@@ -13,15 +13,11 @@ description:
 
 ## 1. What an ask ticket is
 
-A ticket that exists ONLY to obtain one human decision or action. It is **not** the work — that lives on
-its own tickets, which the ask `blocks →`. Anything reaching the human as "needs you" **must be an ask**,
-never a status paragraph.
+A ticket that exists ONLY to obtain one human decision or action. It is **not** the work — that lives on its own tickets, which the ask `blocks →`. Anything reaching the human as "needs you" **must be an ask**, never a status paragraph.
 
 ## 2. Creating one (the raising agent)
 
-**Then use the verb** — it builds the body, files the ticket, reads it BACK out of Linear, and proves
-the decision trigger can parse the options AND that every `--blocks` relation landed. It exits **2**
-rather than leaving you an ask that can never be answered, or that answers into the void:
+**Then use the verb** — it builds the body, files the ticket, reads it BACK out of Linear, and proves the decision trigger can parse the options AND that every `--blocks` relation landed. It exits **2** rather than leaving you an ask that can never be answered, or that answers into the void:
 
 ```bash
 node "$CLAUDE_PLUGIN_ROOT/scripts/ask.mjs" create \
@@ -33,24 +29,19 @@ node "$CLAUDE_PLUGIN_ROOT/scripts/ask.mjs" create \
 #   --dry-run   print the body and the parsed options without writing
 ```
 
-⛔ **`--option` (≥2), `--default` and `--blocks` are REQUIRED** (CTL-2157) — the verb refuses without
-them. `--blocks` is the load-bearing one: an ask that blocks nothing answers into the void (§3).
+⛔ **`--option` (≥2), `--default` and `--blocks` are REQUIRED** (CTL-2157) — the verb refuses without them. `--blocks` is the load-bearing one: an ask that blocks nothing answers into the void (§3).
 
-Why a verb rather than a documented snippet, field-by-field detail, the raw `linearis` form, and the
-exact body grammar: **[`references/creating.md`](references/creating.md)**.
+Why a verb rather than a documented snippet, field-by-field detail, the raw `linearis` form, and the exact body grammar: **[`references/creating.md`](references/creating.md)**.
 
 ## 3. Answering (the human)
 
-A comment on the ticket — top-level or a threaded reply — reaches the monitor. One word is enough
-("A", "yes", "flip now"). Deciding by moving state without a comment is only seen on the next sweep.
+A comment on the ticket — top-level or a threaded reply — reaches the monitor. One word is enough ("A", "yes", "flip now"). Deciding by moving state without a comment is only seen on the next sweep.
 
-**The comment also WAKES the work** (CTL-2157): the daemon fans it out along the ask's `blocks`
-relations and unparks each agent waiting on them. Only a human's comment does this.
+**The comment also WAKES the work** (CTL-2157): the daemon fans it out along the ask's `blocks` relations and unparks each agent waiting on them. Only a human's comment does this.
 
 ## 4. Replying (any agent) — the form
 
-⛔ **The threading, identity and 👀 rules are not repeated here.** They are shared by every role and live
-in one place: **[`references/threading.md`](references/threading.md)** — one-level threads, the app actor
+⛔ **The threading, identity and 👀 rules are not repeated here.** They are shared by every role and live in one place: **[`references/threading.md`](references/threading.md)** — one-level threads, the app actor
 + `createAsUser` tag grammar, why `linearis issues discuss` corrupts state, the newest-first sort, and
 what a reply must contain. Read it before your first reply.
 
@@ -60,16 +51,14 @@ direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" CTL-NNNN --as 
 
 ## 5. Closing (the raising agent)
 
-When the answer satisfies the ask, **verify that it does** (e.g. the token really carries the
-permission), then:
+When the answer satisfies the ask, **verify that it does** (e.g. the token really carries the permission), then:
 
 ```bash
 node "$CLAUDE_PLUGIN_ROOT/scripts/ask.mjs" accept CTL-NNNN --as <ROLE> --body "accepted — …"
 #   --body-file <path>  for anything longer than a one-line body; --body REFUSES a path (CTL-2204)
 ```
 
-It replies in-thread as the app actor and moves the ticket to Done. The two deliberate refusals, the
-manual equivalent, and the defect case: **[`references/closing.md`](references/closing.md)**.
+It replies in-thread as the app actor and moves the ticket to Done. The two deliberate refusals, the manual equivalent, and the defect case: **[`references/closing.md`](references/closing.md)**.
 
 ## 6. Where things live
 

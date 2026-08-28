@@ -1,11 +1,6 @@
 # Compound digests — "since last briefing" window
 
-Two compound-engineering digests the daily review scans: **Friction since last briefing** (the
-primary one — per-phase friction records the daily review wants to skim) and **Learnings since
-last briefing** (new entries in the curated store). Both filter on a *since-last-briefing* window:
-midnight of the most recent prior briefing, or — when there is no prior briefing — midnight of the
-day before `$DATE`. These render as body sections (`references/render-fanout.md`); both degrade to
-a single "_none_" line when their store is empty or absent.
+Two compound-engineering digests the daily review scans: **Friction since last briefing** (the primary one — per-phase friction records the daily review wants to skim) and **Learnings since last briefing** (new entries in the curated store). Both filter on a *since-last-briefing* window: midnight of the most recent prior briefing, or — when there is no prior briefing — midnight of the day before `$DATE`. These render as body sections (`references/render-fanout.md`); both degrade to a single "_none_" line when their store is empty or absent.
 
 ```bash
 # ── Resolve the window floor (epoch seconds) ────────────────────────────────
