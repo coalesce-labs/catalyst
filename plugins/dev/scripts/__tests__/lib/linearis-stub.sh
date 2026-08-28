@@ -11,8 +11,9 @@
 #       Same shape, but the `issues discuss` arm exits non-zero (with a
 #       stderr line) so callers can exercise the CTL-632 fail-open mirror.
 #
-# The body of each stub mirrors plugins/dev/scripts/__tests__/phase-triage-e2e.test.sh
-# (the canonical stub) so existing assertions stay compatible.
+# The body of each stub mirrors the phase-agent e2e suites' original inline
+# stub (CTL-2239 removed the retired phase-*-e2e.test.sh files that first
+# defined it) so existing assertions stay compatible.
 
 linearis_stub_install() {
 	local bin_dir="${1:?bin_dir required}"
