@@ -75,13 +75,11 @@ done
 # Without the CATALYST_PHASE gate, implement-plan writes stateMap.inProgress
 # directly, regressing the ticket state from PR back to Implement
 # (CTL-600 tracer-bullet evidence: 2 regression flickers during pr + monitor-merge).
-# Same risk for code-first-draft (could be called from re-implementation loops).
-echo "Test: implement-plan / code-first-draft gate inProgress writes on CATALYST_PHASE"
-for skill in implement-plan code-first-draft; do
+echo "Test: implement-plan gates inProgress writes on CATALYST_PHASE"
+for skill in implement-plan; do
   f="${SKILLS_DIR}/${skill}/SKILL.md"
   if [[ ! -f "$f" ]]; then
-    # code-first-draft is optional; only fail if it exists AND lacks the gate.
-    [[ "$skill" == "implement-plan" ]] && fail "${skill}/SKILL.md exists"
+    fail "${skill}/SKILL.md exists"
     continue
   fi
   # If the skill writes stateMap.inProgress, it MUST also reference CATALYST_PHASE.

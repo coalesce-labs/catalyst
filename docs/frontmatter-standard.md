@@ -52,8 +52,8 @@ CI/automation skills use `user-invocable: false` and omit `disable-model-invocat
 
 ```yaml
 ---
-name: ci-commit
-description: Create git commits autonomously for CI/automation
+name: ci-sync
+description: Run a non-interactive CI/automation task autonomously
 user-invocable: false
 allowed-tools: Bash, Read
 version: 1.0.0
