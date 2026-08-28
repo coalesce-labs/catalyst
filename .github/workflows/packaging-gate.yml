@@ -18,6 +18,20 @@ name: packaging-gate
 # green drift gate says nothing about whether the emitted pack is
 # spec-conformant, and this step exists to close that gap.
 #
+# CTL-2215 Phase 5 adds a THIRD guard, immediately after conformance: the
+# install-verification harness (skills-cli-install.test.sh) drives the REAL
+# `skills` CLI against a scratch copy of the freshly-regenerated tree —
+# conformance grades the tree's shape against the CLI's own parser contract,
+# but only an actual install proves the CLI discovers and installs it
+# cleanly, and only a deliberately malformed fixture proves the CLI itself
+# (not just our grader) rejects a bad skill. The harness refuses to run a
+# project-scope install with cwd inside this checkout — that would write
+# into .agents/skills/, this emitter's own output directory, and produce a
+# drift failure attributed to the wrong cause — so every install in it runs
+# against a scratch source tree and a scratch project directory, never this
+# checkout, and it asserts `git status --porcelain` is unchanged before/after
+# as proof it left the worktree alone.
+#
 # Same shape as skills-gate.yml and for the same reason: every PR, no
 # `paths:` filter. execution-core-tests.yml's detect-changes step is an
 # explicit allow-list that does not include scripts/packaging/**, so scoping
@@ -48,6 +62,8 @@ jobs:
         run: bun scripts/packaging/cli.mjs render --write --allow-losses
       - name: agentskills.io conformance (spec-check the regenerated portable pack)
         run: bun scripts/packaging/cli.mjs conformance --target agentsSkills
+      - name: Install-verification (real `skills` CLI, scratch copy, not this checkout)
+        run: bash scripts/packaging/__tests__/skills-cli-install.test.sh
       - name: Drift gate — tracked-file diff
         run: |
           FIX="Run 'bun scripts/packaging/cli.mjs render --write \
