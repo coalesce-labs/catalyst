@@ -24,7 +24,7 @@ chk "workflow_dispatch trigger"            '^\s*workflow_dispatch:'
 chk "weekly schedule sweep"                'cron:\s*"0 6 \* \* 1"'
 
 # --- Checkout + history --------------------------------------------------
-chk "pinned checkout action"               'actions/checkout@v4'
+chk "pinned checkout action"               'actions/checkout@v7'
 chk "fetch-depth 0"                        'fetch-depth:\s*0'
 
 # --- Pinned, checksum-verified supply chain ------------------------------
