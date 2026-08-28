@@ -36,7 +36,7 @@ ones in `flake-classes.md`.
 
 The step-level summary (`error: script "X" exited with code 1`, or turbo's own
 `ERROR  run failed: command exited (1)`) tells you WHICH package/task failed, not WHY. Use it to
-scope your search, then search *within* that scope for the actual assertion:
+scope your search, then search _within_ that scope for the actual assertion:
 
 ```bash
 # The turbo summary names the failing package/task — use it to anchor the search window.

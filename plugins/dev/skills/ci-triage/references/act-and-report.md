@@ -41,7 +41,7 @@ check and never suggest bypassing branch protection.
 
 When invoked standalone, end with a structured block:
 
-```
+```text
 CI TRIAGE
 pr: #<N>
 check: <check name>

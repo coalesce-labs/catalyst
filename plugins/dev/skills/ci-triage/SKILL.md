@@ -30,10 +30,10 @@ pushed" — with evidence, not a guess.
 1. **Confirm the run isn't stale.** [references/stale-head.md](references/stale-head.md). A
    failing run whose `head_sha` predates the PR's current HEAD proves nothing about the code
    sitting there now — say so and point at the current head's own run. Do not re-run a stale run.
-2. **Pull the failing step's real log.** [references/log-extraction.md](references/log-extraction.md).
-   Resolve job → step → the step that actually has `conclusion: "failure"`, not `gh run view
-   --log-failed` blind-grepped — turbo interleaves concurrent packages' output in that one step.
-   Strip ANSI before any pattern match.
+2. **Pull the failing step's real log.**
+   [references/log-extraction.md](references/log-extraction.md). Resolve job → step → the step
+   that actually has `conclusion: "failure"`, not `gh run view --log-failed` blind-grepped — turbo
+   interleaves concurrent packages' output in that one step. Strip ANSI before any pattern match.
 3. **Classify flake vs. real.** [references/flake-classes.md](references/flake-classes.md) against
    the repo's documented flake shapes, then grep `thoughts/shared/learnings/` (tags `ci`/`flake`/
    `test`) for anything not yet in that list. State the verdict WITH evidence: which class, which

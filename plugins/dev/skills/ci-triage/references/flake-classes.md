@@ -2,7 +2,7 @@
 
 The single biggest classification error in this repo's history is matching a flake by its CASE
 NAME. The orphan-sweep pid-collision flake (below) rotated through `T98+T99b`, `T89`+`T100b`, and
-`T97` across different runs of the *same* PR — a monitor keyed on literal `T98|T99b` misclassified
+`T97` across different runs of the _same_ PR — a monitor keyed on literal `T98|T99b` misclassified
 a same-mechanism occurrence as a new, real failure. Match the MECHANISM described below, not the
 test identifier it happened to land on this time. After checking these five, also grep
 `thoughts/shared/learnings/` for `ci`/`flake`/`test` tags — this list is not exhaustive, and a
@@ -38,7 +38,7 @@ uncached computation times out on CI but passes comfortably in isolation or loca
 real CPU contention, not a logic bug. Confirmed case: `apps/index-host/test/wiki-augment.test.ts`
 (CTC-928, run 33180922045) — the first test to pay the cost of a full-repo AST scan hit a 150000ms
 budget while a sibling CONTROL test's comment already documented "consistently over 150s ... under
-300s" for a *cheaper* uncached pass, and a same-code re-run of the same commit passed on its own.
+300s" for a _cheaper_ uncached pass, and a same-code re-run of the same commit passed on its own.
 **Confirm:** (a) the failing test/file is untouched by the PR's diff, (b) an isolated or retried
 run of the same commit passes, (c) the test does real uncached CPU-bound work with a budget that
 doesn't leave headroom vs. a documented/measured cost. **Action:** if the margin is provably thin

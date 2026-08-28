@@ -25,7 +25,7 @@ fi
 ```
 
 If `RUN_ID` isn't already known (you were only handed a PR number), list the check-runs for the
-*current* head directly instead of guessing which historical run to compare:
+_current_ head directly instead of guessing which historical run to compare:
 
 ```bash
 gh api "repos/${REPO}/commits/${CURRENT_SHA}/check-runs" --jq '.check_runs[] | {name, status, conclusion, html_url}'
@@ -44,7 +44,7 @@ Even when `RUN_SHA == CURRENT_SHA`, GitHub's `pull_request` trigger by default c
 not your branch's bare commit. If `main` moved between when the run started and now (a routine
 merge from someone else), an old run on the right head SHA can still have tested a tree that no
 longer matches `origin/main`. This is a different mechanism from a stale head SHA — the run is
-current for the *branch*, but its merge base is not current for the *repo* — and it explains a
+current for the _branch_, but its merge base is not current for the _repo_ — and it explains a
 narrower symptom: a failure in a file your diff never touches, at a value owned by something
 external (a generated marker, a version string, a lockfile-derived constant). Diagnose it in this
 order, fastest-to-rule-out first:
