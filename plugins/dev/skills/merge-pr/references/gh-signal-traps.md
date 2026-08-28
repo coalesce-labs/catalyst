@@ -65,7 +65,15 @@ NEW_REACTION=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/reactions" \
   '[.[] | select(.content == "+1" and .user.login == $bot and ([.id] | inside($baseline) | not))] | length')
 
 if [ "$BOT_REVIEW" -gt 0 ] || [ "$NEW_REACTION" -gt 0 ]; then
-  echo "REVIEWED"
+  # Re-confirm the head hasn't moved while the evidence queries above were running —
+  # a new push landing mid-tick can leave $HEAD_SHA stale even though the review/reaction
+  # calls above genuinely found evidence FOR that now-superseded commit.
+  CURRENT_SHA=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.head.sha')
+  if [ "$CURRENT_SHA" = "$HEAD_SHA" ]; then
+    echo "REVIEWED"
+  else
+    echo "PENDING"   # head moved under us — this tick's evidence no longer applies; next tick rebaselines
+  fi
 else
   echo "PENDING"
 fi
