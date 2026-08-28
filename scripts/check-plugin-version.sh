@@ -13,9 +13,20 @@
 set -e
 
 # Get list of changed files
+#
+# DIFF_HEAD is the ref to diff/read the PR's own content from. In CI mode
+# (BASE_REF set) it defaults to PR_HEAD_SHA when the caller supplies it —
+# actions/checkout leaves the *working tree* (and literal HEAD) at GitHub's
+# synthetic pull_request merge commit, whose tree folds a file back to
+# match base wherever the PR's own change happens to agree with base's
+# (possibly since-advanced) value. Diffing/reading against the PR's real
+# head commit instead of that merge tree avoids losing exactly the
+# collision this gate exists to catch (CTL-2266 P1 follow-up).
+DIFF_HEAD=""
 if [[ -n "${BASE_REF:-}" ]]; then
   # CI mode: compare against PR base branch
-  CHANGED_FILES=$(git diff --name-only "$BASE_REF"...HEAD 2>/dev/null || echo "")
+  DIFF_HEAD="${PR_HEAD_SHA:-HEAD}"
+  CHANGED_FILES=$(git diff --name-only "$BASE_REF"..."$DIFF_HEAD" 2>/dev/null || echo "")
 elif [[ -n "$(git diff --cached --name-only 2>/dev/null)" ]]; then
   # Pre-commit mode: staged files
   CHANGED_FILES=$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null || echo "")
@@ -91,10 +102,11 @@ if [[ -n "${BASE_REF:-}" ]]; then
 
     component=$(jq -r --arg pkg "$PLUGIN_DIR" '.packages[$pkg].component // $pkg' "$RELEASE_CONFIG" || true)
 
-    NEW_VERSION=""
-    if [[ -f "$PLUGIN_DIR/version.txt" ]]; then
-      NEW_VERSION=$(tr -d '[:space:]' < "$PLUGIN_DIR/version.txt")
-    fi
+    # Read from $DIFF_HEAD via `git show`, never the working tree: in CI mode
+    # the working tree is the synthetic merge commit, and reading it directly
+    # here is exactly what let a same-value collision hide (see DIFF_HEAD
+    # comment above).
+    NEW_VERSION=$(git show "$DIFF_HEAD:$PLUGIN_DIR/version.txt" 2>/dev/null | tr -d '[:space:]')
     BASE_VERSION=$(git show "$BASE_REF:$PLUGIN_DIR/version.txt" 2>/dev/null | tr -d '[:space:]')
 
     if [[ -z "$NEW_VERSION" ]]; then
@@ -115,8 +127,9 @@ if [[ -n "${BASE_REF:-}" ]]; then
 
     for MANIFEST_REL in ".claude-plugin/plugin.json" ".codex-plugin/plugin.json"; do
       MANIFEST_PATH="$PLUGIN_DIR/$MANIFEST_REL"
-      [[ -f "$MANIFEST_PATH" ]] || continue
-      MANIFEST_VERSION=$(jq -r '.version // empty' "$MANIFEST_PATH" 2>/dev/null || true)
+      MANIFEST_CONTENT=$(git show "$DIFF_HEAD:$MANIFEST_PATH" 2>/dev/null || true)
+      [[ -n "$MANIFEST_CONTENT" ]] || continue
+      MANIFEST_VERSION=$(echo "$MANIFEST_CONTENT" | jq -r '.version // empty' 2>/dev/null || true)
       if [[ "$MANIFEST_VERSION" != "$NEW_VERSION" ]]; then
         MONOTONICITY_FAILURES+=("$component ($PLUGIN_DIR): $MANIFEST_REL version ($MANIFEST_VERSION) does not match version.txt ($NEW_VERSION)")
       fi
@@ -174,7 +187,7 @@ if [[ ${#NEEDS_VERSION_BUMP[@]} -gt 0 ]]; then
   CONVENTIONAL_COMMITS=false
   if [[ -n "${BASE_REF:-}" ]]; then
     # Check commit messages for conventional commit prefixes
-    COMMIT_MSGS=$(git log --format='%s' "$BASE_REF"...HEAD 2>/dev/null || echo "")
+    COMMIT_MSGS=$(git log --format='%s' "$BASE_REF"..."$DIFF_HEAD" 2>/dev/null || echo "")
     if echo "$COMMIT_MSGS" | grep -qE '^(feat|fix|perf|refactor|chore|docs|style|test|build|ci)(\(.+\))?!?:'; then
       CONVENTIONAL_COMMITS=true
     fi

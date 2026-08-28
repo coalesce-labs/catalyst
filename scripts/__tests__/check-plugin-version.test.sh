@@ -254,6 +254,43 @@ else
 	fail "(g) failure message distinguishes 'could not look' from 'no collision'" "$OUT"
 fi
 
+# ── (h) synthetic PR merge-commit checkout (actual actions/checkout shape) ──
+# Reproduces the Codex P1 on #4077: for a pull_request-triggered workflow,
+# actions/checkout leaves HEAD at GitHub's synthetic merge commit (base tip
+# merged with the PR head), not the PR's own tip. When main and pr-h both
+# independently bump the SAME plugin to the SAME value, that merge is clean
+# (identical trees) and the merge commit's version.txt equals $BASE_REF's —
+# reading the collision straight off HEAD/disk makes it vanish. PR_HEAD_SHA
+# (set by the workflow, same shape as gitleaks.yml's PR_HEAD_SHA) must route
+# the check to the PR's real head commit instead of that merge tree.
+R=$(make_repo "$SCRATCH/h")
+git_q "$R" checkout -b pr-h
+seed_plugin "$R" "plugins/fake" "13.0.0"
+git_q "$R" add -A
+git_q "$R" commit -m "feat(fake): bump to 13.0.0"
+PR_HEAD_SHA_H=$(git -C "$R" rev-parse pr-h)
+git_q "$R" checkout main
+seed_plugin "$R" "plugins/fake" "13.0.0"
+git_q "$R" add -A
+git_q "$R" commit -m "feat(fake): bump to 13.0.0 (other lane)"
+# Build and check out the synthetic merge commit exactly as GitHub does for
+# a pull_request run: base tip merged with the PR head, HEAD left detached.
+git_q "$R" checkout -b merge-of-pr-h main
+git_q "$R" merge --no-ff pr-h -m "Merge pr-h into main"
+git_q "$R" checkout --detach HEAD
+OUT=$(cd "$R" && BASE_REF="main" PR_HEAD_SHA="$PR_HEAD_SHA_H" STRICT_VERSION_CHECK=true bash "$SUBJECT" 2>&1)
+RC=$?
+if [[ "$RC" -ne 0 ]]; then
+	pass "(h) collision survives a synthetic merge-commit checkout when PR_HEAD_SHA is supplied"
+else
+	fail "(h) collision survives a synthetic merge-commit checkout when PR_HEAD_SHA is supplied" "rc=$RC (expected non-zero)" "$OUT"
+fi
+if printf '%s' "$OUT" | grep -qi "not strictly greater"; then
+	pass "(h) failure message names the monotonicity violation on the merge-commit checkout"
+else
+	fail "(h) failure message names the monotonicity violation on the merge-commit checkout" "$OUT"
+fi
+
 echo ""
 echo "  PASSED: $PASSES   FAILED: $FAILURES"
 [[ $FAILURES -eq 0 ]]
