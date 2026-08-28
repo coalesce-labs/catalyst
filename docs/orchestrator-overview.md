@@ -89,7 +89,7 @@ Canonical sequence is defined in `plugins/dev/scripts/orchestrate-phase-advance`
 | 7 | `pr` | `/catalyst-dev:create-pr` | `inReview` | `phase-pr.json` (PR# + URL) | Opus (configurable Sonnet) | 12 |
 | 8 | `monitor-merge` | `catalyst-events wait-for` loop → `gh pr merge --squash` | — | `phase-monitor-merge.json` | Opus | 50 |
 | 9 | `monitor-deploy` | `/canary` (gstack) | — | `phase-monitor-deploy.json` | Haiku | 30 |
-| 10 | `teardown` | (skill removed with the daemon, CTL-2240) | `done` | `phase-teardown.json` | Sonnet | 15 |
+| 10 | `teardown` | (`phase-teardown` skill wrapper removed, CTL-2239; the separate standalone `teardown` skill removed, CTL-2240) | `done` | `phase-teardown.json` | Sonnet | 15 |
 
 **Teardown is the terminal phase.** It owns all end-of-ticket housekeeping that previously had no clear owner:
 

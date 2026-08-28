@@ -2152,9 +2152,35 @@ When all waves are complete:
    ```
 
 5. **Clean up all worktrees** (including orchestrator worktree, unless user wants to keep it). The
-   `teardown` skill that wrapped this step was removed with the daemon (CTL-2240);
-   perform the archive-gated deletion directly: confirm step 2's sweep succeeded
-   (`catalyst-archive list` shows the run) before removing the runtime dir and worktrees.
+   `teardown` skill that wrapped this step was removed with the daemon (CTL-2240); perform the
+   archive-gated deletion directly, preserving its safety gates rather than just its archive check:
+
+   1. Confirm step 2's sweep succeeded:
+      ```bash
+      bun "${CATALYST_DEV_SCRIPTS}/orch-monitor/catalyst-archive.ts" list --orch "${ORCH_NAME}" --json
+      ```
+      shows the run with a real `archive_path`. Do not proceed past this point without it.
+   2. Confirm no worker signal file under `${ORCH_DIR}/workers/*.json` has `status: "in_progress"`
+      or an `alive` PID. If any do, stop the remaining background jobs first (`claude stop`, never
+      `claude rm` — phase agents for one ticket share a worktree, so `rm` can delete a live
+      sibling's worktree):
+      ```bash
+      "${CATALYST_DEV_SCRIPTS}/phase-agent-watch-bg" reap --orch-dir "${ORCH_DIR}" --scope all
+      ```
+   3. **Salvage before removing** each worktree (CTL-1639) so a mistaken removal is recoverable:
+      ```bash
+      source "${CATALYST_DEV_SCRIPTS}/lib/worktree-salvage.sh"
+      salvage_worktree "<worktree-path>" "<ticket>" --site interactive-teardown
+      ```
+      This snapshots unpushed commits, uncommitted diff, and untracked files to
+      `~/catalyst/salvage/`. It is best-effort/fail-open and never blocks the removal.
+   4. `git worktree remove <path>` for each worktree, then `rm -rf "${ORCH_DIR}"`.
+   5. **Verify afterward**: re-run
+      ```bash
+      bun "${CATALYST_DEV_SCRIPTS}/orch-monitor/catalyst-archive.ts" list --orch "${ORCH_NAME}" --json
+      ```
+      to confirm the orchestrator is still discoverable and `archive_path` still points to a real
+      directory.
 
 6. **Sync thoughts**: `humanlayer thoughts sync` to persist any shared documents.
 
