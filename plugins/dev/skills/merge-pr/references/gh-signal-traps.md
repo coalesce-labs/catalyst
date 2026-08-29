@@ -11,12 +11,18 @@ A second, easier-to-miss version of the same mistake: if you poll before GitHub 
 **Fix: gate on `status`, and on there being anything to gate on, before ever reading `conclusion`** — on BOTH CI surfaces, since a repo can report through either or both. Check Runs (`/check-runs`) is the modern GitHub Actions surface; legacy commit-status contexts (`/status`, the same Statuses API Cloudflare Pages uses — see [post-merge-deploy-verify.md](post-merge-deploy-verify.md)) is the older one, and a repo using only the latter has zero Check Runs forever — reading only `/check-runs` would misread a genuinely complete, successful build as permanently `PENDING`. `status` is one of `queued` / `in_progress` / `completed`; the Statuses API's aggregate `state` is one of `pending` / `success` / `failure` / `error`.
 
 ```bash
-CHECK_JSON=$(gh api "repos/${REPO}/commits/${SHA}/check-runs" --jq '.check_runs')
-TOTAL=$(echo "$CHECK_JSON" | jq 'length')
-STILL_RUNNING=$(echo "$CHECK_JSON" | jq '[.[] | select(.status != "completed")] | length')
+CHECK_JSON=$(gh api "repos/${REPO}/commits/${SHA}/check-runs" --jq '.check_runs') || CHECK_JSON=""
+STATUS_JSON=$(gh api "repos/${REPO}/commits/${SHA}/status") || STATUS_JSON=""
 
-STATUS_JSON=$(gh api "repos/${REPO}/commits/${SHA}/status")
-STATUS_TOTAL=$(echo "$STATUS_JSON" | jq '.total_count')
+# Fail closed, not SUCCESS: an API failure or unparseable body on EITHER surface must never fall through the empty-string comparisons below into a false pass — `[ "" -eq 0 ]` warns and evaluates false rather than erroring, so an unguarded failure here would have silently reached the SUCCESS branch on the strength of a call that never returned evidence.
+TOTAL=$(echo "$CHECK_JSON" | jq 'length' 2>/dev/null) || TOTAL=""
+STATUS_TOTAL=$(echo "$STATUS_JSON" | jq '.total_count' 2>/dev/null) || STATUS_TOTAL=""
+if [ -z "$CHECK_JSON" ] || [ -z "$TOTAL" ] || [ -z "$STATUS_JSON" ] || [ -z "$STATUS_TOTAL" ]; then
+  echo "ERROR"   # couldn't tell — never conflate with PENDING or a real pass (bounded-poll.md's ERROR sentinel)
+  return 1 2>/dev/null || exit 1
+fi
+
+STILL_RUNNING=$(echo "$CHECK_JSON" | jq '[.[] | select(.status != "completed")] | length')
 STATUS_STATE=$(echo "$STATUS_JSON" | jq -r '.state')
 
 # GitHub's own /status response reports state:"pending" even at total_count:0 (its empty-evidence default), so STATUS_STATE is only meaningful once STATUS_TOTAL > 0.
