@@ -2145,14 +2145,28 @@ When all waves are complete:
       A nonzero `.skipped` means `executor_reap` found a job actively computing (`skipped-active`, above the CPU ceiling) and deliberately left it running — treat that as a hard blocker, not a warning, and re-run after it finishes rather than forcing the delete.
    3. **Salvage before removing** each worktree (CTL-1639) so a mistaken removal is recoverable: `source "${CATALYST_DEV_SCRIPTS}/lib/worktree-salvage.sh"` then `salvage_worktree "<worktree-path>" "<ticket>" --site interactive-teardown` for each. This snapshots unpushed commits, uncommitted diff, and untracked files to `~/catalyst/salvage/`. It is best-effort/fail-open and never blocks the removal.
    4. Gate every removal against live handles the two probes above don't cover — a completed worker can leave a child process whose cwd is under the worktree but whose PID never appeared in any signal file. Use the repo's existing guard rather than a raw `git worktree remove`. This session's OWN worktree (`${ORCH_WORKTREE}`) needs a separate rule, not just the guard: `assert_worktree_removal_safe` walks this session's own process ancestry and deliberately EXEMPTS it from the foreign-handle check (that exemption is correct for its actual purpose — the guard would otherwise refuse to remove any worktree a caller invokes it from), which means it structurally cannot detect "the orchestrator agent itself is still running from in here," even when the calling shell's `$PWD` has been moved elsewhere first. Never rely on the guard for that case — always defer `${ORCH_WORKTREE}` to a separate later pass (a fresh invocation, or the orphan sweep) instead of trying to remove it from inside the session that's running from it:
+      A path-prefix match against `git worktree list` is not safe here: `setup-orchestrator.sh` appends a bare `-2`/`-3`/… suffix to `${ORCH_NAME}` on a naming collision, and that sibling orchestrator's own worktree (and its ticket worktrees) would match a `${ORCH_NAME}-` prefix too, even though it's a completely unrelated, possibly still-active run this session's liveness probes never checked. Enumerate by this orchestrator's OWN recorded ticket identity instead — the same `workers/` directory the two liveness probes above already read:
       ```bash
       source "${CATALYST_DEV_SCRIPTS}/lib/worktree-remove-guard.sh"
-      # Ticket worktrees only — safe to remove now. The orchestrator's own worktree (${ORCH_WORKTREE}) is deliberately excluded; see the note above.
-      while IFS= read -r path; do
-        [[ -n "$path" && "$path" != "$ORCH_WORKTREE" ]] || continue
+      # WORKTREES_BASE is never exported back from create-worktree.sh's own subprocess resolution — replicate its default (config worktreeDir > ~/catalyst/wt/<projectKey> > ~/catalyst/wt/<repo>; the --worktree-dir flag tier doesn't apply here).
+      PROJECT_KEY=$(jq -r '.catalyst.projectKey // empty' "$CONFIG_FILE" 2>/dev/null)
+      if [ -n "$WORKTREE_DIR" ]; then
+        WORKTREES_BASE="${WORKTREE_DIR/#\~/$HOME}"
+      elif [ -n "$PROJECT_KEY" ]; then
+        WORKTREES_BASE="$HOME/catalyst/wt/${PROJECT_KEY}"
+      else
+        WORKTREES_BASE="$HOME/catalyst/wt/$(basename "$(git rev-parse --show-toplevel)")"
+      fi
+      # Ticket worktrees only, by THIS orchestrator's own recorded tickets — the orchestrator's own worktree (${ORCH_WORKTREE}) is deliberately excluded; see the note above.
+      for f in "${ORCH_DIR}"/workers/*; do
+        [[ -e "$f" ]] || continue
+        TICKET=$(basename "$f" .json)
+        [[ "$TICKET" == "output" ]] && continue   # workers/output/ holds stream/stderr logs, not a ticket
+        path="${WORKTREES_BASE}/${ORCH_NAME}-${TICKET}"
+        [[ -d "$path" ]] || continue
         assert_worktree_removal_safe "$path" || { echo "refusing to remove $path — see stderr above"; continue; }
         git worktree remove "$path"
-      done < <(git worktree list --porcelain | awk -v pfx="${WORKTREES_BASE}/${ORCH_NAME}" '/^worktree /{p=$2} p==pfx || index(p, pfx"-")==1{print p; p=""}')
+      done
       echo "leaving ${ORCH_WORKTREE} for a later pass — this session is running from in here"
       rm -rf "${ORCH_DIR}"
       ```
