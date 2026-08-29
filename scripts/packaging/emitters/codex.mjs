@@ -93,8 +93,8 @@ export function resolveCodexVersion({ repoRoot, pluginRelPath, claudeVersion }) 
 // include `dependencies` — unlike Claude's plugin.json, which accepts it
 // (claude.mjs's buildPluginJson). Emitting it here would fail Codex's
 // "field `dependencies` is not accepted by plugin validation" check for
-// every pack whose identity.dependencies is set (catalyst-foundry,
-// catalyst-legacy today), so it is deliberately never read in this file.
+// every pack whose identity.dependencies is set (catalyst-foundry today),
+// so it is deliberately never read in this file.
 
 function firstSentence(text) {
   const match = text.match(/^[^.!?]*[.!?]/);

@@ -255,7 +255,7 @@
                 "oneshot-legacy"
               ],
               "default": "phase-agents",
-              "description": "Selects the orchestration strategy. 'phase-agents' runs one short-lived claude --bg job per pipeline phase (triage\u2192research\u2192plan\u2192implement\u2192verify\u2192review\u2192pr\u2192monitor-merge\u2192monitor-deploy\u2192teardown). 'oneshot-legacy' runs a single long-lived claude -p /catalyst-legacy:oneshot job per ticket. Default is 'phase-agents'."
+              "description": "Selects the orchestration strategy. 'phase-agents' runs one short-lived claude --bg job per pipeline phase (triage\u2192research\u2192plan\u2192implement\u2192verify\u2192review\u2192pr\u2192monitor-merge\u2192monitor-deploy\u2192teardown). 'oneshot-legacy' formerly ran a single long-lived claude -p /catalyst-legacy:oneshot job per ticket; it is no longer functional \u2014 the catalyst-legacy plugin was removed (CTL-2241) \u2014 and is kept in the enum only for backward config compatibility. Default is 'phase-agents'."
             },
             "worktreeRefresh": {
               "type": "object",

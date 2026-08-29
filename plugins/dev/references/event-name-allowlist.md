@@ -51,7 +51,7 @@ Phase-agent orchestration (CTL-447 + CTL-484) routes these on the wire:
 
 - `phase.<name>.complete.<TICKET>` — phase agent finished its `/goal` successfully
 - `phase.<name>.failed.<TICKET>` — phase agent exited with an unrecoverable error (payload `failure_reason` carries the agent's self-reported reason)
-- `phase.<name>.turn-cap-exhausted.<TICKET>` — phase agent self-stopped at its `/goal`-evaluated turn cap (CTL-484). Distinct from `failed` so `orchestrate-revive` can dispatch a continuation worker on a separate budget. Payload carries `failure_reason` ("turn cap hit (N)") and `handoff_path` pointing at the structured handoff doc the resumed worker reads to orient itself.
+- `phase.<name>.turn-cap-exhausted.<TICKET>` — phase agent self-stopped at its `/goal`-evaluated turn cap (CTL-484). Distinct from `failed` so a continuation worker could be dispatched on a separate budget — originally `orchestrate-revive`'s per-phase loop, removed along with the `catalyst-legacy` plugin (CTL-2241); the execution-core daemon treats this status as terminal rather than continuing it. Payload carries `failure_reason` ("turn cap hit (N)") and `handoff_path` pointing at the structured handoff doc a resumed worker would read to orient itself.
 
 `<name>` is a phase identifier — one of `triage`, `research`, `plan`, `implement`, `verify`, `review`, `pr`, `monitor-merge`, `monitor-deploy`. `<TICKET>` matches `[A-Za-z][A-Za-z0-9_]*-\d+` (e.g. `CTL-484`).
 

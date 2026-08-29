@@ -405,28 +405,6 @@ fi
 unset CATALYST_DIR
 scratch_teardown
 
-# ─── CTL-511 Phase 4: orchestrate-healthcheck runs on every reactive scan ───
-# A phase agent that dies after launch is detected only when orchestrate-healthcheck
-# next scans it. Wiring it into the orchestrator's reactive scan (every wake +
-# the 10-min idle fallback) bounds detection latency to one scan interval
-# instead of the once-per-wave-only behavior. Doc-placement assertion in the
-# style of the repo's other docs-drift tests.
-echo "test (CTL-511 Phase 4): SKILL.md runs orchestrate-healthcheck in the reactive scan, not only per-wave"
-SKILL_MD="${REPO_ROOT}/plugins/legacy/skills/orchestrate/SKILL.md"
-if [ ! -f "$SKILL_MD" ]; then
-	fail "orchestrate/SKILL.md not found at $SKILL_MD"
-else
-	# CTL-726: invocations are `${CATALYST_DEV_SCRIPTS}/orchestrate-healthcheck`
-	# (was `${CLAUDE_PLUGIN_ROOT}/scripts/...`); match the trailing invocation
-	# form so the count is resolver-agnostic.
-	HC_COUNT=$(grep -c '/orchestrate-healthcheck"' "$SKILL_MD")
-	if [ "$HC_COUNT" -ge 2 ]; then
-		pass "SKILL.md invokes orchestrate-healthcheck beyond the once-per-wave dispatch (count=$HC_COUNT)"
-	else
-		fail "orchestrate-healthcheck still appears only once (per-wave only)" "count=$HC_COUNT"
-	fi
-fi
-
 # ─── CTL-567: reap sweep delegates to phase-agent-watch-bg ───────────────────
 #
 # After the stall checks, the healthcheck `claude stop`s completed phase jobs by

@@ -134,7 +134,7 @@ catalyst-execution-core restart
 {
   "catalyst": {
     "orchestration": {
-      "dispatchMode": "phase-agents",    // or "oneshot-legacy"
+      "dispatchMode": "phase-agents",    // "oneshot-legacy" is a recognized but non-functional legacy value, CTL-2241
       "executionCore": {
         "maxParallel": 4,                // seed value — Layer-2 wins if present
         "minParallel": 1,
@@ -177,7 +177,7 @@ catalyst-execution-core restart
 **`dispatchMode`**
 
 - `"phase-agents"` (default) — runs one short-lived `claude --bg` job per pipeline phase (triage → research → plan → implement → verify → review → pr → monitor-merge → monitor-deploy → teardown).
-- `"oneshot-legacy"` — runs a single long-lived `claude -p /catalyst-legacy:oneshot` job per ticket. Preserved as a fallback; not recommended for new setups.
+- `"oneshot-legacy"` — formerly ran a single long-lived `claude -p /catalyst-legacy:oneshot` job per ticket. **No longer functional**: the `catalyst-legacy` plugin (and the `/catalyst-legacy:oneshot` skill this mode dispatched) was removed (CTL-2241). The value remains a recognized enum member for backward config compatibility, not as a supported mode. Do not set this for new setups.
 
 **`phaseAgents.models` / `modelOverrides`** — `models[<phase>]` is the model every worker for that phase runs on; `modelOverrides[<phase>][<ticket>]` is a per-ticket exception. Resolution order in `phase-agent-dispatch`: CLI `--model` > `modelOverrides` > `models` > workflow descriptor > the script's fallback (`sonnet`). ⚠️ If the whole `phaseAgents` block is absent the fallback applies to every phase — which is how the fleet silently ran everything on opus until 2026-08-23. Commit the block; do not rely on the fallback.
 

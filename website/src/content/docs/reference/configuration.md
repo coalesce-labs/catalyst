@@ -110,7 +110,7 @@ The `orchestration.dispatchMode` key picks how Catalyst runs each ticket:
 - **`execution-core`** — the autonomous daemon. It watches your board, picks up ready tickets, and
   runs them with no command from you. This is the away-from-keyboard mode.
 - **`phase-agents`** — runs each ticket as ten short background jobs, one per step.
-- **`oneshot-legacy`** — one long-running job per ticket. The older default.
+- **`oneshot-legacy`** — formerly one long-running job per ticket. **No longer functional**: the `catalyst-legacy` plugin it dispatched was removed. Kept as a recognized value for backward config compatibility only.
 
 ```json
 {
@@ -2050,16 +2050,17 @@ fleet is the healthy steady state, so the fleet-activity reading is the discrimi
 is edge-triggered with a **durable latch** (`~/catalyst/broker-degraded-latch.json`), so a broker
 restart mid-episode resumes rather than re-emitting.
 
-**The detector is dormant by default and only meaningful on legacy-wave hosts.** Under
+**The detector is dormant by default, and its one meaningful deployment is now historical.** Under
 **execution-core dispatch** nothing registers interests at all, so `interests.size === 0` is
 permanently true and the gate carries no information. That is a property of execution-core, **not**
-of every configuration named `phase-agents`: a **legacy-wave** host — one driving
-`/catalyst-legacy:orchestrate`, which invokes
-`plugins/dev/scripts/orchestrate-register-interests.sh` — does register interests (`pr_lifecycle` +
-`ticket_lifecycle` + `comms_lifecycle` unconditionally, plus a per-ticket `phase_lifecycle` when
-`dispatchMode` is `phase-agents`). There an empty interest table IS anomalous, and that is the
-deployment where enabling this is appropriate. These knobs are env vars on the `catalyst-broker`
-process:
+of every configuration named `phase-agents`. (A **legacy-wave** host — one driving
+`/catalyst-legacy:orchestrate`, which invoked
+`plugins/dev/scripts/orchestrate-register-interests.sh` — used to register interests there
+[`pr_lifecycle` + `ticket_lifecycle` + `comms_lifecycle` unconditionally, plus a per-ticket
+`phase_lifecycle` when `dispatchMode` was `phase-agents`], making an empty interest table anomalous
+and enabling this knob appropriate; that deployment no longer exists — the wave orchestrator was
+removed along with the `catalyst-legacy` plugin, CTL-2241.) These knobs are env vars on the
+`catalyst-broker` process:
 
 - `FILTER_BROKER_DEGRADED_ENABLED` (default **off**; set to exactly `1` to enable) — opt-in
   kill-switch. Unset (or any other value) means the detector evaluates nothing and emits nothing.

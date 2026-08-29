@@ -532,18 +532,19 @@ describe("⚠️ THE WIRING: proving the functions are CALLED, not just correct"
 
 describe("⚠️ residuals: the anchor-leak chain, and warn volume", () => {
   test("EVERY non-yield terminal writer strips the yield anchors", async () => {
-    // Fixing one writer of a family is not fixing the family — the third time this
-    // shape appeared here. The real leak chain was: sdk backstop patches the parsed
-    // object (keeping the anchors) → orchestrate-revive's continuation sets status
-    // back to "running" and keeps them → emit-complete's `.firstYieldedAt // $ts`
-    // re-anchors a BRAND-NEW wait on the OLD episode and expires it on arrival.
+    // Fixing one writer of a family is not fixing the family. The real leak chain
+    // was: sdk backstop patches the parsed object (keeping the anchors) →
+    // emit-complete's `.firstYieldedAt // $ts` re-anchors a BRAND-NEW wait on the
+    // OLD episode and expires it on arrival. (A third link, `orchestrate-revive`'s
+    // continuation — the wave orchestrator's turn-cap-exhaustion resume path, which
+    // also had to strip the anchors — was checked here the same way until the
+    // script, and the `catalyst-legacy` plugin it served, was removed: CTL-2241.
+    // The execution-core daemon has no equivalent continuation-on-resume path —
+    // it writes `turn-cap-exhausted` as a terminal status, never revives it — so
+    // that specific leak vector no longer exists to check.)
     const sdk = await Bun.file(new URL("./sdk-run-phase-agent.mjs", import.meta.url)).text();
     expect(sdk).toContain("delete sig.yieldedAt");
     expect(sdk).toContain("delete sig.firstYieldedAt");
-    const revive = await Bun.file(new URL("../orchestrate-revive", import.meta.url)).text();
-    // BOTH continuation sites, not just the first — count so a third site added
-    // later fails here rather than leaking.
-    expect((revive.match(/del\(\.yieldedAt\)/g) ?? []).length).toBe(2);
     const emit = await Bun.file(new URL("../phase-agent-emit-complete", import.meta.url)).text();
     expect(emit).toContain("del(.yieldedAt)");
   });

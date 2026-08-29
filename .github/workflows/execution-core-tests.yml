@@ -154,17 +154,14 @@ on:
       # NOTE: the two globs above SUBSUME every plugins/*/skills path listed
       # below. They are retained as documentation of WHICH STEP each path feeds,
       # not as triggers — do not read the list as the trigger set.
-      # CTL-56: the three merge-worktree guard tests scan skills and templates
+      # CTL-56: the merge-worktree guard test scans skills and templates
       # OUTSIDE plugins/dev/scripts/ for the --delete-branch invariant. A change
       # confined to any of those files would otherwise skip this workflow.
+      # (A second, legacy-orchestrator-scoped guard test was removed along with
+      # the catalyst-legacy plugin, CTL-2241.)
       - "plugins/dev/skills/merge-pr/**"
       - "plugins/dev/skills/triage-aging-prs/**"
       - "plugins/dev/templates/**"
-      - "plugins/legacy/skills/oneshot/**"
-      # CTL-56: the repo-wide --delete-branch guard also scans the legacy orchestrate skill (this
-      # PR removes its live --delete-branch instructions); without this path a change confined to
-      # it would neither trigger the workflow on push nor mark a PR relevant, bypassing the guard.
-      - "plugins/legacy/skills/orchestrate/**"
       # CTL-1628: the root bun workspace lockfile/manifest — a change here affects
       # every member package's install (incl. execution-core, broker, otel-forward).
       # CTL-1836: the root installer, whose cloud-replica provisioning is covered by
@@ -255,10 +252,6 @@ jobs:
               - "plugins/dev/skills/merge-pr/**"
               - "plugins/dev/skills/triage-aging-prs/**"
               - "plugins/dev/templates/**"
-              - "plugins/legacy/skills/oneshot/**"
-              # CTL-56: mirror the push-path entry above — the repo-wide guard scans the legacy
-              # orchestrate skill, so a change confined to it must mark the PR relevant.
-              - "plugins/legacy/skills/orchestrate/**"
               # CTL-2162: mirror the two globs from on.push.paths — see the note
               # there. needs-human-deleted.test.sh scans the whole repo, so a
               # docs-only PR that reintroduces the label must mark the PR relevant.
@@ -1300,12 +1293,6 @@ jobs:
         # it locks down was unverified in CI.
         working-directory: plugins/dev/scripts
         run: bash __tests__/phase-artifact-gate.test.sh
-
-      - name: oneshot worktree-safe merge guard (CTL-56)
-        # Guards that plugins/legacy/skills/oneshot/SKILL.md uses worktree-safe merge
-        # (no --delete-branch; checkout-free remote-ref delete after REST confirm).
-        working-directory: plugins/dev/scripts
-        run: bash __tests__/oneshot-merge-worktree-guard.test.sh
 
       - name: cross-site worktree-safe merge guard — model-invoked skills and templates (CTL-56)
         # Guards that merge-pr, triage-aging-prs, followup-prompt, and fixup-prompt all

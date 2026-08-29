@@ -238,7 +238,6 @@ For complex implementations spanning multiple domains, Catalyst supports [Claude
 
 ```
 /implement-plan --team thoughts/shared/plans/my-plan.md
-/oneshot --team PROJ-123
 ```
 
 A lead agent (Opus) coordinates the work, spawning teammates (Sonnet) that each own distinct files. Each teammate can spawn its own research sub-agents, enabling two-level parallelism. See [How we built our multi-agent research system](https://www.anthropic.com/engineering/multi-agent-research-system) for the patterns behind this approach.
