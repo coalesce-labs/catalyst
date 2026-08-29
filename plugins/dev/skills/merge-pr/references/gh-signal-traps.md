@@ -8,22 +8,39 @@ The check-run / status-check rollup exposes `conclusion` as the empty string `""
 
 A second, easier-to-miss version of the same mistake: if you poll before GitHub has created any check runs at all (the workflow hasn't started, or the repo only uses commit-status contexts instead of check-runs), the check-runs array is empty. An "all completed AND all succeeded" test over an empty array is vacuously true in most languages — `[]`'s "every element passes" is `true` — so it reports `SUCCESS` on zero evidence. Treat an empty result set as `PENDING`, the same as an in-progress check, never as a pass.
 
-**Fix: gate on `status`, and on there being anything to gate on, before ever reading `conclusion`.** `status` is one of `queued` / `in_progress` / `completed`.
+**Fix: gate on `status`, and on there being anything to gate on, before ever reading `conclusion`** — on BOTH CI surfaces, since a repo can report through either or both. Check Runs (`/check-runs`) is the modern GitHub Actions surface; legacy commit-status contexts (`/status`, the same Statuses API Cloudflare Pages uses — see [post-merge-deploy-verify.md](post-merge-deploy-verify.md)) is the older one, and a repo using only the latter has zero Check Runs forever — reading only `/check-runs` would misread a genuinely complete, successful build as permanently `PENDING`. `status` is one of `queued` / `in_progress` / `completed`; the Statuses API's aggregate `state` is one of `pending` / `success` / `failure` / `error`.
 
 ```bash
 CHECK_JSON=$(gh api "repos/${REPO}/commits/${SHA}/check-runs" --jq '.check_runs')
 TOTAL=$(echo "$CHECK_JSON" | jq 'length')
 STILL_RUNNING=$(echo "$CHECK_JSON" | jq '[.[] | select(.status != "completed")] | length')
 
-if [ "$TOTAL" -eq 0 ] || [ "$STILL_RUNNING" -gt 0 ]; then
-  echo "PENDING"   # no checks yet, or some still running — do not inspect conclusion
+STATUS_JSON=$(gh api "repos/${REPO}/commits/${SHA}/status")
+STATUS_TOTAL=$(echo "$STATUS_JSON" | jq '.total_count')
+STATUS_STATE=$(echo "$STATUS_JSON" | jq -r '.state')
+
+# GitHub's own /status response reports state:"pending" even at total_count:0 (its empty-evidence default), so STATUS_STATE is only meaningful once STATUS_TOTAL > 0.
+STATUS_PENDING=0; STATUS_FAILED=0
+if [ "$STATUS_TOTAL" -gt 0 ]; then
+  [ "$STATUS_STATE" = "pending" ] && STATUS_PENDING=1
+  { [ "$STATUS_STATE" = "failure" ] || [ "$STATUS_STATE" = "error" ]; } && STATUS_FAILED=1
+fi
+
+if [ "$TOTAL" -eq 0 ] && [ "$STATUS_TOTAL" -eq 0 ]; then
+  echo "PENDING"   # neither surface has any evidence yet — do not inspect conclusion/state
+elif [ "$STILL_RUNNING" -gt 0 ] || [ "$STATUS_PENDING" -eq 1 ]; then
+  echo "PENDING"   # one surface still running
 else
-  FAILED=$(echo "$CHECK_JSON" | jq '[.[] | select(.conclusion != "success" and .conclusion != "neutral" and .conclusion != "skipped")] | length')
-  [ "$FAILED" -gt 0 ] && echo "FAILED" || echo "SUCCESS"
+  FAILED_RUNS=$(echo "$CHECK_JSON" | jq '[.[] | select(.conclusion != "success" and .conclusion != "neutral" and .conclusion != "skipped")] | length')
+  if [ "$FAILED_RUNS" -gt 0 ] || [ "$STATUS_FAILED" -eq 1 ]; then
+    echo "FAILED"
+  else
+    echo "SUCCESS"
+  fi
 fi
 ```
 
-The same trap applies to the PR-level rollup (`gh api repos/{o}/{r}/commits/{sha}/status`, or the `statusCheckRollup` GraphQL field — GraphQL-only, and forbidden by bounded-poll's anti-pattern list on cost grounds alone): always check the aggregate `state`/`status` field first, confirm there is at least one check to aggregate, and only read a per-check `conclusion` once that check is individually `completed`.
+Never the `statusCheckRollup` GraphQL field instead — GraphQL, and forbidden by bounded-poll's anti-pattern list on cost grounds alone.
 
 ## Trap 2: a clean automated review is a reaction, not a review object — and a stale one from a prior push isn't a current pass
 
