@@ -1,8 +1,14 @@
 ---
 import { readFileSync } from "node:fs";
+import path from "node:path";
 
+// Resolved against the astro project root (process.cwd(), i.e. website/), not
+// import.meta.url — astro 7's rolldown-based bundler moved this component's
+// compiled chunk to a different output depth (dist/.prerender/chunks/ vs the
+// previous layout), which silently changed how many `../` a URL-relative path
+// needed to reach the repo root.
 const changelog = readFileSync(
-  new URL("../../../plugins/dev/CHANGELOG.md", import.meta.url),
+  path.join(process.cwd(), "../plugins/dev/CHANGELOG.md"),
   "utf8",
 );
 

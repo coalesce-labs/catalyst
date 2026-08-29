@@ -50,15 +50,15 @@ export default defineConfig({
       sidebar: [
         {
           label: "Start Here",
-          autogenerate: { directory: "getting-started" },
+          items: [{ autogenerate: { directory: "getting-started" } }],
         },
         {
           label: "The Autonomous Workflow",
-          autogenerate: { directory: "autonomous-workflow" },
+          items: [{ autogenerate: { directory: "autonomous-workflow" } }],
         },
         {
           label: "Reference",
-          autogenerate: { directory: "reference" },
+          items: [{ autogenerate: { directory: "reference" } }],
         },
         {
           label: "Changelogs",
