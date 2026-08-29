@@ -13,7 +13,7 @@
     "plugins/dev/scripts/orch-monitor/ui"
   ],
   "devDependencies": {
-    "turbo": "2.10.11"
+    "turbo": "2.10.12"
   },
   "overrides": {
     "@anthropic-ai/claude-agent-sdk": "0.3.237",
@@ -21,7 +21,7 @@
     "hono": "4.12.27"
   },
   "dependencies": {
-    "@catalyst-cloud/schema": "0.1.18",
+    "@catalyst-cloud/schema": "0.1.23",
     "@modelcontextprotocol/sdk": "1.30.0"
   }
 }
