@@ -23,7 +23,13 @@
 // exactly as .mergify.yml's own queue_conditions already spell it (see that file's header: a
 // bare success-only test would be STRICTER than the ruleset and would deadlock on a
 // legitimately-skipped job). `requiredCheckContexts` is therefore a list, and
-// `requiredChecksConclusion` aggregates every context's own three-way state.
+// `requiredChecksConclusion` aggregates every context's own three-way state. `.mergify.yml`
+// also gates three NON-required-but-always-evaluated checks the same three-way way
+// (packaging-gate, skills-gate, check-plugin-manifest-parity) and one in a NEGATIVE
+// active-only form (`quality`, path-filtered and therefore absent on most PRs) — the watchdog
+// must mirror every gate Mergify actually evaluates, not just the ruleset-required subset, or
+// it can declare a PR eligible that Mergify is certain to refuse (Codex P2, this ticket's own
+// PR). `combinedCheckConclusion` folds both forms into one verdict.
 //
 // PATH EXCLUSIONS ARE READ, NEVER DUPLICATED. This script parses the live `-files~=<pattern>`
 // conditions straight out of `.mergify.yml` at runtime — a small line-oriented extractor, not
@@ -71,11 +77,22 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
  * @property {string} readyLabel
  * @property {string} holdLabel
  * @property {readonly string[]} requiredCheckContexts
+ * @property {readonly string[]} negativeGateContexts
  * @property {number} eligibleMinutes
  * @property {number} renudgeCooldownMinutes
  * @property {boolean} swapToHoldLabel
  */
 
+/**
+ * requiredCheckContexts covers every `.mergify.yml` queue_conditions entry gated in the
+ * `or: [check-success=X, check-neutral=X, check-skipped=X]` three-way form — the six
+ * ruleset-required contexts PLUS the three non-required-but-always-gating ones
+ * (packaging-gate, skills-gate, check-plugin-manifest-parity). Nudging while any of these
+ * nine is unsatisfied would send a `@Mergifyio queue` command Mergify is certain to refuse
+ * (Codex P2 on this ticket's own PR: the watchdog must mirror EVERY gate `.mergify.yml`
+ * actually evaluates, not just the ruleset-required subset, or it declares a PR eligible
+ * that Mergify will not embark).
+ */
 /** @type {WatchdogConfig} */
 export const DEFAULT_CONFIG = {
   owner: "coalesce-labs",
@@ -90,7 +107,16 @@ export const DEFAULT_CONFIG = {
     "audit-references",
     "check-versions",
     "execution-core-unit-tests",
+    "packaging-gate",
+    "skills-gate",
+    "check-plugin-manifest-parity",
   ],
+  // `quality` is path-filtered at its own `on:` trigger, so on most PRs it never runs at
+  // all — `.mergify.yml` deliberately gates it with `-check-failure=quality` /
+  // `-check-pending=quality` (block only while ACTIVE and unsatisfied) rather than the
+  // three-way success/neutral/skipped form, because an absent check satisfies none of
+  // those and would deadlock every PR that doesn't trigger it. See negativeGateConclusion.
+  negativeGateContexts: ["quality"],
   eligibleMinutes: 10,
   renudgeCooldownMinutes: 20,
   swapToHoldLabel: true,
@@ -227,6 +253,43 @@ export function requiredChecksConclusion(runs, contextNames) {
   const missing = states.filter((s) => s.state === "missing").map((s) => s.name);
   if (missing.length > 0) return { conclusion: "missing", detail: missing.join(", ") };
   return { conclusion: "success", detail: "" };
+}
+
+/**
+ * The `-check-failure=X` / `-check-pending=X` negative-gate form `.mergify.yml` uses for a
+ * path-filtered check like `quality`: it blocks the queue only while the check is ACTIVE and
+ * unsatisfied (failure or still running), and — unlike requiredChecksConclusion — a context
+ * that never ran at all (`missing`) is NOT blocking, since most PRs never trigger it at all.
+ */
+export function negativeGateConclusion(runs, contextNames) {
+  const states = contextNames.map((name) => ({ name, state: checkStateForContext(runs, name) }));
+  const failing = states.filter((s) => s.state === "failure").map((s) => s.name);
+  if (failing.length > 0) return { conclusion: "failure", detail: failing.join(", ") };
+  const pending = states.filter((s) => s.state === "pending").map((s) => s.name);
+  if (pending.length > 0) return { conclusion: "pending", detail: pending.join(", ") };
+  return { conclusion: "success", detail: "" };
+}
+
+const CONCLUSION_RANK = { failure: 0, pending: 1, missing: 2, success: 3 };
+
+/**
+ * Combines the three-way required-checks verdict with the negative-gate verdict into one
+ * `CheckConclusion`, picking whichever is more blocking (lower rank). When both are
+ * non-success at the same rank (e.g. both "pending"), their details are concatenated so
+ * neither outstanding context is silently dropped from the reported reason.
+ */
+export function combinedCheckConclusion(runs, config) {
+  const required = requiredChecksConclusion(runs, config.requiredCheckContexts);
+  const negativeGate = negativeGateConclusion(runs, config.negativeGateContexts ?? []);
+  if (CONCLUSION_RANK[negativeGate.conclusion] < CONCLUSION_RANK[required.conclusion]) {
+    return negativeGate;
+  }
+  if (CONCLUSION_RANK[required.conclusion] < CONCLUSION_RANK[negativeGate.conclusion]) {
+    return required;
+  }
+  if (required.conclusion === "success") return required;
+  const detail = [required.detail, negativeGate.detail].filter(Boolean).join(", ");
+  return { conclusion: required.conclusion, detail };
 }
 
 // ── Review threads ────────────────────────────────────────────────────────────────────────
@@ -382,10 +445,12 @@ async function githubJsonAllPages(fetchImpl, token, pathWithPage1) {
 export function makeGithubClient(token, owner, repo, fetchImpl = fetch) {
   return {
     async listOpenPrsWithLabel(label) {
-      const raw = await githubJson(
+      // Paginated (Codex P2): a repo with more than one page of open PRs would otherwise
+      // silently miss a `queue:ready` PR on a later page and report zero ready PRs.
+      const raw = await githubJsonAllPages(
         fetchImpl,
         token,
-        `/repos/${owner}/${repo}/pulls?state=open&per_page=100`
+        `/repos/${owner}/${repo}/pulls?state=open&per_page=${PAGE_SIZE}`
       );
       return raw
         .filter((pr) => pr.labels.some((l) => l.name === label))
@@ -446,10 +511,15 @@ export function makeGithubClient(token, owner, repo, fetchImpl = fetch) {
     },
 
     async listLabelTimeline(number) {
-      const raw = await githubJson(
+      // Paginated (Codex P2): a PR with more than one page of timeline events would
+      // otherwise miss a `queue:ready` labeled event on a later page, and
+      // latestLabelAddedAt would return null or a stale label state — decideAction then
+      // permanently skips an otherwise-eligible PR because it can never determine when the
+      // label was applied.
+      const raw = await githubJsonAllPages(
         fetchImpl,
         token,
-        `/repos/${owner}/${repo}/issues/${number}/timeline?per_page=100`
+        `/repos/${owner}/${repo}/issues/${number}/timeline?per_page=${PAGE_SIZE}`
       );
       return raw
         .filter((e) => e.event === "labeled" || e.event === "unlabeled")
@@ -509,7 +579,7 @@ export async function gatherPrInput(client, pr, config) {
     client.listComments(pr.number),
   ]);
   const lastNudgeAt = latestNudgeAt(comments);
-  const checks = requiredChecksConclusion(checkRuns, config.requiredCheckContexts);
+  const checks = combinedCheckConclusion(checkRuns, config);
   return {
     number: pr.number,
     baseRef: pr.baseRef,

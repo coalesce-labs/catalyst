@@ -22,6 +22,8 @@ import {
   findUnsurfacedRefusal,
   checkStateForContext,
   requiredChecksConclusion,
+  negativeGateConclusion,
+  combinedCheckConclusion,
   countUnresolvedThreads,
   decideAction,
   gatherPrInput,
@@ -395,67 +397,185 @@ describe("checkStateForContext", () => {
 });
 
 describe("requiredChecksConclusion — the multi-required-check form (CTL-2285)", () => {
-  const ALL_SIX = DEFAULT_CONFIG.requiredCheckContexts;
+  const ALL_REQUIRED = DEFAULT_CONFIG.requiredCheckContexts;
   const allGreen = (overrides = {}) =>
-    ALL_SIX.map((name) => ({
+    ALL_REQUIRED.map((name) => ({
       name,
       status: "completed",
       conclusion: overrides[name] ?? "success",
     }));
 
-  it("success when all six required contexts are success", () => {
-    const result = requiredChecksConclusion(allGreen(), ALL_SIX);
+  it("covers every gate .mergify.yml evaluates in the three-way form (nine contexts)", () => {
+    assert.deepEqual(
+      [...ALL_REQUIRED].sort(),
+      [
+        "agents-md-gate",
+        "audit-references",
+        "check-plugin-manifest-parity",
+        "check-versions",
+        "docs-gate",
+        "execution-core-unit-tests",
+        "gitleaks",
+        "packaging-gate",
+        "skills-gate",
+      ].sort()
+    );
+  });
+
+  it("success when all required contexts are success", () => {
+    const result = requiredChecksConclusion(allGreen(), ALL_REQUIRED);
     assert.deepEqual(result, { conclusion: "success", detail: "" });
   });
 
   it("success when one context is neutral and the rest are success", () => {
-    const result = requiredChecksConclusion(allGreen({ "docs-gate": "neutral" }), ALL_SIX);
+    const result = requiredChecksConclusion(allGreen({ "docs-gate": "neutral" }), ALL_REQUIRED);
     assert.deepEqual(result, { conclusion: "success", detail: "" });
   });
 
   it("success when one context is skipped and the rest are success", () => {
-    const result = requiredChecksConclusion(allGreen({ gitleaks: "skipped" }), ALL_SIX);
+    const result = requiredChecksConclusion(allGreen({ gitleaks: "skipped" }), ALL_REQUIRED);
     assert.deepEqual(result, { conclusion: "success", detail: "" });
   });
 
   it("⭐ pending when one context is still in_progress — the measured CTL-2285 incident shape", () => {
-    const runs = ALL_SIX.map((name) =>
+    const runs = ALL_REQUIRED.map((name) =>
       name === "execution-core-unit-tests"
         ? { name, status: "in_progress", conclusion: null }
         : { name, status: "completed", conclusion: "success" }
     );
-    const result = requiredChecksConclusion(runs, ALL_SIX);
+    const result = requiredChecksConclusion(runs, ALL_REQUIRED);
     assert.equal(result.conclusion, "pending");
     assert.equal(result.detail, "execution-core-unit-tests");
   });
 
   it("failure takes priority over a simultaneously-pending context", () => {
-    const runs = ALL_SIX.map((name) => {
+    const runs = ALL_REQUIRED.map((name) => {
       if (name === "gitleaks") return { name, status: "completed", conclusion: "failure" };
       if (name === "check-versions") return { name, status: "in_progress", conclusion: null };
       return { name, status: "completed", conclusion: "success" };
     });
-    const result = requiredChecksConclusion(runs, ALL_SIX);
+    const result = requiredChecksConclusion(runs, ALL_REQUIRED);
     assert.equal(result.conclusion, "failure");
     assert.equal(result.detail, "gitleaks");
   });
 
   it("missing when a required context never ran at all", () => {
     const runs = allGreen().filter((r) => r.name !== "audit-references");
-    const result = requiredChecksConclusion(runs, ALL_SIX);
+    const result = requiredChecksConclusion(runs, ALL_REQUIRED);
     assert.equal(result.conclusion, "missing");
     assert.equal(result.detail, "audit-references");
   });
 
   it("names every outstanding context, not just the first, when several are pending", () => {
-    const runs = ALL_SIX.map((name) =>
+    const runs = ALL_REQUIRED.map((name) =>
       name === "docs-gate" || name === "gitleaks"
         ? { name, status: "in_progress", conclusion: null }
         : { name, status: "completed", conclusion: "success" }
     );
-    const result = requiredChecksConclusion(runs, ALL_SIX);
+    const result = requiredChecksConclusion(runs, ALL_REQUIRED);
     assert.equal(result.conclusion, "pending");
     assert.equal(result.detail, "docs-gate, gitleaks");
+  });
+});
+
+describe("negativeGateConclusion — the -check-failure=X / -check-pending=X form (Codex P2, CTL-2285)", () => {
+  it("⭐ success when the gated check never ran at all — an absent check must NOT block (unlike requiredChecksConclusion)", () => {
+    const result = negativeGateConclusion([], ["quality"]);
+    assert.deepEqual(result, { conclusion: "success", detail: "" });
+  });
+
+  it("failure when the gated check completed unsuccessfully", () => {
+    const result = negativeGateConclusion(
+      [{ name: "quality", status: "completed", conclusion: "failure" }],
+      ["quality"]
+    );
+    assert.deepEqual(result, { conclusion: "failure", detail: "quality" });
+  });
+
+  it("pending while the gated check is still active", () => {
+    const result = negativeGateConclusion(
+      [{ name: "quality", status: "in_progress", conclusion: null }],
+      ["quality"]
+    );
+    assert.deepEqual(result, { conclusion: "pending", detail: "quality" });
+  });
+
+  it("success when the gated check completed successfully", () => {
+    const result = negativeGateConclusion(
+      [{ name: "quality", status: "completed", conclusion: "success" }],
+      ["quality"]
+    );
+    assert.deepEqual(result, { conclusion: "success", detail: "" });
+  });
+});
+
+describe("combinedCheckConclusion — folding both gate forms into one verdict (Codex P2, CTL-2285)", () => {
+  const config = DEFAULT_CONFIG;
+  const allGreenRequired = () =>
+    config.requiredCheckContexts.map((name) => ({
+      name,
+      status: "completed",
+      conclusion: "success",
+    }));
+
+  it("success when every required context is green and quality never ran", () => {
+    const result = combinedCheckConclusion(allGreenRequired(), config);
+    assert.deepEqual(result, { conclusion: "success", detail: "" });
+  });
+
+  it("⭐ pending when every required context is green but a triggered quality run is still active — reproduces the exact gap Codex flagged: nudging here would send a queue command .mergify.yml's own -check-pending=quality condition is certain to refuse", () => {
+    const runs = [
+      ...allGreenRequired(),
+      { name: "quality", status: "in_progress", conclusion: null },
+    ];
+    const result = combinedCheckConclusion(runs, config);
+    assert.equal(result.conclusion, "pending");
+    assert.equal(result.detail, "quality");
+  });
+
+  it("failure when a triggered quality run fails, even though every required context is green", () => {
+    const runs = [
+      ...allGreenRequired(),
+      { name: "quality", status: "completed", conclusion: "failure" },
+    ];
+    const result = combinedCheckConclusion(runs, config);
+    assert.equal(result.conclusion, "failure");
+    assert.equal(result.detail, "quality");
+  });
+
+  it("required-context failure still wins priority over a pending quality run", () => {
+    const runs = allGreenRequired().map((r) =>
+      r.name === "gitleaks" ? { ...r, conclusion: "failure" } : r
+    );
+    runs.push({ name: "quality", status: "in_progress", conclusion: null });
+    const result = combinedCheckConclusion(runs, config);
+    assert.equal(result.conclusion, "failure");
+    assert.equal(result.detail, "gitleaks");
+  });
+
+  it("concatenates details when both forms are pending at the same severity", () => {
+    const runs = allGreenRequired().map((r) =>
+      r.name === "check-versions" ? { ...r, status: "in_progress", conclusion: null } : r
+    );
+    runs.push({ name: "quality", status: "in_progress", conclusion: null });
+    const result = combinedCheckConclusion(runs, config);
+    assert.equal(result.conclusion, "pending");
+    assert.equal(result.detail, "check-versions, quality");
+  });
+
+  it("a non-ruleset check outside packaging-gate/skills-gate/check-plugin-manifest-parity blocks a nudge too", () => {
+    const runs = allGreenRequired().map((r) =>
+      r.name === "packaging-gate" ? { ...r, conclusion: "neutral" } : r
+    );
+    const result = combinedCheckConclusion(runs, config);
+    assert.deepEqual(result, { conclusion: "success", detail: "" });
+  });
+
+  it("missing packaging-gate/skills-gate/check-plugin-manifest-parity blocks, unlike missing quality", () => {
+    const runs = allGreenRequired().filter((r) => r.name !== "skills-gate");
+    const result = combinedCheckConclusion(runs, config);
+    assert.equal(result.conclusion, "missing");
+    assert.equal(result.detail, "skills-gate");
   });
 });
 
@@ -911,6 +1031,55 @@ describe("makeGithubClient", () => {
     assert.ok(files.includes("plugins/dev/scripts/db-migrations/0002.sql"));
   });
 
+  it("⭐ paginates open-PR discovery past the first page (Codex P2: a ready PR on a later page must not be silently skipped)", async () => {
+    const page1 = Array.from({ length: 100 }, (_, i) => ({
+      number: i,
+      draft: false,
+      base: { ref: "main" },
+      head: { sha: `sha${i}` },
+      labels: [],
+    }));
+    const page2 = [
+      {
+        number: 999,
+        draft: false,
+        base: { ref: "main" },
+        head: { sha: "readysha" },
+        labels: [{ name: "queue:ready" }],
+      },
+    ];
+    const fetchImpl = fakeFetch((url) => {
+      const page = new URL(url).searchParams.get("page");
+      if (page === "1") return new Response(JSON.stringify(page1), { status: 200 });
+      if (page === "2") return new Response(JSON.stringify(page2), { status: 200 });
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    const client = makeGithubClient("token", "coalesce-labs", "catalyst", fetchImpl);
+    const prs = await client.listOpenPrsWithLabel("queue:ready");
+    assert.equal(prs.length, 1);
+    assert.equal(prs[0].number, 999);
+  });
+
+  it("⭐ paginates the label timeline past the first page (Codex P2: a labeled event on a later page must not read as never-labeled)", async () => {
+    const page1 = Array.from({ length: 100 }, (_, i) => ({
+      event: "labeled",
+      label: { name: "some-other-label" },
+      created_at: `2026-08-2${i % 9}T00:00:00Z`,
+    }));
+    const page2 = [
+      { event: "labeled", label: { name: "queue:ready" }, created_at: "2026-08-29T04:00:00Z" },
+    ];
+    const fetchImpl = fakeFetch((url) => {
+      const page = new URL(url).searchParams.get("page");
+      if (page === "1") return new Response(JSON.stringify(page1), { status: 200 });
+      if (page === "2") return new Response(JSON.stringify(page2), { status: 200 });
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    const client = makeGithubClient("token", "coalesce-labs", "catalyst", fetchImpl);
+    const timeline = await client.listLabelTimeline(1);
+    assert.deepEqual(latestLabelAddedAt(timeline, "queue:ready"), new Date("2026-08-29T04:00:00Z"));
+  });
+
   it("⭐ paginates issue comments past the first page", async () => {
     const page1 = Array.from({ length: 100 }, (_, i) => ({
       id: i,
@@ -1018,9 +1187,7 @@ describe("main", () => {
 
     const fetchImpl = fakeFetch((url, init) => {
       const method = init?.method ?? "GET";
-      if (
-        url === "https://api.github.com/repos/coalesce-labs/catalyst/pulls?state=open&per_page=100"
-      ) {
+      if (url.includes("/pulls?state=open")) {
         return new Response(
           JSON.stringify([
             {
