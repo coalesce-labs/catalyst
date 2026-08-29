@@ -123,6 +123,10 @@ on:
       # scripts/__tests__/** above), but the module itself lives outside that glob — a PR
       # touching only scripts/md-reflow.mjs would otherwise skip the job that tests it.
       - "scripts/md-reflow.mjs"
+      # CTL-2285: same shape as md-reflow.mjs above — the watchdog's offline spec lives under
+      # scripts/__tests__/** (already covered), but the module itself does not; a PR touching
+      # only scripts/merge-queue-watchdog.mjs would otherwise skip the job that tests it.
+      - "scripts/merge-queue-watchdog.mjs"
       # CTL-2253 (Codex round 2): case 16's corpus census reads plugins/dev/agents/*.md as one of
       # its CANDIDATES globs (find plugins/dev/agents -maxdepth 1 -name "*.md"), but nothing in
       # this filter matched that directory — the same "trigger must match the scan" defect the
@@ -235,6 +239,8 @@ jobs:
               # CTL-2253: mirror the push-path entry above — the module lives outside
               # scripts/__tests__/**, so a PR touching only it would skip this job.
               - "scripts/md-reflow.mjs"
+              # CTL-2285: mirror the push-path entry above — same shape as md-reflow.mjs.
+              - "scripts/merge-queue-watchdog.mjs"
               # CTL-2253 (Codex round 2): mirror the push-path entry above — the corpus census
               # (case 16) reads plugins/dev/agents/*.md as a CANDIDATES source.
               - "plugins/dev/agents/**"
@@ -372,6 +378,16 @@ jobs:
       - name: markdown reflow tool test (CTL-2253)
         working-directory: .
         run: bash scripts/__tests__/md-reflow.test.sh
+
+      - name: merge queue watchdog offline spec (CTL-2285)
+        # The live script (scripts/merge-queue-watchdog.mjs) needs the network and stays OUT
+        # of this gate; only its fetchImpl-injected spec runs here. Registered explicitly —
+        # this repo has no glob test runner, so a suite merely present in __tests__/ never
+        # runs in CI otherwise (the exact class of defect CTL-1834's ask-verbs.test.mjs shipped
+        # unregistered, and plugins/dev/scripts/project-onboarding/__tests__/*.test.mjs remain
+        # today).
+        working-directory: .
+        run: node --test scripts/__tests__/merge-queue-watchdog.test.mjs
 
       - name: account-usage pager test (CTL-1908)
         # Pages before an armed Claude account exhausts its 5-hour / 7-day window. The property
