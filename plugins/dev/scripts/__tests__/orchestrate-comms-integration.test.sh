@@ -15,7 +15,6 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 COMMS="${REPO_ROOT}/plugins/dev/scripts/catalyst-comms"
 ORCH_SKILL="${REPO_ROOT}/plugins/legacy/skills/orchestrate/SKILL.md"
 ONESHOT_SKILL="${REPO_ROOT}/plugins/legacy/skills/oneshot/SKILL.md"
-COMMS_SKILL="${REPO_ROOT}/plugins/dev/skills/catalyst-comms/SKILL.md"
 
 FAILURES=0
 PASSES=0
@@ -197,10 +196,10 @@ grep -qE '(catalyst-comms|\$COMMS_BIN") done "\$CATALYST_COMMS_CHANNEL"' "$ONESH
   && pass "oneshot: worker done hook present" \
   || fail "oneshot: worker done hook missing"
 
-# ── 12. catalyst-comms/SKILL.md documents worker traffic contract ────────
-grep -qi "Worker Traffic Contract\|minimum 4 messages\|baseline traffic" "$COMMS_SKILL" \
-  && pass "catalyst-comms: worker traffic contract documented" \
-  || fail "catalyst-comms: worker traffic contract missing"
+# ── 12. (retired with CTL-2240) ───────────────────────────────────────────
+# The catalyst-comms SKILL.md that documented the worker traffic contract was
+# removed with the daemon; the contract's remaining home is this test's
+# sections 1–9 (CLI behavior) and 10–11 (legacy skill hooks).
 
 # ── 13. CTL-127: plugin-root-first binary resolution ─────────────────────
 # Both skills must resolve catalyst-comms via the plugin scripts dir before

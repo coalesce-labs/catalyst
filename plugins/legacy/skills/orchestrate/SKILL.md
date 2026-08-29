@@ -849,16 +849,9 @@ Listen for PR events using this precedence ladder (matches oneshot Phase 5):
        catalyst-events wait-for \
          --filter ".attributes.\"event.name\" == \"filter.wake.${CATALYST_SESSION_ID}\"" \
          --timeout 600
-     Deterministic routes (pr_lifecycle / ticket_lifecycle / comms_lifecycle)
-     cost zero LLM tokens. See plugins/dev/skills/broker/SKILL.md for the
-     full protocol and plugins/dev/skills/catalyst-filter/SKILL.md for
-     prose-based registration when the deterministic routes aren't enough.
+     Deterministic routes (pr_lifecycle / ticket_lifecycle / comms_lifecycle) cost zero LLM tokens. The broker and catalyst-filter skills that documented the full protocol and prose-based registration were removed with the daemon (CTL-2240); the deterministic routes above are the operative statement.
 
-  2. FALLBACK — catalyst-events wait-for with explicit jq (Pattern 2):
-     When catalyst-broker status returns non-running, use the two-phase
-     pattern from plugins/dev/skills/wait-for-github/SKILL.md. Blocking
-     subprocess call; works reliably in claude -p non-interactive sessions.
-     One jq predicate covers CI / reviews / push / merge for your PR.
+  2. FALLBACK — catalyst-events wait-for with explicit jq (Pattern 2): When catalyst-broker status returns non-running, use the two-phase pattern (the wait-for-github skill that documented it was removed with the daemon, CTL-2240; bounded-poll, its relay-era successor, lives in plugins/dev/skills/merge-pr/references/bounded-poll.md). Blocking subprocess call; works reliably in claude -p non-interactive sessions. One jq predicate covers CI / reviews / push / merge for your PR.
 
   3. FORBIDDEN for workers — Monitor over catalyst-events tail (Pattern 1):
      That is the orchestrator's Phase 4 pattern, not a worker pattern.
@@ -880,17 +873,9 @@ phantom user message. The line shape is:
   wake: <event.name> — routine, staying in event loop
   wake: <event.name> — already addressed, no-op
 
-Include the matched filter clause / interest_id when the wake is from the
-broker (.body.payload.interest_id, .body.payload.reason). See
-plugins/dev/skills/monitor-events/SKILL.md § Narration for the full rule.
+Include the matched filter clause / interest_id when the wake is from the broker (.body.payload.interest_id, .body.payload.reason). The monitor-events skill that carried the full narration rule was removed with the daemon (CTL-2240); the rule above is the operative statement.
 
-When you write a filter by hand, target the canonical event names listed in
-[[event-name-allowlist]] — anything outside that allowlist is either
-non-actionable or covered by a different lifecycle group. Do NOT use
-`.attributes."catalyst.orchestrator.id"` as a bare clause: CTL-234 stamps it
-on every github webhook tied to one of the orchestrator's PRs, so without an
-event-type guard it wakes the worker on 60-70% of unrelated webhooks. See
-[[wait-for-github]] § Known filter pitfalls.
+When you write a filter by hand, target the canonical event names listed in [[event-name-allowlist]] — anything outside that allowlist is either non-actionable or covered by a different lifecycle group. Do NOT use `.attributes."catalyst.orchestrator.id"` as a bare clause: CTL-234 stamps it on every github webhook tied to one of the orchestrator's PRs, so without an event-type guard it wakes the worker on 60-70% of unrelated webhooks. The wait-for-github skill that documented the known filter pitfalls was removed with the daemon (CTL-2240); the allowlist + guard above are the operative statement.
 
 Write these fields into your signal file as they become available:
   pr.number
@@ -910,8 +895,7 @@ remediation for stalled workers.
 Status transitions you do NOT write (orchestrator-owned fallback only):
   done   (written by orchestrator Phase 4 ONLY when worker stalled before merge)
 
-COMMS DISCIPLINE: when posting to the shared comms channel, follow the rules in the
-catalyst-comms skill (plugins/dev/skills/catalyst-comms/SKILL.md § Posting Discipline):
+COMMS DISCIPLINE: when posting to the shared comms channel, follow the rules below (the catalyst-comms skill that documented them was removed with the daemon, CTL-2240):
   - info = phase transitions + PR-opened only (default heartbeat, ~5-7 per session)
   - attention = orchestrator action required (0-2 per session, MANDATORY on: scope
     conflict, missing access, ambiguous spec, 3+ repeated CI failures, status=stalled)
@@ -1021,12 +1005,7 @@ cursor and routes each match through `orchestrate-phase-advance` (for `complete`
 # regardless. The helper exits 1 only when state.json.race is missing.
 ```
 
-**Phase 4 is event-driven, not poll-driven (CTL-210, CTL-243).** The orchestrator subscribes to the
-unified event log via `catalyst-events tail` (wrapped in the `Monitor` tool) and wakes on every
-relevant GitHub / Linear / orchestrator-lifecycle event. A 10-minute idle timer is the **safety-net
-fallback** for daemon-down or missed-event scenarios — never the primary mechanism. Do NOT self-pace
-with sleeps or "wake in N minutes" framing — that defeats the event-driven contract and burns
-context to no purpose. See `plugins/dev/skills/monitor-events/SKILL.md` for the full pattern.
+**Phase 4 is event-driven, not poll-driven (CTL-210, CTL-243).** The orchestrator subscribes to the unified event log via `catalyst-events tail` (wrapped in the `Monitor` tool) and wakes on every relevant GitHub / Linear / orchestrator-lifecycle event. A 10-minute idle timer is the **safety-net fallback** for daemon-down or missed-event scenarios — never the primary mechanism. Do NOT self-pace with sleeps or "wake in N minutes" framing — that defeats the event-driven contract and burns context to no purpose. The monitor-events skill that documented the full pattern was removed with the daemon (CTL-2240); the pattern is inlined below.
 
 **Launch the Monitor before entering the reactive scan.** Wrap this command with the `Monitor` tool
 — each emitted line is a wake-up.
@@ -1155,8 +1134,7 @@ Surface the matched interest when wake came from the broker (`filter.wake.${ORCH
 and a one-clause restatement of `.body.payload.reason`. For broad-form `catalyst-events tail` wakes,
 surface the raw `event.name` and the PR/ticket scope instead.
 
-See `plugins/dev/skills/monitor-events/SKILL.md` § Narration for the full rule and the good-vs-bad
-transcript fixture.
+The monitor-events skill that carried the full narration rule and the good-vs-bad transcript fixture was removed with the daemon (CTL-2240); the rule above is the operative statement.
 
 **Wake-up classification.** When a line arrives on the Monitor, classify it before re-entering the
 scan so the response stays proportional. Every reaction reads authoritative state from `gh pr view`,
@@ -2076,11 +2054,10 @@ When all waves are complete:
 
    ```bash
    bun "${CATALYST_DEV_SCRIPTS}/orch-monitor/catalyst-archive.ts" sweep "${ORCH_NAME}"
+   SWEEP_RC=$?
    ```
 
-   The sweep is idempotent (`ON CONFLICT` upserts). Re-running is safe. If it fails, capture the
-   exit code and `stderr` but proceed with the remaining cleanup steps — artifacts can be re-swept
-   later before teardown.
+   The sweep is idempotent (`ON CONFLICT` upserts). Re-running is safe. If it fails, capture the exit code (`$SWEEP_RC`, checked by step 5 below) and `stderr` but proceed with steps 3–4 — Linear-state verification and findings filing don't depend on the archive. Step 5's deletion does: an existing archive entry for `${ORCH_NAME}` from an earlier run is not evidence this run's artifacts were archived, so a failed `$SWEEP_RC` must block deletion even when `show` finds an old entry.
 
 3. **Verify Linear states**: Check all tickets are in `stateMap.done`. If any are stuck, update them
    using the Linearis CLI (run `linearis issues usage` for update syntax).
@@ -2144,9 +2121,57 @@ When all waves are complete:
    fi
    ```
 
-5. **Clean up all worktrees** (including orchestrator worktree, unless user wants to keep it). Use
-   `/catalyst-dev:teardown ${ORCH_NAME}` for a safe, archive-gated deletion. Teardown refuses to run
-   unless step 2's sweep succeeded (use `--force` to override).
+5. **Clean up ticket worktrees** (the orchestrator's own worktree is deliberately deferred to a separate pass — see step 4 below). The `teardown` skill that wrapped this step was removed with the daemon (CTL-2240); perform the archive-gated deletion directly, preserving its safety gates rather than just its archive check:
+
+   1. Confirm step 2's sweep both ran clean AND actually archived THIS orchestrator. `$SWEEP_RC` alone isn't enough — a stale entry from an earlier run of the same `${ORCH_NAME}` would otherwise let a failed *current* sweep slip through — so require both:
+      ```bash
+      [[ "${SWEEP_RC:-1}" -eq 0 ]] || { echo "step 2's sweep failed (rc=${SWEEP_RC:-unset}) — do not delete unarchived artifacts"; exit 1; }
+      bun "${CATALYST_DEV_SCRIPTS}/orch-monitor/catalyst-archive.ts" show "${ORCH_NAME}" --json
+      ```
+      `list` has no `--orch` filter (it dumps every archived entry), so `show` is the entry point that actually filters to one orchestrator by id. Check that its `.archivePath` field is a real, existing directory. Do not proceed past this point without both checks passing.
+   2. Confirm no worker is still live, in EITHER dispatch mode this skill supports. Phase-agent workers: signals are nested per ticket at `${ORCH_DIR}/workers/<ticket>/phase-*.json` (not flat `workers/*.json`), live marker is `status: "running"` (not `in_progress`/`alive`). Reap first, then check the summary rather than trusting the exit code — `reap` always exits 0 even when it left a job running:
+      ```bash
+      SUMMARY=$("${CATALYST_DEV_SCRIPTS}/phase-agent-watch-bg" reap --orch-dir "${ORCH_DIR}" --scope all --json)
+      echo "$SUMMARY" | jq -e '.skipped == 0' >/dev/null || { echo "live phase job(s) skipped, see $SUMMARY — do not delete"; exit 1; }
+      ```
+      `oneshot-legacy` workers (the dispatch mechanism above, "Dispatch mechanism — `claude` CLI with streaming JSON") are invisible to that reap — they're flat `${ORCH_DIR}/workers/<ticket>.json` signals carrying a `.pid`, not a `bg_job_id`, so `phase-agent-watch-bg` reports `scanned: 0` for them even while one is alive. Probe those directly with the same `kill -0` liveness check `orchestrate-revive` uses (CTL-63):
+      ```bash
+      for f in "${ORCH_DIR}"/workers/*.json; do
+        [[ -f "$f" ]] || continue
+        PID=$(jq -r '.pid // empty' "$f")
+        [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null && { echo "live legacy worker pid=$PID ($f) — do not delete"; exit 1; }
+      done
+      ```
+      A nonzero `.skipped` means `executor_reap` found a job actively computing (`skipped-active`, above the CPU ceiling) and deliberately left it running — treat that as a hard blocker, not a warning, and re-run after it finishes rather than forcing the delete.
+   3. **Salvage before removing** each worktree (CTL-1639) so a mistaken removal is recoverable: `source "${CATALYST_DEV_SCRIPTS}/lib/worktree-salvage.sh"` then `salvage_worktree "<worktree-path>" "<ticket>" --site interactive-teardown` for each. This snapshots unpushed commits, uncommitted diff, and untracked files to `~/catalyst/salvage/`. It is best-effort/fail-open and never blocks the removal.
+   4. Gate every removal against live handles the two probes above don't cover — a completed worker can leave a child process whose cwd is under the worktree but whose PID never appeared in any signal file. Use the repo's existing guard rather than a raw `git worktree remove`. This session's OWN worktree (`${ORCH_WORKTREE}`) needs a separate rule, not just the guard: `assert_worktree_removal_safe` walks this session's own process ancestry and deliberately EXEMPTS it from the foreign-handle check (that exemption is correct for its actual purpose — the guard would otherwise refuse to remove any worktree a caller invokes it from), which means it structurally cannot detect "the orchestrator agent itself is still running from in here," even when the calling shell's `$PWD` has been moved elsewhere first. Never rely on the guard for that case — always defer `${ORCH_WORKTREE}` to a separate later pass (a fresh invocation, or the orphan sweep) instead of trying to remove it from inside the session that's running from it:
+      A path-prefix match against `git worktree list` is not safe here: `setup-orchestrator.sh` appends a bare `-2`/`-3`/… suffix to `${ORCH_NAME}` on a naming collision, and that sibling orchestrator's own worktree (and its ticket worktrees) would match a `${ORCH_NAME}-` prefix too, even though it's a completely unrelated, possibly still-active run this session's liveness probes never checked. Enumerate by this orchestrator's OWN recorded ticket identity instead — the same `workers/` directory the two liveness probes above already read:
+      ```bash
+      source "${CATALYST_DEV_SCRIPTS}/lib/worktree-remove-guard.sh"
+      # WORKTREES_BASE is never exported back from create-worktree.sh's own subprocess resolution — replicate its default (config worktreeDir > ~/catalyst/wt/<projectKey> > ~/catalyst/wt/<repo>; the --worktree-dir flag tier doesn't apply here).
+      PROJECT_KEY=$(jq -r '.catalyst.projectKey // empty' "$CONFIG_FILE" 2>/dev/null)
+      if [ -n "$WORKTREE_DIR" ]; then
+        WORKTREES_BASE="${WORKTREE_DIR/#\~/$HOME}"
+      elif [ -n "$PROJECT_KEY" ]; then
+        WORKTREES_BASE="$HOME/catalyst/wt/${PROJECT_KEY}"
+      else
+        WORKTREES_BASE="$HOME/catalyst/wt/$(basename "$(git rev-parse --show-toplevel)")"
+      fi
+      # Ticket worktrees only, by THIS orchestrator's own recorded tickets — the orchestrator's own worktree (${ORCH_WORKTREE}) is deliberately excluded; see the note above.
+      for f in "${ORCH_DIR}"/workers/*; do
+        [[ -e "$f" ]] || continue
+        TICKET=$(basename "$f" .json)
+        [[ "$TICKET" == "output" ]] && continue   # workers/output/ holds stream/stderr logs, not a ticket
+        path="${WORKTREES_BASE}/${ORCH_NAME}-${TICKET}"
+        [[ -d "$path" ]] || continue
+        assert_worktree_removal_safe "$path" || { echo "refusing to remove $path — see stderr above"; continue; }
+        git worktree remove "$path"
+      done
+      echo "leaving ${ORCH_WORKTREE} for a later pass — this session is running from in here"
+      rm -rf "${ORCH_DIR}"
+      ```
+      `${ORCH_DIR}` (`~/catalyst/runs/${ORCH_NAME}/`) is the runs directory, not a git worktree — removing it is unaffected by the `${ORCH_WORKTREE}` deferral above. `assert_worktree_removal_safe` also refuses (fail-closed) when `lsof` finds any live handle under a ticket worktree that isn't this session's own process ancestry. A skipped worktree is not an error; leave it for the next sweep.
+   5. **Verify afterward**: re-run `bun "${CATALYST_DEV_SCRIPTS}/orch-monitor/catalyst-archive.ts" show "${ORCH_NAME}" --json` to confirm the orchestrator is still discoverable and `.archivePath` still points to a real directory.
 
 6. **Sync thoughts**: `humanlayer thoughts sync` to persist any shared documents.
 

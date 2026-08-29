@@ -98,15 +98,12 @@ fi
      "${SIGNAL_FILE}" > "${SIGNAL_FILE}.tmp" && mv "${SIGNAL_FILE}.tmp" "${SIGNAL_FILE}"
    ```
 
-9. **Active listen + merge** (CTL-252 contract) — after pushing the fix-up commit, enter an
-   event-driven listen loop using [[wait-for-github]] to wait for the PR to be CLEAN (CI green
-   + reviews satisfied). Resolve remaining blockers inline (CI failures up to 3 times, bot
-   review threads via GraphQL resolve). When CLEAN, execute the merge directly:
+9. **Active listen + merge** (CTL-252 contract) — after pushing the fix-up commit, enter an event-driven listen loop using [[merge-pr]]'s wait patterns to wait for the PR to be CLEAN (CI green + reviews satisfied). Resolve remaining blockers inline (CI failures up to 3 times, bot review threads via GraphQL resolve). When CLEAN, execute the merge directly:
 
    ```bash
-   # Wait for CLEAN state using [[wait-for-github]] two-phase pattern (never gh pr view --json)
+   # Wait for CLEAN state using [[merge-pr]]'s bounded-poll pattern (never gh pr view --json)
    REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
-   # ... two-phase catalyst-events wait-for loop (see [[wait-for-github]]) ...
+   # ... bounded catalyst-events wait-for / bounded-poll loop (see [[merge-pr]]) ...
    # On each wake-up: check inbound comms, then REST check state
    comms_check
    # REST check via gh api "repos/${REPO}/pulls/${PR_NUMBER}"
@@ -176,7 +173,6 @@ fi
 - Do NOT create a new PR — push to the existing branch.
 - Do NOT force-push unless the orchestrator explicitly instructed you to (history rewrites break
   review threads).
-- Do NOT run `gh pr view --json` in a loop — a tight loop burns GitHub's 5,000/hr GraphQL rate
-  limit in minutes (120 calls/hr per worker). Use [[wait-for-github]] for any intermediate waits.
+- Do NOT run `gh pr view --json` in a loop — a tight loop burns GitHub's 5,000/hr GraphQL rate limit in minutes (120 calls/hr per worker). Use [[merge-pr]]'s bounded-poll pattern for any intermediate waits.
 - Do NOT use `gh pr merge --auto` — the worker owns the merge directly after the listen loop
   confirms CLEAN. Write `status=done` with `pr.mergedAt` after the merge succeeds.

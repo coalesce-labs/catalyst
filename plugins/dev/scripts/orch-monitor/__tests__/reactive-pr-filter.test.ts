@@ -5,8 +5,9 @@ import type { CanonicalEvent } from "../lib/canonical-event";
 
 /**
  * Validates the canonical "Reactive PR lifecycle" disjunctive jq filter
- * documented in `plugins/dev/skills/monitor-events/SKILL.md` against canonical
- * envelopes produced by `buildEventLogEnvelope`. Predicate paths use
+ * against canonical envelopes produced by `buildEventLogEnvelope`. The
+ * monitor-events skill that documented the filter was removed with the daemon
+ * (CTL-2240); this test is now its executable record. Predicate paths use
  * `.attributes."<key>"` per the OTel-shaped canonical schema (CTL-300).
  *
  * Skips silently if `jq` is not on PATH.

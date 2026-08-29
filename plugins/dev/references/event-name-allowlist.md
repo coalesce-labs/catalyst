@@ -2,7 +2,7 @@
 
 Authoritative list of canonical event names a worker should wake on, in OTel canonical form (`.attributes."event.name"`). Source of truth for each group is the broker code path that routes it — cited inline so doc and code stay in sync. A regression test in `plugins/dev/scripts/broker/index.test.mjs` fails loudly when this file and the broker's routing tables drift apart.
 
-For envelope shape and the full attribute schema, see [[event-schema]]. For writing filters by hand or registering interests, see [[monitor-events]], [[wait-for-github]], [[catalyst-filter]].
+For envelope shape and the full attribute schema, see [[event-schema]]. The skills that documented hand-written filters and interest registration (monitor-events, wait-for-github, catalyst-filter) were removed with the daemon (CTL-2240); for the relay-era wait pattern see the merge-pr skill's bounded-poll reference (plugins/dev/skills/merge-pr/references/bounded-poll.md).
 
 ## Why this exists
 
@@ -88,7 +88,7 @@ Always combine the orchestrator clause with an event-name guard from the allowli
 
 Or — when scoping by PR rather than orchestrator — drop the orch clause and use `.attributes."vcs.pr.number"` instead.
 
-See `monitor-events` § references/filter-cookbook.md for the broader jq-filter table — `wait-for-github` no longer maintains one: its bounded-poll pattern polls GitHub REST directly and has no event-log filters to get wrong.
+The broader jq-filter table lived in the removed monitor-events skill (CTL-2240). The bounded-poll pattern (merge-pr/references/bounded-poll.md) polls GitHub REST directly and has no event-log filters to get wrong.
 
 ## Schema drift: v1 raw names vs canonical names on disk
 

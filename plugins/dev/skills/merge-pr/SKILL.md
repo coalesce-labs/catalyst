@@ -32,8 +32,7 @@ blockers legitimately or escalate with specifics. See
 1. **Identify PR** — use argument or `gh pr view`/`gh pr list` if none given.
 2. **Verify open + mergeable** — rebase if behind, resolve conflicts or exit.
 3. **Run local tests** — skip with `--skip-tests`.
-4. **Diagnose blockers + reactive wait** — single disjunctive `wait-for` (CI, reviews, push,
-   merge/close) with authoritative `gh api` REST re-check on every wake-up.
+4. **Diagnose blockers + reactive wait** — check whether the unified event log is live first (`~/catalyst/events/YYYY-MM.jsonl` present and the daemon running): if so, [blocker-loop.md](references/blocker-loop.md)'s single disjunctive `wait-for` (CI, reviews, push, merge/close) with authoritative `gh api` REST re-check on every wake-up; if the substrate is absent — the relay default since the daemon's retirement — poll instead, on [bounded-poll.md](references/bounded-poll.md)'s merge/review cadence (interval/ceiling), performing the SAME resolution actions as blocker-loop.md's table (CI fix-up, bot-thread resolve via `/review-comments`, BEHIND update) each tick, and checking readiness each tick with [gh-signal-traps.md](references/gh-signal-traps.md)'s combined CI-ready + review-ready check — not `bounded-poll.md`'s bare `bounded_poll_pr_state` alone, which only detects `MERGED`/`CLOSED` and has no way to ever cause either, so a CI-green, fully-reviewed-but-not-yet-merged PR would poll uselessly to the ceiling on that check alone. Proceed to Step 5 once CLEAN.
 5. **Squash merge + cleanup** — checkout-free remote-ref delete (CTL-56), Linear ticket to Done,
    worktree-safe local branch delete. **catalyst-cloud queue-merge default (CTC-1219):** for an
    eligible catalyst-cloud PR (no `hold:hand-steps`, no schema/migration path), this step applies
@@ -58,5 +57,7 @@ blockers legitimately or escalate with specifics. See
 | Deeper pre-merge adversarial review (8-gate table + regression-risk scoring) for a risky diff | [verify-gates.md](references/verify-gates.md) |
 | Post-merge tasks, compound close, deployment detection, success summary | [post-merge.md](references/post-merge.md) |
 | Confirming a merged change actually deployed + a live smoke check (bounded-poll, no broker dependency) | [post-merge-deploy-verify.md](references/post-merge-deploy-verify.md) |
+| Blocking on a GitHub state change (CI, review, merge) with a foreground, bounded, quota-conscious loop — the relay-era wait pattern, no daemon needed | [bounded-poll.md](references/bounded-poll.md) |
+| GitHub signal shapes that look like an answer and aren't (empty-string `conclusion`, empty check-run set, reaction-only clean review pass) | [gh-signal-traps.md](references/gh-signal-traps.md) |
 | Flags (`--skip-tests`, `--no-update`, `--keep-branch`), errors, examples | [flags-errors.md](references/flags-errors.md) |
 | Configuration (`.catalyst/config.json` schema, safety features) | [config-safety.md](references/config-safety.md) |

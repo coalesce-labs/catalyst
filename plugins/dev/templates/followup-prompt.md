@@ -104,13 +104,12 @@ This is a normal `/oneshot`-style workflow — full research → plan → implem
    - <finding 2>
    ```
 
-9. **Active listen + merge** (CTL-252 contract) — after the PR is open, enter an event-driven
-   listen loop using [[wait-for-github]] to wait for the PR to be CLEAN (CI green + reviews satisfied). Resolve blockers inline (CI failures up to 3 times, bot review threads via GraphQL resolve). When CLEAN, execute the merge directly. On unrecoverable blockers (human changes-requested, persistent DIRTY, CI exhausted), write `status=stalled` and post `comms attention`. Do NOT poll `gh pr view --json` — use REST via `gh api` only.
+9. **Active listen + merge** (CTL-252 contract) — after the PR is open, enter an event-driven listen loop using [[merge-pr]]'s wait patterns to wait for the PR to be CLEAN (CI green + reviews satisfied). Resolve blockers inline (CI failures up to 3 times, bot review threads via GraphQL resolve). When CLEAN, execute the merge directly. On unrecoverable blockers (human changes-requested, persistent DIRTY, CI exhausted), write `status=stalled` and post `comms attention`. Do NOT poll `gh pr view --json` — use REST via `gh api` only.
 
    ```bash
-   # Wait for CLEAN state using [[wait-for-github]] two-phase pattern
+   # Wait for CLEAN state using [[merge-pr]]'s bounded-poll pattern
    REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
-   # ... two-phase catalyst-events wait-for loop (see [[wait-for-github]]) ...
+   # ... bounded catalyst-events wait-for / bounded-poll loop (see [[merge-pr]]) ...
    # On each wake-up: check inbound comms, then REST check state
    comms_check
    # REST check via gh api "repos/${REPO}/pulls/${PR_NUMBER}"
@@ -177,7 +176,6 @@ This is a normal `/oneshot`-style workflow — full research → plan → implem
   tests missed something.
 - Do NOT omit the `followUpTo` link from your signal file or PR description — traceability is
   the whole point of this pattern.
-- Do NOT run `gh pr view --json` in a loop — a tight loop burns GitHub's 5,000/hr GraphQL rate
-  limit in minutes. Use [[wait-for-github]] for any intermediate GitHub event waits.
+- Do NOT run `gh pr view --json` in a loop — a tight loop burns GitHub's 5,000/hr GraphQL rate limit in minutes. Use [[merge-pr]]'s bounded-poll pattern for any intermediate GitHub event waits.
 - Do NOT use `gh pr merge --auto` — the worker owns the merge directly after the listen loop
   confirms CLEAN. Write `status=done` with `pr.mergedAt` after the merge succeeds.

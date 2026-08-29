@@ -172,7 +172,7 @@ catalyst-comms poll "$CHANNEL" --filter-to "$TICKET_ID" --since "$LAST_READ"
 catalyst-comms watch "$CHANNEL"   # live tail (human auditor)
 ```
 
-(Legacy `/oneshot` worker examples now live in the `plugins/legacy` plugin — see Phase-Agent Communication for the current model.) Contract: every worker produces ≥4 messages/run. Signal files remain authoritative state; comms is observability + coordination. Full protocol: `plugins/dev/skills/catalyst-comms/SKILL.md`.
+(Legacy `/oneshot` worker examples now live in the `plugins/legacy` plugin — see Phase-Agent Communication for the current model.) Contract: every worker produces ≥4 messages/run. Signal files remain authoritative state; comms is observability + coordination. The skill that documented the protocol was removed with the daemon (CTL-2240); the `catalyst-comms` CLI (`plugins/dev/scripts/catalyst-comms`) is the implementation of record.
 
 ## Phase-Agent Communication
 
@@ -521,4 +521,4 @@ Config from `.catalyst/config.json` merged with `~/.config/catalyst/config.json`
 
 **Monitor + UI** — orch-monitor read-only endpoints: `GET /api/archive/orchestrators` (paginated, since/until/ticket/status filters); `GET /api/archive/orchestrators/:id` (detail w/ workers+artifacts); `GET /api/archive/orchestrators/:id/files/:relPath+` (streams a file; paths validated via `isSafeArchivePart`/`isSafeArchiveFileRel` + `realpathSync` against `archive_path` to block symlink escapes — 403/400/404). The `/history` page renders an "Archived Orchestrators" section over these.
 
-**Lifecycle** — Orchestrate Phase 7 runs the sweep after the final SUMMARY.md and before worktree cleanup (idempotent). The teardown skill (`/catalyst-dev:teardown <orchId>`) deletes runtime + worktree state but refuses unless the archive exists and the SQLite row is present (`--force` bypasses).
+**Lifecycle** — Orchestrate Phase 7 runs the sweep after the final SUMMARY.md and before worktree cleanup (idempotent). The teardown skill that deleted runtime + worktree state — refusing unless the archive exists and the SQLite row is present (`--force` bypasses) — was removed with the daemon (CTL-2240); the archive CLI above is what remains.

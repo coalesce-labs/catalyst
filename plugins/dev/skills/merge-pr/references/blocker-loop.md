@@ -1,11 +1,11 @@
 # Step 6 — Diagnose and Resolve Merge Blockers (Reactive PR Lifecycle)
 
-_The canonical Pattern 3 loop from [[monitor-events]]: a single `wait-for` fires on any of PR merged, PR closed, CI failure, review changes-requested, or push to the base branch. Each wake-up is paired with an authoritative `gh api` REST re-check._
+_The canonical reactive-PR loop (documented here since CTL-2240 removed `monitor-events`): a single `wait-for` fires on any of PR merged, PR closed, CI failure, review changes-requested, or push to the base branch. Each wake-up is paired with an authoritative `gh api` REST re-check._
 
 Read and follow the full workflow in
 `"${CLAUDE_PLUGIN_ROOT}/references/merge-blocker-diagnosis.md"`.
 
-The wake-up mechanism here is the **canonical "Reactive PR lifecycle" pattern from `monitor-events` (Pattern 3, CTL-228)**: each wake-up tells the agent *what changed*; `gh api` tells it *the current truth*. Subscribe only to `github.pr.merged` is wrong — most of the interval between PR-create and PR-merge is spent on CI, review, and base-branch churn; the disjunctive filter restores event-driven dispatch for those cases.
+The wake-up mechanism here is the **canonical "Reactive PR lifecycle" pattern (Pattern 3, CTL-228; the `monitor-events` skill that first documented it was removed with the daemon, CTL-2240)**: each wake-up tells the agent *what changed*; `gh api` tells it *the current truth*. Subscribe only to `github.pr.merged` is wrong — most of the interval between PR-create and PR-merge is spent on CI, review, and base-branch churn; the disjunctive filter restores event-driven dispatch for those cases.
 
 ```bash
 # Two-phase compliant cadence loop. The 600s timeout serves as a fallback cadence;

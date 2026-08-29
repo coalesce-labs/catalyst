@@ -4,13 +4,14 @@
 
 ## Step 12a — Wait for CI checks and automated reviewers (event-driven)
 
-Automated reviewers (Codex, security scanners, linters) typically post within 3–5 minutes; CI needs time too. Use the canonical "Reactive PR lifecycle" pattern from `monitor-events` § Pattern 3 (CTL-228) — one multi-event subscription that wakes on PR merged, PR closed, CI completed, review submitted, or a push to the base branch — instead of polling on a sleep loop.
+Automated reviewers (Codex, security scanners, linters) typically post within 3–5 minutes; CI needs time too. Use the canonical "Reactive PR lifecycle" pattern (Pattern 3, CTL-228; the `monitor-events` skill that first documented it was removed with the daemon, CTL-2240) — one multi-event subscription that wakes on PR merged, PR closed, CI completed, review submitted, or a push to the base branch — instead of polling on a sleep loop. That subscription needs the unified event log actually live (`~/catalyst/events/YYYY-MM.jsonl` present, not just the `catalyst-events` CLI installed) — on a relay-default host with no live log, the fallback below takes over instead.
 
 ```bash
 REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
 BASE_BRANCH=$(gh api "repos/${REPO}/pulls/${pr_number}" --jq '.base.ref' 2>/dev/null || echo "main")
 
-if command -v catalyst-events >/dev/null 2>&1; then
+EVENT_LOG="${CATALYST_DIR:-$HOME/catalyst}/events/$(date +%Y-%m).jsonl"
+if command -v catalyst-events >/dev/null 2>&1 && [ -f "$EVENT_LOG" ]; then
   EVENT_JSON=$(catalyst-events wait-for \
     --filter '
       (.attributes."event.name" == "github.pr.merged" and .attributes."vcs.pr.number" == '"$pr_number"') or
@@ -39,9 +40,7 @@ if command -v catalyst-events >/dev/null 2>&1; then
   fi
   echo "wake: state=${PR_STATE} CI=${CI_STATUS} event=$(echo "$EVENT_JSON" | jq -r '.attributes."event.name" // "(timeout)"')"
 else
-  # Fallback when the catalyst-events CLI isn't installed — REST-only poll,
-  # 5-min intervals, 2-hour cap. This is `wait-for-github`'s bounded-poll
-  # merge/review preset — see that skill for the full pattern and ceiling.
+  # Fallback when the catalyst-events CLI isn't installed — REST-only poll, 5-min intervals, 2-hour cap. This is the bounded-poll merge/review preset — see merge-pr/references/bounded-poll.md for the full pattern and ceiling.
   COUNT=0; MAX=24; MERGED_FLAG="false"
   while [ "$MERGED_FLAG" != "true" ] && [ $COUNT -lt $MAX ]; do
     sleep 300; COUNT=$((COUNT + 1))

@@ -375,10 +375,11 @@ run "filter rejects github.pr.merged attributed to a foreign orchestrator (CTL-3
 # counts — (a) the events never reach the consumer to begin with, and
 # (b) the grep pattern would also strip the orchestrator's OWN intended
 # wake event `filter.wake.${ORCH_NAME}` if that ever did reach the pipe.
-# See `plugins/dev/skills/monitor-events/SKILL.md` for the prohibition on
-# downstream filtering pipes; the rule's primary reason is keeping `--filter`
-# the single source of truth, not the secondary 4 KB buffering concern
-# (`grep --line-buffered` + `jq --unbuffered` mechanically flush per line).
+# The monitor-events skill that documented the prohibition on downstream
+# filtering pipes was removed with the daemon (CTL-2240); the rule's primary
+# reason is keeping `--filter` the single source of truth, not the secondary
+# 4 KB buffering concern (`grep --line-buffered` + `jq --unbuffered`
+# mechanically flush per line).
 
 # (m) canonical filter.wake.${ORCH_NAME} envelope — not matched
 EVENT_M='{"ts":"2026-05-14T00:00:00Z","resource":{"service.name":"catalyst.broker"},"attributes":{"event.name":"filter.wake.orch-test-2026-05-04","catalyst.orchestrator.id":"orch-test-2026-05-04"},"body":{"payload":{"reason":"PR #501 ready","interest_id":"pr-501"}}}'
