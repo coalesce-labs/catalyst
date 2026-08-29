@@ -31,6 +31,8 @@ import { ASSERTED_BY } from "./assertion-evidence.mjs"; // CTL-1789: terminal-wr
 // CTL-2192 (review): the REAL preemption canceller — a fake would have passed
 // against the very wiring gap this covers.
 import { cancelSdkRun, abortSdkWorker } from "./sdk-worker-registry.mjs";
+// CTL-2015: sourced, not hand-listed — the whole point of the AC's phase table.
+import { PHASES, ANCILLARY_PHASES } from "../lib/workflow-descriptor.mjs";
 
 // ── Fakes ───────────────────────────────────────────────────────────────────
 
@@ -1582,6 +1584,356 @@ describe("defaultEmitBackstop → defaultWriteSignalStalled terminal-status guar
       expect(JSON.parse(readFileSync(signalFile, "utf8")).status).toBe(st);
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// ── CTL-2015: the backstop must leave an artifact even when the signal is GONE ──
+// The 2026-08-18 incident: the overload backstop ran (the exhausted event fired) but
+// defaultWriteSignalTerminal's `catch { return; }` no-op'd on an absent file, so the
+// board read the ticket as in-flight while the event log said failed.
+describe("defaultEmitBackstop — absent signal file (CTL-2015)", () => {
+  const SEED = { ticket: "CTL-1", phase: "implement", generation: 3, worktreePath: "/wt/CTL-1" };
+
+  test("an ABSENT signal file is CREATED as stalled when a seed is supplied", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ctl2015-"));
+    const signalFile = join(dir, "workers", "CTL-1", "phase-implement.json"); // dir does NOT exist
+    defaultEmitBackstop(
+      { phase: "implement", ticket: "CTL-1", status: "failed",
+        reason: "sdk-overloaded-exhausted", orchDir: "/ec", signalFile, signalSeed: SEED },
+      { spawn: () => ({ status: 0, error: null }), appendEventLog: () => {} },
+    );
+    const sig = JSON.parse(readFileSync(signalFile, "utf8"));
+    expect(sig.status).toBe("stalled");
+    expect(sig.attentionReason).toBe("sdk-overloaded-exhausted");
+    expect(sig.assertedBy).toBe(ASSERTED_BY.SDK_BACKSTOP);
+    expect(sig.phaseTimestamps.stalled).toBeTruthy();
+    // The seed identity survives — a signal the sweep can attribute.
+    expect(sig.ticket).toBe("CTL-1");
+    expect(sig.phase).toBe("implement");
+    // CTL-2015 (Codex #3871 P1): isTerminalTeardownStale's sibling-freshness check
+    // reads this field directly — an absent startedAt silently fails that compare.
+    expect(sig.startedAt).toBe(sig.updatedAt);
+    expect(sig.generation).toBe(3);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a seed carrying its own startedAt is PRESERVED, not overwritten by the recreate moment", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ctl2015-started-"));
+    const signalFile = join(dir, "workers", "CTL-1", "phase-implement.json");
+    defaultEmitBackstop(
+      { phase: "implement", ticket: "CTL-1", status: "failed",
+        reason: "sdk-overloaded-exhausted", orchDir: "/ec", signalFile,
+        signalSeed: { ...SEED, startedAt: "2026-01-01T00:00:00Z" } },
+      { spawn: () => ({ status: 0, error: null }), appendEventLog: () => {} },
+    );
+    const sig = JSON.parse(readFileSync(signalFile, "utf8"));
+    expect(sig.startedAt).toBe("2026-01-01T00:00:00Z");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("NO seed → an absent file is STILL a no-op (claim-lost / pre-claim failure)", () => {
+    // CTL-1367 P2-G: a claim-lost loser has no local signal because the WINNER owns it.
+    // Creating one there would write a stalled signal into the winner's worker dir.
+    const dir = mkdtempSync(join(tmpdir(), "ctl2015-noseed-"));
+    const signalFile = join(dir, "phase-implement.json");
+    defaultEmitBackstop(
+      { phase: "implement", ticket: "CTL-1", status: "failed",
+        reason: "sdk-prelaunch-failed", orchDir: "/ec", signalFile },
+      { spawn: () => ({ status: 0, error: null }), appendEventLog: () => {} },
+    );
+    expect(existsSync(signalFile)).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a file that APPEARS between the read and the create is NEVER clobbered", () => {
+    // Exclusive create (wx): if a newer generation's prelaunch won the race, that
+    // worker owns the phase — bow out rather than stalling a live dispatch.
+    const dir = mkdtempSync(join(tmpdir(), "ctl2015-race-"));
+    const signalFile = join(dir, "phase-implement.json");
+    let created = false;
+    const raceWrite = () => {
+      if (created) return;
+      created = true;
+      writeFileSync(signalFile, JSON.stringify({ status: "dispatched", generation: 4 }));
+    };
+    defaultEmitBackstop(
+      { phase: "implement", ticket: "CTL-1", status: "failed",
+        reason: "sdk-overloaded-exhausted", orchDir: "/ec", signalFile, signalSeed: SEED },
+      { spawn: () => ({ status: 0, error: null }), appendEventLog: () => {},
+        // seam that simulates the concurrent prelaunch landing mid-call
+        onBeforeCreate: raceWrite },
+    );
+    const sig = JSON.parse(readFileSync(signalFile, "utf8"));
+    expect(sig.status).toBe("dispatched"); // the live gen-4 dispatch is untouched
+    expect(sig.generation).toBe(4);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("an EXISTING non-terminal signal still takes the PATCH path (seed does not replace it)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ctl2015-patch-"));
+    const signalFile = join(dir, "phase-implement.json");
+    writeFileSync(signalFile, JSON.stringify({ status: "running", ticket: "CTL-1",
+      phase: "implement", generation: 9, catalystSessionId: "sess_x" }));
+    defaultEmitBackstop(
+      { phase: "implement", ticket: "CTL-1", status: "failed",
+        reason: "sdk-overloaded-exhausted", orchDir: "/ec", signalFile, signalSeed: SEED },
+      { spawn: () => ({ status: 0, error: null }), appendEventLog: () => {} },
+    );
+    const sig = JSON.parse(readFileSync(signalFile, "utf8"));
+    expect(sig.status).toBe("stalled");
+    expect(sig.generation).toBe(9);              // on-disk value wins, not the seed's 3
+    expect(sig.catalystSessionId).toBe("sess_x"); // pre-existing fields preserved
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("the P3 terminal-clobber guard is unchanged — a 'done' success survives a seeded backstop", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ctl2015-p3-"));
+    const signalFile = join(dir, "phase-implement.json");
+    writeFileSync(signalFile, JSON.stringify({ status: "done", ticket: "CTL-1" }));
+    defaultEmitBackstop(
+      { phase: "implement", ticket: "CTL-1", status: "failed",
+        reason: "sdk-overloaded-exhausted", orchDir: "/ec", signalFile, signalSeed: SEED },
+      { spawn: () => ({ status: 0, error: null }), appendEventLog: () => {} },
+    );
+    expect(JSON.parse(readFileSync(signalFile, "utf8")).status).toBe("done");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a created signal carries NO yield anchors (CTL-1854 family rule)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ctl2015-yield-"));
+    const signalFile = join(dir, "phase-implement.json");
+    defaultEmitBackstop(
+      { phase: "implement", ticket: "CTL-1", status: "failed",
+        reason: "sdk-overloaded-exhausted", orchDir: "/ec", signalFile,
+        signalSeed: { ...SEED, yieldedAt: "2026-08-21T00:00:00Z", firstYieldedAt: "x", yieldMs: 1 } },
+      { spawn: () => ({ status: 0, error: null }), appendEventLog: () => {} },
+    );
+    const sig = JSON.parse(readFileSync(signalFile, "utf8"));
+    expect("yieldedAt" in sig).toBe(false);
+    expect("firstYieldedAt" in sig).toBe(false);
+    expect("yieldMs" in sig).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+// ── CTL-2015: EVERY dispatchable phase, as a table ───────────────────────────
+// Sourced from the workflow descriptor + the delegate runner's recovery-pass, NOT
+// hand-listed: a phase added to the descriptor is covered by construction. That is
+// the whole point of the AC — the defect was "covered the phase they were looking at".
+// delegate-runner-entry.mjs:62 dispatches this through the same sdk runner, and it
+// is deliberately NOT in PHASES (∉ descriptor steps/ancillarySteps).
+const DISPATCHABLE_PHASES = [...PHASES, ...ANCILLARY_PHASES, "recovery-pass"];
+
+describe("sdkRunPhaseAgent — overload exhaustion leaves a stalled artifact for EVERY phase", () => {
+  // Real defaultEmitBackstop (NOT injected) so the signal WRITE is exercised. Only
+  // spawn is faked (no real prelaunch / emit binary) — the seam the old test at
+  // :803 stubbed away, which is why it could not catch this.
+  const runExhaustion = async ({ phase, seedSignal }) => {
+    const dir = mkdtempSync(join(tmpdir(), `ctl2015-${phase}-`));
+    const workerDir = join(dir, "workers", "CTL-100");
+    const signalFile = join(workerDir, `phase-${phase}.json`);
+    const spec = makeSpec({ phase, signalFile });
+    // seedSignal=false reproduces the CTC-427 / CTC-55 state: the file is GONE
+    // when the budget runs out.
+    const { spawn } = spawnReturningSpec({ spec, signalFile: seedSignal ? signalFile : undefined });
+    if (seedSignal) mkdirSync(workerDir, { recursive: true });
+    const r = await sdkRunPhaseAgent(
+      { orchDir: dir, ticket: "CTL-100", phase, worktreePath: "/wt/CTL-100" },
+      { ...GOOD_AUTH, spawn,
+        runQuery: () => (async function* () {
+          yield resultMsg({ subtype: "error", is_error: true, api_error_status: 529 });
+        })(),
+        sleep: () => Promise.resolve(), maxRetries: 1, backoff: { baseMs: 1, capMs: 2 },
+        emitEvent: () => {},
+        // NOTE: emitBackstop deliberately NOT injected — the real one must run.
+      },
+    );
+    return { r, dir, signalFile };
+  };
+
+  for (const phase of DISPATCHABLE_PHASES) {
+    test(`${phase}: exhaustion with the signal file PRESENT → stalled/sdk-overloaded-exhausted`, async () => {
+      const { r, dir, signalFile } = await runExhaustion({ phase, seedSignal: true });
+      expect(r.code).toBe(1);
+      const sig = JSON.parse(readFileSync(signalFile, "utf8"));
+      expect(sig.status).toBe("stalled");
+      expect(sig.attentionReason).toBe("sdk-overloaded-exhausted");
+      expect(sig.assertedBy).toBe(ASSERTED_BY.SDK_BACKSTOP);
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    test(`${phase}: exhaustion with the signal file ABSENT → still stalled/sdk-overloaded-exhausted`, async () => {
+      // The 2026-08-18 shape exactly: CTC-427 held no phase-implement.json,
+      // CTC-55 held no phase-plan.json, and neither was escalated.
+      const { r, dir, signalFile } = await runExhaustion({ phase, seedSignal: false });
+      expect(r.code).toBe(1);
+      expect(existsSync(signalFile)).toBe(true);
+      const sig = JSON.parse(readFileSync(signalFile, "utf8"));
+      expect(sig.status).toBe("stalled");
+      expect(sig.attentionReason).toBe("sdk-overloaded-exhausted");
+      expect(sig.phase).toBe(phase);
+      rmSync(dir, { recursive: true, force: true });
+    });
+  }
+
+  test("the table is sourced from the descriptor, not hand-listed (fails if a phase is dropped)", () => {
+    // A guard on the guard: if someone shortens the table, this fails rather than
+    // silently shrinking coverage.
+    expect(DISPATCHABLE_PHASES).toContain("triage");
+    expect(DISPATCHABLE_PHASES).toContain("implement");
+    expect(DISPATCHABLE_PHASES).toContain("plan");
+    expect(DISPATCHABLE_PHASES).toContain("remediate");
+    expect(DISPATCHABLE_PHASES).toContain("recovery-pass");
+    expect(DISPATCHABLE_PHASES.length).toBe(PHASES.length + ANCILLARY_PHASES.length + 1);
+  });
+});
+
+// ── CTL-2015 negative control: a transient blip must leave NO stalled artifact ──
+describe("sdkRunPhaseAgent — a recovered overload writes no stalled artifact", () => {
+  for (const phase of ["triage", "plan", "implement"]) {
+    test(`${phase}: one 529 then success → no stalled signal`, async () => {
+      const dir = mkdtempSync(join(tmpdir(), `ctl2015-neg-${phase}-`));
+      const workerDir = join(dir, "workers", "CTL-100");
+      mkdirSync(workerDir, { recursive: true });
+      const signalFile = join(workerDir, `phase-${phase}.json`);
+      const spec = makeSpec({ phase, signalFile });
+      const { spawn } = spawnReturningSpec({ spec, signalFile });
+      let n = 0;
+      const r = await sdkRunPhaseAgent(
+        { orchDir: dir, ticket: "CTL-100", phase, worktreePath: "/wt/CTL-100" },
+        { ...GOOD_AUTH, spawn,
+          runQuery: () => (async function* () {
+            n += 1;
+            yield n === 1
+              ? resultMsg({ subtype: "error", is_error: true, api_error_status: 529 })
+              : resultMsg();
+          })(),
+          sleep: () => Promise.resolve(), backoff: { baseMs: 1, capMs: 2 }, emitEvent: () => {} },
+      );
+      expect(r.code).toBe(0);
+      expect(n).toBe(2); // retried once, then succeeded
+      const sig = JSON.parse(readFileSync(signalFile, "utf8"));
+      expect(sig.status).not.toBe("stalled");
+      expect(sig.attentionReason).toBeUndefined();
+      rmSync(dir, { recursive: true, force: true });
+    });
+  }
+});
+
+// ── CTL-2015 Phase 3: make an absent signal file OBSERVABLE ──────────────────
+describe("sdkRunPhaseAgent — CTL-2015 Phase 3 (backstop-signal-recreated observability)", () => {
+  test("recreating an absent signal emits execution-core.sdk.backstop-signal-recreated", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ctl2015-obs-"));
+    const signalFile = join(dir, "workers", "CTL-100", "phase-implement.json");
+    const spec = makeSpec({ phase: "implement", signalFile });
+    const { spawn } = spawnReturningSpec({ spec }); // no signalFile → never written
+    const events = [];
+    await sdkRunPhaseAgent(
+      { orchDir: dir, ticket: "CTL-100", phase: "implement", worktreePath: "/wt/CTL-100" },
+      { ...GOOD_AUTH, spawn,
+        runQuery: () => (async function* () {
+          yield resultMsg({ subtype: "error", is_error: true, api_error_status: 529 });
+        })(),
+        sleep: () => Promise.resolve(), maxRetries: 1, backoff: { baseMs: 1, capMs: 2 },
+        emitEvent: (n, p) => events.push([n, p]) },
+    );
+    const rec = events.find(([n]) => n === "execution-core.sdk.backstop-signal-recreated");
+    expect(rec).toBeTruthy();
+    expect(rec[1].phase).toBe("implement");
+    expect(rec[1].reason).toBe("sdk-overloaded-exhausted");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a PRESENT signal file emits no recreated event (the normal path stays quiet)", async () => {
+    // A detector that fires on the healthy path is not a detector.
+    const dir = mkdtempSync(join(tmpdir(), "ctl2015-obs-present-"));
+    const workerDir = join(dir, "workers", "CTL-100");
+    mkdirSync(workerDir, { recursive: true });
+    const signalFile = join(workerDir, "phase-implement.json");
+    const spec = makeSpec({ phase: "implement", signalFile });
+    const { spawn } = spawnReturningSpec({ spec, signalFile });
+    const events = [];
+    await sdkRunPhaseAgent(
+      { orchDir: dir, ticket: "CTL-100", phase: "implement", worktreePath: "/wt/CTL-100" },
+      { ...GOOD_AUTH, spawn,
+        runQuery: () => (async function* () {
+          yield resultMsg({ subtype: "error", is_error: true, api_error_status: 529 });
+        })(),
+        sleep: () => Promise.resolve(), maxRetries: 1, backoff: { baseMs: 1, capMs: 2 },
+        emitEvent: (n, p) => events.push([n, p]) },
+    );
+    const rec = events.find(([n]) => n === "execution-core.sdk.backstop-signal-recreated");
+    expect(rec).toBeFalsy();
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+// ── CTL-2015: absent-file recreate proven for the OTHER 2 emitBackstop call sites ──
+// The overload-exhausted call site (above) is covered end-to-end via the real,
+// uninjected defaultEmitBackstop. `sdk-threw` and the mapResult-derived `backstop`
+// are two MORE call sites that got the same signalSeed threading — "fixing one
+// writer of a family is not fixing the family" applies to call sites too. Without
+// these, a future refactor could silently drop `signalSeed` from one of those two
+// object literals and nothing would catch it.
+describe("sdkRunPhaseAgent — CTL-2015 absent-file recreate on the sdk-threw call site", () => {
+  test("a thrown error with the signal file ABSENT still creates a stalled signal", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ctl2015-threw-"));
+    const signalFile = join(dir, "workers", "CTL-100", "phase-implement.json"); // never written
+    const spec = makeSpec({ phase: "implement", signalFile });
+    const { spawn } = spawnReturningSpec({ spec }); // no signalFile arg → prelaunch never writes it
+    const runQuery = () => (async function* () { throw new Error("boom"); })();
+    const r = await sdkRunPhaseAgent(
+      { orchDir: dir, ticket: "CTL-100", phase: "implement", worktreePath: "/wt/CTL-100" },
+      { ...GOOD_AUTH, spawn, runQuery },
+      // NOTE: emitBackstop deliberately NOT injected — the real one must run.
+    );
+    expect(r.code).toBe(1);
+    expect(existsSync(signalFile)).toBe(true);
+    const sig = JSON.parse(readFileSync(signalFile, "utf8"));
+    expect(sig.status).toBe("stalled");
+    expect(sig.attentionReason).toBe("sdk-threw");
+    expect(sig.assertedBy).toBe(ASSERTED_BY.SDK_BACKSTOP);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("sdkRunPhaseAgent — CTL-2015 absent-file recreate on the mapResult backstop call site", () => {
+  test("error_max_turns with the signal file ABSENT still creates a turn-cap-exhausted signal", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ctl2015-turncap-"));
+    const signalFile = join(dir, "workers", "CTL-100", "phase-implement.json"); // never written
+    const spec = makeSpec({ phase: "implement", signalFile });
+    const { spawn } = spawnReturningSpec({ spec });
+    const r = await sdkRunPhaseAgent(
+      { orchDir: dir, ticket: "CTL-100", phase: "implement", worktreePath: "/wt/CTL-100" },
+      { ...GOOD_AUTH, spawn, runQuery: fakeQuery([resultMsg({ subtype: "error_max_turns", is_error: true })]) },
+      // NOTE: emitBackstop deliberately NOT injected — the real one must run.
+    );
+    expect(r.code).toBe(1);
+    expect(existsSync(signalFile)).toBe(true);
+    const sig = JSON.parse(readFileSync(signalFile, "utf8"));
+    // ⚠️ CTL-1367 P2-F: the CREATED signal's status must match the event's terminal
+    // subtype — "turn-cap-exhausted", never the generic "stalled" the other two
+    // call sites use. The `fresh` object in the writer just copies `status`
+    // through, but that was unasserted for the create path before this test.
+    expect(sig.status).toBe("turn-cap-exhausted");
+    expect(sig.assertedBy).toBe(ASSERTED_BY.SDK_BACKSTOP);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a generic error subtype with the signal file ABSENT still creates a stalled signal", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ctl2015-generic-"));
+    const signalFile = join(dir, "workers", "CTL-100", "phase-implement.json"); // never written
+    const spec = makeSpec({ phase: "implement", signalFile });
+    const { spawn } = spawnReturningSpec({ spec });
+    const r = await sdkRunPhaseAgent(
+      { orchDir: dir, ticket: "CTL-100", phase: "implement", worktreePath: "/wt/CTL-100" },
+      { ...GOOD_AUTH, spawn, runQuery: fakeQuery([resultMsg({ subtype: "error_during_execution", is_error: true })]) },
+    );
+    expect(r.code).toBe(1);
+    expect(existsSync(signalFile)).toBe(true);
+    const sig = JSON.parse(readFileSync(signalFile, "utf8"));
+    expect(sig.status).toBe("stalled");
+    rmSync(dir, { recursive: true, force: true });
   });
 });
 
