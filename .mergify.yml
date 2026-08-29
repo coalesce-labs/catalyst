@@ -107,4 +107,6 @@ merge_protections:
       - -head~=^release-please--
     success_conditions:
       # yamllint disable-line rule:line-length
-      - 'title~=^(feat|fix|chore|docs|style|refactor|perf|test|build|ci|revert)(\([a-zA-Z0-9 ,._/+-]+\))?!?: '
+      # Scope group restricted to this repo's five valid scopes (Codex P2 on #4089) —
+      # a single scope only, no comma lists, matching the commit convention docs.
+      - 'title~=^(feat|fix|chore|docs|style|refactor|perf|test|build|ci|revert)(\((dev|meta|pm-ops|legacy|foundry)\))?!?: '
