@@ -1,0 +1,51 @@
+# .github/workflows/merge-queue-watchdog.yml — CTL-2285. Ports catalyst-cloud's CTC-1218
+# watchdog, codifying the coordinator's manual `@Mergifyio queue` nudge as infrastructure
+# (AGENTS.md house rule: infra fixes must be codified).
+#
+# Runs scripts/merge-queue-watchdog.mjs on a schedule: for every open PR against main
+# carrying `queue:ready`, nudge it once it has sat eligible (all six required checks
+# satisfied in the ruleset's own skip-tolerant success/neutral/skipped form, zero unresolved
+# threads, not path-excluded) for 10+ minutes without entering the merge queue; alert (and
+# swap the label to hold:hand-steps) when the PR's changed files match a queue path exclusion
+# and it will never queue; surface a Mergify refusal reply as a PR comment. See the script's
+# own header for the full design, and .mergify.yml's header for why the three-way check form
+# is required here (a bare success-only test would be stricter than the ruleset and would
+# deadlock on a legitimately skipped job).
+#
+# GITHUB_TOKEN posts as github-actions[bot]; Mergify's `queue` command accepts commands from
+# any actor with write access, which the default token has via `pull-requests: write` below.
+# If that ever proves insufficient, set the MERGE_QUEUE_WATCHDOG_TOKEN repo secret to a
+# PAT/App token with write access — the step below prefers it when present.
+
+name: Merge queue watchdog
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: merge-queue-watchdog
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  checks: read
+
+jobs:
+  watchdog:
+    # Scheduled workflows run on the default branch's definition regardless of what triggered
+    # the dispatch, but forks of this repo should not run a schedule that posts comments on
+    # OUR PRs.
+    if: github.repository == 'coalesce-labs/catalyst'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Run merge queue watchdog
+        run: node scripts/merge-queue-watchdog.mjs
+        env:
+          GITHUB_TOKEN: ${{ secrets.MERGE_QUEUE_WATCHDOG_TOKEN || github.token }}
