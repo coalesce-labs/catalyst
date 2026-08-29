@@ -28,7 +28,7 @@
     "@types/bun": "^1.4.0",
     "@types/react": "^19.2.18",
     "@types/web-push": "^3.6.4",
-    "eslint": "^9",
+    "eslint": "^10",
     "eslint-plugin-security": "^4.0.0",
     "globals": "^17.11.0",
     "knip": "6.32.2",
