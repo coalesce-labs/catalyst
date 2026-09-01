@@ -1,11 +1,11 @@
 ---
 name: remediate-plan
 description:
-  "Fixes what /catalyst-dev:validate-plan just found, in the same session. Consumes validate-plan's actual output — the Validation Report it renders into the conversation, since validate-plan has no Write tool and produces no verify.json — and applies the fixes directly via Edit/Write, re-runs a scoped gate, and commits. Use right after validate-plan reports FAIL or PARTIAL, especially inside a /relay-ticket session: relay-ticket's phase list names '(→ remediate)' but the only other remediation-shaped skill, phase-remediate, is bound to the daemon-era verify.json contract relay-ticket does not produce — this is the relay-native replacement (CTL-2243). Not for a fresh implementation pass; scope stays to what the Validation Report named."
+  "Fixes what /catalyst-dev:validate-plan found. Consumes validate-plan's Validation Report from either of two places — the report rendered into this conversation by a same-session validate-plan run (validate-plan has no Write tool and produces no verify.json), or a persisted report handed to a fresh session as a materialized prior-artifact file whose path the dispatch prompt names (the cloud runner's path — CTC-1384) — then applies the fixes directly via Edit/Write, re-runs a scoped gate, and commits. Use right after validate-plan reports FAIL or PARTIAL, or when dispatched as a remediate session with a validation report on disk, especially inside a /relay-ticket session: relay-ticket's phase list names '(→ remediate)' but the only other remediation-shaped skill, phase-remediate, is bound to the daemon-era verify.json contract relay-ticket does not produce — this is the relay-native replacement (CTL-2243). Not for a fresh implementation pass; scope stays to what the Validation Report named."
 disable-model-invocation: false
 user-invocable: true
 allowed-tools: Read, Grep, Glob, Bash, Edit, Write, Task
-version: 1.0.0
+version: 1.1.0
 ---
 
 # Remediate Plan
@@ -16,11 +16,16 @@ Read `plugins/dev/skills/validate-plan/SKILL.md` for the schema this skill reads
 
 ## When to run it
 
-Only in the same session as the validate-plan run that produced the report you are fixing. There is no persisted, verify.json-equivalent artifact to hand to a fresh session, and a relay worker cannot self-sustain a wait for one or hand off to a background job. If no Validation Report is in context yet, run `/catalyst-dev:validate-plan` first, in this session, before invoking this skill.
+Two modes, same report, same steps:
+
+- **Same-session (laptop):** right after a `/catalyst-dev:validate-plan` run in this session reported FAIL or PARTIAL — its Validation Report is sitting in the conversation.
+- **Fresh session (cloud dispatch):** the session was dispatched to remediate a validate failure and the persisted Validation Report is a real file on disk — primarily a materialized prior-artifact file (the runner fetches the failed validate phase's `validation.md` from the R2 artifact store and your dispatch prompt names its local path); failing that, a thoughts doc or Linear attachment the prompt points at.
+
+If no Validation Report is in context and no report file is named in your prompt, run `/catalyst-dev:validate-plan` first, in this session, before invoking this skill.
 
 ## Steps
 
-1. **Read the Validation Report** already in context — every gate failure, every deviation and potential issue, and any manual-testing item that is actually automatable.
+1. **Read the Validation Report** — from the conversation if a same-session validate-plan run produced one, otherwise from the prior-artifact path (or fallback location) named in your prompt. Take in every gate failure, every deviation and potential issue, and any manual-testing item that is actually automatable. If neither source exists, stop and run `/catalyst-dev:validate-plan` first.
 2. **Triage**: fix now vs. defer. Anything that would keep the report's own verdict off PASS is must-fix; a bullet the report itself calls an "improvement" is not.
 3. **Apply fixes** via Edit/Write, scoped to the files the report named — this is a fix pass, not a redesign.
 4. **Re-run a targeted gate** (this repo's `bun run check`, or the touched workspace's slice of it) and print the real `exit 0` to the transcript.
