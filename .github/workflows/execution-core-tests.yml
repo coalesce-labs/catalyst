@@ -1545,6 +1545,7 @@ jobs:
             lease-authority.test.mjs \
             lease-authority-claim.test.mjs \
             lease-authority-gate.test.mjs \
+            lease-authority-renew.test.mjs \
             cluster-heartbeat.test.mjs \
             cluster-heartbeat-capacity.test.mjs \
             comms-drain.test.mjs \
