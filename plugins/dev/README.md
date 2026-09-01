@@ -6,16 +6,15 @@ Phase-agent / execution-core pipeline for Level 3 multi-ticket orchestration.
 
 > **Plugin topology:**
 >
-> - The wave-orchestration skills `oneshot`, `orchestrate`, `god`, `setup-orchestrate` live in the
->   **[catalyst-legacy](../legacy/README.md)** plugin — use `/catalyst-legacy:<skill>`. (The old
->   redirect stubs that briefly lived here were removed.)
 > - The framework setup/maintenance skills `setup-catalyst`, `setup-warp`, and `research-curate`
 >   moved to the new **[catalyst-foundry](../foundry/README.md)** plugin — use
 >   `/catalyst-foundry:<skill>`.
 > - `briefing-followup` and `iterate-plan` are general workflow skills and live here in
 >   catalyst-dev.
 >
-> Both catalyst-legacy and catalyst-foundry depend on catalyst-dev for shared backing scripts.
+> catalyst-foundry depends on catalyst-dev for shared backing scripts. (The wave-orchestration
+> skills `oneshot`, `orchestrate`, `god`, `setup-orchestrate` — formerly the catalyst-legacy
+> plugin — were removed once the daemon they served was retired, CTL-2241.)
 
 See the [Skills Reference](https://catalyst.coalescelabs.ai/reference/skills/) and
 [Agents Reference](https://catalyst.coalescelabs.ai/reference/agents/) for detailed per-skill

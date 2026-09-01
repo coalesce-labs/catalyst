@@ -96,7 +96,7 @@ Coding agents orient on this codebase through **Serena** — a self-hosted, loca
 - `fix(pm-ops): correct cycle calculation` — catalyst-pm-ops patch bump
 - `feat(dev)!: breaking change` — catalyst-dev MAJOR bump
 - `chore(meta): update docs` — no version bump
-- Valid scopes (one per plugin): `dev`, `meta`, `pm-ops`, `legacy`, `foundry`
+- Valid scopes (one per plugin): `dev`, `meta`, `pm-ops`, `foundry`
 
 **Versioning (CTL-2263):** release-please auto-bumps `version.txt` and both `plugin.json` files, writes each `CHANGELOG.md`, and cuts a GitHub release — but only after a conventional-commit PR merges to `main`, via its own release PR, never inside the PR that changed the plugin. Do **not** hand-bump the version in the same PR as the change — a hand bump plus release-please's own bump on the next release PR is a double bump. Just use a conventional commit message; `scripts/check-plugin-version.sh` (the `check-versions` PR check) is what enforces the format, and it is a gate on the message, not a bumper itself. See `docs/releases.md` → "Versioning" for the full mechanism.
 
@@ -125,7 +125,7 @@ Edit plugin files in `plugins/*/`, test locally (symlinks make changes immediate
 
 ## Orchestration
 
-Catalyst's **execution-core daemon** ships work as **phase-agent workers** — one short-lived background agent job per phase, walking a 10-phase pipeline (triage → research → plan → implement → verify → review → pr → monitor-merge → monitor-deploy → teardown). The legacy wave-orchestration model is preserved in the **catalyst-legacy** plugin as a fallback; the mode is selected by `.catalyst/config.json → catalyst.orchestration.dispatchMode`.
+Catalyst's **execution-core daemon** ships work as **phase-agent workers** — one short-lived background agent job per phase, walking a 10-phase pipeline (triage → research → plan → implement → verify → review → pr → monitor-merge → monitor-deploy → teardown). The pre-phase-agent wave-orchestration model (the **catalyst-legacy** plugin: `oneshot`, `orchestrate`, `god`, `setup-orchestrate`) was removed once the daemon it served was retired (CTL-2241); dispatch today is relay-based (`/relay-ticket <TICKET>`, see the `relay-ticket` skill), not a resident daemon.
 
 Cross-process communication is built on a **single unified event log** at `~/catalyst/events/YYYY-MM.jsonl`. Workers, the phase dispatcher, the broker, the webhook receiver, and `catalyst-comms send` all append; the broker daemon, the HUD, the orch-monitor web dashboard, and `catalyst-events wait-for` all read.
 

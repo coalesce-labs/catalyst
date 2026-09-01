@@ -3,7 +3,7 @@
 
 How a Catalyst orchestrator runs today (post-CTL-452, post-2026-05-17 ship). This doc describes what exists in `origin/main` — it is not a roadmap.
 
-> ⚠️ **Superseded in part (CTL-2239).** The twelve phase-agent skills this doc's diagrams invoke (`/catalyst-dev:phase-*` and `_phase-agent-template`) were removed with the daemon they served, so those slash commands no longer resolve. The event/signal contracts and the dispatch mechanics described below are still accurate for the surviving machinery; the skill invocations are a record of how it ran. The rest of the legacy orchestration path is removed in CTL-2218 Phase C.
+> ⚠️ **Superseded in part (CTL-2239, CTL-2241).** The twelve phase-agent skills this doc's diagrams invoke (`/catalyst-dev:phase-*` and `_phase-agent-template`) were removed with the daemon they served, so those slash commands no longer resolve. The event/signal contracts and the dispatch mechanics described below are still accurate for the surviving machinery; the skill invocations are a record of how it ran. The wave-orchestration path this doc's TL;DR and User-flow sections describe (`/catalyst-legacy:orchestrate`, `/catalyst-legacy:oneshot`, and the `catalyst-legacy` plugin generally) was removed in CTL-2218 Phase C (CTL-2241) — those sections are kept as a historical record of how orchestration worked pre-daemon, not as current instructions.
 
 ## Why this exists
 
@@ -21,14 +21,11 @@ Catalyst orchestrates AI engineering work under the constraints of LLM agents. E
 
 ## TL;DR
 
-A single operator command (`/catalyst-legacy:orchestrate …`) launches an interactive Claude Code session that schedules tickets into waves and dispatches **phase-agent workers** (or legacy `oneshot` workers, depending on `dispatchMode`) into one git worktree per ticket.
+**Current model:** the execution-core daemon runs autonomously — no operator command launches it per-run — and dispatches **phase-agent workers** into one git worktree per ticket. Phase-agent workers run as `claude --bg` jobs and walk a **10-phase pipeline** — one `--bg` job per phase — emitting `phase.<name>.complete.<TICKET>` events the daemon wakes on via the broker. It advances each ticket through the pipeline, opens a PR, waits for CI and merge, runs teardown, and archives the run. See [architecture.md](architecture.md) for the end-to-end pipeline.
 
-> **Note (v11.0.0, CTL-726):** The wave-based orchestration skills (`orchestrate`, `oneshot`, etc.)
-> moved to the `catalyst-legacy` plugin. The *current* multi-ticket model is the execution-core
-> daemon — see [architecture.md](architecture.md) for the end-to-end phase-agent pipeline. Phase-agent workers run as `claude --bg` jobs and walk a
-**10-phase pipeline** — one `--bg` job per phase — emitting `phase.<name>.complete.<TICKET>` events the orchestrator wakes on via the broker. The orchestrator advances each ticket through the pipeline, opens a PR, waits for CI and merge, runs teardown, and archives the run.
+> **Historical (superseded v11.0.0 CTL-726, removed CTL-2241).** Before the execution-core daemon, a single operator command (`/catalyst-legacy:orchestrate …`) launched an interactive Claude Code session that scheduled tickets into waves and dispatched phase-agent workers (or legacy `oneshot` workers, depending on `dispatchMode`) — the wave-based orchestration skills (`orchestrate`, `oneshot`, `god`, `setup-orchestrate`) that implemented this lived in the `catalyst-legacy` plugin, since removed. The **User flow** section immediately below documents that removed model, not current behavior.
 
-## User flow
+## User flow (historical — the removed wave orchestrator)
 
 ```mermaid
 flowchart TD
@@ -46,7 +43,7 @@ flowchart TD
   I --> J[~/catalyst/archives/&lt;orchId&gt;/<br/>+ catalyst.db rows]
 ```
 
-The orchestrator itself runs as a normal Claude Code session — there is no `--bg` flag on the `orchestrate` skill. Only its workers are backgrounded.
+This ran as a normal Claude Code session — there was no `--bg` flag on the `orchestrate` skill itself. Only its workers were backgrounded. (The `catalyst-legacy` plugin that implemented this — `orchestrate`, `oneshot`, `god`, `setup-orchestrate` — was removed, CTL-2241.)
 
 ## Dispatch mode
 
@@ -55,13 +52,13 @@ Selected by `.catalyst/config.json → catalyst.orchestration.dispatchMode`:
 | Value | Worker spawn | Notes |
 |---|---|---|
 | `"phase-agents"` | `claude --bg --resume /catalyst-dev:phase-<name> <TICKET> --orch-dir <ORCH_DIR>` via `phase-agent-dispatch` | Template default. One `--bg` job per phase. State at `~/.claude/jobs/<bg_job_id>/state.json`. |
-| `"oneshot-legacy"` | `claude -p /catalyst-legacy:oneshot <TICKET> --auto-merge` (long-lived, streaming JSON) | Runtime default when key missing. Pre-CTL-452 model. |
+| `"oneshot-legacy"` | formerly `claude -p /catalyst-legacy:oneshot <TICKET> --auto-merge` (long-lived, streaming JSON) | **No longer functional** — the `catalyst-legacy` plugin was removed (CTL-2241). Pre-CTL-452 model, kept here as historical record. |
 
-Dispatch-mode resolution lives in `plugins/dev/scripts/orchestrate-dispatch-next`. Without `--config <path>`, the dispatcher always uses `oneshot-legacy`; the `orchestrate` skill passes `--config "${REPO_ROOT}/.catalyst/config.json"` so the project config wins.
+Dispatch-mode resolution for the (now-removed) wave orchestrator lived in `plugins/dev/scripts/orchestrate-dispatch-next`, which was removed along with it (CTL-2241).
 
 ### Config drift detection (CTL-489)
 
-When `plugins/dev/templates/config.template.json` gains a new key (e.g. CTL-452's `orchestration.dispatchMode`), existing projects' `.catalyst/config.json` files do not automatically receive it. To prevent the silent-fallback class of bug (CTL-487 — catalyst itself ran in `oneshot-legacy` mode for two months because the new key was absent), `plugins/dev/scripts/check-config-drift.sh` walks the template and emits one warning per missing leaf key. The drift script is wired into `check-project-setup.sh`, so every workflow that runs the prereq check (`/orchestrate`, `/oneshot`, `/research-codebase`, etc.) prints drift warnings until the user runs `/catalyst-foundry:setup-catalyst`, which offers a `jq` deep-merge that adds the missing keys while preserving every existing user value (jq's `*` recursive merge with project on the right). Allow-listed roots (`projectKey`, `project.ticketPrefix`, `linear.teamKey`, `linear.stateMap`, `linear.stateIds`) are suppressed to avoid double-warning — those are already checked individually by `check-project-setup.sh`.
+When `plugins/dev/templates/config.template.json` gains a new key (e.g. CTL-452's `orchestration.dispatchMode`), existing projects' `.catalyst/config.json` files do not automatically receive it. To prevent the silent-fallback class of bug (CTL-487 — catalyst itself ran in `oneshot-legacy` mode for two months because the new key was absent), `plugins/dev/scripts/check-config-drift.sh` walks the template and emits one warning per missing leaf key. The drift script is wired into `check-project-setup.sh`, so every workflow that runs the prereq check (`/research-codebase`, etc.) prints drift warnings until the user runs `/catalyst-foundry:setup-catalyst`, which offers a `jq` deep-merge that adds the missing keys while preserving every existing user value (jq's `*` recursive merge with project on the right). Allow-listed roots (`projectKey`, `project.ticketPrefix`, `linear.teamKey`, `linear.stateMap`, `linear.stateIds`) are suppressed to avoid double-warning — those are already checked individually by `check-project-setup.sh`.
 
 ### Execution-core entry triggers (two-state monitor)
 
@@ -144,9 +141,11 @@ stateDiagram-v2
 
 Revives are once-per-phase; on the second `phase.<name>.failed` for the same phase the orchestrator marks the worker `stalled`, posts `attention`, and stops advancing. The `verify ⇄ remediate` cycle (CTL-653) is the one exception to the "escalate on second failure" rule: a verify *verdict*-fail (a `complete` event with a high `regression_risk`, distinct from a verify *crash* `failed` event) self-heals through `remediate` up to 3 times before stalling — so a fixable verify failure no longer needs a human on the first try.
 
-## Phase 4 monitor — broker interests + event flow
+## Phase 4 monitor — broker interests + event flow (historical — the removed wave orchestrator)
 
-The orchestrator registers four broker interests at Phase 4 start. All four route back as `filter.wake.<ORCH_NAME>` so the orchestrator only watches one event stream:
+This section describes the removed wave orchestrator's own monitor loop, not the execution-core daemon: under execution-core dispatch nothing registers broker interests at all (`interests.size === 0` is permanently true — see the broker-degraded detector in `architecture.md`), so this mechanism has no current equivalent. Kept as a historical record of the event/broker plumbing.
+
+The orchestrator registered four broker interests at Phase 4 start. All four routed back as `filter.wake.<ORCH_NAME>` so the orchestrator only watched one event stream:
 
 | Interest | Type | Cardinality | Source |
 |---|---|---|---|

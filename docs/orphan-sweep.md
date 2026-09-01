@@ -126,7 +126,7 @@ All widened numerics are parsed as **bounded base-10** integers. A value Bash ar
 - **CTL-657** (Done) — Fixed the real-time reaper in execution-core. The orphan sweep is a belt-and-suspenders complement that catches resources the reaper missed, or those that accumulate when the daemon is not running.
 - **CTL-691** (Backlog) — Trunk daemon kill (`pkill trunk daemon launch`) is explicitly out of scope here.
 - **CTL-692** (Research) — `claude agents` invocation timeout is explicitly out of scope here.
-- **Interactive cleanup** — The standalone `teardown` skill was removed with the daemon (CTL-2240); an interactive session now archives (`bun plugins/dev/scripts/orch-monitor/catalyst-archive.ts sweep <orchId>`) and salvages (`plugins/dev/scripts/lib/worktree-salvage.sh`) before `git worktree remove`, mirroring the removed skill's safety gates — see `plugins/legacy/skills/orchestrate/SKILL.md`'s cleanup step. The sweep here handles the automatic-cleanup case for unattended hosts.
+- **Interactive cleanup** — The standalone `teardown` skill was removed with the daemon (CTL-2240); an interactive session now archives (`bun plugins/dev/scripts/orch-monitor/catalyst-archive.ts sweep <orchId>`) and salvages (`plugins/dev/scripts/lib/worktree-salvage.sh`) before `git worktree remove`, mirroring the removed skill's safety gates (formerly documented in the legacy orchestrator's own cleanup step, removed with the `catalyst-legacy` plugin, CTL-2241). The sweep here handles the automatic-cleanup case for unattended hosts.
 
 ## Log
 

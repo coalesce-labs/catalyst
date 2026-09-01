@@ -49,9 +49,9 @@ function readPackId(repoRootPath, pluginRelPath) {
  * ordering — a real config repurposed as a bare roster. Now that CTL-2263
  * restored the schema, this is a legitimate consumer reading the file that
  * declares the plugin roster, not a repurposing to be undone. Renaming the
- * file now would mean editing this function, check-plugin-version.sh,
- * check-plugin-manifest-parity.sh, and catalyst-legacy-plugin.test.sh to
- * *reduce* honesty about what the file is. And it is not a single point of
+ * file now would mean editing this function, check-plugin-version.sh, and
+ * check-plugin-manifest-parity.sh to *reduce* honesty about what the file
+ * is. And it is not a single point of
  * failure for "which plugins exist" either way: `listPluginRelPaths()`
  * derives plugin discovery from disk, and `assertPluginInventoryAgreement()`
  * below cross-checks the two sources bidirectionally, throwing a named error

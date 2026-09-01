@@ -76,13 +76,15 @@
 // execution-core daemon runs no `filter.register` producer at all, so on such a host
 // `interests.size === 0` can never be false and the gate degenerates to "the fleet
 // has been busy for N ticks". By contrast, a LEGACY-WAVE host — one running the
-// `/catalyst-legacy:orchestrate` skill, which invokes
-// plugins/dev/scripts/orchestrate-register-interests.sh — DOES register interests:
-// that script emits the three deterministic interests (pr_lifecycle,
+// `/catalyst-legacy:orchestrate` skill, which invoked
+// plugins/dev/scripts/orchestrate-register-interests.sh — USED TO register
+// interests: that script emitted the three deterministic interests (pr_lifecycle,
 // ticket_lifecycle, comms_lifecycle) UNCONDITIONALLY, plus a per-ticket
-// phase_lifecycle interest when `dispatchMode` is `phase-agents`. On those hosts an
-// empty table IS anomalous and the conjunct genuinely discriminates — which is
-// exactly the deployment where FILTER_BROKER_DEGRADED_ENABLED=1 belongs.
+// phase_lifecycle interest when `dispatchMode` was `phase-agents`. On those hosts an
+// empty table WAS anomalous and the conjunct genuinely discriminated — but that
+// deployment no longer exists (the wave orchestrator was removed along with the
+// `catalyst-legacy` plugin, CTL-2241), so there is currently no host on which
+// FILTER_BROKER_DEGRADED_ENABLED=1 belongs.
 //
 // This module is a near-leaf: it imports only config.mjs (knobs + logger). The
 // activity reading and the event append are INJECTED by the router, so the whole
