@@ -1,5 +1,13 @@
 # Changelog
 
+## [3.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-ops-v3.0.0...catalyst-pm-ops-v3.1.0) (2026-09-01)
+
+
+### Features
+
+* **packaging:** CTL-1461 — real render interface, safety gate, drift gate, inventory independence ([#4015](https://github.com/coalesce-labs/catalyst/issues/4015)) ([5f4fa48](https://github.com/coalesce-labs/catalyst/commit/5f4fa482bf22e143a9f41a90487f52f113956da5))
+* **packaging:** CTL-1463 — installable plugin packages for Codex + open-spec agents ([#3978](https://github.com/coalesce-labs/catalyst/issues/3978)) ([3b80357](https://github.com/coalesce-labs/catalyst/commit/3b803576f1f801278ebf6ac92da68026d289d6dd))
+
 ## [2.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-ops-v2.2.0...catalyst-pm-ops-v2.3.0) (2026-08-24)
 
 

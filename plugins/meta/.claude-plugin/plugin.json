@@ -1,6 +1,6 @@
 {
   "name": "catalyst-meta",
-  "version": "5.0.0",
+  "version": "5.1.0",
   "description": "Frontmatter validation, reference auditing, and directory reorganization tools for Catalyst plugin developers: keep skill and agent frontmatter consistent, find broken references, and safely reorganize directory structures.",
   "author": {
     "name": "Coalesce Labs",

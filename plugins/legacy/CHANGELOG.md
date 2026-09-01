@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.4.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-legacy-v2.3.0...catalyst-legacy-v2.4.0) (2026-09-01)
+
+
+### Features
+
+* **packaging:** CTL-1461 — real render interface, safety gate, drift gate, inventory independence ([#4015](https://github.com/coalesce-labs/catalyst/issues/4015)) ([5f4fa48](https://github.com/coalesce-labs/catalyst/commit/5f4fa482bf22e143a9f41a90487f52f113956da5))
+
 ## [2.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-legacy-v2.2.1...catalyst-legacy-v2.3.0) (2026-08-24)
 
 
