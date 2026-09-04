@@ -7,12 +7,12 @@
   },
   "dependencies": {
     "@catalyst-cloud/read-model": "^0.1.0",
-    "@catalyst-cloud/sdk": "0.8.20",
+    "@catalyst-cloud/sdk": "0.8.28",
     "@modelcontextprotocol/sdk": "1.30.0",
     "@opentelemetry/api": "^1.9.1",
-    "@opentelemetry/exporter-trace-otlp-http": "^0.221.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.222.0",
     "@opentelemetry/resources": "^2.8.0",
-    "@opentelemetry/sdk-trace-base": "^2.8.0",
+    "@opentelemetry/sdk-trace-base": "^2.11.0",
     "@opentelemetry/semantic-conventions": "^1.41.1",
     "pino": "^10.3.1"
   },
@@ -20,7 +20,7 @@
     "@types/bun": "^1.4.0"
   },
   "optionalDependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.3.246"
+    "@anthropic-ai/claude-agent-sdk": "0.3.252"
   },
   "overrides": {
     "@hono/node-server": "1.19.14",

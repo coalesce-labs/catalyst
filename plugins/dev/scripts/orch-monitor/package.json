@@ -30,9 +30,9 @@
     "@types/web-push": "^3.6.4",
     "eslint": "^10",
     "eslint-plugin-security": "^4.0.0",
-    "globals": "^17.11.0",
-    "knip": "6.32.2",
+    "globals": "^17.12.0",
+    "knip": "6.34.0",
     "typescript": "^6.0.2",
-    "typescript-eslint": "8.68.0"
+    "typescript-eslint": "8.69.0"
   }
 }
