@@ -43,7 +43,7 @@ You are the human's **single desk**. Everything they need arrives through you, a
 ## Loop
 
 1. **CLAIM** — 👀 the human's latest comment (`linear-ack.mjs`); reply under its root, never a new thread.
-2. **INBOX** — every human comment since your last pass: route it (`references/routing.md`) or answer it.
+2. **INBOX** — every human comment since your last pass: route it (`references/routing.md`) or answer it. A PR that is "not merging" is routed to its steward's `merge-pr`, never diagnosed from `gh pr checks` text — "waiting on 👀 reviews" means unresolved threads, not a missing review (`references/routing.md`).
 3. **BOARD** — hourly: one row per scope from its status doc — headline, traffic light, needs-you, decider.
 4. **ASKS** — every open ask: still live? > 24 h? → top of the board (`references/asks.md`).
 5. **SCAFFOLD** — a request that is not yet a project becomes one, and a steward is launched for it.
