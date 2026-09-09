@@ -51,11 +51,24 @@ if (!commentId) {
   if (!isReplicaCurrent(dbPath)) {
     console.error("linear-ack: WARN — replica may be STALE (cloud-sync writer not fresh); the latest human comment could be missed.");
   }
-  const latest = await readLatestHumanComment({
-    dbPath,
-    identifier: key,
-    humanId: process.env.ASK_HUMAN_ID || undefined, // '' or unset → the leaf's DEFAULT_ASK_HUMAN_ID (JS defaults fire on undefined only, not '')
-  });
+  // CTL-2299: '' or unset → the leaf resolves THIS TENANT's configured human
+  // (catalyst.human.linearUserId). JS defaults fire on undefined only, not '', so the
+  // `|| undefined` still matters. A tenant that configured none gets a one-line refusal
+  // here rather than an unhandled rejection's stack.
+  let latest;
+  try {
+    latest = await readLatestHumanComment({
+      dbPath,
+      identifier: key,
+      humanId: process.env.ASK_HUMAN_ID || undefined,
+    });
+  } catch (err) {
+    if (err?.name === "HumanNotConfiguredError") {
+      console.error(`linear-ack: REFUSED — ${err.message}`);
+      process.exit(1);
+    }
+    throw err;
+  }
   if (!latest) {
     console.log("no human comment");
     process.exit(0);

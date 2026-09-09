@@ -307,6 +307,32 @@ jobs:
       # It was only visible because those suites plant positive controls. A guard that scans for
       # the absence of a token, with no planted control, would have gone GREEN here while checking
       # nothing at all — which is the failure this whole epic is about.
+      # ⛔ A THIRD-PARTY APT SOURCE MUST NOT BE ABLE TO FAIL THIS JOB. The hosted runner image
+      # ships apt sources for software this job never installs, and on 2026-09-09 Google's
+      # `dl.google.com/linux/chrome-stable` served a `Packages.gz` whose hash did not match its
+      # own Release file. `apt-get update` exits 100 on that, and under `bash -e` it killed the
+      # ripgrep step before `install` ever ran — every PR in the repo red on a step that had not
+      # yet done anything, and rerunning did not help, because the bad index was not transient.
+      #
+      # Fixed ONCE, here, rather than by making each `apt-get update` tolerant: this job runs
+      # three of them (ripgrep below, direnv, zsh) and they must keep their identical fail-closed
+      # shape — a `|| true` at each site would also swallow a genuinely unreachable Ubuntu
+      # archive, which is the case that MUST stay red. Dropping the source we do not use leaves
+      # every apt call strict against the archive it actually installs from.
+      #
+      # Scoped to `sources.list.d` entries naming dl.google.com, and a no-op when there are none
+      # (a future runner image that ships no such source is not an error).
+      - name: Neutralise unused third-party apt sources
+        working-directory: .
+        run: |
+          hits=$(grep -rlE 'dl\.google\.com' /etc/apt/sources.list.d 2>/dev/null || true)
+          if [ -n "$hits" ]; then
+            echo "removing unused third-party apt sources:"; echo "$hits"
+            echo "$hits" | sudo xargs -r rm -f
+          else
+            echo "no dl.google.com apt source present — nothing to remove"
+          fi
+
       - name: Install ripgrep (required by the scan-based suites)
         working-directory: .
         run: |
@@ -885,6 +911,22 @@ jobs:
         # scoped to, so it needs an explicit run: line or it never executes in CI.
         working-directory: plugins/dev/scripts/lib
         run: bun test comment-body-arg.test.mjs
+
+      - name: tenant-identity resolver + fleet-owner-literal scan (bun, CTL-2299)
+        # lib/tenant-identity.mjs resolves WHO the human is, WHICH team an ask is filed on,
+        # and WHAT the status doc calls them — from the tenant's own config, with no
+        # person-shaped fallback. Own step for the same reason as the three leaves above:
+        # it sits outside the execution-core/ tree the "Run stable unit tests" step below is
+        # scoped to, so it needs an explicit run: line or it never executes in CI.
+        #
+        # The suite's second half is a CORPUS SCAN asserting the fleet owner's Linear user
+        # id appears in no shipped skill text and no default — the guard for the rule this
+        # ticket enforces, registered in the SAME change that adds it (the
+        # four-times-burned exec-core-stable-test-allowlist lesson). Positive control:
+        # `grep -n tenant-identity.test .github/workflows/execution-core-tests.yml` returns
+        # this run: line.
+        working-directory: plugins/dev/scripts/lib
+        run: bun test tenant-identity.test.mjs
 
       - name: ask-verb unit tests (bun, CTL-1922 / CTL-1944)
         # ⛔ `ask-verbs.test.mjs` shipped with #3509 and was registered in NO workflow —

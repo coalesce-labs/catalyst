@@ -16,7 +16,11 @@ FAIL=0
 ok()  { echo "PASS: $1"; PASS=$((PASS+1)); }
 bad() { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
 
-HUMAN="c2a8cc92-cab6-4536-9500-0f24abdf702b"
+HUMAN="11111111-2222-3333-4444-555555555555"
+# CTL-2299: the tool no longer carries a baked-in human id — it resolves the tenant's
+# configured one and refuses when there is none. This suite seeds comments authored by
+# $HUMAN, so it must declare that identity rather than rely on a default that is gone.
+export ASK_HUMAN_ID="$HUMAN"
 
 # The tool reads the replica via node:sqlite (node >= 24) OR bun:sqlite, selected at runtime.
 # CI runners may ship an older system `node` without node:sqlite, so run the TOOL under a

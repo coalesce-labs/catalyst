@@ -32,6 +32,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { resolveCommentBody } from "./lib/comment-body-arg.mjs";
+import { resolveAskHuman, resolveAskTeam } from "./lib/tenant-identity.mjs";
 
 // ⚠️ ONE alternation-free pattern, deliberately: JS alternation prefers the earliest MATCH
 // POSITION, so a bare `Options:` branch matches at the preceding newline and consumes
@@ -296,7 +297,12 @@ export function resolveTeamLabelIds(team, { runFn = run, names = ASK_LABEL_NAMES
 
 // ── CLI ────────────────────────────────────────────────────────────────────────────────
 
-const RYAN = process.env.ASK_HUMAN_ID || "c2a8cc92-cab6-4536-9500-0f24abdf702b";
+// ⛔ CTL-2299: this used to be `process.env.ASK_HUMAN_ID || "<one Linear user's uuid>"` —
+// the fleet owner's id, baked in as the assignee every ask fell back to. On any other
+// tenant that id names nobody, so the ask filed, reported success, and was assigned to a
+// user who does not exist in that workspace: undecidable, and silent. The resolver reads
+// the tenant's own config (`catalyst.human.linearUserId`, Layer 1 then Layer 2) and
+// returns a NAMED failure rather than guessing a person — see lib/tenant-identity.mjs.
 
 /**
  * run — spawnSync with a THREE-part result, including the case where the child never ran.
@@ -347,7 +353,7 @@ function readTicketViaReplica(id) {
 
 function usage() {
   console.error(`Usage:
-  ask.mjs create --team <TEAM> --title <t> --why <text>
+  ask.mjs create [--team <TEAM>] --title <t> --why <text>
                  --option <label> --option <label> [--option ...]   (at least TWO)
                  --default <text> --blocks <ISSUE> [--blocks <ISSUE> ...]
                  [--priority <1-4>] [--dry-run]
@@ -357,6 +363,10 @@ create files a correctly-shaped ask ticket, then READS IT BACK and proves the de
 trigger can parse its options AND that every requested blocking relation landed. accept
 replies in-thread as the app actor and moves the ticket to Done — refusing if the ticket
 is not an ask.
+
+--team and the assignee come from the TENANT's config when not given (CTL-2299):
+catalyst.linear.teamKey and catalyst.human.linearUserId, Layer 1 then Layer 2. Neither has
+a person-shaped fallback — an unconfigured tenant gets a named refusal, not a guess.
 
 ⛔ --option (>=2), --default and --blocks are REQUIRED (CTL-2157). An ask with nothing to
 choose between, no meaning for silence, or no work attached is the pile-up asks exist to
@@ -374,7 +384,11 @@ function argOf(argv, name, { many = false } = {}) {
 }
 
 function cmdCreate(argv) {
-  const team = argOf(argv, "--team");
+  // CTL-2299: `--team` stays available (a decision may belong to a team other than the
+  // repo's own) but is no longer REQUIRED — the tenant's `catalyst.linear.teamKey` is the
+  // default, so a customer runs this verb without knowing our team key.
+  const teamResolved = resolveAskTeam({ team: argOf(argv, "--team") });
+  const team = teamResolved.ok ? teamResolved.team : null;
   const title = argOf(argv, "--title");
   const why = argOf(argv, "--why");
   const options = argOf(argv, "--option", { many: true });
@@ -383,8 +397,12 @@ function cmdCreate(argv) {
   const priority = argOf(argv, "--priority") ?? "2";
   const dryRun = argv.includes("--dry-run");
 
-  if (!team || !title || !why) {
-    console.error("ask create: --team, --title and --why are required");
+  if (!team) {
+    console.error(`ask create: REFUSING — ${teamResolved.message}`);
+    return 1;
+  }
+  if (!title || !why) {
+    console.error("ask create: --title and --why are required");
     return 1;
   }
 
@@ -459,10 +477,29 @@ function cmdCreate(argv) {
   }
   const labelIds = lbl.labelIds;
 
+  // CTL-2299: resolve the assignee BEFORE the dry-run returns, for the same reason the
+  // labels are resolved here — a rehearsal that skips the step which actually fails is not
+  // a rehearsal. An ask assigned to nobody never reaches a human.
+  const human = resolveAskHuman();
+  if (!human.ok) {
+    console.error(`ask create: REFUSING — ${human.message}`);
+    return 1;
+  }
+
   if (dryRun) {
     console.log(
       JSON.stringify(
-        { action: "dry-run", team, title, body, parsedOptions: pre.parsed, labelIds },
+        {
+          action: "dry-run",
+          team,
+          teamSource: teamResolved.source,
+          assignee: human.humanId,
+          assigneeSource: human.source,
+          title,
+          body,
+          parsedOptions: pre.parsed,
+          labelIds,
+        },
         null,
         2
       )
@@ -479,7 +516,7 @@ function cmdCreate(argv) {
     "--priority",
     String(priority),
     "--assignee",
-    RYAN,
+    human.humanId,
     "--labels",
     labelIds.join(","),
     "--description",

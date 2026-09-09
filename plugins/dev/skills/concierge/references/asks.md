@@ -24,7 +24,7 @@ The board's *needs-you* cell is the **title plus the one-word options** — `A /
 
 - ⛔ **Answer an ask.** Not even an obvious one. The whole value of the surface is that the human's word is
   distinguishable from an agent's guess; one answered-by-proxy ask destroys that for every future ask.
-- ⛔ Re-assign an ask away from the scope's decider — except on Ryan's explicit override, recorded in-thread.
+- ⛔ Re-assign an ask away from the scope's decider — except on the workspace owner's explicit override, recorded in-thread.
 - ⛔ Let downstream work live on the ask. The ask is a decision, not a task; the work is its own ticket,
   linked `blocks →`.
 - ⛔ Batch a **P1** ask into the next window. P1 pushes any hour.

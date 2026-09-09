@@ -3,6 +3,11 @@
   "$comment": "Catalyst Configuration Template - Copy to config.json and fill in values. Secrets go in ~/.config/catalyst/config-{projectKey}.json",
   "catalyst": {
     "projectKey": "my-project",
+    "human": {
+      "$comment": "CTL-2299. WHO this tenant's human decision-maker is. linearUserId is the Linear user UUID an ask is assigned to and whose comments count as 'the human's' (the ask/concierge/steward skills and ask.mjs read it; ASK_HUMAN_ID overrides, and ~/.config/catalyst/config.json backstops it per-machine). name is a display string only — it is what the steward status doc's 'Needs from <human>' heading is named for, and an absent name reads as 'the human'. Not secret, but workspace-specific: keep null in committed templates. Obtain via: linearis users list, or curl the Linear GraphQL viewer{id} with your own token. There is NO built-in default — an unconfigured tenant gets a named refusal, because an ask assigned to a user who does not exist on that workspace files cleanly and reaches nobody.",
+      "linearUserId": null,
+      "name": null
+    },
     "repository": {
       "org": "[YOUR_ORG]",
       "name": "[YOUR_REPO]"

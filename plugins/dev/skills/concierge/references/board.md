@@ -35,4 +35,4 @@
 
 ## Two humans, one board
 
-One board per workspace, one `Concierge — <human>` pinned ticket per human. Rows carry the **decider** so each human can find their own *needs-you* items. Ryan, as workspace owner, may override anything — record it in-thread and re-assign the ask; if two humans disagree, the ask goes to the scope's decider quoting both, and you do not pick.
+One board per workspace, one `Concierge — <human>` pinned ticket per human. Rows carry the **decider** so each human can find their own *needs-you* items. The workspace owner (`catalyst.human.linearUserId` — the tenant's configured human) may override anything — record it in-thread and re-assign the ask; if two humans disagree, the ask goes to the scope's decider quoting both, and you do not pick.

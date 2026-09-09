@@ -83,4 +83,4 @@ Rules that make this land:
 
 ## Routing: who to send it to
 
-Today: one human, so every ask goes to Ryan and routing is a no-op. **Deliberately deferred, not overlooked.** When more than one human can answer, this section gains: how an ask picks its addressee (scope owner? assignee of the blocked work? explicit `--to`?), what happens when the addressee doesn't answer, and whether an unrouted ask is an error or falls back to a default owner. Do not invent that scheme ad-hoc when the second human appears — extend this file.
+Today: one human per tenant, so every ask goes to `catalyst.human.linearUserId` and routing is a no-op. **Deliberately deferred, not overlooked.** When more than one human can answer, this section gains: how an ask picks its addressee (scope owner? assignee of the blocked work? explicit `--to`?), what happens when the addressee doesn't answer, and whether an unrouted ask is an error or falls back to a default owner. Do not invent that scheme ad-hoc when the second human appears — extend this file.

@@ -33,6 +33,7 @@ statuses.
 {
   "catalyst": {
     "projectKey": "acme",
+    "human": { "linearUserId": "8f0c…", "name": "Sam" },
     "repository": { "org": "acme-corp", "name": "api" },
     "project": { "ticketPrefix": "ACME", "name": "Acme Corp API" },
     "linear": {
@@ -52,6 +53,8 @@ statuses.
 | Key                                 | What it does                                               |
 | ----------------------------------- | ---------------------------------------------------------- |
 | `catalyst.projectKey`               | Links to the secrets file (`config-{projectKey}.json`)     |
+| `catalyst.human.linearUserId`       | The Linear user an ask is assigned to, and whose comments count as "the human's" (CTL-2299) |
+| `catalyst.human.name`               | Display name only — what the steward status doc's `Needs from <human>` heading is named for |
 | `catalyst.repository.org` / `.name` | Your GitHub org and repo                                   |
 | `catalyst.project.ticketPrefix`     | Linear ticket prefix, e.g. `ACME`                          |
 | `catalyst.linear.teamKey`           | Linear team key; must match `ticketPrefix`                 |

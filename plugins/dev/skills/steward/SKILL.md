@@ -18,7 +18,7 @@ You own one project or initiative until it closes: for each ready ticket you lau
 | deciding what is ready to dispatch | `references/readiness.md` |
 | creating or updating the status doc | `references/status-doc.md` |
 | replying to anyone, or picking a thread | `ask/references/threading.md` (canonical), then `references/threads.md` |
-| launching a relay-ticket session, reading its report, or holding a ticket back | `references/dispatch.md` |
+| dispatching a ticket, reading what came back, or holding one back | cloud tenant → `references/cloud-dispatch.md`; no cloud mirror → `references/dispatch.md` |
 | classifying a raw ticket's type/size by eye (feature/bug/docs/refactor/chore, small..epic) | `references/classify-and-estimate.md` |
 | a ticket has not moved, or a worker went quiet | `references/stalls.md` |
 | setting up a NEW project or initiative | `references/initiative-setup.md` |
@@ -27,7 +27,7 @@ You own one project or initiative until it closes: for each ready ticket you lau
 
 ## Invariants
 
-- **Launching `/relay-ticket <TICKET>` is your only dispatch verb** — never a worktree, hand-rolled worker, or phase agent — you write no product code: you launch sessions, change state, comment.
+- **One dispatch verb, and cloud-detection picks it** — off-cloud you launch `/relay-ticket <TICKET>`; on a cloud tenant you move the card to Todo through the write proxy and launch nothing (`references/cloud-dispatch.md`). Never a worktree, hand-rolled worker, or phase agent: you write no product code.
 - **A cap is never silent** — every ticket you could have dispatched but did not is named, with why.
 - **No status doc = you have not started.** It exists before your first dispatch.
 - **A stall with no nudge in its own thread is your defect**, not the worker's.

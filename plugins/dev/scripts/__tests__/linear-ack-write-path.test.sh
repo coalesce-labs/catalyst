@@ -58,6 +58,11 @@ else
   bad "linear-ack.mjs failed node --check"
 fi
 
+HUMAN="11111111-2222-3333-4444-555555555555"
+# CTL-2299: the tool no longer carries a baked-in human id — it resolves the tenant's
+# configured one and refuses when there is none. Declare the identity this suite seeds.
+export ASK_HUMAN_ID="$HUMAN"
+
 # --- Hermetic replica seeding helper ---
 seed_replica() { # $1=db path  $2=with_human_comment(1/0)
   local db="$1" withc="$2"
@@ -69,7 +74,7 @@ CREATE TABLE comments (id TEXT PRIMARY KEY, issue_id TEXT, body TEXT, updated_at
 INSERT INTO issues VALUES ('issue-1','CTL-1','t',NULL);
 SQL
   if [[ "$withc" == "1" ]]; then
-    sqlite3 "$db" "INSERT INTO comments (id,issue_id,is_bot,author_id,removed_at,created_at) VALUES ('c-1','issue-1',0,'c2a8cc92-cab6-4536-9500-0f24abdf702b',NULL,100);"
+    sqlite3 "$db" "INSERT INTO comments (id,issue_id,is_bot,author_id,removed_at,created_at) VALUES ('c-1','issue-1',0,'$HUMAN',NULL,100);"
   fi
 }
 

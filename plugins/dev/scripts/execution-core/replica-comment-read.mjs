@@ -18,15 +18,39 @@
 // identical across both, so only the constructor + option key differ.
 //
 // zero-npm-import: node:sqlite / bun:sqlite are runtime built-ins; getReplicaDbPath comes
-// from the sibling config.mjs (which the tools already import) and isReplicaFresh from the
-// SQLite-free replica-freshness.mjs leaf.
+// from the sibling config.mjs (which the tools already import), isReplicaFresh from the
+// SQLite-free replica-freshness.mjs leaf, and resolveAskHuman from ../lib/tenant-identity.mjs
+// (node:fs/os/path only — see CTL-2299 below).
 import { getReplicaDbPath } from "./config.mjs";
 import { isReplicaFresh } from "./replica-freshness.mjs";
+import { resolveAskHuman } from "../lib/tenant-identity.mjs";
 
-// The ASK_HUMAN default: the fleet's single human decision-maker. Kept here as the leaf's
-// documented default so both tools resolve the same id; callers may override via env at
-// their call site (process.env.ASK_HUMAN_ID) and pass it in — the leaf stays pure.
-export const DEFAULT_ASK_HUMAN_ID = "c2a8cc92-cab6-4536-9500-0f24abdf702b";
+// ⛔ CTL-2299 — THE DEFAULT HUMAN IS THE TENANT'S, NOT A PERSON WE BAKED IN.
+//
+// This used to be `export const DEFAULT_ASK_HUMAN_ID = "<one Linear user's uuid>"` — the
+// fleet owner. On any other tenant that id authored nothing, so the query below returned
+// no row and both tools read it as "the human has not commented": threading and the 👀
+// clear silently dropped, with no error anywhere. A default that names a person is the
+// single-tenant assumption in its most expensive form.
+//
+// The leaf stays pure in the sense that mattered: callers may still pass `humanId`
+// explicitly, and nothing here reads process.env. What changed is the DEFAULT — it now
+// resolves the tenant's configured human, and REFUSES when none is configured, matching
+// this module's existing loud contract (an unanswerable read is never a clean `null`).
+export class HumanNotConfiguredError extends Error {
+  constructor(detail) {
+    super(detail);
+    this.name = "HumanNotConfiguredError";
+  }
+}
+
+// Resolved lazily, at call time — a default parameter expression only evaluates when the
+// argument is omitted, so a caller that passes its own id never touches config at all.
+function defaultHumanId() {
+  const resolved = resolveAskHuman();
+  if (!resolved.ok) throw new HumanNotConfiguredError(resolved.message);
+  return resolved.humanId;
+}
 
 // A NAMED error (not a falsy sentinel) for an absent/unreadable replica, so a missing DB
 // is a loud failure the tools surface — never a silent empty read that reads as "no human
@@ -75,7 +99,7 @@ function closeQuietly(db) {
 export async function readLatestHumanComment({
   dbPath = getReplicaDbPath(),
   identifier,
-  humanId = DEFAULT_ASK_HUMAN_ID,
+  humanId = defaultHumanId(),
 } = {}) {
   if (!identifier) return null;
   const db = await openReadonly(dbPath);
@@ -120,7 +144,7 @@ export async function readIssueId({ dbPath = getReplicaDbPath(), identifier } = 
 export async function readReplyContext({
   dbPath = getReplicaDbPath(),
   identifier,
-  humanId = DEFAULT_ASK_HUMAN_ID,
+  humanId = defaultHumanId(),
 } = {}) {
   if (!identifier) return { issueId: null, latest: null };
   const db = await openReadonly(dbPath);
