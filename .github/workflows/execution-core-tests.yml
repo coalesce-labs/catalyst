@@ -307,10 +307,25 @@ jobs:
       # It was only visible because those suites plant positive controls. A guard that scans for
       # the absence of a token, with no planted control, would have gone GREEN here while checking
       # nothing at all — which is the failure this whole epic is about.
+      # ⛔ `apt-get update` is NOT allowed to be the gate. The hosted runner image ships
+      # third-party apt sources we neither control nor need — and on 2026-09-09 Google's
+      # `dl.google.com/linux/chrome-stable` served a `Packages.gz` whose hash did not match
+      # its own Release file, so `apt-get update -qq` exited 100 and, under `bash -e`, killed
+      # this step before `install ripgrep` ever ran. Every PR in the repo went red on a step
+      # that had not yet done anything, and rerunning did not help because the bad index was
+      # not transient. ripgrep comes from the UBUNTU ARCHIVE, so an unrelated repo's broken
+      # index has no bearing on whether it can be installed.
+      #
+      # The tolerance is scoped precisely: the update is allowed to report errors, the
+      # INSTALL is not, and `rg --version` still has to succeed. So a genuinely unreachable
+      # Ubuntu archive fails this step exactly as loudly as before — which matters, because
+      # the whole reason this step exists is that a missing `rg` makes the scan suites read
+      # an empty tree and pass while checking nothing.
       - name: Install ripgrep (required by the scan-based suites)
         working-directory: .
         run: |
-          sudo apt-get update -qq
+          sudo apt-get update -qq \
+            || echo "::warning::apt-get update reported errors (third-party repo index); continuing — ripgrep comes from the Ubuntu archive and the install below still has to succeed"
           sudo apt-get install -y -qq ripgrep
           rg --version
 
