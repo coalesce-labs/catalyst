@@ -363,12 +363,163 @@ describe("probeAuth — the non-mutating auth spike", () => {
   });
 });
 
-describe("renew — stub (progress-asserted renewal is out of scope, CTL-1786)", () => {
-  test("renew throws a typed not-implemented error (no silent no-op)", () => {
-    const { httpFn } = fakeHttp(ok({}));
-    const client = createLeaseAuthorityClient({ env: envWithKey(), httpFn });
-    expect(() => client.renew({ ticket: "CTL-1", phase: "implement", holder: "mini", nonce: "n1" })).toThrow(
-      LeaseAuthorityError
+// ─── renew — the progress-asserted renewal verb (CTC-921) ────────────────────
+//
+// The server contract this pins is `renewLease` (catalyst-cloud
+// apps/mirror/src/do/lease-verbs.ts:126) reached via `POST /lease/renew`
+// (MirrorDO.handleLeaseRenew): the wire body is `{ticket, phase, holder, nonce,
+// assertion, ttlMs?}` — `nowMs` is supplied SERVER-side (`Date.now()`), so the client
+// must not send it.
+//
+// ⛔ The load-bearing property: a refusal (`renewed:false`) is a NORMAL RETURN. The store
+// arbitrated — the assertion was empty, the generation stale, the holder wrong, or the lease
+// already expired — and there is nothing to retry. Only a transport failure or an unreadable
+// 2xx body throws, exactly as for `claim`. A renewal path may NEVER report a renewal it did
+// not earn, so an ambiguous 2xx throws rather than defaulting to renewed.
+describe("renew — request shape", () => {
+  test("POSTs {ticket,phase,holder,nonce,assertion} → {renewed:true, lease, grant}", () => {
+    const { httpFn, calls } = fakeHttp(
+      ok({
+        renewed: true,
+        lease: { ticket: "CTC-1", phase: "implement", generation: 4, holder: "mini", deadlineMs: 999 },
+        grant: { nonce: 4, expiresAtMs: 999, scope: { ticket: "CTC-1", phase: "implement" } },
+      })
     );
+    const client = createLeaseAuthorityClient({ env: envWithKey(), httpFn });
+    const res = client.renew({
+      ticket: "CTC-1",
+      phase: "implement",
+      holder: "mini",
+      nonce: 4,
+      assertion: "implement-progress:3",
+    });
+    expect(calls[0].url).toBe(`${DEFAULT_CLOUD_BASE_URL}/lease/renew`);
+    expect(calls[0].method).toBe("POST");
+    expect(JSON.parse(calls[0].body)).toEqual({
+      ticket: "CTC-1",
+      phase: "implement",
+      holder: "mini",
+      nonce: 4,
+      assertion: "implement-progress:3",
+    });
+    expect(res.renewed).toBe(true);
+    expect(res.grant).toEqual({ nonce: 4, expiresAtMs: 999, scope: { ticket: "CTC-1", phase: "implement" } });
+    expect(res.lease.generation).toBe(4);
+  });
+
+  test("nowMs is NEVER sent — the server stamps it (handleLeaseRenew: nowMs: Date.now())", () => {
+    const { httpFn, calls } = fakeHttp(ok({ renewed: true, lease: {}, grant: {} }));
+    const client = createLeaseAuthorityClient({ env: envWithKey(), httpFn });
+    client.renew({ ticket: "CTC-1", phase: "implement", holder: "mini", nonce: 1, assertion: "x" });
+    expect(JSON.parse(calls[0].body).nowMs).toBeUndefined();
+  });
+
+  test("ttlMs rides only when explicitly passed (server default otherwise)", () => {
+    const { httpFn, calls } = fakeHttp(ok({ renewed: true, lease: {}, grant: {} }));
+    const client = createLeaseAuthorityClient({ env: envWithKey(), httpFn });
+    client.renew({ ticket: "CTC-1", phase: "implement", holder: "mini", nonce: 1, assertion: "x", ttlMs: 60_000 });
+    expect(JSON.parse(calls[0].body).ttlMs).toBe(60_000);
+  });
+});
+
+describe("renew — outcome classification", () => {
+  test("refusal (renewed:false) is a NORMAL return, never a throw", () => {
+    const { httpFn } = fakeHttp(ok({ renewed: false, refusal: "expired", current: { generation: 4 } }));
+    const client = createLeaseAuthorityClient({ env: envWithKey(), httpFn });
+    const res = client.renew({ ticket: "CTC-1", phase: "implement", holder: "mini", nonce: 4, assertion: "x" });
+    expect(res).toEqual({ renewed: false, refusal: "expired", current: { generation: 4 } });
+  });
+
+  test("every documented refusal reason round-trips unchanged", () => {
+    // The closed set from lease-verbs.ts's `refuse()` — a client that silently remaps one of
+    // these would make an I2 refusal indistinguishable from a bug.
+    for (const refusal of ["no_lease", "not_holder", "stale_generation", "expired"]) {
+      const { httpFn } = fakeHttp(ok({ renewed: false, refusal, current: null }));
+      const client = createLeaseAuthorityClient({ env: envWithKey(), httpFn });
+      const res = client.renew({ ticket: "CTC-1", phase: "implement", holder: "mini", nonce: 1, assertion: "x" });
+      expect(res.renewed).toBe(false);
+      expect(res.refusal).toBe(refusal);
+    }
+  });
+
+  test("a refusal with a non-string refusal field degrades to 'unknown', never to renewed", () => {
+    const { httpFn } = fakeHttp(ok({ renewed: false }));
+    const client = createLeaseAuthorityClient({ env: envWithKey(), httpFn });
+    const res = client.renew({ ticket: "CTC-1", phase: "implement", holder: "mini", nonce: 1, assertion: "x" });
+    expect(res).toEqual({ renewed: false, refusal: "unknown", current: null });
+  });
+
+  test("2xx body with neither renewed:true nor renewed:false → typed error (never a false renewal)", () => {
+    const { httpFn } = fakeHttp(ok({ weird: true }));
+    const client = createLeaseAuthorityClient({ env: envWithKey(), httpFn });
+    expect(() =>
+      client.renew({ ticket: "CTC-1", phase: "implement", holder: "mini", nonce: 1, assertion: "x" })
+    ).toThrow(LeaseAuthorityError);
+  });
+
+  test("an unreadable 2xx body throws retryable, and reports no renewal", () => {
+    const { httpFn } = fakeHttp({ transportOk: true, status: 200, bodyText: "<html>gateway</html>" });
+    const client = createLeaseAuthorityClient({ env: envWithKey(), httpFn });
+    try {
+      client.renew({ ticket: "CTC-1", phase: "implement", holder: "mini", nonce: 1, assertion: "x" });
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(LeaseAuthorityError);
+      expect(err.retryable).toBe(true);
+    }
+  });
+});
+
+describe("renew — HTTP error classification", () => {
+  test("5xx → retryable typed error", () => {
+    const { httpFn } = fakeHttp(httpStatus(500, { error: "boom" }));
+    const client = createLeaseAuthorityClient({ env: envWithKey(), httpFn });
+    try {
+      client.renew({ ticket: "CTC-1", phase: "implement", holder: "mini", nonce: 1, assertion: "x" });
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(LeaseAuthorityError);
+      expect(err.retryable).toBe(true);
+      expect(err.status).toBe(500);
+    }
+  });
+
+  test("403 (the CTC-871 auth shape) → terminal typed error, NOT retryable", () => {
+    const { httpFn } = fakeHttp(httpStatus(403, { error: "nope" }));
+    const client = createLeaseAuthorityClient({ env: envWithKey(), httpFn });
+    try {
+      client.renew({ ticket: "CTC-1", phase: "implement", holder: "mini", nonce: 1, assertion: "x" });
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(LeaseAuthorityError);
+      expect(err.retryable).toBe(false);
+      expect(err.status).toBe(403);
+    }
+  });
+
+  test("400 (the server's own empty-assertion rejection) → terminal, never read as renewed", () => {
+    const { httpFn } = fakeHttp(httpStatus(400, { error: "assertion" }));
+    const client = createLeaseAuthorityClient({ env: envWithKey(), httpFn });
+    try {
+      client.renew({ ticket: "CTC-1", phase: "implement", holder: "mini", nonce: 1, assertion: " " });
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(LeaseAuthorityError);
+      expect(err.retryable).toBe(false);
+      expect(err.status).toBe(400);
+    }
+  });
+
+  test("no per-host credential → no-cloud-token, and NO wire call (same guard as every other verb)", () => {
+    const { httpFn, calls } = fakeHttp(ok({ renewed: true }));
+    const client = createLeaseAuthorityClient({ env: {}, httpFn });
+    try {
+      client.renew({ ticket: "CTC-1", phase: "implement", holder: "mini", nonce: 1, assertion: "x" });
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(LeaseAuthorityError);
+      expect(err.reason).toBe("no-cloud-token");
+    }
+    expect(calls).toHaveLength(0);
   });
 });
