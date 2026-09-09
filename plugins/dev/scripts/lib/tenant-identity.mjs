@@ -10,7 +10,8 @@
 //
 //   * `ask.mjs`'s assignee default and `replica-comment-read.mjs`'s DEFAULT_ASK_HUMAN_ID
 //     were both the string `c2a8cc92-…` — one specific Linear user in one workspace;
-//   * `ask/references/creating.md` hard-coded that id AND `--team CTL`;
+//   * `ask/references/creating.md` hard-coded that id AND one fleet team key as a `--team`
+//     argument;
 //   * `steward/references/status-doc.md` templated a `Needs from <one person's name>`
 //     heading, so every tenant's status doc asked its own human for the fleet owner.
 //

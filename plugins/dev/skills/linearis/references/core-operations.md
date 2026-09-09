@@ -1,12 +1,15 @@
 # Core operations — full syntax
 
+> ⛔ **Assign the stage name, then check it — never inline `$(state …)` into the query (CTL-2300, Codex round 2).** A command substitution used as an *argument* does not propagate its exit status, so a refused slot leaves `linearis` running with an empty `--status` and the named refusal becomes an empty result set. `VAR=$(state slot) || exit 1` DOES propagate: the assignment's status is the substitution's. `state() { bash "$CLAUDE_PLUGIN_ROOT/scripts/linear-transition.sh" --print-state --transition "$1" --team "$TEAM"; }`
+
+
 Full CRUD and comment-thread commands behind `SKILL.md` → "Core Operations". Run `linearis usage` / `linearis <domain> usage` for the authoritative, always-current flag list — prefer it to memorizing.
 
 ## Search tickets
 
 ```bash
 linearis issues search "keyword"
-linearis issues search "auth bug" --team ENG --status "Todo"
+linearis issues search "auth bug" --team "$TEAM" --status "$(state todo)"
 ```
 
 ## Create a ticket
@@ -21,7 +24,7 @@ linearis issues create "Title" --team ENG --description "Details" --priority 2 -
 ## Update a ticket
 
 ```bash
-linearis issues update ENG-123 --status "In Progress"
+linearis issues update ENG-123 --status "$(state inProgress)"
 linearis issues update ENG-123 --priority 1
 linearis issues update ENG-123 --labels "bug" --label-mode add
 linearis issues update ENG-123 --project "Project Name"

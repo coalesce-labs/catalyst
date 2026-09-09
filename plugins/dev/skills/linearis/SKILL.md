@@ -39,8 +39,9 @@ Raw SQL syntax (only after the helper's gate already ran), schema discovery, app
 Reads → direct SQL via the gated helper above; writes always `linearis` — run `linearis usage` / `linearis <domain> usage` for authoritative, current flag syntax. **`linear_read_ticket` covers a single ticket only** — a scope-wide list/search still goes through `linearis` (no bulk-query replica form yet; see [Reading Linear](references/reading-linear-detail.md#still-needs-linearis)).
 
 ```bash
-linearis issues search "auth bug" --team ENG --status "Todo"
-linearis issues update ENG-123 --status "In Progress" --labels "bug" --label-mode add
+state() { bash "$CLAUDE_PLUGIN_ROOT/scripts/linear-transition.sh" --print-state --transition "$1" --team "$TEAM"; }  # ⛔ never TYPE a stage name
+linearis issues search "auth bug" --team "$TEAM" --status "$(state todo)"
+linearis issues update ENG-123 --status "$(state inProgress)" --labels "bug" --label-mode add
 ```
 
 > ⛔ **Agent comments → `linear-reply.mjs`, never `issues discuss`/`reply`** — those post AS THE HUMAN (personal token; ask-resolution gate reads that as the human deciding, CTL-1567).
@@ -53,20 +54,22 @@ direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" ENG-123 --as <
 ## Workflow: Status Transitions
 > **Single source of the Linear `stateMap` table** — `linear`, `create-plan`, `implement-plan`, `create-pr`, `research-codebase` point here; none restates it.
 
-| Workflow Phase | Default State | Config Key |
-| --- | --- | --- |
-| New tickets | Backlog | `stateMap.backlog` |
-| Acknowledged | Todo | `stateMap.todo` |
-| Research / Planning started | In Progress | `stateMap.research` / `.planning` |
-| Implementation | In Progress | `stateMap.inProgress` |
-| Verify / Review phase | In Progress | `stateMap.verifying` / `.reviewing` |
-| PR created | In Review | `stateMap.inReview` |
-| Completed / Canceled | Done / Canceled | `stateMap.done` / `.canceled` |
+⛔ **A stage is addressed by SLOT, never by name (CTL-2300).** The table below deliberately has no column of stage names: a tenant renames its stages freely — CTC-1597 renamed one mid-flight — and this repo's own board calls `inProgress` something other than "In Progress" today. Resolve the slot with `linear-transition.sh --print-state --transition <slot> --team <KEY>`, which walks the one resolution chain (per-project `stateMap` → global `stateMap` → registry `triageStatus` → bootstrap) and REFUSES rather than substituting our word when a tenant declares a `stateMap` without the slot. The reason this matters more than it looks: `--status` is server-side and **fails empty on a typo** (Gotcha 1) — a name the board does not have returns an empty list, not an error.
 
-Names come from `.catalyst/config.json`'s `linear.stateMap` (`null` skips a transition). UUID calls + the team-key allowlist cache (`linear-team-keys.json`): [`references/status-transitions.md`](references/status-transitions.md).
+| Workflow Phase | Slot (config key) |
+| --- | --- |
+| New tickets | `stateMap.backlog` |
+| Acknowledged | `stateMap.todo` |
+| Research / Planning started | `stateMap.research` / `.planning` |
+| Implementation | `stateMap.inProgress` |
+| Verify / Review phase | `stateMap.verifying` / `.reviewing` |
+| PR created | `stateMap.inReview` |
+| Completed / Canceled | `stateMap.done` / `.canceled` |
+
+Names come from `.catalyst/config.json`'s `linear.stateMap` (`null` skips a transition); the canonical bootstrap for a repo that declares none is `scripts/lib/tenant-contract.default.json`. UUID calls + the team-key allowlist cache (`linear-team-keys.json`): [`references/status-transitions.md`](references/status-transitions.md).
 
 ## Gotchas & Traps
-1. `issues list` **hides Done** (shows Canceled) — `--status "Done"`, or `issues read <ID>` for one.
+1. `issues list` **hides the done stage** (shows the canceled one) — pass `--status "$(state done)"`, or `issues read <ID>` for one.
 2. `linearis` **consumes stdin** in a loop — append `</dev/null`.
 3. **No `--json` flag** — JSON is the default; pipe to `jq`.
 4. `--status` is server-side and **fails empty on a typo** — not an error; also deprecated `--query` (use `issues search`).

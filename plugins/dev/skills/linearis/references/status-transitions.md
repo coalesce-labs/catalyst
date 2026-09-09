@@ -4,15 +4,23 @@ The canonical `stateMap` transition table lives in `SKILL.md` → "Workflow: Sta
 
 ## Common flow
 
+⛔ **The stage name is resolved, never typed (CTL-2300).** `--status` takes whatever THIS tenant calls the stage, and a name it does not use fails EMPTY rather than erroring. `linear-transition.sh` owns the one resolution chain; `--print-state` is its read-only, linearis-free, ticket-free form (it needs `jq`, and exits non-zero without it rather than printing a bootstrap it cannot verify).
+
+⚠️ **In a script, assign before you query.** `linearis … --status "$(state done)"` swallows a refusal — a command substitution used as an argument does not propagate its exit status — so `linearis` runs with an empty `--status` and returns nothing. `DONE=$(state done) || exit 1` propagates; the examples below are interactive one-liners where you would see the error.
+
 ```bash
-linearis issues update ENG-123 --status "In Progress"
-linearis issues update ENG-123 --status "In Review"
-linearis issues update ENG-123 --status "Done"
+state() { bash "$CLAUDE_PLUGIN_ROOT/scripts/linear-transition.sh" --print-state --transition "$1" --team "$TEAM"; }
+
+linearis issues update ENG-123 --status "$(state inProgress)"
+linearis issues update ENG-123 --status "$(state inReview)"
+linearis issues update ENG-123 --status "$(state done)"
 
 # With comment — an AGENT posting the "Merged" note goes through linear-reply.mjs, not `discuss`
-linearis issues update ENG-123 --status "Done"
+linearis issues update ENG-123 --status "$(state done)"
 direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" ENG-123 --as <AGENT> --body "Merged: PR #456" --top
 ```
+
+Better still for a whole transition: `linear-transition.sh --ticket ENG-123 --transition done` does the resolve, the idempotency read and the write in one call.
 
 ## UUID-based calls (CTL-207)
 

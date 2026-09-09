@@ -31,6 +31,7 @@ import { spawnSync } from "node:child_process";
 // module — the documented form threw a ReferenceError before reading anything.
 import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { CONTRACT_ASK_LABEL_NAMES, resolveAskLabelNames } from "./lib/board-vocabulary.mjs";
 import { resolveCommentBody } from "./lib/comment-body-arg.mjs";
 import { resolveAskHuman, resolveAskTeam } from "./lib/tenant-identity.mjs";
 
@@ -217,7 +218,7 @@ export function verifyAskBody({ intendedOptions = [], storedBody }) {
 /**
  * teamPrefixMismatch — did Linear file this on the team we asked for?
  *
- * `issues create --team CTL` has historically fallen back to the workspace's DEFAULT team
+ * `issues create --team <KEY>` has historically fallen back to the workspace's DEFAULT team
  * when given a key rather than a UUID (czottmann/linearis#56). An ask on the wrong board
  * still reports success while its team-scoped labels and blocking relations serve a team
  * nobody is watching. Only checked when `team` LOOKS like a key — a UUID carries no prefix
@@ -317,33 +318,40 @@ export function missingBlocksFrom(blocks, readBack) {
 /**
  * ⛔ THE LABEL SET FOLLOWS THE TARGET TEAM (CTCB-6 trap b).
  *
- * Linear issue labels are TEAM-SCOPED, and both of these names exist on BOTH teams with
- * DIFFERENT ids. Measured 2026-08-18:
+ * Linear issue labels are TEAM-SCOPED, and the ask label names exist on SEVERAL teams with
+ * DIFFERENT ids. Measured 2026-08-18 across this fleet's own two teams: each name resolved to
+ * a different uuid per team.
  *
- *   catalyst-ask   CTL 54179639-c850-4d3a-91da-f3d9288e68b0   CTC e1b5ef97-4f8b-43fc-8e11-f6286a12a415
- *   ask/decision   CTL b23229ae-1d2b-4fa0-9987-091875e2b2a8   CTC 752b5560-068c-42e5-87af-e8cadbfd4ae3
- *
- * Passing the NAMES let `linearis` resolve them against whichever team it picked — CTL's —
- * so filing a CTC ask failed with "The label 'catalyst-ask' is not associated with the same
- * team as the issue." That one at least failed loudly; the danger is the other direction,
- * where a name happens to resolve to the right team by luck and the tool looks correct
- * until someone files across teams.
+ * Passing the NAMES let `linearis` resolve them against whichever team it picked — the
+ * workspace's default one — so filing on the other team failed with "The label 'ask' is not
+ * associated with the same team as the issue." That one at least failed loudly; the danger is
+ * the other direction, where a name happens to resolve to the right team by luck and the tool
+ * looks correct until someone files across teams.
  *
  * ⚠️ The local replica CANNOT answer this question: its `labels` table has no team column,
  * so both rows are visible and indistinguishable — exactly the `label-ambiguous` case the
  * write-proxy resolver names. The team scoping lives only in the API, so this is one of the
  * few reads that legitimately goes there.
+ *
+ * ⛔ CTL-2300: the id table that used to sit in this comment was two teams' uuids from ONE
+ * workspace — a tenant-shaped literal shipped as documentation. Resolving per team is the fix;
+ * writing down the answers for our own workspace was the drift.
  */
-export const ASK_LABEL_NAMES = Object.freeze(["catalyst-ask", "ask/decision"]);
+export const ASK_LABEL_NAMES = CONTRACT_ASK_LABEL_NAMES;
 
 /**
- * resolveTeamLabelIds — map ASK_LABEL_NAMES to ids ON THIS TEAM.
+ * resolveTeamLabelIds — map this tenant's ask label NAMES to ids ON THIS TEAM.
+ *
+ * ⛔ CTL-2300: the names now come from {@link resolveAskLabelNames} — env, then either config
+ * layer, then the committed contract — not from a constant in this file. A tenant whose
+ * decision label is called something else used to get `label-not-on-team` and no ask at all,
+ * with our plugin as the only place the wrong name was written down.
  *
  * ALL-OR-NOTHING and three-valued. A partial set would file an ask carrying some of its
  * labels and silently dropping the rest, which reads as success at the call site and makes
- * the ask invisible to the very views that select on `catalyst-ask`.
+ * the ask invisible to the very views that select on the ask label.
  */
-export function resolveTeamLabelIds(team, { runFn = run, names = ASK_LABEL_NAMES } = {}) {
+export function resolveTeamLabelIds(team, { runFn = run, names = resolveAskLabelNames().names } = {}) {
   const r = runFn("linearis", ["labels", "list", "--team", team, "--limit", "250"]);
   if (r.code !== 0) {
     return { ok: false, reason: "label-list-failed", detail: r.stderr.slice(0, 200) };
@@ -544,7 +552,7 @@ function cmdCreate(argv) {
     console.error(
       `ask create: REFUSING — could not resolve the ask labels on team ${team} ` +
         `(${lbl.reason}: ${lbl.detail}). Labels are TEAM-SCOPED; filing without them would ` +
-        "hide the ask from every view that selects on catalyst-ask."
+        "hide the ask from every view that selects on this tenant's ask labels."
     );
     return 1;
   }
@@ -609,7 +617,7 @@ function cmdCreate(argv) {
     return 1;
   }
 
-  // ⛔ Codex #3509 P1: `issues create --team CTL` has historically fallen back to the
+  // ⛔ Codex #3509 P1: `issues create --team <KEY>` has historically fallen back to the
   // workspace's DEFAULT team when given a key rather than a UUID (czottmann/linearis#56;
   // the linearis skill says to verify scope by the returned identifier's prefix). An ask
   // filed on the wrong board still reports success, while its team-scoped labels and
@@ -737,9 +745,16 @@ function cmdAccept(argv) {
     return 1;
   }
   const labels = (issue?.labels?.nodes ?? []).map((l) => l?.name).filter(Boolean);
-  if (!labels.includes("catalyst-ask")) {
+  // ⛔ Codex P1 (CTL-2300 round 2): this used to test the CONTRACT literal, so a tenant that
+  // overrode `catalyst.linear.askLabels` filed an ask through `create` that `accept` then
+  // refused as "not an ask" — the writer and the reader disagreeing about the same ticket,
+  // which is worse than either literal alone. ANY of the tenant's own ask labels qualifies:
+  // `create` applies all of them, and a human who strips one has not un-asked the question.
+  const askLabels = resolveAskLabelNames().names;
+  if (!labels.some((l) => askLabels.includes(l))) {
     console.error(
-      `ask accept: ${id} is not an ask (no catalyst-ask label; has: ${labels.join(",") || "none"}) — refusing`
+      `ask accept: ${id} is not an ask (carries none of ${askLabels.join(", ")}; has: ` +
+        `${labels.join(",") || "none"}) — refusing`
     );
     return 1;
   }

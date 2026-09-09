@@ -948,6 +948,26 @@ jobs:
         working-directory: plugins/dev/scripts/lib
         run: bun test cloud-facts.test.mjs
 
+      - name: board-vocabulary resolvers + the FULL tenant-literal deny-list (bun, CTL-2300)
+        # lib/board-vocabulary.mjs resolves the WORDS a tenant's board uses — its ask labels,
+        # its not-an-ask release label, and what it calls each pipeline stage — from
+        # lib/tenant-contract.default.json, the one committed file allowed to spell a
+        # tenant-shaped literal.
+        #
+        # ⭐ The second half is the Tier-2 acceptance criterion in full. cloud-facts.test.mjs's
+        # scan forbids exactly one string; this one forbids a stage name, a label name, a fleet
+        # team key and the stale write-budget threshold in ARGUMENT POSITION across every
+        # shipped skill .md and script, and pins the contract in lockstep with
+        # linear-transition.sh's bootstrap table so the read path and the write path cannot
+        # drift apart about one board.
+        #
+        # Same registration lesson as the steps above, for the same reason: this lib/ leaf sits
+        # outside the execution-core/ tree the "Run stable unit tests" step is scoped to, so
+        # without this run: line it would never execute in CI. Positive control:
+        # `grep -n board-vocabulary.test .github/workflows/execution-core-tests.yml` returns it.
+        working-directory: plugins/dev/scripts/lib
+        run: bun test board-vocabulary.test.mjs
+
       - name: identity-report — the four identity slots (bun, CTL-2300)
         # scripts/identity-report.mjs is what turns "whose workspace is this?" into four
         # named lines check-project-setup.sh can warn on. Its load-bearing rung is the one

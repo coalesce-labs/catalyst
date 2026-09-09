@@ -1,0 +1,46 @@
+{
+  "$schema": "./tenant-contract.default.json",
+  "$about": [
+    "CTL-2300 Tier 2 — THE ONE FILE ALLOWED TO SPELL A TENANT-SHAPED LITERAL.",
+    "",
+    "Every value below is a CANONICAL DEFAULT: what a Catalyst tenant gets when it has declared",
+    "nothing of its own. It is not a description of any tenant's board, and a tool must never treat",
+    "it as one — .catalyst/config.json (Layer 1) and ~/.config/catalyst/config.json (Layer 2) win",
+    "over every rung of it, and the GET /api/v1/agent/contract route will win over both once it",
+    "exists (the CTC half of this pair).",
+    "",
+    "It exists so the deny-list scan in lib/board-vocabulary.test.mjs has an ALLOWED SOURCE to point",
+    "at. The scan forbids these strings in argument position anywhere in the shipped surface — every",
+    "skill .md and every non-test script under plugins/dev — so the only way to reach one is to",
+    "resolve it, and the only place it is written down is here. A literal re-added three modules over",
+    "reddens the suite instead of shipping as somebody else's stage name.",
+    "",
+    "⛔ knownTeamKeys is OUR fleet's teams, listed here PRECISELY SO THEY CAN BE FORBIDDEN. It is not",
+    "an allowlist a tool may filter on and it must never be read as one — a customer's team key is",
+    "not in it and never will be."
+  ],
+  "cloud": {
+    "canonicalHost": "staging.catalystcloud.dev",
+    "hostDailyWriteBudget": 3000
+  },
+  "linear": {
+    "askLabels": ["catalyst-ask", "ask/decision"],
+    "notAnAskLabel": "catalyst-not-an-ask",
+    "stateNames": {
+      "backlog": "Backlog",
+      "todo": "Todo",
+      "triage": "Triage",
+      "research": "In Progress",
+      "planning": "In Progress",
+      "inProgress": "In Progress",
+      "verifying": "In Progress",
+      "reviewing": "In Progress",
+      "remediating": "In Progress",
+      "inReview": "In Review",
+      "done": "Done",
+      "canceled": "Canceled",
+      "duplicate": "Duplicate"
+    },
+    "knownTeamKeys": ["CTL", "CTC", "PROJ"]
+  }
+}

@@ -12,7 +12,7 @@ For each open decision, present its fields and the action set filtered by decisi
 | dispatch the work / start relay-ticket / run the ticket | launch `/relay-ticket <TICKET>` (below) → `record_resolution "$ID" dispatch_relay_ticket "$JSON"` | TSV + JSON |
 | draft email / send a note to X / message Y | `action-email.sh` → `record_resolution "$ID" draft_email "$JSON"` | TSV + JSON |
 | edit / update the ADR (adr_drift only) | `action-adr.sh --mode update --adr-file "$ADR"` → `record_resolution "$ID" adr_update "$JSON"` | TSV + JSON |
-| file code-drift ticket (adr_drift only) | `action-adr.sh --mode ticket --adr-file "$ADR" --team CTL --summary "$SUMMARY" --drift-status "$DRIFT_STATUS"` → `record_resolution "$ID" adr_ticket "$JSON"` | TSV + JSON |
+| file code-drift ticket (adr_drift only) | `action-adr.sh --mode ticket --adr-file "$ADR" --team "$TEAM" --summary "$SUMMARY" --drift-status "$DRIFT_STATUS"` → `record_resolution "$ID" adr_ticket "$JSON"` | TSV + JSON |
 | defer / note as intentional (adr_drift only) | `action-adr.sh --mode defer --adr-file "$ADR" --reason "$REASON"` → `record_resolution "$ID" adr_defer "$JSON"` | TSV + JSON |
 | skip | move on without logging |
 | quit / stop / done | break out of the loop |

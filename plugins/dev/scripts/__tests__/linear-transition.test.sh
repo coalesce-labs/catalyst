@@ -943,6 +943,78 @@ run "⛔ Codex P1 THE POINT: the built-in 'In Progress' never reached Linear for
 # renamed something — Test 33 above already proves it still resolves. Refusing there would
 # break every unconfigured repo to prevent a failure that cannot happen in one.
 
+# ─── --print-state (CTL-2300) ──────────────────────────────────────────────
+# The handle shipped skill text calls instead of typing a stage name into a `--status`
+# argument. It must resolve the SAME chain the write path resolves — a second resolver for
+# readers would be the drift this ticket is about, one layer down — and it must work with no
+# ticket, no linearis and no replica, because its caller is a `$(…)` inside a query.
+
+run "⭐ CTL-2300 --print-state: prints the tenant's OWN name for the slot, on --team alone" \
+  bash -c "[ \"\$(PATH='/usr/bin:/bin' '$TRANSITION' --print-state --transition inProgress \
+    --team WID --config '$WORK38/.catalyst/config.json')\" = 'Building' ]"
+
+run "⛔ CTL-2300 THE POINT: --print-state never emits this workspace's name for a mapped slot" \
+  bash -c "! PATH='/usr/bin:/bin' '$TRANSITION' --print-state --transition inProgress \
+    --team WID --config '$WORK38/.catalyst/config.json' | grep -q 'In Progress'"
+
+run "CTL-2300 --print-state: --ticket's prefix works as the team key too" \
+  bash -c "[ \"\$(PATH='/usr/bin:/bin' '$TRANSITION' --print-state --transition done \
+    --ticket WID-40 --config '$WORK38/.catalyst/config.json')\" = 'Shipped' ]"
+
+run "⭐ CTL-2300 --print-state: an unmapped slot REFUSES rather than printing our word" \
+  bash -c "! PATH='/usr/bin:/bin' '$TRANSITION' --print-state --transition verifying \
+    --team WID --config '$WORK39/.catalyst/config.json' 2>/dev/null"
+
+run "CTL-2300 --print-state: a repo with NO stateMap still bootstraps (unconfigured repos keep working)" \
+  bash -c "[ \"\$(cd / && PATH='/usr/bin:/bin' '$TRANSITION' --print-state --transition inReview \
+    --team ZZZ --config /nonexistent/config.json)\" = 'In Review' ]"
+
+# ⛔ Codex P1 (round 2): every config rung in the resolution chain is `command -v jq`-gated,
+# INCLUDING the refusal, so a jq-less host reaches the print with the BOOTSTRAP in hand. For
+# the write path that degrades loudly at linearis; for a value interpolated into somebody
+# else's `--status` it returns an empty list and reads as a quiet morning. So --print-state
+# refuses instead. NB the control below: on this host jq lives in /usr/bin, so the
+# PATH='/usr/bin:/bin' used elsewhere in this file does NOT remove it — the fixture PATH has
+# to be a directory we built, or this test would pass without ever exercising the branch.
+NOJQ="${SCRATCH}/nojqbin"
+mkdir -p "$NOJQ"
+for _c in sed tr dirname cat grep basename; do
+  [ -x "/usr/bin/${_c}" ] && ln -sf "/usr/bin/${_c}" "${NOJQ}/${_c}"
+done
+# ⛔ bash ITSELF, or these tests pass for the wrong reason. The script's shebang is
+# `#!/usr/bin/env bash`, so a fixture PATH without bash makes `env` exit 127 with NO output —
+# which satisfies "exits non-zero" and "prints no stage name" without ever reaching the
+# branch under test. Caught by the stderr assertion below, which is the only one of the four
+# that cannot pass on a 127. This is AGENTS.md's fail-open probe, in a test fixture.
+ln -sf "$(command -v bash)" "${NOJQ}/bash"
+
+run "⭐ CTL-2300 POSITIVE CONTROL: the fixture PATH has no jq" \
+  bash -c "! PATH='$NOJQ' command -v jq >/dev/null 2>&1"
+
+run "⭐ CTL-2300 POSITIVE CONTROL: …but DOES have bash, so a 127 cannot fake the refusal" \
+  bash -c "PATH='$NOJQ' command -v bash >/dev/null 2>&1"
+
+run "⭐ CTL-2300 Codex P1: --print-state REFUSES without jq rather than printing the bootstrap" \
+  bash -c "! PATH='$NOJQ' '$TRANSITION' --print-state --transition inProgress \
+    --team WID --config '$WORK38/.catalyst/config.json' 2>/dev/null"
+
+run "⛔ CTL-2300 THE POINT: the jq-less refusal emits no stage name on stdout" \
+  bash -c "[ -z \"\$(PATH='$NOJQ' '$TRANSITION' --print-state --transition inProgress \
+    --team WID --config '$WORK38/.catalyst/config.json' 2>/dev/null)\" ]"
+
+run "CTL-2300: the jq-less refusal NAMES jq on stderr" \
+  bash -c "PATH='$NOJQ' '$TRANSITION' --print-state --transition inProgress \
+    --team WID --config '$WORK38/.catalyst/config.json' 2>&1 >/dev/null | grep -q 'jq'"
+
+run "⛔ CONTROL: the WRITE path still degrades rather than refusing without jq (a jq-less host must still close a ticket)" \
+  bash -c "PATH='$NOJQ:/usr/bin:/bin' FAKE_LINEARIS_LOG='$LOG38' \
+    '$TRANSITION' --ticket WID-41 --transition done --dry-run \
+    --config '$WORK38/.catalyst/config.json' >/dev/null 2>&1"
+
+run "CTL-2300 --print-state: refuses without a team or a ticket, naming both" \
+  bash -c "out=\$(PATH='/usr/bin:/bin' '$TRANSITION' --print-state --transition done 2>&1); \
+    [ \$? -ne 0 ] && printf '%s' \"\$out\" | grep -q -- '--team'"
+
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"
 [ "$FAILURES" = "0" ]

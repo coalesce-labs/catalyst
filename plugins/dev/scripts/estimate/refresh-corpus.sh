@@ -19,7 +19,7 @@
 # adapt-reference-corpus.ts stays bootstrap-only (the historical /tmp dict).
 #
 # Usage:
-#   refresh-corpus.sh [--team CTL] [--corpus <path>] [--thoughts-dir <path>]
+#   refresh-corpus.sh [--team <KEY>] [--corpus <path>] [--thoughts-dir <path>]
 #                     [--actuals <csv>]   # skip Extract, use this CSV
 #                     [--signals <csv>]   # skip Extract+Collect, use this CSV
 #                     [--limit N] [--pr-limit N] [--no-check-labels]
