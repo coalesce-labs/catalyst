@@ -24,11 +24,9 @@ corpus.
 
 The shell scripts that power these skills remain in `plugins/dev/scripts/` (e.g.
 `research-curate/run.sh`, `check-setup.sh`, `catalyst-thoughts.sh`, `launch-worktree-tab.sh`).
-The moved skills resolve them at runtime via the `CATALYST_DEV_SCRIPTS` cache shim — the same
-pattern `catalyst-legacy` uses — so the scripts stay co-located with the live `catalyst-dev`
-tooling they share.
+The moved skills resolve them at runtime via the `CATALYST_DEV_SCRIPTS` cache shim, so the
+scripts stay co-located with the live `catalyst-dev` tooling they share.
 
 ## See also
 
 - `catalyst-dev` — active development workflow (research, plan, implement, ship, orchestrate).
-- `catalyst-legacy` — pre-phase-agent wave orchestration, preserved as a fallback.

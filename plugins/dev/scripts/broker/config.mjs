@@ -249,14 +249,17 @@ export const ACCOUNT_EXHAUSTED_PCT = parseIntKnob(process.env.FILTER_ACCOUNT_EXH
 // trading the CTL-352 restart-driven false positive for a busy-window-driven one.
 // Not a trade worth making, and execution-core is what every current host runs.
 //
-// WHY IT IS KEPT — and where to enable it. The empty-table property belongs to
-// execution-core dispatch, NOT to every configuration named `phase-agents`. A
-// LEGACY-WAVE host (one driving `/catalyst-legacy:orchestrate`, which invokes
-// plugins/dev/scripts/orchestrate-register-interests.sh) DOES register interests:
-// that script emits pr_lifecycle + ticket_lifecycle + comms_lifecycle
-// UNCONDITIONALLY, plus a per-ticket phase_lifecycle interest when `dispatchMode` is
-// `phase-agents`. On such a host an empty interest table IS anomalous, the conjunct
-// genuinely discriminates, and FILTER_BROKER_DEGRADED_ENABLED=1 is appropriate.
+// WHY IT IS KEPT — and where it used to be worth enabling. The empty-table
+// property belongs to execution-core dispatch, NOT to every configuration named
+// `phase-agents`. A LEGACY-WAVE host (one driving `/catalyst-legacy:orchestrate`,
+// which invoked plugins/dev/scripts/orchestrate-register-interests.sh) USED TO
+// register interests: that script emitted pr_lifecycle + ticket_lifecycle +
+// comms_lifecycle UNCONDITIONALLY, plus a per-ticket phase_lifecycle interest when
+// `dispatchMode` was `phase-agents`. On such a host an empty interest table WAS
+// anomalous and the conjunct genuinely discriminated — but that deployment no
+// longer exists: the wave orchestrator was removed along with the
+// `catalyst-legacy` plugin (CTL-2241), so there is currently no host on which
+// FILTER_BROKER_DEGRADED_ENABLED=1 is appropriate.
 //
 // THIS IS NOT A DEAD-BROKER DETECTOR — and neither is CTL-1122's `checkSourceRecency`
 // over RECENCY_SOURCES (router.mjs), despite both living in this process. That is the

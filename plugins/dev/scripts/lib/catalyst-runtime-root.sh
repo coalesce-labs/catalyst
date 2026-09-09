@@ -56,9 +56,9 @@ unset __crr_lib_dir
 # (exported) and returns 0, or prints a LOUD actionable error to stderr and
 # returns 1. This is the exact probe order, sentinel, and `sort -V` newest-
 # wins semantics proven in plugins/foundry/scripts/require-catalyst-dev.sh —
-# lifted verbatim (CTL-1628 Phase A2) so that file (and its plugins/legacy
-# twin) can fold onto this single implementation instead of hand-maintaining
-# two copies.
+# lifted verbatim (CTL-1628 Phase A2) so that file can fold onto this single
+# implementation instead of hand-maintaining a second copy. (Its former
+# plugins/legacy twin was removed with the catalyst-legacy plugin, CTL-2241.)
 #
 # Resolution order (first dir containing the sentinel wins):
 #   1. $CATALYST_DEV_SCRIPTS if already valid

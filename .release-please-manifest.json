@@ -2,6 +2,5 @@
   "plugins/dev": "12.66.3",
   "plugins/meta": "5.0.0",
   "plugins/playground/pm-ops": "3.0.0",
-  "plugins/legacy": "2.3.0",
   "plugins/foundry": "2.5.0"
 }

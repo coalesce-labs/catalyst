@@ -113,7 +113,7 @@ Migration `005_claude_session_metadata.sql` adds `claude_session_id` (bound via 
 - `--bg` healthcheck (`orchestrate-healthcheck`) stats `${JOBS_ROOT}/<bg>/state.json` (default `~/.claude/jobs/<bg>/state.json`); files older than `--stale-bg-seconds` (default 900) with `.state` not in `{done,failed,errored,stopped}` = stalled. PID liveness still covers `oneshot-legacy`.
 - Intermediate Linear states (CTL-454): `triaged`, `researching`, `planning`, `verifying`, `reviewing` (+ existing `inProgress`/`inReview`), mapped via `stateMap` (opt-in).
 - Revive budget at the top-level signal (`reviveCount`); `>= MAX_REVIVES` (default 10) → `stalled`, `attentionReason="revive-budget-exhausted"`. Once-per-phase; second `failed` for the same phase escalates.
-- Legacy `oneshot-legacy` preserved (catalyst-legacy plugin); cutover is per-project.
+- Legacy `oneshot-legacy` preserved (catalyst-legacy plugin) at the time; cutover was per-project. **(The `catalyst-legacy` plugin was removed CTL-2241; `oneshot-legacy` is no longer a supported dispatch path.)**
 - Built across CTL-447 (broker interest), 452 (state-machine rewrite + `--bg` cutover), 454 (Linear states), 455 (session_metrics fix) → 470. Internal reference: `docs/orchestrator-overview.md`. Related: ADR-006, ADR-008, ADR-014.
 
 ## ADR-018: Event-Sourced Worker Signal Files via Broker Projection (CTL-483)

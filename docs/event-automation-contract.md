@@ -370,7 +370,7 @@ That comment is in-repo proof the duplication is a live defect **independent of 
 | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
 | Phase routing is gated on a table that is empty under execution-core                     | `router.mjs:2831` `if (!interests.size) return;`                                                                    |
 | Zero `filter.*` events in all of 2026-08 (control: 326,940 `recovery.tick` on same pass) | measured                                                                                                            |
-| The routing IS live on legacy-wave, which does register                                  | `orchestrate-register-interests.sh:146,:170,:191,:224`                                                              |
+| The routing WAS live on legacy-wave, which registered (that path removed, CTL-2241)      | `orchestrate-register-interests.sh:146,:170,:191,:224`                                                              |
 | Producers of the routable phase name — the complete set, must move in lockstep           | `recovery.mjs:482`, `sdk-run-phase-agent.mjs:616`, `phase-agent-emit-complete:315`, `lib/phase-emit-complete.sh:69` |
 | 59 `phase-agent-emit-complete` invocations across 10 SKILL.md files need **zero** edits  | they pass `--phase`/`--ticket`, never a name                                                                        |
 

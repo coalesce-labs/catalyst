@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tests for the briefing-followup skill action handlers (CTL-463 Phase 2).
-# Covers: schedule_calendar / file_ticket / dispatch_orchestrator / draft_email
+# Covers: schedule_calendar / file_ticket / draft_email
 # action scripts + the resolution recorder.
 #
 # Run: bash plugins/dev/scripts/__tests__/briefing-followup-actions.test.sh
@@ -105,23 +105,6 @@ fi
 exit 0
 EOF
   chmod +x "$bin_dir/linearis"
-}
-
-install_fake_claude() {
-  local bin_dir="$1"
-  mkdir -p "$bin_dir"
-  cat > "$bin_dir/claude" <<'EOF'
-#!/usr/bin/env bash
-echo "claude $*" >> "${FAKE_CLAUDE_LOG:-/dev/null}"
-echo "OTEL=${OTEL_RESOURCE_ATTRIBUTES:-}" >> "${FAKE_CLAUDE_LOG:-/dev/null}"
-if [[ "${FAKE_CLAUDE_NO_ORCH:-0}" == "1" ]]; then
-  echo "${FAKE_CLAUDE_STDERR:-dispatch failed}" >&2
-  exit 1
-fi
-echo "Started orchestrator ${FAKE_CLAUDE_ORCH_ID:-orch_abc123}"
-exit 0
-EOF
-  chmod +x "$bin_dir/claude"
 }
 
 # ─── Test 1: action-schedule.sh invokes Calendar create-event with right shape ─
@@ -229,57 +212,6 @@ test_action_ticket() {
   assert_exit "ticket failure exits 1" "1" "$fail_ec"
   assert_grep "ticket failure status=failed" '"status":"failed"' "$fail_out"
   assert_grep "ticket failure surfaces stderr reason" "auth denied" "$fail_out"
-}
-
-# ─── Test 3: action-orchestrate.sh calls claude headless and returns orch_id ──
-test_action_orchestrate() {
-  echo "test 3: action-orchestrate.sh dispatches orchestrator"
-  local target="$BF_DIR/action-orchestrate.sh"
-  local t_dir="$SCRATCH/t3"
-  local bin_dir="$t_dir/bin"
-  local log="$t_dir/claude.log"
-  mkdir -p "$t_dir"
-  install_fake_claude "$bin_dir"
-
-  local out ec
-  out=$(FAKE_CLAUDE_LOG="$log" \
-        FAKE_CLAUDE_ORCH_ID="orch_test123" \
-        PATH="$bin_dir:$PATH" \
-        bash "$target" --ticket CTL-999 2>&1)
-  ec=$?
-
-  assert_exit "orchestrate exits 0" "0" "$ec"
-  assert_grep "orchestrate stdout has orchestrator_id" \
-    '"orchestrator_id":"orch_test123"' "$out"
-  assert_grep "orchestrate stdout status=dispatched" '"status":"dispatched"' "$out"
-
-  local log_content
-  log_content=$(cat "$log" 2>/dev/null || echo "")
-  assert_grep "claude invoked with -p flag" "-p" "$log_content"
-  assert_grep "claude invoked with orchestrate command" \
-    "/catalyst-legacy:orchestrate CTL-999" "$log_content"
-  # CTL-495: claude inherits OTEL with task.type=briefing-followup.
-  assert_grep "claude inherits OTEL with task.type=briefing-followup" \
-    "task.type=briefing-followup" "$log_content"
-
-  # Soft-skip path: claude not on PATH.
-  local skip_out skip_ec
-  skip_out=$(PATH="/usr/bin:/bin" bash "$target" --ticket CTL-999 2>&1)
-  skip_ec=$?
-  assert_exit "orchestrate soft-skip exits 0" "0" "$skip_ec"
-  assert_grep "orchestrate soft-skip status=skipped" '"status":"skipped"' "$skip_out"
-
-  # Hard-failure path: claude prints no orch_id and exits non-zero.
-  local fail_out fail_ec
-  fail_out=$(FAKE_CLAUDE_LOG="$log" \
-             FAKE_CLAUDE_NO_ORCH=1 \
-             FAKE_CLAUDE_STDERR="permission denied" \
-             PATH="$bin_dir:$PATH" \
-             bash "$target" --ticket CTL-999 2>&1)
-  fail_ec=$?
-  assert_exit "orchestrate failure exits 1" "1" "$fail_ec"
-  assert_grep "orchestrate failure status=failed" '"status":"failed"' "$fail_out"
-  assert_grep "orchestrate failure surfaces stderr reason" "permission denied" "$fail_out"
 }
 
 # ─── Test 4: action-email.sh invokes Gmail drafts ───────────────────────────
@@ -417,7 +349,6 @@ test_skill_md_frontmatter() {
 
 test_action_schedule
 test_action_ticket
-test_action_orchestrate
 test_action_email
 test_record_resolution
 test_skill_md_frontmatter

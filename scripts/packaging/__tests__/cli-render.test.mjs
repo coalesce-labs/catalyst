@@ -32,18 +32,18 @@ function realSkillCountAcrossRepo() {
 // default 5000ms test timeout sits close enough to that cost that machine
 // load decides pass/fail (measured 2026-08-27 on commit 060ddd63e, then at
 // 9 plugins: 6139ms and 9553ms on two timed-out runs, sub-1s on four passing
-// runs, same commit/host). The plugin count has since dropped to 5 via the
-// CTL-2235/2236/2237/2238 removals, which only shrinks the cost — 20000ms
+// runs, same commit/host). The plugin count has since dropped to 4 via the
+// CTL-2235/2236/2237/2238/2241 removals, which only shrinks the cost — 20000ms
 // keeps real headroom above the worst observed case without disabling the
 // timeout outright (CTL-2215 Phase 0).
 const RENDER_ALL_PACKS_TIMEOUT_MS = 20000;
 
 describe("renderAllPacks — cli.mjs's render command core", () => {
   test(
-    "renders all 5 plugins, all valid, with a skill total matching an independent filesystem count",
+    "renders all 4 plugins, all valid, with a skill total matching an independent filesystem count",
     () => {
       const results = renderAllPacks(repoRoot);
-      expect(results.length).toBe(5);
+      expect(results.length).toBe(4);
       for (const { pluginRelPath, validation } of results) {
         expect(validation.errors).toEqual([]);
         expect(validation.ok).toBe(true);

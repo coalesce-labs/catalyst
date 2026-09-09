@@ -426,18 +426,6 @@ run "partial registry: name fallback for uncached state" \
 run "In Review passed as name (not in registry)" \
   expect_contains "$LOG16" "linearis issues update TST-16 --status In Review"
 
-# ─── Test 17: orchestrate SKILL.md references the helper (no drift) ───────
-ORCH_SKILL="${REPO_ROOT}/plugins/legacy/skills/orchestrate/SKILL.md"
-run "orchestrate SKILL.md references linear-transition.sh" \
-  bash -c "grep -q 'linear-transition.sh' '$ORCH_SKILL'"
-run "orchestrate SKILL.md documents --state-on-merge flag" \
-  bash -c "grep -q 'state-on-merge' '$ORCH_SKILL'"
-
-# ─── Test 18: oneshot SKILL.md references the helper ──────────────────────
-ONESHOT_SKILL="${REPO_ROOT}/plugins/legacy/skills/oneshot/SKILL.md"
-run "oneshot SKILL.md references linear-transition.sh" \
-  bash -c "grep -q 'linear-transition.sh' '$ONESHOT_SKILL'"
-
 # ─── Test 19: merge-pr skill uses the helper (SKILL.md + references/) ────
 MERGE_SKILL_DIR="${REPO_ROOT}/plugins/dev/skills/merge-pr"
 run "merge-pr skill uses linear-transition.sh" \

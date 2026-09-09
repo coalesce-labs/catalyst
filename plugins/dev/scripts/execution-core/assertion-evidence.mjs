@@ -34,14 +34,16 @@
 // ASSERTED_BY — the registered writer ids. One per terminal-success writer.
 //
 // THIS IS THE ONLY SOURCE. JS writers (recovery.mjs, sdk-run-phase-agent.mjs)
-// import these symbols. The two BASH writers cannot — `phase-agent-emit-complete`
-// hard-codes PHASE_AGENT as its --asserted-by default and `orchestrate-revive`
-// hard-codes REVIVE_SYNTHESIZED — so those mirrors are held honest MECHANICALLY
-// by assertion-evidence-parity.test.mjs, which extracts each bash literal and
+// import these symbols. The one surviving BASH writer cannot —
+// `phase-agent-emit-complete` hard-codes PHASE_AGENT as its --asserted-by
+// default — so that mirror is held honest MECHANICALLY by
+// assertion-evidence-parity.test.mjs, which extracts the bash literal and
 // compares it to the row here. Renaming EITHER side alone fails that suite; an
 // undetected drift would silently reclassify a valid declared/fabricated
 // terminal as absent/unknown-writer and corrupt the advancement audit. Same
-// discipline as lib/secret-contract.mjs and its bash mirror. CTL-1789 P2.
+// discipline as lib/secret-contract.mjs and its bash mirror. CTL-1789 P2. (A
+// second bash writer, `orchestrate-revive`, mirrored REVIVE_SYNTHESIZED the
+// same way until it was removed with the `catalyst-legacy` plugin, CTL-2241.)
 export const ASSERTED_BY = Object.freeze({
   // A — the phase skill invoked the wrapper itself. The wrapper's DEFAULT, so a
   // caller that passes no --asserted-by is recorded as the agent's own claim.
@@ -50,7 +52,12 @@ export const ASSERTED_BY = Object.freeze({
   // the worker died, a work-done probe said the artifact landed, so the reclaim
   // ran the wrapper on its behalf.
   RECOVERY_RECLAIM: "recovery-reclaim",
-  // C (legacy wave orchestration) — orchestrate-revive's synthetic complete.
+  // C — HISTORICAL (legacy wave orchestration) — orchestrate-revive's synthetic
+  // complete. `orchestrate-revive` and the `catalyst-legacy` plugin it served
+  // were removed (CTL-2241); no code emits this id any more. Deliberately KEPT
+  // REGISTERED, same rationale as SDK_SUCCESS_FLIP below: signal files/events
+  // written before CTL-2241 still carry it, and dropping it would classify
+  // them `absent`/`unknown-writer` instead. Keep forever.
   REVIVE_SYNTHESIZED: "revive-synthesized",
   // C — CTL-2050. The artifact-contradiction retraction: a phase whose signal
   // says `failed` for an EMIT-TIME INFRASTRUCTURE reason, while the phase's own

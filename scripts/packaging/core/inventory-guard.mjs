@@ -35,7 +35,6 @@ export const ALLOWLISTED_SKILL_IDENTIFIERS = Object.freeze([
 const REAL_PLUGIN_IDS = Object.freeze([
   "catalyst-dev",
   "catalyst-foundry",
-  "catalyst-legacy",
   "catalyst-meta",
   "catalyst-pm-ops",
 ]);

@@ -1,13 +1,18 @@
 // assertion-evidence-parity.test.mjs — CTL-1789 round-1 P2 (Codex).
 //
-// The writer vocabulary in assertion-evidence.mjs (ASSERTED_BY) has two BASH
-// consumers that cannot import it: `phase-agent-emit-complete` hard-codes the
-// default `phase-agent-emit-complete`, and `orchestrate-revive` hard-codes
-// `revive-synthesized` in its `--asserted-by` flag. Before this file, each side
-// was asserted independently — the JS tests pinned the constants, the bash test
-// pinned the literal — so a rename on ONE side passed every test while silently
+// The writer vocabulary in assertion-evidence.mjs (ASSERTED_BY) has one BASH
+// consumer that cannot import it: `phase-agent-emit-complete` hard-codes the
+// default `phase-agent-emit-complete`. Before this file, each side was asserted
+// independently — the JS tests pinned the constants, the bash test pinned the
+// literal — so a rename on ONE side passed every test while silently
 // reclassifying valid DECLARED/FABRICATED terminals as `absent`/`unknown-writer`
 // and corrupting the advancement audit this ticket exists to produce.
+//
+// (A second bash mirror, `orchestrate-revive`'s `--asserted-by` flag hard-coding
+// `revive-synthesized`, was checked here the same way until the script — and the
+// `catalyst-legacy` plugin it served — was removed, CTL-2241. Its registry id,
+// ASSERTED_BY.REVIVE_SYNTHESIZED, stays registered forever for historical
+// signals; there is simply no live bash writer left to check it against.)
 //
 // This is the same shape as lib/secret-contract.mjs and its independently
 // maintained bash mirror: one registry, an unavoidable hand-written mirror, and
@@ -33,7 +38,6 @@ import { ASSERTED_BY } from "./assertion-evidence.mjs";
 
 const SCRIPTS_DIR = join(import.meta.dir, "..");
 const EMIT_COMPLETE = join(SCRIPTS_DIR, "phase-agent-emit-complete");
-const ORCHESTRATE_REVIVE = join(SCRIPTS_DIR, "orchestrate-revive");
 const JS_WRITERS = ["recovery.mjs", "sdk-run-phase-agent.mjs"];
 
 // readBash — file contents with whole-line `#` comments removed, so prose that
@@ -57,10 +61,6 @@ const emitCompleteDefaults = () =>
     (v) => !v.startsWith("$")
   );
 
-// orchestrate-revive's flag usage, anchored on the flag.
-const reviveFlagValues = () =>
-  extractAll(readBash(ORCHESTRATE_REVIVE), /--asserted-by[ \t]+([A-Za-z0-9._-]+)/g);
-
 describe("CTL-1789 P2: ASSERTED_BY vocabulary parity — JS registry vs its bash consumers", () => {
   test("phase-agent-emit-complete's default == ASSERTED_BY.PHASE_AGENT", () => {
     const found = emitCompleteDefaults();
@@ -68,19 +68,13 @@ describe("CTL-1789 P2: ASSERTED_BY vocabulary parity — JS registry vs its bash
     expect(found[0]).toBe(ASSERTED_BY.PHASE_AGENT);
   });
 
-  test("orchestrate-revive's --asserted-by == ASSERTED_BY.REVIVE_SYNTHESIZED", () => {
-    const found = reviveFlagValues();
-    expect(found).toHaveLength(1); // fail closed
-    expect(found[0]).toBe(ASSERTED_BY.REVIVE_SYNTHESIZED);
-  });
-
   test("every writer id embedded in bash is a REGISTERED id (no unknown-writer drift)", () => {
-    // Catches what the per-site expectations above could miss: a bash literal
+    // Catches what the per-site expectation above could miss: a bash literal
     // renamed to something the registry does not contain AT ALL. Such an id
     // classifies `absent` / `unknown-writer` in classifySignal — precisely the
     // silent corruption this suite exists to prevent.
     const registered = Object.values(ASSERTED_BY);
-    const embedded = [...emitCompleteDefaults(), ...reviveFlagValues()];
+    const embedded = [...emitCompleteDefaults()];
     expect(embedded.length).toBeGreaterThan(0); // fail closed on a vanished anchor
     for (const id of embedded) expect(registered).toContain(id);
   });

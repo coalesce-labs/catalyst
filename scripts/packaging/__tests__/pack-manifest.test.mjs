@@ -10,11 +10,11 @@ import { listPluginRelPaths } from "../providers/local.mjs";
 
 const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
 
-describe("validatePackManifest — all 5 real pack.json files", () => {
+describe("validatePackManifest — all 4 real pack.json files", () => {
   const pluginRelPaths = listPluginRelPaths(repoRoot);
 
-  test("discovers 5 plugins", () => {
-    expect(pluginRelPaths.length).toBe(5);
+  test("discovers 4 plugins", () => {
+    expect(pluginRelPaths.length).toBe(4);
   });
 
   for (const pluginRelPath of pluginRelPaths) {

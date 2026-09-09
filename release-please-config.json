@@ -59,25 +59,6 @@
         }
       ]
     },
-    "plugins/legacy": {
-      "release-type": "simple",
-      "component": "catalyst-legacy",
-      "package-name": "catalyst-legacy",
-      "changelog-path": "CHANGELOG.md",
-      "include-component-in-tag": true,
-      "extra-files": [
-        {
-          "type": "json",
-          "path": ".claude-plugin/plugin.json",
-          "jsonpath": "$.version"
-        },
-        {
-          "type": "json",
-          "path": ".codex-plugin/plugin.json",
-          "jsonpath": "$.version"
-        }
-      ]
-    },
     "plugins/foundry": {
       "release-type": "simple",
       "component": "catalyst-foundry",

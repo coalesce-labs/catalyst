@@ -17,7 +17,7 @@ no build step for the plugins themselves; the orchestration runtime under
     - `scripts/` — the runtime (see below)
     - `templates/` — global-state.json schema (the former `global-event.json` was deleted in CTL-1819: it passed ZERO live events and no code imported it — counts in that module's header)
     - `scripts/lib/` — zero-npm-import leaves: `event-name.mjs` (the one event-name boundary, CTL-1834) and `event-envelope.mjs` (the executable event-envelope contract, CTL-1819)
-  - `plugins/meta/`, `plugins/legacy/`, `plugins/foundry/`, `plugins/playground/pm-ops/` (one surviving skill, `groom-backlog`, plus `agents/backlog-analyzer.md` and `scripts/`) — other plugins. The CTL-2218 cleanup removed `catalyst-pm`, `catalyst-discovery`, `catalyst-analytics`, `catalyst-debugging` and `catalyst-meeting-hygiene` outright, so `plugins/playground/` now contains `pm-ops/` alone.
+  - `plugins/meta/`, `plugins/foundry/`, `plugins/playground/pm-ops/` (one surviving skill, `groom-backlog`, plus `agents/backlog-analyzer.md` and `scripts/`) — other plugins. The CTL-2218 cleanup removed `catalyst-pm`, `catalyst-discovery`, `catalyst-analytics`, `catalyst-debugging`, `catalyst-meeting-hygiene`, and `catalyst-legacy` outright, so `plugins/playground/` now contains `pm-ops/` alone.
 - `docs/` — `architecture.md`, `orchestrator-overview.md`, `adrs.md`, `releases.md`
 - `AGENTS.md` — portable, tool-agnostic source of truth (CLAUDE.md is a thin `@AGENTS.md` bridge)
 - `website/` — Astro docs site (`website/src/content/docs/…`, esp. `reference/configuration.md`)
@@ -38,7 +38,7 @@ no build step for the plugins themselves; the orchestration runtime under
 ## Key concepts (see `thoughts/shared/CONCEPTS.md`)
 - **Unified event log** `~/catalyst/events/YYYY-MM.jsonl` — append-only backbone; all processes read/write it (NOT in repo)
 - **Phase-agent pipeline** — 10 phases: triage → research → plan → implement → verify → review → pr → monitor-merge → monitor-deploy → teardown
-- **dispatchMode** — `phase-agents` (default) / `execution-core` (daemon) / `oneshot-legacy` (fallback); set in `.catalyst/config.json`
+- **dispatchMode** — `phase-agents` (default) / `execution-core` (daemon) / `oneshot-legacy` (non-functional, catalyst-legacy plugin removed CTL-2241); set in `.catalyst/config.json`
 - **Signal files** — `workers/<TICKET>/phase-*.json` are authoritative per-worker state
 - **Durable state** — `~/catalyst/catalyst.db` (SQLite, WAL), `~/catalyst/state.json` (active-orchestrator summary) — runtime, not in repo
 
@@ -49,7 +49,7 @@ no build step for the plugins themselves; the orchestration runtime under
 - CI gates on `main`: agents-md-gate, docs-gate, audit-references, gitleaks, quality (bun test), CodeQL, Cloudflare Pages
 
 ## Conventions
-- Commits: `feat(dev):` / `fix(pm-ops):` / `chore(meta):` etc. (scopes: dev, meta, pm-ops, discovery, legacy, foundry, …)
+- Commits: `feat(dev):` / `fix(pm-ops):` / `chore(meta):` etc. (scopes: dev, meta, pm-ops, foundry)
 - main stays on main; every change via worktree → PR. `main` is gated by a ruleset that requires
   all review threads (incl. the `chatgpt-codex-connector` Codex bot) resolved.
 - Agents are documentarians: describe what EXISTS, don't critique or suggest unless asked.

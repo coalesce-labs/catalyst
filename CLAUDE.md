@@ -11,7 +11,7 @@ This is the Claude Code bridge file. All portable project guidance lives in `AGE
 
 ### Orchestration runtime
 
-- Phase-agent workers run as `claude --bg` jobs; the legacy oneshot mode runs a long-lived `claude -p /catalyst-legacy:oneshot` per ticket.
+- Phase-agent workers run as `claude --bg` jobs. The pre-phase-agent legacy oneshot mode (a long-lived `claude -p /catalyst-legacy:oneshot` per ticket) was removed along with the `catalyst-legacy` plugin (CTL-2241).
 
 ### Pull request review (Codex)
 

@@ -7,7 +7,6 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 AUTO_FIXUP="${REPO_ROOT}/plugins/dev/scripts/orchestrate-auto-fixup"
-SKILL_MD="${REPO_ROOT}/plugins/legacy/skills/orchestrate/SKILL.md"
 
 FAILURES=0
 PASSES=0
@@ -306,15 +305,6 @@ DISPATCHED=$(echo "$OUT" | jq -r '.dispatched' 2>/dev/null || echo "?")
 [ "$CHECKED" = "1" ] && pass "summary.checked=1" || fail "summary.checked=1" "got: $CHECKED; out: $OUT"
 [ "$DISPATCHED" = "1" ] && pass "summary.dispatched=1" || fail "summary.dispatched=1" "got: $DISPATCHED; out: $OUT"
 scratch_teardown
-
-echo
-echo "test: SKILL.md documents the new script (prevents doc drift)"
-grep -q "orchestrate-auto-fixup" "$SKILL_MD" \
-  && pass "SKILL.md references orchestrate-auto-fixup" || fail "SKILL.md references orchestrate-auto-fixup"
-grep -q "blockedSince" "$SKILL_MD" \
-  && pass "SKILL.md documents blockedSince field" || fail "SKILL.md documents blockedSince field"
-grep -q "fixupAttempts" "$SKILL_MD" \
-  && pass "SKILL.md documents fixupAttempts field" || fail "SKILL.md documents fixupAttempts field"
 
 echo
 echo "Results: $PASSES passed, $FAILURES failed"
