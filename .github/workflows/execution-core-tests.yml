@@ -307,25 +307,36 @@ jobs:
       # It was only visible because those suites plant positive controls. A guard that scans for
       # the absence of a token, with no planted control, would have gone GREEN here while checking
       # nothing at all — which is the failure this whole epic is about.
-      # ⛔ `apt-get update` is NOT allowed to be the gate. The hosted runner image ships
-      # third-party apt sources we neither control nor need — and on 2026-09-09 Google's
-      # `dl.google.com/linux/chrome-stable` served a `Packages.gz` whose hash did not match
-      # its own Release file, so `apt-get update -qq` exited 100 and, under `bash -e`, killed
-      # this step before `install ripgrep` ever ran. Every PR in the repo went red on a step
-      # that had not yet done anything, and rerunning did not help because the bad index was
-      # not transient. ripgrep comes from the UBUNTU ARCHIVE, so an unrelated repo's broken
-      # index has no bearing on whether it can be installed.
+      # ⛔ A THIRD-PARTY APT SOURCE MUST NOT BE ABLE TO FAIL THIS JOB. The hosted runner image
+      # ships apt sources for software this job never installs, and on 2026-09-09 Google's
+      # `dl.google.com/linux/chrome-stable` served a `Packages.gz` whose hash did not match its
+      # own Release file. `apt-get update` exits 100 on that, and under `bash -e` it killed the
+      # ripgrep step before `install` ever ran — every PR in the repo red on a step that had not
+      # yet done anything, and rerunning did not help, because the bad index was not transient.
       #
-      # The tolerance is scoped precisely: the update is allowed to report errors, the
-      # INSTALL is not, and `rg --version` still has to succeed. So a genuinely unreachable
-      # Ubuntu archive fails this step exactly as loudly as before — which matters, because
-      # the whole reason this step exists is that a missing `rg` makes the scan suites read
-      # an empty tree and pass while checking nothing.
+      # Fixed ONCE, here, rather than by making each `apt-get update` tolerant: this job runs
+      # three of them (ripgrep below, direnv, zsh) and they must keep their identical fail-closed
+      # shape — a `|| true` at each site would also swallow a genuinely unreachable Ubuntu
+      # archive, which is the case that MUST stay red. Dropping the source we do not use leaves
+      # every apt call strict against the archive it actually installs from.
+      #
+      # Scoped to `sources.list.d` entries naming dl.google.com, and a no-op when there are none
+      # (a future runner image that ships no such source is not an error).
+      - name: Neutralise unused third-party apt sources
+        working-directory: .
+        run: |
+          hits=$(grep -rlE 'dl\.google\.com' /etc/apt/sources.list.d 2>/dev/null || true)
+          if [ -n "$hits" ]; then
+            echo "removing unused third-party apt sources:"; echo "$hits"
+            echo "$hits" | sudo xargs -r rm -f
+          else
+            echo "no dl.google.com apt source present — nothing to remove"
+          fi
+
       - name: Install ripgrep (required by the scan-based suites)
         working-directory: .
         run: |
-          sudo apt-get update -qq \
-            || echo "::warning::apt-get update reported errors (third-party repo index); continuing — ripgrep comes from the Ubuntu archive and the install below still has to succeed"
+          sudo apt-get update -qq
           sudo apt-get install -y -qq ripgrep
           rg --version
 
