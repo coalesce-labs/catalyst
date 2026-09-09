@@ -871,6 +871,78 @@ run "jq-less --json output still contains ticket and targetState (manual JSON, n
 run "jq-less path: the write really happened (linearis was invoked, not skipped)" \
   bash -c "grep -q 'linearis issues update TST-37' '$LOG37'"
 
+# ─── CTL-2300: a configured tenant's stage names are never guessed at ──────
+# A tenant renames its stages freely and the platform addresses them by SLOT. Before this,
+# a config that DECLARED a stateMap but had no entry for the slot being asked for fell
+# through to default_state_for() — substituting this workspace's "In Progress" for whatever
+# that tenant calls the stage. The substitution is silent here and surfaces much later as a
+# state linearis cannot find, or as a card in a stage the tenant uses for something else.
+WORK38="${SCRATCH}/t38"
+BIN38="${SCRATCH}/t38/bin"
+LOG38="${SCRATCH}/t38/log"
+mkdir -p "${WORK38}/.catalyst"
+# A real tenant shape: stages declared, named their way, and no `verifying` slot at all.
+cat > "${WORK38}/.catalyst/config.json" <<'EOF'
+{"catalyst":{"projectKey":"tenant","linear":{"teamKey":"WID","stateMap":{
+  "backlog":"Icebox","todo":"Queued","inProgress":"Building","done":"Shipped"}}}}
+EOF
+install_fake_linearis "$BIN38"
+touch "$LOG38"
+
+run "⭐ CTL-2300: an unmapped slot on a tenant WITH a stateMap REFUSES, it does not guess" \
+  bash -c "! FAKE_LINEARIS_LOG='$LOG38' PATH='$BIN38:$PATH' \
+    '$TRANSITION' --ticket WID-38 --transition verifying --config '$WORK38/.catalyst/config.json'"
+
+run "CTL-2300: the refusal NAMES the unmapped slot and the config file" \
+  bash -c "FAKE_LINEARIS_LOG='$LOG38' PATH='$BIN38:$PATH' \
+    '$TRANSITION' --ticket WID-38 --transition verifying --config '$WORK38/.catalyst/config.json' 2>&1 \
+    | grep -q \"no stage is mapped to 'verifying'\""
+
+run "⛔ CTL-2300 THE POINT: our own stage name never reached Linear" \
+  bash -c "! grep -q 'In Progress' '$LOG38'"
+
+run "⛔ CONTROL: a slot the tenant DID map still transitions, on the tenant's own name" \
+  bash -c "FAKE_LINEARIS_LOG='$LOG38' PATH='$BIN38:$PATH' \
+    '$TRANSITION' --ticket WID-38 --transition inProgress --config '$WORK38/.catalyst/config.json'"
+
+run "⛔ CONTROL: it used the tenant's 'Building', not this workspace's 'In Progress'" \
+  expect_contains "$LOG38" "linearis issues update WID-38 --status Building"
+
+# ⚠️ Codex P1 (round 1): a project whose own stateMap is EMPTY must still see the global
+# one. A `//` chain treats `{}` as a declaration (it is not null), so the first cut of the
+# guard read "project map wins, it is empty, nothing is declared" and fell through to the
+# built-in guess — for a repo whose global map is fully populated, which is exactly the
+# tenant the guard exists to protect.
+WORK39="${SCRATCH}/t39"
+BIN39="${SCRATCH}/t39/bin"
+LOG39="${SCRATCH}/t39/log"
+mkdir -p "${WORK39}/.catalyst"
+cat > "${WORK39}/.catalyst/config.json" <<'EOF'
+{"catalyst":{"projectKey":"tenant","linear":{"teamKey":"WID","stateMap":{
+  "backlog":"Icebox","inProgress":"Building","done":"Shipped"}},
+  "projects":[{"key":"WID","stateMap":{}}]}}
+EOF
+install_fake_linearis "$BIN39"
+touch "$LOG39"
+
+run "⭐ CTL-2300: an EMPTY project stateMap falls back to the global one, it does not resolve" \
+  bash -c "FAKE_LINEARIS_LOG='$LOG39' PATH='$BIN39:$PATH' \
+    '$TRANSITION' --ticket WID-39 --transition inProgress --config '$WORK39/.catalyst/config.json'"
+
+run "CTL-2300: and it used the GLOBAL map's 'Building'" \
+  expect_contains "$LOG39" "linearis issues update WID-39 --status Building"
+
+run "⭐ Codex P1: an unmapped slot with an EMPTY project map still REFUSES (the global map counts as declared)" \
+  bash -c "! FAKE_LINEARIS_LOG='$LOG39' PATH='$BIN39:$PATH' \
+    '$TRANSITION' --ticket WID-39 --transition verifying --config '$WORK39/.catalyst/config.json'"
+
+run "⛔ Codex P1 THE POINT: the built-in 'In Progress' never reached Linear for the unmapped slot" \
+  bash -c "! grep -q 'status In Progress' '$LOG39'"
+
+# ⛔ THE OTHER CONTROL: a repo with NO stateMap at all is a BOOTSTRAP, not a tenant that
+# renamed something — Test 33 above already proves it still resolves. Refusing there would
+# break every unconfigured repo to prevent a failure that cannot happen in one.
+
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"
 [ "$FAILURES" = "0" ]

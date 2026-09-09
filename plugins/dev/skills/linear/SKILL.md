@@ -13,6 +13,10 @@ version: 1.0.0
 
 Create tickets from thoughts documents, update existing tickets, and follow the Linearis-CLI workflow.
 
+## Setup check (first, every session)
+
+`bash "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh"` — the same gate `create-pr`/`merge-pr` run, and since CTL-2300 it also names every identity it could NOT resolve (tenant, human, team, cloud host). A write addressed to the wrong team or the wrong workspace does not error; it lands somewhere plausible, which is why this runs before the first read as well as the first write.
+
 ## REQUIRED: ticket format gate
 
 **Before creating ANY ticket, apply the `/catalyst-dev:gherkin-ticket` standard** — an outcome-first title (`<actor> should <outcome> [so that <benefit>]`, no `[Component]` prefix) and a body leading with a plain-English use case, then tiered Gherkin acceptance criteria. Hard gate: do not draft a title/description without it. Component goes in a label, not the title.

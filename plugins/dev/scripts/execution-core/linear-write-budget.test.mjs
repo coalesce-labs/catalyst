@@ -137,7 +137,7 @@ describe("AC2 — one ticket cannot spend the whole budget", () => {
 
   test("a host genuinely out of budget says so", () => {
     let l = emptyLedger(DAY);
-    for (let i = 0; i < 300; i++) l = recordWrite(l, `T-${i}`);
+    for (let i = 0; i < DEFAULT_DAILY_BUDGET; i++) l = recordWrite(l, `T-${i}`);
     expect(classifyWrite({ ledger: l, ticket: "T-NEW" }).reason).toBe(REASONS.DAY_EXHAUSTED);
   });
 });
@@ -199,12 +199,12 @@ describe("AC3 — a converged write is not re-issued", () => {
 
 describe("AC5 — the exhausted state is loud, exactly once", () => {
   test("no announcement below the budget", () => {
-    expect(classifyExhaustion(spend(emptyLedger(DAY), "T", 299)).announce).toBe(false);
+    expect(classifyExhaustion(spend(emptyLedger(DAY), "T", DEFAULT_DAILY_BUDGET - 1)).announce).toBe(false);
   });
 
   test("announces on the first crossing", () => {
     let l = emptyLedger(DAY);
-    for (let i = 0; i < 300; i++) l = recordWrite(l, `T-${i}`);
+    for (let i = 0; i < DEFAULT_DAILY_BUDGET; i++) l = recordWrite(l, `T-${i}`);
     const v = classifyExhaustion(l);
     expect(v.exhausted).toBe(true);
     expect(v.announce).toBe(true);
@@ -212,7 +212,7 @@ describe("AC5 — the exhausted state is loud, exactly once", () => {
 
   test("⛔ and NOT again — a storm must not emit one alarm per refused write", () => {
     let l = emptyLedger(DAY);
-    for (let i = 0; i < 300; i++) l = recordWrite(l, `T-${i}`);
+    for (let i = 0; i < DEFAULT_DAILY_BUDGET; i++) l = recordWrite(l, `T-${i}`);
     l = markExhaustionAnnounced(l);
     const v = classifyExhaustion(l);
     expect(v.exhausted).toBe(true);
@@ -221,7 +221,7 @@ describe("AC5 — the exhausted state is loud, exactly once", () => {
 
   test("the latch does not survive the day roll", () => {
     let l = emptyLedger("2026-08-17");
-    for (let i = 0; i < 300; i++) l = recordWrite(l, `T-${i}`);
+    for (let i = 0; i < DEFAULT_DAILY_BUDGET; i++) l = recordWrite(l, `T-${i}`);
     const rolled = rollToDay(markExhaustionAnnounced(l), DAY);
     expect(classifyExhaustion(rolled).exhausted).toBe(false);
     expect(rolled.exhaustedAnnounced).toBe(false);

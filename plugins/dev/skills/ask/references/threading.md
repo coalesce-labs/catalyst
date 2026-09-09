@@ -82,13 +82,17 @@ Before starting work on a scope: set the assignee on the tracking ticket **and**
 | proxy route | status |
 | -- | -- |
 | `issue-comment`, `issue-state`, `issue-label`, `me/ask-answer` | exists |
-| `reaction`, general `issue-create` | ⚠️ not yet — FLEET-30 / COORD-173 |
+| `reaction`, `issue-create` | exists (CTL-1961 / CTC-724 / CTC-725) |
 
-⚠️ **Until the routes land, state moves via `linearis` attribute to the human**, because the CLI writes with the host's personal token. Two consequences, both required:
+⚠️ **This table was wrong in the direction of under-claiming, and the correction matters (CTL-2300).** It said `reaction` and `issue-create` did not exist while `linear-ack.mjs` was already calling `reaction` through the proxy and the cloud was already serving both — so a reader following this reference reached for `linearis` and the personal token for a write the app actor could have made. The single source is `DEFAULT_ROUTES` in `plugins/dev/scripts/execution-core/linear-write-proxy.mjs`; read it rather than trusting a table in prose.
+
+⚠️ **A route existing is not the same as this plugin using it.** `linear-ack.mjs` sends `reaction` through the proxy; `ask.mjs` still calls `linearis issues create` directly, so an ask filed by the skill is attributed to the host's personal token even though `issue-create` is live. Read the route table as "what the cloud will accept", and the caller as "what we actually send" — they are two facts, and only the first one is above.
+
+Where the caller does go through the proxy, the write is attributed to the app actor. Where it does not — `linearis` writing with the host's personal token — the history reads as the human, so two things are required:
 
 1. Say **"moved by `<role>` via linearis"** in the accompanying comment, so the history reads honestly
    (COORD-179).
-2. Treat this as a known attribution defect, not as license — it is exactly why the proxy routes exist.
+2. Treat it as a known attribution defect, not as license — it is exactly why the proxy routes exist.
 
 ## Cite only what exists
 

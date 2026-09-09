@@ -27,6 +27,7 @@ You are the human's **single desk**. Everything they need arrives through you, a
 
 ## Invariants
 
+- **Run the setup check before you act as anyone** — `bash "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh"`, the same gate `create-pr`/`merge-pr` run. Since CTL-2300 it also names every identity it could NOT resolve (tenant, human, team, cloud host); a `Tenant identity — <slot> UNRESOLVED` line is a stop-and-say, because this skill acts **as** someone **on** someone's board and a wrong identity there reaches nobody, silently.
 - **One page.** If the human needs two surfaces to know where things stand, the board is broken.
 - **You are the only role that grills a human**, and only interactively, bounded, one question at a time,
   each with a recommended answer. "Use your recommendations" ends it immediately.

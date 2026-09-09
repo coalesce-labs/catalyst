@@ -44,8 +44,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # CTL-1397: direct-SQLite Linear reads (replica-first, loud linearis fallback).
 source "${SCRIPT_DIR}/lib/linear-read-replica.sh"
 
-# ─── Default state fallbacks (when config doesn't specify them) ────────────
+# ─── Default state fallbacks (BOOTSTRAP ONLY — see the refusal below) ──────
 # These match the defaults documented in oneshot/orchestrate skills.
+#
+# ⛔ CTL-2300 — THESE ARE OUR WORKSPACE'S STAGE NAMES, NOT ANY TENANT'S. A tenant renames
+# stages freely (CTC-1597 renamed Triage to Intake mid-flight; CTC-1740/CTC-1885 are the
+# fallout), and the platform addresses a stage by SLOT, not by name. So this table is a
+# bootstrap for a repo that has not configured a stateMap at all — never a fallback for a
+# repo that HAS one and simply lacks the slot being asked for. That case is a named refusal
+# below: guessing "In Progress" on a tenant whose board says "Building" resolves to a state
+# that does not exist, and linearis reports it as a failed update long after the transition
+# was supposed to have happened.
 default_state_for() {
   case "$1" in
     backlog)     echo "Backlog" ;;
@@ -146,6 +155,32 @@ if [ -z "$TARGET_STATE" ] && [ "$TRANSITION" = "triage" ] && command -v jq >/dev
     TARGET_STATE=$(jq -r --arg t "$PROJECT_KEY" \
       '(.projects[]? | select(.team == $t) | .eligibleQuery.triageStatus) // empty' \
       "$EXEC_REGISTRY_PATH" 2>/dev/null)
+  fi
+fi
+# ⛔ CTL-2300 — A CONFIGURED TENANT IS NEVER GUESSED AT. If this repo declares a stateMap
+# and it has no entry for the slot being asked for, the tenant HAS told us what its stages
+# are called and this one is not among them. Falling through to default_state_for() there
+# substitutes our workspace's stage name for theirs — the failure is silent at this layer
+# and surfaces later as a linearis update that could not find the state, or (worse) as a
+# card moved to a stage the tenant uses for something else. Refuse, and name the key.
+# ⚠️ Codex P1 (round 1): "declared" means EITHER map is non-empty, not "the first non-null
+# one is". A `//` chain reads `stateMap: {}` on a matching project as a declaration (an
+# empty object is not null), so a project with an empty map plus a populated GLOBAL map
+# concluded "nothing declared" and fell through to the guess — which is precisely the
+# tenant this guard exists for. The resolution query above falls back per KEY, so the guard
+# has to ask the same question the resolution does.
+if [ -z "$TARGET_STATE" ] && [ -n "$CONFIG_PATH" ] && [ -f "$CONFIG_PATH" ] && command -v jq >/dev/null 2>&1; then
+  HAS_STATE_MAP=$(jq -r --arg p "$PROJECT_KEY" \
+    'if (([.catalyst.projects[]? | select(.key == $p) | .stateMap // {}] | add // {} | length)
+         + ((.catalyst.linear.stateMap // {}) | length)) > 0 then "yes" else "" end' \
+    "$CONFIG_PATH" 2>/dev/null)
+  if [ -n "$HAS_STATE_MAP" ]; then
+    echo "ERROR: no stage is mapped to '${TRANSITION}' for ${PROJECT_KEY} in ${CONFIG_PATH}." >&2
+    echo "       This tenant declares a stateMap, so its stage names are its own — refusing to" >&2
+    echo "       substitute this workspace's '$(default_state_for "$TRANSITION")'. Add the" >&2
+    echo "       '${TRANSITION}' key to catalyst.linear.stateMap (or the project's own stateMap)," >&2
+    echo "       or pass --state with the literal stage name." >&2
+    exit 1
   fi
 fi
 if [ -z "$TARGET_STATE" ]; then

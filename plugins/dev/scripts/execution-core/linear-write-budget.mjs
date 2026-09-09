@@ -25,9 +25,23 @@
 
 import { readFileSync, writeFileSync, renameSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { DEFAULT_HOST_DAILY_WRITE_BUDGET } from "../lib/cloud-facts.mjs";
 
-/** The cloud-side daily cap this mirrors. Used for the exhaustion signal, not the throttle. */
-export const DEFAULT_DAILY_BUDGET = 300;
+/**
+ * The cloud-side daily cap this mirrors. Used for the exhaustion signal, not the throttle.
+ *
+ * ⭐ CTL-2300 — RE-EXPORTED FROM lib/cloud-facts.mjs, AND THE NUMBER MOVED. This was `300`,
+ * the cap in force when CTL-1936 was written. CTC-796 raised the cloud's own
+ * `DEFAULT_HOST_DAILY_WRITE_BUDGET` to 3000 and this copy never followed, so a host that
+ * was legitimately busy across many tickets announced "day exhausted" at a TENTH of its
+ * real allowance — the exhaustion signal firing on healthy fan-out, which is the same
+ * defect shape the per-ticket cap below exists to avoid.
+ *
+ * ⛔ The per-ticket cap is unchanged and is the actual throttle. Raising the day mirror
+ * does not loosen the runaway guard; it only stops the host lying about how much of the
+ * cloud's budget is left.
+ */
+export const DEFAULT_DAILY_BUDGET = DEFAULT_HOST_DAILY_WRITE_BUDGET;
 
 /**
  * One ticket's share of a day. 50 sits an order of magnitude above what a real ticket

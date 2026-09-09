@@ -31,7 +31,7 @@ import { defaultBudgetPath } from "./linear-write-proxy.mjs";
 // process.env" — but doctor runs in a plain shell, and the lever the DAEMON actually
 // enforces lives in execution-core.env, the file its launcher sources before start.
 // Measured on mini: the daemon ran under 2000, doctor's shell had the var unset, so
-// this fell back to DEFAULT_DAILY_BUDGET (300) — smaller than every real deployment,
+// this fell back to DEFAULT_DAILY_BUDGET — smaller than every real deployment,
 // so the check failed in the alarming direction (WRITE-EXHAUSTED at 34% of the real
 // budget) rather than the quiet one. Same defect class as CTL-2068/CTL-2071: resolving
 // configuration from a process that isn't the one being graded.
@@ -166,9 +166,9 @@ export function checkLinearWriteBudget(deps = {}) {
 
   if (total >= dailyBudget) {
     // CTL-2073 AC2: "never assert exhaustion off an unverified default." dailyBudget
-    // here is DEFAULT_DAILY_BUDGET (300) — a guess, not a read — precisely when a
+    // here is DEFAULT_DAILY_BUDGET — a guess, not a read — precisely when a
     // daemon pid-file exists: some daemon is (or was) configured with its OWN real
-    // budget that this check could not read, so 300 is not confirmed to be it.
+    // budget that this check could not read, so the default is not confirmed to be it.
     if (!dailyBudgetR.confirmed && daemonPossiblyRunning()) {
       return mkCheck(
         "linear-write-budget",
