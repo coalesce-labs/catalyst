@@ -368,8 +368,14 @@ fi
 # copy of the attention taxonomy, used at :194 and NOT covered by the broker's
 # parity test. CTL-2161 emptied it of the label; assert it stays empty.
 CACHE_READER="${REPO_ROOT}/plugins/dev/scripts/orch-monitor/lib/linear-cache-reader.mjs"
+# ⚠️ CTL-2300 widened this from `= \[[^]]*\]` to "the rest of the statement". The taxonomy is
+# no longer one array literal: its ASK half is resolved from the tenant's own config
+# (lib/board-vocabulary.mjs) and only `needs-input` — the operator's own label, not one
+# Catalyst issues — is still written inline. The old regex silently matched NOTHING against
+# the new shape, and this guard's fail-closed branch is what caught it rather than a vacuous
+# pass. Matching to the `;` reads both shapes and keeps the same fail-closed contract.
 extract_attention_labels() {
-  rg --no-ignore -N -o 'export const ATTENTION_LABELS = \[[^]]*\]' "$1" 2>/dev/null
+  rg --no-ignore -N -o 'export const ATTENTION_LABELS = [^;]*' "$1" 2>/dev/null
 }
 ATT="$(extract_attention_labels "${CACHE_READER}")"
 if [[ -z "${ATT}" ]]; then
@@ -385,6 +391,22 @@ else
     fail "orch-monitor attention taxonomy excludes needs-human" \
          "the extractor returned a list with neither needs-human nor needs-input — it is not reading the taxonomy"
   fi
+fi
+
+# ── Case 5a-ii — and the RESOLVED half of that taxonomy (CTL-2300) ────────────
+# Widening the extractor above would otherwise have weakened this case: the ask labels the
+# taxonomy now spreads in come from lib/tenant-contract.default.json, which the old regex
+# used to see inline. Assert the label is absent from the contract too, with the same
+# fail-closed shape — an unreadable contract is not evidence of absence.
+CONTRACT_JSON="${REPO_ROOT}/plugins/dev/scripts/lib/tenant-contract.default.json"
+CONTRACT_ASK="$(rg --no-ignore -N -o '"askLabels": \[[^]]*\]' "${CONTRACT_JSON}" 2>/dev/null)"
+if [[ -z "${CONTRACT_ASK}" ]]; then
+  fail "the contract's ask labels exclude needs-human" \
+       "could not read askLabels in ${CONTRACT_JSON#"${REPO_ROOT}/"} — the check would pass vacuously"
+elif echo "${CONTRACT_ASK}" | rg -q "${PATTERN}"; then
+  fail "the contract's ask labels exclude needs-human" "found: ${CONTRACT_ASK}"
+else
+  ok "the contract's ask labels exclude needs-human (control: read ${#CONTRACT_ASK} chars of askLabels)"
 fi
 
 # ── Case 5b — the retired off-machine event name ─────────────────────────────
