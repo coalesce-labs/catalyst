@@ -42,6 +42,10 @@
 #                        keeps the resolution chain (per-project stateMap > global
 #                        stateMap > registry triageStatus > bootstrap) as ONE
 #                        implementation rather than growing a second one for readers.
+#                        ⛔ REQUIRES jq and exits 1 without it: every config rung here is
+#                        jq-gated, so a jq-less host could only ever print the bootstrap,
+#                        and this value is interpolated into somebody else's query where a
+#                        wrong stage name returns an empty list instead of an error.
 #   --json               Emit a JSON result to stdout (default: human-readable)
 #
 # Exit codes:
@@ -98,7 +102,7 @@ PRINT_STATE=0
 TEAM_ARG=""
 
 usage() {
-  sed -n '2,45p' "$0" >&2
+  sed -n '2,49p' "$0" >&2
   exit "${1:-1}"
 }
 
@@ -220,10 +224,25 @@ fi
 # ─── --print-state short-circuit (CTL-2300) ────────────────────────────────
 # Above the state-id cache and above every read: the caller is a `$(…)` inside a
 # `--status` argument in shipped skill text, and its whole job is to be cheaper and safer
-# than typing the stage name. The refusal above has already fired for a tenant that
-# declares a stateMap without this slot, so what reaches here is either the tenant's own
-# word for the stage or — for a repo that has declared nothing — the bootstrap.
+# than typing the stage name.
+#
+# ⛔ Codex P1 (round 2) — WITHOUT jq THIS COMMAND HAS NO ANSWER, ONLY A GUESS. Every rung
+# that reads the tenant's config above is `command -v jq`-gated, INCLUDING the refusal. So
+# on a jq-less host a repo mapping `inProgress` to "Building" reaches this line carrying
+# `default_state_for`'s "In Progress" and would print it with exit 0 — the caller then
+# queries a stage the board does not have, gets an EMPTY list rather than an error, and
+# reports a quiet morning. That is this ticket's own failure re-created by its own fix.
+#
+# The write path may keep degrading (a wrong `--status` there fails loudly at linearis, and
+# a jq-less host must still be able to close a ticket); a value INTERPOLATED INTO SOMEBODY
+# ELSE'S QUERY may not. So --print-state refuses, names jq, and exits non-zero.
 if [ "$PRINT_STATE" -eq 1 ]; then
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "ERROR: --print-state needs jq to read this tenant's stateMap, and jq is not on PATH." >&2
+    echo "       Refusing rather than printing this workspace's '$(default_state_for "$TRANSITION")'," >&2
+    echo "       which a board that renamed the stage would return an EMPTY list for, not an error." >&2
+    exit 1
+  fi
   printf '%s\n' "$TARGET_STATE"
   exit 0
 fi

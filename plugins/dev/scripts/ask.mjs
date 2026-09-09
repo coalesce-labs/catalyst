@@ -552,7 +552,7 @@ function cmdCreate(argv) {
     console.error(
       `ask create: REFUSING — could not resolve the ask labels on team ${team} ` +
         `(${lbl.reason}: ${lbl.detail}). Labels are TEAM-SCOPED; filing without them would ` +
-        "hide the ask from every view that selects on catalyst-ask."
+        "hide the ask from every view that selects on this tenant's ask labels."
     );
     return 1;
   }
@@ -745,9 +745,16 @@ function cmdAccept(argv) {
     return 1;
   }
   const labels = (issue?.labels?.nodes ?? []).map((l) => l?.name).filter(Boolean);
-  if (!labels.includes("catalyst-ask")) {
+  // ⛔ Codex P1 (CTL-2300 round 2): this used to test the CONTRACT literal, so a tenant that
+  // overrode `catalyst.linear.askLabels` filed an ask through `create` that `accept` then
+  // refused as "not an ask" — the writer and the reader disagreeing about the same ticket,
+  // which is worse than either literal alone. ANY of the tenant's own ask labels qualifies:
+  // `create` applies all of them, and a human who strips one has not un-asked the question.
+  const askLabels = resolveAskLabelNames().names;
+  if (!labels.some((l) => askLabels.includes(l))) {
     console.error(
-      `ask accept: ${id} is not an ask (no catalyst-ask label; has: ${labels.join(",") || "none"}) — refusing`
+      `ask accept: ${id} is not an ask (carries none of ${askLabels.join(", ")}; has: ` +
+        `${labels.join(",") || "none"}) — refusing`
     );
     return 1;
   }

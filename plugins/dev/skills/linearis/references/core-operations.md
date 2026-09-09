@@ -1,6 +1,6 @@
 # Core operations — full syntax
 
-> ⛔ **Stage names are resolved, never typed (CTL-2300).** `state() { bash "$CLAUDE_PLUGIN_ROOT/scripts/linear-transition.sh" --print-state --transition "$1" --team "$TEAM"; }` — a name this tenant does not use makes `--status` return an EMPTY list rather than an error.
+> ⛔ **Assign the stage name, then check it — never inline `$(state …)` into the query (CTL-2300, Codex round 2).** A command substitution used as an *argument* does not propagate its exit status, so a refused slot leaves `linearis` running with an empty `--status` and the named refusal becomes an empty result set. `VAR=$(state slot) || exit 1` DOES propagate: the assignment's status is the substitution's. `state() { bash "$CLAUDE_PLUGIN_ROOT/scripts/linear-transition.sh" --print-state --transition "$1" --team "$TEAM"; }`
 
 
 Full CRUD and comment-thread commands behind `SKILL.md` → "Core Operations". Run `linearis usage` / `linearis <domain> usage` for the authoritative, always-current flag list — prefer it to memorizing.

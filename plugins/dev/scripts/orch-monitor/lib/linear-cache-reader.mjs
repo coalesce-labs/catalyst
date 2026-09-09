@@ -31,6 +31,7 @@ import { readFile, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { resolveAskLabelNames } from "../../lib/board-vocabulary.mjs";
 
 const HOME = homedir();
 const DEFAULT_DB_PATH = join(HOME, "catalyst", "filter-state.db");
@@ -170,9 +171,13 @@ async function readTicketStateById(dbPath) {
 // canonical ATTENTION_LABEL* exports (linear-cache-reader.test.mjs), which is what
 // stops a taxonomy rename (CTL-995) from silently emptying the parked inbox.
 // Exported for that test — not part of the module's functional API.
-export const ATTENTION_LABELS = ["catalyst-ask", "ask/decision", "needs-input"];
-/** The ask half of ATTENTION_LABELS — the labels that mean "a person owes an answer". */
-export const ASK_LABELS = ["catalyst-ask", "ask/decision"];
+// ⭐ CTL-2300: the ask half is RESOLVED from the tenant's config (lib/board-vocabulary.mjs
+// is a zero-npm leaf — importing it adds no bun:sqlite to the vite graph and no cycle, which
+// is what the note above is actually protecting). `needs-input` stays a literal: it is not a
+// Catalyst-issued label, it is whatever the operator already had.
+export const ASK_LABELS = Object.freeze(resolveAskLabelNames().names);
+/** The parked-inbox taxonomy: the ask labels plus the operator's own needs-input signal. */
+export const ATTENTION_LABELS = Object.freeze([...ASK_LABELS, "needs-input"]);
 const TERMINAL_LINEAR_STATES = new Set(["Done", "Canceled"]);
 
 // readAllTicketDescriptors — the SAME bulk descriptor accessor readTicketStateById
