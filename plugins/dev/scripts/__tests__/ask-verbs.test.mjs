@@ -10,6 +10,7 @@ import { describe, expect, test } from "bun:test";
 import {
   ASK_LABEL_NAMES,
   VERBS,
+  HOW_TO_ANSWER_HEADING,
   buildAskBody,
   isEntryPoint,
   missingBlocksFrom,
@@ -72,6 +73,66 @@ describe("buildAskBody renders the shape the trigger parses", () => {
       defaultIfSilent: "nothing",
     });
     expect(parseAskOptions(body)).toEqual([]);
+  });
+});
+
+// ── CTL-2300: a skill-filed ask reads the same as a cloud-filed one ─────────────────────
+//
+// `apps/mirror/src/write-proxy/human-ask.ts` renders every cloud-filed ask with lettered
+// option bullets and a `**How to answer:**` line (CTC-1298). `ask.mjs` rendered the same
+// three headings WITHOUT either, so the same human got two different-looking artefacts for
+// the same kind of decision and the trigger's parser was exercised on two shapes.
+describe("CTL-2300 — the ask body carries the cloud's how-to-answer contract", () => {
+  const OPTIONS = ["mint a new key", "reuse the existing org key"];
+  const withOptions = () =>
+    buildAskBody({ why: "w", options: OPTIONS, defaultIfSilent: "reuse it at 09:00" });
+
+  test("the how-to-answer line is present, and names every form the classifier accepts", () => {
+    const body = withOptions();
+    expect(body).toContain(HOW_TO_ANSWER_HEADING);
+    // The four forms `ask-decision.ts` recognizes. A body that advertises a SUBSET is what
+    // made a correct reply read to the customer as a wrong one (CTC-1298).
+    for (const form of ["`A`", "`(A)`", "`option A`", "`DECIDED: <your answer>`"]) {
+      expect(body).toContain(form);
+    }
+  });
+
+  test("an option-LESS ask still says how to answer, and names DECIDED:", () => {
+    const body = buildAskBody({ why: "w", defaultIfSilent: "nothing" });
+    expect(body).toContain(HOW_TO_ANSWER_HEADING);
+    expect(body).toContain("`DECIDED: <your answer>`");
+    // …and does NOT promise a letter there is no list for.
+    expect(body).not.toContain("option letter");
+  });
+
+  test("⭐ the letters the line refers to are actually VISIBLE in the body", () => {
+    // The half that makes the line true rather than a pointer at nothing.
+    expect(withOptions()).toContain("- **A** — mint a new key");
+    expect(withOptions()).toContain("- **B** — reuse the existing org key");
+  });
+
+  test("⭐ and the lettered body still round-trips to the DECLARED labels, byte-for-byte", () => {
+    // The regression the letters could have caused: without the ported
+    // stripSelfReferentialLetter, every label would parse back as "**A** — mint a new key",
+    // so verifyAskBody would compare against text no reply will ever match.
+    expect(parseAskOptions(withOptions())).toEqual(OPTIONS);
+    expect(verifyAskBody({ intendedOptions: OPTIONS, storedBody: withOptions() }).ok).toBe(true);
+  });
+
+  test("⛔ CONTROL: a letter that DISAGREES with its position is content, and is kept", () => {
+    // `B:` at position A is telling us the list is not what we think it is — stripping it
+    // would eat the first word of a legitimate label.
+    const body = ["**Options:**", "- B: use the existing table", "- **B** — mint one", ""].join(
+      "\n",
+    );
+    expect(parseAskOptions(body)).toEqual(["B: use the existing table", "mint one"]);
+  });
+
+  test("⛔ CONTROL: past Z there is no letter, and the ask is still fileable", () => {
+    const many = Array.from({ length: 27 }, (_, i) => `opt ${i}`);
+    const body = buildAskBody({ why: "w", options: many, defaultIfSilent: "the first" });
+    expect(body).toContain("- opt 26"); // unlettered — letterFor(26) is "[", which no strip removes
+    expect(parseAskOptions(body)).toEqual(many);
   });
 });
 

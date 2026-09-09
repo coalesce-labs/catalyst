@@ -666,6 +666,45 @@ if [[ ( -e AGENTS.md || -L AGENTS.md || -e CLAUDE.md || -L CLAUDE.md || -e .clau
 	esac
 fi
 
+# 11. Tenant identity — WHOSE workspace are these tools about to write into? (CTL-2300)
+#     Everything above this point tests the HOST INSTALL. None of it says which account,
+#     which human, which team, or which cloud host the session will act as — and each of
+#     those four used to have a silent default that named the fleet: `tenant-0`, the fleet
+#     owner's Linear user id, team `PROJ`, and a retired API host. A wrong identity does not
+#     error; it produces a plausible wrong result (an ask assigned to a user who does not
+#     exist on this workspace, a card filed on a board nobody watches) — the exact failure
+#     shape AGENTS.md's positive-control rule exists to stop.
+#
+#     WARN, never fatal, and the reporter itself always exits 0: a repo mid-setup is told
+#     what is missing rather than stopped. The ladders are NOT re-derived here — the report
+#     comes from the same resolvers the tools use (lib/tenant-identity.mjs,
+#     lib/cloud-facts.mjs), so this check cannot drift from the behaviour it describes.
+IDENTITY_REPORT="${SCRIPT_DIR}/identity-report.mjs"
+if [[ -f "$IDENTITY_REPORT" ]]; then
+	if command -v node &>/dev/null; then
+		identity_out=""
+		identity_rc=0
+		identity_out=$(node "$IDENTITY_REPORT" 2>/dev/null) || identity_rc=$?
+		if [[ $identity_rc -ne 0 || -z $identity_out ]]; then
+			warnings+=("Could not read this project's tenant identity (identity-report.mjs returned ${identity_rc}) — the session's account, human, team and cloud host are unverified")
+		else
+			identity_gaps=0
+			while IFS=$'\t' read -r id_slot id_status id_detail; do
+				[[ -z $id_slot ]] && continue
+				if [[ $id_status != "ok" ]]; then
+					warnings+=("Tenant identity — ${id_slot} UNRESOLVED: ${id_detail}")
+					identity_gaps=$((identity_gaps + 1))
+				fi
+			done <<<"$identity_out"
+			if [[ $identity_gaps -eq 0 ]]; then
+				echo -e "${GREEN}Tenant identity resolved${NC} — account, human, team and cloud host all come from config, not from a built-in default."
+			fi
+		fi
+	else
+		warnings+=("node is not on PATH — cannot verify this project's tenant identity (account, human, team, cloud host)")
+	fi
+fi
+
 # Report errors (fatal)
 if [[ ${#errors[@]} -gt 0 ]]; then
 	echo -e "${RED}ERROR: Project setup incomplete${NC}"

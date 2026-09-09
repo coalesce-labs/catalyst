@@ -64,7 +64,12 @@ _warn_if_readable "$HOME/.config/catalyst/cloud-sync.env"
 set -u
 
 # ─── Cloud feed coordinates (overridable; sane prod defaults) ────────────────
-export CATALYST_CLOUD_BASE_URL="${CATALYST_CLOUD_BASE_URL:-https://api.catalyst-cloud.coalescelabs.ai/api/v1}"
+# CTL-2300: the canonical host. The value this replaced named the retired estate that
+# lib/cloud-facts.mjs (the resolver the writer itself goes through) now refuses from every
+# rung — so a launcher default pointing back at it would be a host the writer immediately
+# talks itself out of. That estate is spelled out in exactly one file, cloud-facts.mjs,
+# and a test asserts it appears in no other shipped script or skill.
+export CATALYST_CLOUD_BASE_URL="${CATALYST_CLOUD_BASE_URL:-https://staging.catalystcloud.dev/api/v1}"
 # ⛔ CTL-1893: capture PROVENANCE BEFORE the fallback erases the distinction.
 # The fallback below makes CATALYST_CLOUD_ACCOUNT always-set by the time the writer reads
 # it, so the writer cannot tell "the operator declared tenant-0" from "nobody said

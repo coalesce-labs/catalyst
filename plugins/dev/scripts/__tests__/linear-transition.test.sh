@@ -871,6 +871,47 @@ run "jq-less --json output still contains ticket and targetState (manual JSON, n
 run "jq-less path: the write really happened (linearis was invoked, not skipped)" \
   bash -c "grep -q 'linearis issues update TST-37' '$LOG37'"
 
+# ─── CTL-2300: a configured tenant's stage names are never guessed at ──────
+# A tenant renames its stages freely and the platform addresses them by SLOT. Before this,
+# a config that DECLARED a stateMap but had no entry for the slot being asked for fell
+# through to default_state_for() — substituting this workspace's "In Progress" for whatever
+# that tenant calls the stage. The substitution is silent here and surfaces much later as a
+# state linearis cannot find, or as a card in a stage the tenant uses for something else.
+WORK38="${SCRATCH}/t38"
+BIN38="${SCRATCH}/t38/bin"
+LOG38="${SCRATCH}/t38/log"
+mkdir -p "${WORK38}/.catalyst"
+# A real tenant shape: stages declared, named their way, and no `verifying` slot at all.
+cat > "${WORK38}/.catalyst/config.json" <<'EOF'
+{"catalyst":{"projectKey":"tenant","linear":{"teamKey":"WID","stateMap":{
+  "backlog":"Icebox","todo":"Queued","inProgress":"Building","done":"Shipped"}}}}
+EOF
+install_fake_linearis "$BIN38"
+touch "$LOG38"
+
+run "⭐ CTL-2300: an unmapped slot on a tenant WITH a stateMap REFUSES, it does not guess" \
+  bash -c "! FAKE_LINEARIS_LOG='$LOG38' PATH='$BIN38:$PATH' \
+    '$TRANSITION' --ticket WID-38 --transition verifying --config '$WORK38/.catalyst/config.json'"
+
+run "CTL-2300: the refusal NAMES the unmapped slot and the config file" \
+  bash -c "FAKE_LINEARIS_LOG='$LOG38' PATH='$BIN38:$PATH' \
+    '$TRANSITION' --ticket WID-38 --transition verifying --config '$WORK38/.catalyst/config.json' 2>&1 \
+    | grep -q \"no stage is mapped to 'verifying'\""
+
+run "⛔ CTL-2300 THE POINT: our own stage name never reached Linear" \
+  bash -c "! grep -q 'In Progress' '$LOG38'"
+
+run "⛔ CONTROL: a slot the tenant DID map still transitions, on the tenant's own name" \
+  bash -c "FAKE_LINEARIS_LOG='$LOG38' PATH='$BIN38:$PATH' \
+    '$TRANSITION' --ticket WID-38 --transition inProgress --config '$WORK38/.catalyst/config.json'"
+
+run "⛔ CONTROL: it used the tenant's 'Building', not this workspace's 'In Progress'" \
+  expect_contains "$LOG38" "linearis issues update WID-38 --status Building"
+
+# ⛔ THE OTHER CONTROL: a repo with NO stateMap at all is a BOOTSTRAP, not a tenant that
+# renamed something — Test 33 above already proves it still resolves. Refusing there would
+# break every unconfigured repo to prevent a failure that cannot happen in one.
+
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"
 [ "$FAILURES" = "0" ]

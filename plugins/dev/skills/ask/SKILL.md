@@ -11,6 +11,10 @@ description:
 > Rules v3 (Ryan, 2026-08-15 → 08-17). Applies to every Catalyst-managed Linear project and every agent,
 > Claude or Codex. Full plugin verb: **CTL-1922**.
 
+## 0. Setup check (first, every session)
+
+`bash "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh"` — the same gate `create-pr`/`merge-pr`/`create-handoff` run. Since CTL-2300 it also names every identity it could NOT resolve (tenant, human, team, cloud host). A `Tenant identity — <slot> UNRESOLVED` line is a stop-and-say: this skill files a decision **for** a human **on** a team, and an unresolved identity there is an ask that reaches nobody while looking filed.
+
 ## 1. What an ask ticket is
 
 A ticket that exists ONLY to obtain one human decision or action. It is **not** the work — that lives on its own tickets, which the ask `blocks →`. Anything reaching the human as "needs you" **must be an ask**, never a status paragraph.

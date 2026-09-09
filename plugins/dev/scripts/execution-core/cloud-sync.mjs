@@ -72,6 +72,7 @@
 // orch-monitor, which is the ticket's "the restart is visible in the event log" clause.
 import { CatalystReplica } from "@catalyst-cloud/sdk/node";
 import { getCloudSyncDepSkewLedgerPath, getCloudSyncDepsPath, getCloudSyncSelfHealPath, getEventLogPath, getHostName, getReplicaDbPath, resolveNodeCloudTokenEnv, HEARTBEAT_INTERVAL_MS } from "./config.mjs";
+import { DEFAULT_CLOUD_BASE_URL } from "../lib/cloud-facts.mjs"; // CTL-2300: one host definition
 import { logDaemonHeartbeat } from "../lib/daemon-heartbeat.mjs";
 import { emitProcessMemoryMetric } from "../lib/process-memory-metric.mjs"; // CTL-1517: per-process RSS/heap gauge
 import { sdkLogRecord } from "./cloud-sync-log.mjs";
@@ -124,7 +125,12 @@ function hbLogger() {
     return { info: emit("info"), warn: emit("warn"), error: emit("error") };
   }
 }
-const DEFAULT_BASE_URL = "https://api.catalyst-cloud.coalescelabs.ai/api/v1";
+// CTL-2300 — one definition, in lib/cloud-facts.mjs. This module and
+// linear-write-proxy.mjs each carried their own copy, and both named the RETIRED estate
+// (spelled out in cloud-facts.mjs, and nowhere else in the shipped surface — a test
+// asserts that). The resolver there refuses that estate from every rung, so the drift
+// cannot come back as an env var either.
+const DEFAULT_BASE_URL = DEFAULT_CLOUD_BASE_URL;
 const DEFAULT_ACCOUNT = "tenant-0";
 export const WRITER_IDLE_EVENT = "catalyst.replica.writer_idle";
 

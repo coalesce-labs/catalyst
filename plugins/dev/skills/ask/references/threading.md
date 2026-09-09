@@ -82,13 +82,15 @@ Before starting work on a scope: set the assignee on the tracking ticket **and**
 | proxy route | status |
 | -- | -- |
 | `issue-comment`, `issue-state`, `issue-label`, `me/ask-answer` | exists |
-| `reaction`, general `issue-create` | ⚠️ not yet — FLEET-30 / COORD-173 |
+| `reaction`, `issue-create` | exists (CTL-1961 / CTC-724 / CTC-725) |
 
-⚠️ **Until the routes land, state moves via `linearis` attribute to the human**, because the CLI writes with the host's personal token. Two consequences, both required:
+⚠️ **This table was wrong in the direction of under-claiming, and the correction matters (CTL-2300).** It said `reaction` and `issue-create` did not exist while `linear-ack.mjs` was already calling `reaction` through the proxy and the cloud was already serving both — so a reader following this reference reached for `linearis` and the personal token for a write the app actor could have made. The single source is `DEFAULT_ROUTES` in `plugins/dev/scripts/execution-core/linear-write-proxy.mjs`; read it rather than trusting a table in prose.
+
+**A write that has a proxy route goes through the proxy, and is attributed to the app actor.** That is every route in the table above. Where no route exists, `linearis` writes with the host's personal token and the history reads as the human — so if you ever have to do that, two things are required:
 
 1. Say **"moved by `<role>` via linearis"** in the accompanying comment, so the history reads honestly
    (COORD-179).
-2. Treat this as a known attribution defect, not as license — it is exactly why the proxy routes exist.
+2. Treat it as a known attribution defect, not as license — it is exactly why the proxy routes exist.
 
 ## Cite only what exists
 

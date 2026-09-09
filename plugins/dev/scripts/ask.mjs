@@ -46,11 +46,40 @@ const OPTION_ITEM = /^(?:[-*]\s+|\(([A-Za-z])\)\s*|([A-Za-z])[).:]\s+)(.+)$/;
 /** The same forms found INLINE on one line: `OPTIONS: (A) do x (B) do y`. */
 const INLINE_OPTION = /\(([A-Za-z])\)\s*([^(]+)/g;
 
+/**
+ * ⭐ CTL-2300 — THE LETTER MARKER, PORTED. The cloud's parser strips a leading `A — ` /
+ * `**A** — ` / `A. ` / `A) ` / `A: ` from a label, but ONLY when the letter AGREES with the
+ * option's own position. Without this port the plugin's round-trip check read the letters
+ * the plugin itself now renders as part of the label text, so a body the cloud parses to
+ * `["keep it", "rewrite"]` parsed here to `["**A** — keep it", …]`.
+ *
+ * ⛔ THE AGREEMENT CHECK IS THE SAFETY PROPERTY, NOT A REFINEMENT (verbatim from
+ * `apps/mirror/src/do/ask-decision.ts`): stripping ANY leading letter marker would eat the
+ * first word of a legitimate label — `B: use the existing table` as option A means
+ * something. Only a marker redundant with the letter at that position is presentation.
+ */
+const SELF_REFERENTIAL_LETTER =
+  /^(?:\*\*|\*|__|_|`)?\s*([A-Za-z])\s*(?:\*\*|\*|__|_|`)?\s*(?:[—–-]|[).:])\s+/;
+
 const nonEmpty = (v) => {
   if (typeof v !== "string") return null;
   const t = v.trim();
   return t === "" ? null : t;
 };
+
+/** `A` for 0, `B` for 1, … Ported from ask-decision.ts's `letterFor`. */
+export function letterFor(index) {
+  return String.fromCharCode(65 + index);
+}
+
+function stripSelfReferentialLetter(label, index) {
+  const m = SELF_REFERENTIAL_LETTER.exec(label);
+  if (m == null) return label;
+  if ((m[1] ?? "").toUpperCase() !== letterFor(index)) return label;
+  // A label that is NOTHING BUT its own letter marker keeps the original: a blank label is
+  // worse than a redundant one — it would render an option that says only "A".
+  return nonEmpty(label.slice(m[0].length)) ?? label;
+}
 
 /** Extract option labels in order; `[]` when the body carries no readable options section. */
 export function parseAskOptions(body) {
@@ -67,7 +96,11 @@ export function parseAskOptions(body) {
   const firstLine = lines[0] ?? "";
   const inline = [...firstLine.matchAll(INLINE_OPTION)]
     .map((m) => nonEmpty(m[2]))
-    .filter((v) => v != null);
+    .filter((v) => v != null)
+    // CTL-2300 — the inline form gets the same strip as the bulleted one, for the reason
+    // ask-decision.ts gives: a fix that fires on only one of two parse paths depends on
+    // which form the human happened to use.
+    .map((label, i) => stripSelfReferentialLetter(label, i));
   if (inline.length >= 2) return inline;
 
   const options = [];
@@ -80,21 +113,61 @@ export function parseAskOptions(body) {
     const item = OPTION_ITEM.exec(trimmed);
     if (item == null) break; // a non-item line (e.g. "**Default if silent:**") ends the list
     const label = nonEmpty(item[3]);
-    if (label != null) options.push(label);
+    // CTL-2300 — `options.length` IS this item's position, because the strip happens as it
+    // is appended: one loop cannot disagree with itself about what index an item is at.
+    if (label != null) options.push(stripSelfReferentialLetter(label, options.length));
   }
   return options;
+}
+
+/** The heading the cloud's own asks carry. Ported from `apps/mirror/src/do/ask-reply-format.ts`. */
+export const HOW_TO_ANSWER_HEADING = "**How to answer:**";
+
+/**
+ * The option bullets. `- **A** — <label>` is the ONE lettered form that round-trips:
+ * `OPTION_ITEM` eats the `- `, `stripSelfReferentialLetter` removes `**A** — ` because the
+ * letter agrees with the position, so `parseAskOptions` returns the declared label
+ * byte-for-byte. `- (A) label` does not round-trip; a bare `(A) label` is not a list item,
+ * so markdown merges every option onto one line.
+ *
+ * ⚠️ PAST Z THERE IS NO LETTER. `letterFor(26)` is `[`, which the strip would not remove, so
+ * the round-trip check would refuse the ask. A 27-option ask is absurd but must be fileable.
+ */
+export function askOptionBullets(options) {
+  return options.map((label, i) => (i < 26 ? `- **${letterFor(i)}** — ${label}` : `- ${label}`));
+}
+
+/**
+ * ⭐ CTL-2300 — THE LINE THE PLUGIN WAS MISSING. `apps/mirror/src/write-proxy/human-ask.ts`
+ * puts this on EVERY ask body it renders (CTC-1298); `ask.mjs` rendered its own template
+ * without it, so an ask filed by a skill and an ask filed by the cloud read differently to
+ * the same human, and the decision trigger's parser was exercised on two shapes. The text
+ * is a port of `howToAnswerLine` — it must name EVERY form `ask-decision.ts` accepts, not a
+ * subset, because a narrow list is what makes a correct reply feel like a wrong one.
+ */
+export function howToAnswerLine(hasOptions) {
+  return hasOptions
+    ? `${HOW_TO_ANSWER_HEADING} reply in this thread with the option letter on its own (\`A\`), ` +
+        `\`(A)\`, \`option A\`, or the option's own text pasted back. For an answer that is not on ` +
+        `the list, reply \`DECIDED: <your answer>\`.`
+    : `${HOW_TO_ANSWER_HEADING} reply in this thread with \`DECIDED: <your answer>\` to record your decision.`;
 }
 
 /**
  * buildAskBody — the canonical shape. Exactly one blank line between sections, because a
  * blank line is what ends the option list for the parser above.
+ *
+ * ⚠️ THE LETTERS AND THE HOW-TO-ANSWER LINE ARE ONE CHANGE, NOT TWO (CTL-2300). The line
+ * tells the human to reply with "the option letter"; rendering it above a list that carries
+ * no letters is the exact defect CTC-1298 measured on the cloud side ("did I need to put
+ * the word decided there?"). Neither half ships without the other.
  */
 export function buildAskBody({ why, options = [], defaultIfSilent, blocks = [] }) {
+  const hasOptions = options.length > 0;
   const parts = [`**Why:** ${why}`];
-  if (options.length > 0) {
-    parts.push(["**Options:**", ...options.map((o) => `- ${o}`)].join("\n"));
-  }
+  if (hasOptions) parts.push(["**Options:**", ...askOptionBullets(options)].join("\n"));
   if (nonEmpty(defaultIfSilent)) parts.push(`**Default if silent:** ${defaultIfSilent}`);
+  parts.push(howToAnswerLine(hasOptions));
   if (blocks.length > 0) parts.push(`Blocks: ${blocks.join(", ")}`);
   return parts.join("\n\n");
 }

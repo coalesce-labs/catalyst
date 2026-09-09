@@ -8,6 +8,10 @@ description:
 
 > Verified against Linearis v2026.4.9 (2026-05-31). ⚠️ **READ vs WRITE.** Linear **READS** → the local replica by direct SQL, or `linear_read_ticket <ID>`. **Never** shell `linearis issues read` for a routine read — it 429s the shared fleet quota. **WRITES** → `linearis`. Read [Gotchas](#gotchas--traps) before scripting.
 
+## Setup check (first, every session)
+
+`bash "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh"` — the same gate `create-pr`/`merge-pr` run, and since CTL-2300 it also names every identity it could NOT resolve (tenant, human, team, cloud host). A write addressed to the wrong team or the wrong workspace does not error; it lands somewhere plausible, which is why this runs before the first read as well as the first write.
+
 ## Reading Linear
 > **Single source of the Linear read rule** — other skills point here, they don't restate it.
 

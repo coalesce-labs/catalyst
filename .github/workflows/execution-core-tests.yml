@@ -928,6 +928,26 @@ jobs:
         working-directory: plugins/dev/scripts/lib
         run: bun test tenant-identity.test.mjs
 
+      - name: cloud-facts resolver + wrong-today-literal scan (bun, CTL-2300)
+        # lib/cloud-facts.mjs resolves WHERE the cloud is and WHAT the host believes it may
+        # spend there — the sibling of tenant-identity.mjs above, for the two cloud-shaped
+        # literals that were measurably wrong on 2026-09-09: a retired API host shipping as
+        # the default in two modules, and a daily write budget an order of magnitude below
+        # the cloud's own.
+        #
+        # Same registration lesson as the step above, for the same reason: this lib/ leaf
+        # sits outside the execution-core/ tree the "Run stable unit tests" step is scoped
+        # to, so without this run: line it would never execute in CI. Positive control:
+        # `grep -n cloud-facts.test .github/workflows/execution-core-tests.yml` returns it.
+        #
+        # The suite's second half is the CTL-2300 Tier-2 DENY-LIST: a corpus scan asserting
+        # no shipped skill text and no shipped script carries the retired host, that
+        # threading.md no longer under-claims the proxy routes, and that the ask template
+        # still carries the cloud's how-to-answer line. A resolver nobody calls fixes
+        # nothing — the scan is what keeps the literals deleted.
+        working-directory: plugins/dev/scripts/lib
+        run: bun test cloud-facts.test.mjs
+
       - name: ask-verb unit tests (bun, CTL-1922 / CTL-1944)
         # ⛔ `ask-verbs.test.mjs` shipped with #3509 and was registered in NO workflow —
         # 20 tests that had never run in CI. Verified with the instrument note above:

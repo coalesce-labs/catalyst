@@ -90,6 +90,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { DEFAULT_CLOUD_BASE_URL, resolveCloudBaseUrl } from "../lib/cloud-facts.mjs";
 import { resolveSecret } from "../lib/secret-contract.mjs";
 import {
   DEFAULT_DAILY_BUDGET,
@@ -241,8 +242,16 @@ export const DEFAULT_READ_ROUTES = Object.freeze({
   attachments: "/agent/attachments",
 });
 
-/** Mirrors cloud-sync.mjs:127 — one default, one env override, no third rung. */
-export const DEFAULT_CLOUD_BASE_URL = "https://api.catalyst-cloud.coalescelabs.ai/api/v1";
+/**
+ * ⭐ CTL-2300 — RE-EXPORT, NOT A CONSTANT. This module and cloud-sync.mjs each carried
+ * their own copy of the base URL, both spelling the RETIRED estate (named in
+ * lib/cloud-facts.mjs and nowhere else), while catalyst-cloud's own narrator defaulted
+ * to the canonical host. Two skill trees, two hosts, and a customer who exports nothing
+ * writes to neither of theirs. The one definition now lives in lib/cloud-facts.mjs, which
+ * also REFUSES a retired host from every rung — including an env var — so re-adding the
+ * old literal here cannot quietly work again.
+ */
+export { DEFAULT_CLOUD_BASE_URL };
 
 /**
  * Hard cap on the serialized request body, byte length. Over it the write is
@@ -269,12 +278,29 @@ export function scrub(s) {
 }
 
 /**
- * resolveProxyBaseUrl — the cloud API base, same two-rung shape cloud-sync.mjs uses.
- * A trailing slash is trimmed so route concatenation is unambiguous.
+ * resolveProxyBaseUrl — the cloud API base, resolved through lib/cloud-facts.mjs's ladder
+ * (env → Layer 1 → Layer 2 → canonical). A trailing slash is trimmed so route
+ * concatenation is unambiguous.
+ *
+ * ⚠️ CTL-2300 — A RETIRED HOST IS CORRECTED, LOUDLY, NOT REFUSED. `resolveCloudBaseUrl`
+ * returns a named failure for a URL on that estate from any rung. This
+ * caller cannot refuse: it returns a string and every write in the process is built on it,
+ * so a refusal here is a total write stoppage. It also cannot pass the value through — the
+ * retired estate is going away, so those writes are lost either way. So it prints the
+ * resolver's own message and continues on the canonical host: one visible line, and the
+ * write still lands where the tenant lives.
  */
 export function resolveProxyBaseUrl(env = process.env) {
-  const raw = env?.CATALYST_CLOUD_BASE_URL || DEFAULT_CLOUD_BASE_URL;
-  return String(raw).replace(/\/+$/, "");
+  const resolved = resolveCloudBaseUrl({ env });
+  if (!resolved.ok) {
+    try {
+      process.stderr.write(`linear-write-proxy: ${resolved.message}\n`);
+    } catch {
+      /* a closed stderr is not a reason to lose the write */
+    }
+    return DEFAULT_CLOUD_BASE_URL.replace(/\/+$/, "");
+  }
+  return String(resolved.baseUrl).replace(/\/+$/, "");
 }
 
 /**
