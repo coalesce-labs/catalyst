@@ -1,11 +1,16 @@
 # Suggest relay-dispatch candidates
 
-Query Linear for tickets that look ready for a `/relay-ticket <TICKET>` dispatch — unblocked, high-priority, sitting in Triage or Backlog. This is the same shape of readiness question `steward` asks before dispatching (`steward/references/readiness.md`), scoped here to a daily top-10 surfaced for a human to skim rather than acted on automatically:
+Query Linear for tickets that look ready for a `/relay-ticket <TICKET>` dispatch — unblocked, high-priority, sitting in the tenant's triage or backlog stage. This is the same shape of readiness question `steward` asks before dispatching (`steward/references/readiness.md`), scoped here to a daily top-10 surfaced for a human to skim rather than acted on automatically:
+
+⛔ **The stage names are resolved from the tenant's own `stateMap`, never typed (CTL-2300).** A board that calls its first stage something else — CTC-1597 renamed one mid-flight — returns an EMPTY list from `--status`, not an error, so a briefing built on typed names reports a quiet morning it cannot distinguish from a wrong query.
 
 ```bash
+TEAM="$(jq -r '.catalyst.linear.teamKey' .catalyst/config.json)"
+state() { bash "$CLAUDE_PLUGIN_ROOT/scripts/linear-transition.sh" --print-state --transition "$1" --team "$TEAM"; }
+
 linearis issues list \
-  --team "$(jq -r '.catalyst.linear.teamKey' .catalyst/config.json)" \
-  --status "Triage,Backlog" \
+  --team "$TEAM" \
+  --status "$(state triage),$(state backlog)" \
   --priority 1 --priority 2 \
   --limit 10 \
   2>/dev/null \

@@ -30,6 +30,18 @@
 #                        (per-project stateMap > global stateMap > registry triageStatus
 #                        > built-in default) must keep working there. Duplicating that
 #                        chain in JS would make this script one of two sources of truth.
+#   --print-state        CTL-2300. Print the resolved stage NAME for --transition and
+#                        stop — no read, no write, no linearis, no ticket needed. Pass
+#                        --team <KEY> instead of --ticket (or as well; --ticket's prefix
+#                        is used when --team is absent). This is what shipped skill text
+#                        calls instead of typing a stage name into a `--status` argument:
+#                        `--status "$(linear-transition.sh --print-state --transition
+#                        inProgress --team "$TEAM")"`. A stage name typed into a query is
+#                        the silent half of this ticket — a board that calls the stage
+#                        something else returns an EMPTY LIST, not an error — and this
+#                        keeps the resolution chain (per-project stateMap > global
+#                        stateMap > registry triageStatus > bootstrap) as ONE
+#                        implementation rather than growing a second one for readers.
 #   --json               Emit a JSON result to stdout (default: human-readable)
 #
 # Exit codes:
@@ -82,9 +94,11 @@ FORCE=0
 DRY_RUN=0
 JSON_OUT=0
 RESOLVE_ONLY=0
+PRINT_STATE=0
+TEAM_ARG=""
 
 usage() {
-  sed -n '2,24p' "$0" >&2
+  sed -n '2,45p' "$0" >&2
   exit "${1:-1}"
 }
 
@@ -93,17 +107,29 @@ while [[ $# -gt 0 ]]; do
     --ticket)      TICKET="$2"; shift 2 ;;
     --transition)  TRANSITION="$2"; shift 2 ;;
     --state)       STATE="$2"; shift 2 ;;
+    --team)        TEAM_ARG="$2"; shift 2 ;;
     --config)      CONFIG="$2"; shift 2 ;;
     --force)       FORCE=1; shift ;;
     --dry-run)     DRY_RUN=1; shift ;;
     --resolve-only) RESOLVE_ONLY=1; shift ;;
+    --print-state) PRINT_STATE=1; shift ;;
     --json)        JSON_OUT=1; shift ;;
     -h|--help)     usage 0 ;;
     *)             echo "unknown arg: $1" >&2; usage ;;
   esac
 done
 
-[ -z "$TICKET" ] && { echo "ERROR: --ticket required" >&2; exit 1; }
+# --print-state resolves a NAME, not a ticket's next state, so it needs a team key rather
+# than a ticket. --ticket still works (its prefix is the team key) and either is accepted;
+# requiring a ticket id for a question that has nothing to do with one is what would send a
+# caller back to typing the stage name by hand.
+if [ "$PRINT_STATE" -eq 1 ]; then
+  if [ -z "$TICKET" ] && [ -z "$TEAM_ARG" ]; then
+    echo "ERROR: --print-state needs --team <KEY> (or --ticket <ID>)" >&2; exit 1
+  fi
+else
+  [ -z "$TICKET" ] && { echo "ERROR: --ticket required" >&2; exit 1; }
+fi
 if [ -z "$TRANSITION" ] && [ -z "$STATE" ]; then
   echo "ERROR: --transition or --state required" >&2; exit 1
 fi
@@ -134,7 +160,7 @@ CONFIG_PATH="$(resolve_config)"
 TARGET_STATE=""
 # Derive team prefix from ticket (e.g. "CTL-123" → "CTL"). Use tr for bash-3.2-safe
 # uppercasing (${x^^} fails as "bad substitution" on macOS /bin/bash 3.2).
-PROJECT_KEY="$(printf '%s' "${TICKET%%-*}" | tr '[:lower:]' '[:upper:]')"
+PROJECT_KEY="$(printf '%s' "${TEAM_ARG:-${TICKET%%-*}}" | tr '[:lower:]' '[:upper:]')"
 if [ -n "$STATE" ]; then
   TARGET_STATE="$STATE"
 elif [ -n "$CONFIG_PATH" ] && [ -f "$CONFIG_PATH" ] && command -v jq >/dev/null 2>&1; then
@@ -189,6 +215,17 @@ fi
 if [ -z "$TARGET_STATE" ]; then
   echo "ERROR: could not resolve target state (transition='${TRANSITION}')" >&2
   exit 1
+fi
+
+# ─── --print-state short-circuit (CTL-2300) ────────────────────────────────
+# Above the state-id cache and above every read: the caller is a `$(…)` inside a
+# `--status` argument in shipped skill text, and its whole job is to be cheaper and safer
+# than typing the stage name. The refusal above has already fired for a tenant that
+# declares a stateMap without this slot, so what reaches here is either the tenant's own
+# word for the stage or — for a repo that has declared nothing — the bootstrap.
+if [ "$PRINT_STATE" -eq 1 ]; then
+  printf '%s\n' "$TARGET_STATE"
+  exit 0
 fi
 
 # ─── Look up the cached UUID from the machine-level registry (CTL-577) ─────

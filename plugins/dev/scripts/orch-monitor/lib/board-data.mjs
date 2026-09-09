@@ -28,6 +28,7 @@ import {
   readReplicaTitles,
   readReplicaHumanHolds,
 } from "./linear-cache-reader.mjs";
+import { CONTRACT_ASK_LABEL_NAMES } from "../../lib/board-vocabulary.mjs";
 import { readFleetAlerts } from "./fleet-alerts.mjs";
 import { fillEstimateFallback, getEstimationMethodAsync } from "./linear-estimate-fallback.mjs";
 // CTL-1046: supplemental Linear-title fallback for cross-team (e.g. ADV) records.
@@ -237,11 +238,12 @@ export function heldFor(labels) {
 // (needs-input, PR-stuck, failed phase) — dropping those would silently blank
 // rows this phase is not about.
 //
-// The ask labels. A SECOND COPY of ask.mjs's ASK_LABEL_NAMES / ask-wake.mjs's,
-// deliberately (importing across the execution-core boundary would run ask.mjs's
-// CLI self-execution guard) — and pinned by a parity test, the same discipline
+// The ask labels. ⛔ CTL-2300: this WAS a third frozen copy of ask.mjs's / ask-wake.mjs's
+// list, because importing across the execution-core boundary would run ask.mjs's CLI
+// self-execution guard. lib/board-vocabulary.mjs is a zero-npm leaf with no CLI, so all
+// three now re-export one committed contract. The parity test stays, the same discipline
 // linear-cache-reader's taxonomy copy is held to.
-export const ATTENTION_LABELS_ASK = Object.freeze(["catalyst-ask", "ask/decision"]);
+export const ATTENTION_LABELS_ASK = CONTRACT_ASK_LABEL_NAMES;
 export const ATTENTION_LABEL_NEEDS_INPUT = "needs-input";
 
 /** True when `labels` carries an ask label. Pure; exported for the parity test. */

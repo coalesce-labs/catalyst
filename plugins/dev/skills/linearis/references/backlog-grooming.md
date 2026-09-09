@@ -1,5 +1,8 @@
 # Backlog grooming
 
+> ⛔ **Stage names are resolved, never typed (CTL-2300).** `state() { bash "$CLAUDE_PLUGIN_ROOT/scripts/linear-transition.sh" --print-state --transition "$1" --team "$TEAM"; }` — a name this tenant does not use makes `--status` return an EMPTY list rather than an error.
+
+
 Cookbook for a grooming pass: lay of the land, pull by project, find orphans, triage by priority, find stale tickets. All reads here are bulk `linearis` calls (not the replica) because they cross many tickets at once — the replica has no bulk-query CLI form yet (see the `linearis` skill's "Reading Linear" → "Still needs linearis").
 
 ## Get the lay of the land
@@ -15,7 +18,7 @@ linearis projects list | jq '.nodes[] | {name, status: .status.name, id}'
 linearis issues list --project "Auth System" --limit 100
 
 # Grouped by status (requires --team for --status filter)
-linearis issues list --team ENG --project "Auth System" --status "Backlog,Todo" --limit 100
+linearis issues list --team "$TEAM" --project "Auth System" --status "$(state backlog),$(state todo)" --limit 100
 ```
 
 ## Find orphaned tickets (no project assigned)
@@ -39,7 +42,7 @@ linearis issues list --project "Auth System" --limit 100 | jq '.nodes[] | select
 
 ```bash
 # Not updated in 30+ days
-linearis issues list --team ENG --updated-before 2026-03-13 --status "In Progress" --limit 50
+linearis issues list --team "$TEAM" --updated-before 2026-03-13 --status "$(state inProgress)" --limit 50
 ```
 
 ## Assign a ticket to a project

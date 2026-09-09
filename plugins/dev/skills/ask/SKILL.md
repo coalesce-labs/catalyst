@@ -24,8 +24,9 @@ A ticket that exists ONLY to obtain one human decision or action. It is **not** 
 **Then use the verb** — it builds the body, files the ticket, reads it BACK out of Linear, and proves the decision trigger can parse the options AND that every `--blocks` relation landed. It exits **2** rather than leaving you an ask that can never be answered, or that answers into the void:
 
 ```bash
+TEAM="$(jq -r '.catalyst.linear.teamKey' .catalyst/config.json)"   # or omit --team entirely; the verb resolves it
 node "$CLAUDE_PLUGIN_ROOT/scripts/ask.mjs" create \
-  --team CTL --priority 2 \
+  --team "$TEAM" --priority 2 \
   --title "ASK: <one line>" \
   --why "<what it unblocks>" \
   --option "<option A>" --option "<option B>" \

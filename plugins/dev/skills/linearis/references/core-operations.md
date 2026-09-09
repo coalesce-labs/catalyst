@@ -1,12 +1,15 @@
 # Core operations — full syntax
 
+> ⛔ **Stage names are resolved, never typed (CTL-2300).** `state() { bash "$CLAUDE_PLUGIN_ROOT/scripts/linear-transition.sh" --print-state --transition "$1" --team "$TEAM"; }` — a name this tenant does not use makes `--status` return an EMPTY list rather than an error.
+
+
 Full CRUD and comment-thread commands behind `SKILL.md` → "Core Operations". Run `linearis usage` / `linearis <domain> usage` for the authoritative, always-current flag list — prefer it to memorizing.
 
 ## Search tickets
 
 ```bash
 linearis issues search "keyword"
-linearis issues search "auth bug" --team ENG --status "Todo"
+linearis issues search "auth bug" --team "$TEAM" --status "$(state todo)"
 ```
 
 ## Create a ticket
@@ -21,7 +24,7 @@ linearis issues create "Title" --team ENG --description "Details" --priority 2 -
 ## Update a ticket
 
 ```bash
-linearis issues update ENG-123 --status "In Progress"
+linearis issues update ENG-123 --status "$(state inProgress)"
 linearis issues update ENG-123 --priority 1
 linearis issues update ENG-123 --labels "bug" --label-mode add
 linearis issues update ENG-123 --project "Project Name"

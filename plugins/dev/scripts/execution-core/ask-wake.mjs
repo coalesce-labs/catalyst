@@ -38,12 +38,18 @@
 //
 // PURE: no IO, no clock, no process state. The daemon injects the detail record.
 
-// ⛔ A SECOND COPY of ask.mjs's ASK_LABEL_NAMES, deliberately: importing ask.mjs
-// from the daemon would run its CLI self-execution guard, which exits the process
-// with 3 if argv[0] happens to be "create"/"accept". The copy is pinned by a
-// parity test (ask-wake.test.mjs) — the same discipline alert-emit's taxonomy uses
-// against board-data's.
-export const ASK_LABEL_NAMES = Object.freeze(["catalyst-ask", "ask/decision"]);
+import { CONTRACT_ASK_LABEL_NAMES } from "../lib/board-vocabulary.mjs";
+
+// ⛔ CTL-2300: this WAS a second frozen copy of ask.mjs's list, because importing ask.mjs
+// from the daemon would run its CLI self-execution guard (which exits the process with 3
+// if argv[0] happens to be "create"/"accept"). lib/board-vocabulary.mjs is a zero-npm leaf
+// with no CLI and no side effects, so the copy is now a re-export of the one committed
+// contract instead. The parity test in ask-wake.test.mjs stays: it is cheaper than trusting
+// that nobody re-diverges them.
+//
+// ⚠️ The CONTRACT constant, not resolveAskLabelNames() — this module is PURE (no IO, no
+// clock, no process state) and the daemon injects `labelNames` when a tenant has its own.
+export const ASK_LABEL_NAMES = CONTRACT_ASK_LABEL_NAMES;
 
 /** A Linear identifier, anchored — `CTL-2157`, `CTC-841`. */
 const TICKET_ID = /^[A-Z][A-Z0-9]*-\d+$/;

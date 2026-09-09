@@ -109,7 +109,7 @@ export function deriveCaller(cmd, args) {
   const base = String(cmd ?? "").split("/").pop() || "unknown";
   const a = Array.isArray(args) ? args : [];
   // Take only the positional subcommand tokens that appear BEFORE the first flag
-  // (`issues list` from `linearis issues list --team CTL`). Stopping at the first
+  // (`issues list` from `linearis issues list --team <KEY>`). Stopping at the first
   // `-`-prefixed token avoids capturing flag VALUES: a status write
   // `linear-transition.sh --ticket CTL-123 --transition research` yields just the
   // basename, not a per-ticket high-cardinality `…:CTL-123-research` tag (CTL-1430

@@ -42,7 +42,7 @@ If a richer Linear or Notion query is needed beyond what the CLI/REST helpers ex
 
 ## Gather "today"
 
-- In-progress Linear tickets — `linearis issues list --team <team> --status "In Progress" --limit 20`
+- In-progress Linear tickets — `linearis issues list --team "$TEAM" --status "$(state inProgress)" --limit 20`, where `state` resolves the SLOT out of the tenant's `stateMap` (`linear-transition.sh --print-state`, CTL-2300). Typing a stage name here is the silent failure this whole section exists to avoid: a name the board does not use returns an empty list, which reads as "nothing in flight".
 - Today's calendar — already gathered above, reuse `$SCRATCH/calendar.json`
 - Follow-ups — extract action items from the prior day's Granola notes (`$SCRATCH/granola.json`) via a Claude-side synthesis pass
 - **Retro signals** — the most recent `/catalyst-dev:ticket-retro` artifact's open watch-items, rendered as a `Plan today → Retro signals` sub-section. Degrades to an empty array (`_no data_`) when no retro has ever run.

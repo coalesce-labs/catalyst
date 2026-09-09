@@ -943,6 +943,36 @@ run "⛔ Codex P1 THE POINT: the built-in 'In Progress' never reached Linear for
 # renamed something — Test 33 above already proves it still resolves. Refusing there would
 # break every unconfigured repo to prevent a failure that cannot happen in one.
 
+# ─── --print-state (CTL-2300) ──────────────────────────────────────────────
+# The handle shipped skill text calls instead of typing a stage name into a `--status`
+# argument. It must resolve the SAME chain the write path resolves — a second resolver for
+# readers would be the drift this ticket is about, one layer down — and it must work with no
+# ticket, no linearis and no replica, because its caller is a `$(…)` inside a query.
+
+run "⭐ CTL-2300 --print-state: prints the tenant's OWN name for the slot, on --team alone" \
+  bash -c "[ \"\$(PATH='/usr/bin:/bin' '$TRANSITION' --print-state --transition inProgress \
+    --team WID --config '$WORK38/.catalyst/config.json')\" = 'Building' ]"
+
+run "⛔ CTL-2300 THE POINT: --print-state never emits this workspace's name for a mapped slot" \
+  bash -c "! PATH='/usr/bin:/bin' '$TRANSITION' --print-state --transition inProgress \
+    --team WID --config '$WORK38/.catalyst/config.json' | grep -q 'In Progress'"
+
+run "CTL-2300 --print-state: --ticket's prefix works as the team key too" \
+  bash -c "[ \"\$(PATH='/usr/bin:/bin' '$TRANSITION' --print-state --transition done \
+    --ticket WID-40 --config '$WORK38/.catalyst/config.json')\" = 'Shipped' ]"
+
+run "⭐ CTL-2300 --print-state: an unmapped slot REFUSES rather than printing our word" \
+  bash -c "! PATH='/usr/bin:/bin' '$TRANSITION' --print-state --transition verifying \
+    --team WID --config '$WORK39/.catalyst/config.json' 2>/dev/null"
+
+run "CTL-2300 --print-state: a repo with NO stateMap still bootstraps (unconfigured repos keep working)" \
+  bash -c "[ \"\$(cd / && PATH='/usr/bin:/bin' '$TRANSITION' --print-state --transition inReview \
+    --team ZZZ --config /nonexistent/config.json)\" = 'In Review' ]"
+
+run "CTL-2300 --print-state: refuses without a team or a ticket, naming both" \
+  bash -c "out=\$(PATH='/usr/bin:/bin' '$TRANSITION' --print-state --transition done 2>&1); \
+    [ \$? -ne 0 ] && printf '%s' \"\$out\" | grep -q -- '--team'"
+
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"
 [ "$FAILURES" = "0" ]
