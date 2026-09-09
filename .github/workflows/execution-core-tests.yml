@@ -948,6 +948,17 @@ jobs:
         working-directory: plugins/dev/scripts/lib
         run: bun test cloud-facts.test.mjs
 
+      - name: identity-report — the four identity slots (bun, CTL-2300)
+        # scripts/identity-report.mjs is what turns "whose workspace is this?" into four
+        # named lines check-project-setup.sh can warn on. Its load-bearing rung is the one
+        # Codex's round-1 P1 found: the ENROLLED account lives in cloud-sync.env, a file
+        # sourced only by the supervised launcher, so reading process.env alone reported
+        # UNRESOLVED on every correctly enrolled host — a warning that always fires.
+        # Registered here for the same reason as the two steps above; positive control:
+        # `grep -n identity-report.test .github/workflows/execution-core-tests.yml`.
+        working-directory: plugins/dev/scripts/lib
+        run: bun test identity-report.test.mjs
+
       - name: ask-verb unit tests (bun, CTL-1922 / CTL-1944)
         # ⛔ `ask-verbs.test.mjs` shipped with #3509 and was registered in NO workflow —
         # 20 tests that had never run in CI. Verified with the instrument note above:

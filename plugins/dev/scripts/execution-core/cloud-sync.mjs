@@ -72,7 +72,7 @@
 // orch-monitor, which is the ticket's "the restart is visible in the event log" clause.
 import { CatalystReplica } from "@catalyst-cloud/sdk/node";
 import { getCloudSyncDepSkewLedgerPath, getCloudSyncDepsPath, getCloudSyncSelfHealPath, getEventLogPath, getHostName, getReplicaDbPath, resolveNodeCloudTokenEnv, HEARTBEAT_INTERVAL_MS } from "./config.mjs";
-import { DEFAULT_CLOUD_BASE_URL } from "../lib/cloud-facts.mjs"; // CTL-2300: one host definition
+import { DEFAULT_CLOUD_BASE_URL, resolveCloudBaseUrl } from "../lib/cloud-facts.mjs"; // CTL-2300
 import { logDaemonHeartbeat } from "../lib/daemon-heartbeat.mjs";
 import { emitProcessMemoryMetric } from "../lib/process-memory-metric.mjs"; // CTL-1517: per-process RSS/heap gauge
 import { sdkLogRecord } from "./cloud-sync-log.mjs";
@@ -240,7 +240,24 @@ function scrub(s) {
     .replace(/\blin_(?:api|oauth)_[A-Za-z0-9_-]+/g, "lin_***");
 }
 
-const baseUrl = process.env.CATALYST_CLOUD_BASE_URL || DEFAULT_BASE_URL;
+// ⭐ CTL-2300 (Codex P1, round 1) — RESOLVED, NOT `env || DEFAULT`. The two-rung form this
+// replaced could not see the config layers at all, so a tenant that set
+// `catalyst.cloud.baseUrl` and nothing else was ignored — and an upgraded host whose
+// `cloud-sync.env` still carried the retired URL had it passed straight through, which is
+// the exact value this ticket exists to stop reaching the wire. The resolver refuses a
+// retired host from every rung; on that refusal we say so and continue on the canonical
+// host, for the same reason linear-write-proxy.mjs does: the retired estate is going away,
+// so passing the value through loses the writes either way, and refusing to start loses
+// them too.
+const baseUrlR = resolveCloudBaseUrl({ env: process.env });
+if (!baseUrlR.ok) {
+  try {
+    process.stderr.write(`${TAG} ${baseUrlR.message}\n`);
+  } catch {
+    /* a closed stderr is not a reason to refuse to start */
+  }
+}
+const baseUrl = baseUrlR.ok ? baseUrlR.baseUrl : DEFAULT_BASE_URL;
 // CTL-1893 / sdk 0.8.7: the account and its PROVENANCE are different facts, and the SDK's
 // tenant fence needs both. An operator setting CATALYST_CLOUD_ACCOUNT IS a declaration;
 // falling back to DEFAULT_ACCOUNT is not.

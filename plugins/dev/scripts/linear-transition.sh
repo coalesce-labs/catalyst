@@ -163,9 +163,16 @@ fi
 # substitutes our workspace's stage name for theirs — the failure is silent at this layer
 # and surfaces later as a linearis update that could not find the state, or (worse) as a
 # card moved to a stage the tenant uses for something else. Refuse, and name the key.
+# ⚠️ Codex P1 (round 1): "declared" means EITHER map is non-empty, not "the first non-null
+# one is". A `//` chain reads `stateMap: {}` on a matching project as a declaration (an
+# empty object is not null), so a project with an empty map plus a populated GLOBAL map
+# concluded "nothing declared" and fell through to the guess — which is precisely the
+# tenant this guard exists for. The resolution query above falls back per KEY, so the guard
+# has to ask the same question the resolution does.
 if [ -z "$TARGET_STATE" ] && [ -n "$CONFIG_PATH" ] && [ -f "$CONFIG_PATH" ] && command -v jq >/dev/null 2>&1; then
   HAS_STATE_MAP=$(jq -r --arg p "$PROJECT_KEY" \
-    'if ((.catalyst.projects[]? | select(.key == $p) | .stateMap) // .catalyst.linear.stateMap // {} | length) > 0 then "yes" else "" end' \
+    'if (([.catalyst.projects[]? | select(.key == $p) | .stateMap // {}] | add // {} | length)
+         + ((.catalyst.linear.stateMap // {}) | length)) > 0 then "yes" else "" end' \
     "$CONFIG_PATH" 2>/dev/null)
   if [ -n "$HAS_STATE_MAP" ]; then
     echo "ERROR: no stage is mapped to '${TRANSITION}' for ${PROJECT_KEY} in ${CONFIG_PATH}." >&2

@@ -64,12 +64,20 @@ _warn_if_readable "$HOME/.config/catalyst/cloud-sync.env"
 set -u
 
 # ─── Cloud feed coordinates (overridable; sane prod defaults) ────────────────
-# CTL-2300: the canonical host. The value this replaced named the retired estate that
-# lib/cloud-facts.mjs (the resolver the writer itself goes through) now refuses from every
-# rung — so a launcher default pointing back at it would be a host the writer immediately
-# talks itself out of. That estate is spelled out in exactly one file, cloud-facts.mjs,
-# and a test asserts it appears in no other shipped script or skill.
-export CATALYST_CLOUD_BASE_URL="${CATALYST_CLOUD_BASE_URL:-https://staging.catalystcloud.dev/api/v1}"
+# ⛔ CTL-2300 (Codex P1, round 1) — THE LAUNCHER NO LONGER INJECTS A DEFAULT HOST.
+# It used to `export CATALYST_CLOUD_BASE_URL="${…:-<a literal>}"`, which had two effects,
+# both wrong now that the writer resolves this through lib/cloud-facts.mjs:
+#
+#   1. an ALWAYS-SET env var SHADOWS the config layers — a tenant who set
+#      `catalyst.cloud.baseUrl` and nothing else could never be read, because the env rung
+#      is the highest one and the launcher had already filled it in;
+#   2. a `cloud-sync.env` on an upgraded host that still carries the RETIRED URL was
+#      preserved verbatim and handed to the writer.
+#
+# Leaving it unset lets the writer's own ladder run (env → Layer 1 → Layer 2 → canonical)
+# AND lets its retired-host guard see the value it has to refuse. An operator-provisioned
+# CATALYST_CLOUD_BASE_URL sourced above is still honoured — it is simply no longer
+# manufactured here when nobody set one.
 # ⛔ CTL-1893: capture PROVENANCE BEFORE the fallback erases the distinction.
 # The fallback below makes CATALYST_CLOUD_ACCOUNT always-set by the time the writer reads
 # it, so the writer cannot tell "the operator declared tenant-0" from "nobody said

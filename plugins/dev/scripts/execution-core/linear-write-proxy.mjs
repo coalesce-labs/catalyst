@@ -90,7 +90,11 @@ import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { DEFAULT_CLOUD_BASE_URL, resolveCloudBaseUrl } from "../lib/cloud-facts.mjs";
+import {
+  DEFAULT_CLOUD_BASE_URL,
+  resolveCloudBaseUrl,
+  resolveHostDailyWriteBudget,
+} from "../lib/cloud-facts.mjs";
 import { resolveSecret } from "../lib/secret-contract.mjs";
 import {
   DEFAULT_DAILY_BUDGET,
@@ -833,8 +837,19 @@ export function resolveWriteBudgetCaps(env = process.env, log = null) {
     }
     return n;
   };
+  // ⭐ CTL-2300 (Codex P2, round 1) — THE CONFIGURED BUDGET IS THE FALLBACK, NOT THE
+  // CONSTANT. `catalyst.cloud.hostDailyWriteBudget` was documented and resolvable but had
+  // no production caller, so an operator who set it changed nothing — a config key that
+  // reads as live and is inert is worse than one that does not exist.
+  //
+  // ⚠️ IT IS THE FALLBACK RUNG, NOT AN OVERRIDE OF THE ENV VAR. The daemon's own
+  // CATALYST_LINEAR_WRITE_DAILY_BUDGET is what write-budget-health.mjs reads back out of
+  // the pid-gated runtime snapshot to decide whether a limit is CONFIRMED; putting config
+  // above it would make doctor's confirmed/unconfirmed split disagree with what is
+  // actually enforced.
+  const configuredDaily = resolveHostDailyWriteBudget({ env }).budget;
   return {
-    dailyBudget: resolveCap("CATALYST_LINEAR_WRITE_DAILY_BUDGET", DEFAULT_DAILY_BUDGET),
+    dailyBudget: resolveCap("CATALYST_LINEAR_WRITE_DAILY_BUDGET", configuredDaily),
     perTicketCap: resolveCap("CATALYST_LINEAR_WRITE_TICKET_CAP", DEFAULT_PER_TICKET_CAP),
   };
 }

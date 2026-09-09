@@ -908,6 +908,37 @@ run "⛔ CONTROL: a slot the tenant DID map still transitions, on the tenant's o
 run "⛔ CONTROL: it used the tenant's 'Building', not this workspace's 'In Progress'" \
   expect_contains "$LOG38" "linearis issues update WID-38 --status Building"
 
+# ⚠️ Codex P1 (round 1): a project whose own stateMap is EMPTY must still see the global
+# one. A `//` chain treats `{}` as a declaration (it is not null), so the first cut of the
+# guard read "project map wins, it is empty, nothing is declared" and fell through to the
+# built-in guess — for a repo whose global map is fully populated, which is exactly the
+# tenant the guard exists to protect.
+WORK39="${SCRATCH}/t39"
+BIN39="${SCRATCH}/t39/bin"
+LOG39="${SCRATCH}/t39/log"
+mkdir -p "${WORK39}/.catalyst"
+cat > "${WORK39}/.catalyst/config.json" <<'EOF'
+{"catalyst":{"projectKey":"tenant","linear":{"teamKey":"WID","stateMap":{
+  "backlog":"Icebox","inProgress":"Building","done":"Shipped"}},
+  "projects":[{"key":"WID","stateMap":{}}]}}
+EOF
+install_fake_linearis "$BIN39"
+touch "$LOG39"
+
+run "⭐ CTL-2300: an EMPTY project stateMap falls back to the global one, it does not resolve" \
+  bash -c "FAKE_LINEARIS_LOG='$LOG39' PATH='$BIN39:$PATH' \
+    '$TRANSITION' --ticket WID-39 --transition inProgress --config '$WORK39/.catalyst/config.json'"
+
+run "CTL-2300: and it used the GLOBAL map's 'Building'" \
+  expect_contains "$LOG39" "linearis issues update WID-39 --status Building"
+
+run "⭐ Codex P1: an unmapped slot with an EMPTY project map still REFUSES (the global map counts as declared)" \
+  bash -c "! FAKE_LINEARIS_LOG='$LOG39' PATH='$BIN39:$PATH' \
+    '$TRANSITION' --ticket WID-39 --transition verifying --config '$WORK39/.catalyst/config.json'"
+
+run "⛔ Codex P1 THE POINT: the built-in 'In Progress' never reached Linear for the unmapped slot" \
+  bash -c "! grep -q 'status In Progress' '$LOG39'"
+
 # ⛔ THE OTHER CONTROL: a repo with NO stateMap at all is a BOOTSTRAP, not a tenant that
 # renamed something — Test 33 above already proves it still resolves. Refusing there would
 # break every unconfigured repo to prevent a failure that cannot happen in one.

@@ -31,6 +31,9 @@
 // tenant is a repo mid-setup, and a checkup that refuses to finish tells the operator less
 // than one that lists what is missing.
 
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { resolveAskHuman, resolveAskTeam } from "./lib/tenant-identity.mjs";
 import {
   BASE_URL_CONFIG_PATH,
@@ -39,6 +42,52 @@ import {
   resolveCloudBaseUrl,
 } from "./lib/cloud-facts.mjs";
 
+const declared = (v) => (typeof v === "string" && v.trim() !== "" ? v.trim() : null);
+
+/**
+ * ⭐ CTL-2300 (Codex P1, round 1) — THE ENROLLED ACCOUNT LIVES IN A FILE NOTHING SOURCES.
+ * `catalyst-enrol.sh` writes `export CATALYST_CLOUD_ACCOUNT=<id>` into
+ * `~/.config/catalyst/cloud-sync.env`, which is sourced ONLY by the supervised cloud-sync
+ * launcher — never by an interactive shell and never by a setup check. Reading only the
+ * process env therefore reported `unresolved` on every correctly enrolled host, which is
+ * worse than not checking: a warning that always fires is one nobody reads, and it would
+ * have made this whole section noise on the first host that saw it.
+ *
+ * So the env FILES are a rung of their own. Deliberately a narrow scan for one assignment,
+ * not a `source` — this runs inside a checkup, and sourcing an operator-provisioned file
+ * that also carries the host's cloud TOKEN executes arbitrary shell to answer a question
+ * about an account id.
+ */
+export function readAccountFromEnvFiles(paths, readFile) {
+  for (const path of paths) {
+    let text;
+    try {
+      text = readFile(path);
+    } catch {
+      continue; // absent or unreadable — try the next file
+    }
+    // `export CATALYST_CLOUD_ACCOUNT=tenant-3`, with or without `export`, quoted or not.
+    // Last assignment wins, matching shell's own semantics when a file sets it twice.
+    let found = null;
+    for (const line of String(text).split("\n")) {
+      const m = /^\s*(?:export\s+)?CATALYST_CLOUD_ACCOUNT\s*=\s*(.*)$/.exec(line);
+      if (m == null) continue;
+      const raw = (m[1] ?? "").trim().replace(/^(['"])(.*)\1$/, "$2");
+      const value = declared(raw);
+      if (value) found = value;
+    }
+    if (found) return { account: found, path };
+  }
+  return null;
+}
+
+/** The env files an enrolment writes, most specific first. */
+export function accountEnvFilePaths(env = process.env) {
+  const home = declared(env?.HOME) ?? homedir();
+  const dir = join(home, ".config", "catalyst");
+  return [join(dir, "cloud-sync.env"), join(dir, "cluster.env")];
+}
+
 /**
  * The tenant/account id.
  *
@@ -46,19 +95,29 @@ import {
  * `setup-catalyst.sh` both default to it, so a customer host is stamped with the fleet
  * owner's account before it has said anything. There is no cloud route a key holder can
  * ask "which account am I?" yet (CTC-493), so the honest answer here is `unresolved` with
- * the two places an operator can declare it — not a guess that reads like a fact.
+ * the places an operator can declare it — not a guess that reads like a fact.
  */
-export function resolveTenantAccount({ env = process.env } = {}) {
-  const declared = (v) => (typeof v === "string" && v.trim() !== "" ? v.trim() : null);
+export function resolveTenantAccount({
+  env = process.env,
+  envFilePaths,
+  readFile = (p) => readFileSync(p, "utf8"),
+} = {}) {
   const fromEnv = declared(env?.CATALYST_CLOUD_ACCOUNT);
   if (fromEnv) return { ok: true, account: fromEnv, source: "env" };
+
+  const paths = envFilePaths ?? accountEnvFilePaths(env);
+  const fromFile = readAccountFromEnvFiles(paths, readFile);
+  if (fromFile) {
+    return { ok: true, account: fromFile.account, source: `env-file (${fromFile.path})` };
+  }
+
   return {
     ok: false,
     message:
-      "no cloud account declared. Export CATALYST_CLOUD_ACCOUNT, or set it in the host's " +
-      "cloud-sync env. Nothing here defaults to tenant-0: on a customer host that is the " +
-      "fleet owner's account, and the mirror's tenant fence refuses the write long after " +
-      "the tools have decided it was fine.",
+      "no cloud account declared. Export CATALYST_CLOUD_ACCOUNT, or enrol this host " +
+      `(catalyst-enrol.sh writes it to ${paths[0]}). Nothing here defaults to tenant-0: ` +
+      "on a customer host that is the fleet owner's account, and the mirror's tenant fence " +
+      "refuses the write long after the tools have decided it was fine.",
   };
 }
 
