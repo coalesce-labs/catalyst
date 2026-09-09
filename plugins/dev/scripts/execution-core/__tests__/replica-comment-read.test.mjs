@@ -10,7 +10,7 @@
 // comment" is a clean null. Both are asserted below.
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync, utimesSync } from "node:fs";
+import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -20,10 +20,13 @@ import {
   readCommentThreadRoot,
   isReplicaCurrent,
   ReplicaUnavailableError,
-  DEFAULT_ASK_HUMAN_ID,
+  HumanNotConfiguredError,
 } from "../replica-comment-read.mjs";
 
-const HUMAN = "c2a8cc92-cab6-4536-9500-0f24abdf702b";
+// CTL-2299: an arbitrary uuid, not a real person's. It used to be the fleet owner's id
+// because the module DEFAULTED to it; the default is now the tenant's own config, so this
+// is a fixture and nothing more.
+const HUMAN = "11111111-2222-3333-4444-555555555555";
 const OTHER_HUMAN = "99999999-0000-0000-0000-000000000000";
 
 let dir;
@@ -134,11 +137,53 @@ describe("readLatestHumanComment", () => {
     expect(thrown.dbPath).toBe(missing);
   });
 
-  test("humanId defaults to the ASK_HUMAN_ID sentinel", async () => {
-    expect(DEFAULT_ASK_HUMAN_ID).toBe(HUMAN);
-    seed([{ id: "c-def", author_id: HUMAN, is_bot: 0, created_at: 600 }]);
-    const got = await readLatestHumanComment({ dbPath, identifier: "CTL-1" });
-    expect(got).toEqual({ id: "c-def", parentId: "c-def" });
+  // CTL-2299 — the default humanId is the TENANT's, read from config, with no
+  // person-shaped fallback. Both halves are asserted: the configured tenant resolves, and
+  // the unconfigured one REFUSES loudly instead of querying an id nobody authored (which
+  // returns no row and reads, wrongly, as "the human has not commented").
+  describe("the default humanId comes from the tenant's config", () => {
+    let savedEnv;
+
+    beforeEach(() => {
+      savedEnv = {
+        ASK_HUMAN_ID: process.env.ASK_HUMAN_ID,
+        CATALYST_CONFIG_FILE: process.env.CATALYST_CONFIG_FILE,
+        CATALYST_LAYER2_CONFIG_FILE: process.env.CATALYST_LAYER2_CONFIG_FILE,
+      };
+      delete process.env.ASK_HUMAN_ID;
+      // Point BOTH layers somewhere this test owns, so whatever config the runner's cwd or
+      // home happens to carry cannot decide the answer.
+      process.env.CATALYST_LAYER2_CONFIG_FILE = join(dir, "absent-layer2.json");
+    });
+
+    afterEach(() => {
+      for (const [k, v] of Object.entries(savedEnv)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    });
+
+    test("resolves the configured human", async () => {
+      const cfg = join(dir, "config.json");
+      writeFileSync(cfg, JSON.stringify({ catalyst: { human: { linearUserId: HUMAN } } }));
+      process.env.CATALYST_CONFIG_FILE = cfg;
+      seed([{ id: "c-def", author_id: HUMAN, is_bot: 0, created_at: 600 }]);
+      const got = await readLatestHumanComment({ dbPath, identifier: "CTL-1" });
+      expect(got).toEqual({ id: "c-def", parentId: "c-def" });
+    });
+
+    test("REFUSES when no human is configured, rather than silently matching nobody", async () => {
+      process.env.CATALYST_CONFIG_FILE = join(dir, "absent-layer1.json");
+      seed([{ id: "c-def", author_id: HUMAN, is_bot: 0, created_at: 600 }]);
+      let thrown;
+      try {
+        await readLatestHumanComment({ dbPath, identifier: "CTL-1" });
+      } catch (e) {
+        thrown = e;
+      }
+      expect(thrown).toBeInstanceOf(HumanNotConfiguredError);
+      expect(thrown.message).toContain("catalyst.human.linearUserId");
+    });
   });
 });
 

@@ -1,6 +1,10 @@
 {
   "catalyst": {
     "projectKey": "catalyst-workspace",
+    "human": {
+      "linearUserId": "c2a8cc92-cab6-4536-9500-0f24abdf702b",
+      "name": "Ryan"
+    },
     "project": {
       "ticketPrefix": "CTL"
     },

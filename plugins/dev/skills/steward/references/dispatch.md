@@ -1,5 +1,7 @@
 # Dispatch — launching a relay-ticket session
 
+⚠️ **This is the OFF-CLOUD shape.** On a Catalyst Cloud tenant the phases run in the tenant's runner containers and you dispatch by moving the card, not by launching anything — read [`cloud-dispatch.md`](cloud-dispatch.md) instead. `cloud-detection.md` is what tells you which you are on; launching a local session on a cloud tenant puts two workers on one branch.
+
 ## Launching `/relay-ticket <TICKET>` IS the dispatch
 
 There is no daemon and no pull-based scheduler to hand a ticket to — both retired 2026-08-24 (CTL-2218). You dispatch by launching a session that runs `/relay-ticket <TICKET>` yourself (a background agent / `claude --bg` session — whatever your environment's session primitive is). Three shapes, from the `relay-ticket` skill:

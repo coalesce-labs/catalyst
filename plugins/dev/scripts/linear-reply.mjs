@@ -112,7 +112,18 @@ if (top) {
 } else {
   // `|| undefined`: JS default parameters fire on undefined only, not '', so an explicitly-empty
   // ASK_HUMAN_ID='' would otherwise query author_id='' (matches nothing) → a silent "no comment".
-  const ctx = await readReplyContext({ dbPath: DB, identifier: issueKey, humanId: process.env.ASK_HUMAN_ID || undefined });
+  // CTL-2299: unset now resolves THIS TENANT's configured human, and a tenant that configured
+  // none gets a one-line refusal here rather than an unhandled rejection's stack.
+  let ctx;
+  try {
+    ctx = await readReplyContext({ dbPath: DB, identifier: issueKey, humanId: process.env.ASK_HUMAN_ID || undefined });
+  } catch (err) {
+    if (err?.name === "HumanNotConfiguredError") {
+      console.error(`linear-reply: REFUSED — ${err.message}`);
+      process.exit(1);
+    }
+    throw err;
+  }
   issueId = ctx.issueId;
   if (ctx.latest) {
     parentId = ctx.latest.parentId;

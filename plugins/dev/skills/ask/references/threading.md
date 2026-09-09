@@ -57,7 +57,7 @@ The human is looking at the **last message they wrote**, not the top of the thre
 - **On reply** — `linear-reply.mjs` removes the eyes automatically when the reply posts (`--keep-eyes`
   to leave it).
 
-⚠️ **Linear returns comments newest-first.** Sort explicitly before choosing "the latest human comment". Both helpers do; anything you write yourself must too — acking the oldest message has already happened. Only the human's own comments count (`ASK_HUMAN_ID`, default Ryan); the decision trigger's replies carry a `user` field too and will fool a naive check.
+⚠️ **Linear returns comments newest-first.** Sort explicitly before choosing "the latest human comment". Both helpers do; anything you write yourself must too — acking the oldest message has already happened. Only the human's own comments count — `ASK_HUMAN_ID`, defaulting to this tenant's `catalyst.human.linearUserId` (CTL-2299; there is no person-shaped fallback, an unconfigured tenant refuses loudly); the decision trigger's replies carry a `user` field too and will fool a naive check.
 
 ## What a reply says
 

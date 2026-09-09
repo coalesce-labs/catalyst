@@ -2,8 +2,8 @@
 
 The body shape below is parsed by the decision trigger (`apps/mirror/src/do/ask-decision.ts`). A body in any other shape yields **zero** options, and then every reply the human writes is rejected.
 
-- **Team:** the team the decision belongs to. **Assignee = the human** (Ryan:
-  `c2a8cc92-cab6-4536-9500-0f24abdf702b`); no delegate.
+- **Team and assignee come from THIS tenant's config, never from a literal you copy out of
+  here (CTL-2299).** The team is `catalyst.linear.teamKey` and the assignee is `catalyst.human.linearUserId`, both read from `.catalyst/config.json` (or the per-machine `~/.config/catalyst/config.json`); `ask.mjs create` resolves both for you, and `--team` is only for the case where the decision belongs to a team other than the repo's own. There is no default human — an unconfigured tenant gets a named refusal, because an ask assigned to a user who does not exist on that workspace files cleanly and reaches nobody. No delegate: the assignee is the human.
 - **Labels — both, exact names:** `catalyst-ask` + `ask/decision`. Linear labels are **team-scoped**:
   if a team lacks them, create them once (`issueLabelCreate` with the personal token — the app actor cannot create labels, measured CTC-626). `catalyst-ask` is what the "Waiting on me" view and the push trigger key on; `ask/decision` is the human-readable class.
 - **Title:** starts with `ASK:` (or names the click/decision itself); one line a phone can show.
@@ -26,13 +26,16 @@ The body shape below is parsed by the decision trigger (`apps/mirror/src/do/ask-
   (`A`, `A.`, `option A`) or the option's exact text, or `DECIDED: <free text>`. `(A)` inside a sentence is NOT recognized until CTC-653 lands. The trigger is deterministic — no LLM reads the reply (CTC-554).
 - Priority 1 if it blocks a live customer path, else 2.
 
-The raw form, for reference (or when you must hand-build):
+The raw form, for reference (or when you must hand-build). Read the two identities out of the config rather than typing them — a pasted id is how a single-tenant assumption spreads:
 
 ```bash
-linearis issues create "ASK: <one line>" --team CTL --priority 2 \
-  --assignee c2a8cc92-cab6-4536-9500-0f24abdf702b \
+cfg=.catalyst/config.json
+team=$(jq -r '.catalyst.linear.teamKey' "$cfg")
+human=$(jq -r '.catalyst.human.linearUserId' "$cfg")
+linearis issues create "ASK: <one line>" --team "$team" --priority 2 \
+  --assignee "$human" \
   --labels "catalyst-ask,ask/decision" \
-  --blocks CTL-NNNN \
+  --blocks "$team-NNNN" \
   --description "$(printf '**Why:** …\n\n**Options:**\n- …\n- …\n\n**Default if silent:** …')"
 ```
 

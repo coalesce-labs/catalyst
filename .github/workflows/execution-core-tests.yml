@@ -886,6 +886,22 @@ jobs:
         working-directory: plugins/dev/scripts/lib
         run: bun test comment-body-arg.test.mjs
 
+      - name: tenant-identity resolver + fleet-owner-literal scan (bun, CTL-2299)
+        # lib/tenant-identity.mjs resolves WHO the human is, WHICH team an ask is filed on,
+        # and WHAT the status doc calls them — from the tenant's own config, with no
+        # person-shaped fallback. Own step for the same reason as the three leaves above:
+        # it sits outside the execution-core/ tree the "Run stable unit tests" step below is
+        # scoped to, so it needs an explicit run: line or it never executes in CI.
+        #
+        # The suite's second half is a CORPUS SCAN asserting the fleet owner's Linear user
+        # id appears in no shipped skill text and no default — the guard for the rule this
+        # ticket enforces, registered in the SAME change that adds it (the
+        # four-times-burned exec-core-stable-test-allowlist lesson). Positive control:
+        # `grep -n tenant-identity.test .github/workflows/execution-core-tests.yml` returns
+        # this run: line.
+        working-directory: plugins/dev/scripts/lib
+        run: bun test tenant-identity.test.mjs
+
       - name: ask-verb unit tests (bun, CTL-1922 / CTL-1944)
         # ⛔ `ask-verbs.test.mjs` shipped with #3509 and was registered in NO workflow —
         # 20 tests that had never run in CI. Verified with the instrument note above:
