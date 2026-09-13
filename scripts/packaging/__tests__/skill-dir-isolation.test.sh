@@ -18,7 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 SKILLS_ROOT="${REPO_ROOT}/plugins/dev/skills"
 
-SKILLS="agent-browser ask commit concierge create-handoff create-plan create-pr describe-pr fix-typescript gherkin-ticket implement-plan iterate-plan linear linearis merge-pr project-orchestrator remediate-plan research-codebase resume-handoff review-comments scan-reward-hacking steward triage-aging-prs validate-plan validate-type-safety"
+SKILLS="agent-browser ask briefing-followup commit concierge create-handoff create-plan create-pr describe-pr fix-typescript gherkin-ticket implement-plan iterate-plan linear linearis merge-pr morning-briefing project-orchestrator remediate-plan research-codebase resume-handoff review-comments scan-reward-hacking steward triage-aging-prs validate-plan validate-type-safety"
 
 PASS=0
 FAIL=0
@@ -180,6 +180,18 @@ run_isolated "steward: cloud-detection helpers source (replica + marker)" stewar
   'source "$CLAUDE_SKILL_DIR/scripts/lib/linear-read-replica.sh" && source "$CLAUDE_SKILL_DIR/scripts/lib/plugin-dirs.sh" && declare -F replica_fresh >/dev/null && declare -F plugin_dirs_repo_config_path >/dev/null'
 run_isolated "create-handoff: handoff-durability helper sources and defines its three steps" create-handoff \
   'source "$CLAUDE_SKILL_DIR/scripts/lib/handoff-durability.sh" && declare -F handoff_resolve_path >/dev/null && declare -F handoff_write_verified >/dev/null && declare -F handoff_sync_and_classify >/dev/null'
+
+# Cluster 4b — briefings.
+run_isolated_expect "morning-briefing: validate-frontmatter finds its schema from a lone copy" morning-briefing "no frontmatter block found" \
+  'printf "no frontmatter here\n" > "$HOME/briefing.md"; bash "$CLAUDE_SKILL_DIR/scripts/morning-briefing/validate-frontmatter.sh" "$HOME/briefing.md"'
+run_isolated "morning-briefing: output-path resolves a dry-run path" morning-briefing \
+  'bash "$CLAUDE_SKILL_DIR/scripts/morning-briefing/output-path.sh" --dry-run --date 2026-01-02 | grep -q 2026-01-02'
+run_isolated "morning-briefing: linear-transition --help (suggest-dispatch state names)" morning-briefing \
+  '"$CLAUDE_SKILL_DIR/scripts/linear-transition.sh" --help 2>/dev/null'
+run_isolated "briefing-followup: writeback's frontmatter lib and event lib are carried" briefing-followup \
+  'test -s "$CLAUDE_SKILL_DIR/scripts/briefing-frontmatter-lib.sh" && test -s "$CLAUDE_SKILL_DIR/scripts/lib/canonical-event.sh" && test -s "$CLAUDE_SKILL_DIR/scripts/lib/task-type.sh"'
+run_isolated_expect "briefing-followup: parse-briefing prints its usage" briefing-followup "sage" \
+  'bash "$CLAUDE_SKILL_DIR/scripts/briefing-followup/parse-briefing.sh"'
 
 for agent in codebase-locator codebase-analyzer codebase-pattern-finder thoughts-locator thoughts-analyzer external-research; do
   for skill in research-codebase create-plan; do

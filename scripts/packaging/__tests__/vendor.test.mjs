@@ -34,8 +34,13 @@ describe("vendorDestination", () => {
     expect(vendorDestination("references/merge-blocker-diagnosis.md")).toBe("assets/references/merge-blocker-diagnosis.md");
   });
 
-  test("anything outside scripts/, agents/*.md and references/*.md is refused, naming the path", () => {
-    expect(() => vendorDestination("templates/CLAUDE_SNIPPET.md")).toThrow(/templates\/CLAUDE_SNIPPET\.md/);
+  test("a shared plugin template lands under assets/templates/", () => {
+    expect(vendorDestination("templates/briefing-frontmatter.schema.json")).toBe("assets/templates/briefing-frontmatter.schema.json");
+  });
+
+  test("anything outside scripts/, agents/*.md, references/*.md and templates/<name> is refused, naming the path", () => {
+    expect(() => vendorDestination("templates/nested/CLAUDE_SNIPPET.md")).toThrow(/templates\/nested\/CLAUDE_SNIPPET\.md/);
+    expect(() => vendorDestination("hooks/x.sh")).toThrow(/hooks\/x\.sh/);
     expect(() => vendorDestination("agents/nested/x.md")).toThrow(/agents\/nested\/x\.md/);
     expect(() => vendorDestination("references/nested/x.md")).toThrow(/references\/nested\/x\.md/);
     expect(() => vendorDestination("scripts/../hooks.toml")).toThrow(/\.\./);

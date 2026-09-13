@@ -31,9 +31,11 @@ const skillsRoot = join(repoRoot, "plugins/dev/skills");
 // Cluster 2: the PR/merge skills.
 // Cluster 3: the Linear skills.
 // Cluster 4a: coordination (concierge, steward, handoffs) and the skills that were already clean.
+// Cluster 4b: the briefings.
 export const SELF_CONTAINED = [
   "agent-browser",
   "ask",
+  "briefing-followup",
   "commit",
   "concierge",
   "create-handoff",
@@ -47,6 +49,7 @@ export const SELF_CONTAINED = [
   "linear",
   "linearis",
   "merge-pr",
+  "morning-briefing",
   "project-orchestrator",
   "remediate-plan",
   "research-codebase",
