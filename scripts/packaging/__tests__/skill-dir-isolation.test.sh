@@ -228,6 +228,13 @@ cat > "$SCRATCH/cw-bin/humanlayer" <<'STUB'
 exit 0
 STUB
 chmod +x "$SCRATCH/cw-bin/humanlayer"
+# The removal guard refuses when lsof is missing (fail-closed), and lsof is not a required dependency;
+# a probe that finds no holder (exit 1, silent) keeps the rollback case independent of the host.
+cat > "$SCRATCH/cw-bin/lsof-no-holders" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+chmod +x "$SCRATCH/cw-bin/lsof-no-holders"
 CW_RUN='cd "'"$SCRATCH"'/cw-src" && PATH="'"$SCRATCH"'/cw-bin:$PATH" "$CLAUDE_SKILL_DIR/scripts/create-worktree.sh"'
 run_isolated_expect "create-worktree: no name prints its usage" create-worktree "Usage: ./create-worktree.sh" \
   '"$CLAUDE_SKILL_DIR/scripts/create-worktree.sh"'
@@ -237,7 +244,7 @@ run_isolated "create-worktree: a new worktree gets thoughts/shared from the carr
 # A failed thoughts init rolls the worktree back, and the rollback refuses to force-remove anything
 # unless the removal guard loaded (CTL-1417), so the guard must travel with the script.
 run_isolated "create-worktree: a failed thoughts init rolls the new worktree back" create-worktree \
-  'rm -f "$HOME/.config/humanlayer/humanlayer.json"; if '"$CW_RUN"' cw-rollback main --worktree-dir "'"$SCRATCH"'/cw-wt" --skip-fetch > "$HOME/cw-rollback.log" 2>&1; then exit 1; fi; grep -qF "Cleaning up worktree" "$HOME/cw-rollback.log" && test ! -d "'"$SCRATCH"'/cw-wt/cw-rollback"'
+  'rm -f "$HOME/.config/humanlayer/humanlayer.json"; export WT_GUARD_LSOF="'"$SCRATCH"'/cw-bin/lsof-no-holders"; if '"$CW_RUN"' cw-rollback main --worktree-dir "'"$SCRATCH"'/cw-wt" --skip-fetch > "$HOME/cw-rollback.log" 2>&1; then exit 1; fi; grep -qF "Cleaning up worktree" "$HOME/cw-rollback.log" && test ! -d "'"$SCRATCH"'/cw-wt/cw-rollback"'
 run_isolated "create-worktree: catalyst-thoughts --version (the reuse-path repair script)" create-worktree \
   '"$CLAUDE_SKILL_DIR/scripts/catalyst-thoughts.sh" --version >/dev/null'
 
