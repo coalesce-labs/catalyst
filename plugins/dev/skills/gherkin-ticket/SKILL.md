@@ -18,6 +18,8 @@ Every ticket must open with **a use case a stranger can understand**: who gets w
 
 This skill owns **ticket format** (title voice + body structure). It does **not** own the Linear CLI mechanics — once a draft is ready, hand off to the `/catalyst-dev:linear` skill to actually create or update the issue. CLI syntax lives in `/catalyst-dev:linearis`.
 
+**Paths.** Commands below name files inside this skill's own directory as `${CLAUDE_SKILL_DIR}/…`. Claude Code fills that in. On any other harness, set CLAUDE_SKILL_DIR to the absolute directory that contains this SKILL.md before running them. If you cannot, stop and report `skill_dir_unresolved`.
+
 ## When this fires
 
 Auto-invoked whenever a ticket is being born or rewritten — you do **not** need to say "gherkin":
@@ -210,7 +212,7 @@ Scenario: Dispatch still waits for completion before returning  # invariant
 1. Read the **full** existing ticket — never partial. Title + description come from
    the replica (per the `linearis` skill's "Reading Linear" rule) — read it in ONE
    command (the helper's function is only defined in the shell that sourced it):
-   `source "${CLAUDE_PLUGIN_ROOT}/scripts/lib/linear-read-replica.sh" && linear_read_ticket "$TICKET"`
+   `source "${CLAUDE_SKILL_DIR}/scripts/lib/linear-read-replica.sh" && linear_read_ticket "$TICKET"`
    (freshness gate → SQL → loud linearis fallback). **Comments are not mirrored** —
    fetch them via `linearis comments list "$TICKET"`, and for any comment with a
    discussion thread also fetch its replies (`linearis issues replies <thread>`) so

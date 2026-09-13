@@ -1,0 +1,8 @@
+{
+  "generatedBy": "catalyst-packaging vendor",
+  "files": [
+    "scripts/lib/canonical-event.sh",
+    "scripts/lib/host-identity.sh",
+    "scripts/lib/linear-read-replica.sh"
+  ]
+}

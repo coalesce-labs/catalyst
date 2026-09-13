@@ -148,6 +148,18 @@ describe("the checker sees each violation it exists to catch (positive controls)
     expect(checkSkillSelfContainment(dir).violations.map((v) => v.detail).sort()).toEqual(["../scripts/lib/absent.mjs", "./lib/gone.sh"]);
   });
 
+  // Found by skill-dir-isolation.test.sh, not by this checker: board-vocabulary.mjs reads a JSON
+  // file located from its own URL. The static rule now sees that shape too.
+  test("a JS module reading a file joined onto its own directory", () => {
+    const dir = fixtureSkill("dirname-join", {
+      "SKILL.md": "---\nname: x\n---\nno commands\n",
+      "scripts/a.mjs":
+        'import { dirname, join } from "node:path";\nimport { fileURLToPath } from "node:url";\nexport const P = join(dirname(fileURLToPath(import.meta.url)), "contract.default.json");\nexport const Q = join(import.meta.dirname, "present.json");\n',
+      "scripts/present.json": "{}\n",
+    });
+    expect(checkSkillSelfContainment(dir).violations.map((v) => v.detail)).toEqual(["contract.default.json"]);
+  });
+
   test("a type-only import inside a JSDoc comment is not a runtime dependency", () => {
     const dir = fixtureSkill("jsdoc-import", {
       "SKILL.md": "---\nname: x\n---\nno commands\n",

@@ -1,0 +1,36 @@
+---
+# CTL-2306: files this skill carries as generated copies of one source in plugins/dev.
+# Edit the source, never a copy; `bun scripts/packaging/cli.mjs vendor --write` refreshes them
+# (render --write does it too) and packaging-gate.yml fails on drift.
+files:
+  - scripts/identity-report.mjs
+  - scripts/lib/tenant-identity.mjs
+  - scripts/lib/cloud-facts.mjs
+  - scripts/lib/linear-read-replica.sh
+  - scripts/lib/canonical-event.sh
+  - scripts/lib/host-identity.sh
+  - scripts/linear-reply.mjs
+  - scripts/lib/comment-body-arg.mjs
+  - scripts/lib/linear-write-path.mjs
+  - scripts/lib/deployment-mode.mjs
+  - scripts/lib/entitlement.mjs
+  - scripts/lib/github-feed-mode.mjs
+  - scripts/lib/secret-contract.mjs
+  - scripts/execution-core/config.mjs
+  - scripts/execution-core/config-schema.mjs
+  - scripts/execution-core/entitlement-event.mjs
+  - scripts/execution-core/entitlement-roster.mjs
+  - scripts/execution-core/lib/canonical-event.mjs
+  - scripts/execution-core/lib/catalyst-resource.mjs
+  - scripts/execution-core/lib/host-identity.mjs
+  - scripts/execution-core/lib/node-class.mjs
+  - scripts/execution-core/linear-write-budget.mjs
+  - scripts/execution-core/linear-write-proxy.mjs
+  - scripts/execution-core/replica-comment-read.mjs
+  - scripts/execution-core/replica-freshness.mjs
+  - scripts/ask.mjs
+  - scripts/linear-ack.mjs
+  - scripts/lib/board-vocabulary.mjs
+  - scripts/ask-triage.sh
+  - scripts/human-blocked.sh
+  - scripts/lib/tenant-contract.default.json

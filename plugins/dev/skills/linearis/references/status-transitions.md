@@ -9,7 +9,7 @@ The canonical `stateMap` transition table lives in `SKILL.md` → "Workflow: Sta
 ⚠️ **In a script, assign before you query.** `linearis … --status "$(state done)"` swallows a refusal — a command substitution used as an argument does not propagate its exit status — so `linearis` runs with an empty `--status` and returns nothing. `DONE=$(state done) || exit 1` propagates; the examples below are interactive one-liners where you would see the error.
 
 ```bash
-state() { bash "$CLAUDE_PLUGIN_ROOT/scripts/linear-transition.sh" --print-state --transition "$1" --team "$TEAM"; }
+state() { bash "${CLAUDE_SKILL_DIR}/scripts/linear-transition.sh" --print-state --transition "$1" --team "$TEAM"; }
 
 linearis issues update ENG-123 --status "$(state inProgress)"
 linearis issues update ENG-123 --status "$(state inReview)"
@@ -17,7 +17,7 @@ linearis issues update ENG-123 --status "$(state done)"
 
 # With comment — an AGENT posting the "Merged" note goes through linear-reply.mjs, not `discuss`
 linearis issues update ENG-123 --status "$(state done)"
-direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" ENG-123 --as <AGENT> --body "Merged: PR #456" --top
+direnv exec . node "${CLAUDE_SKILL_DIR}/scripts/linear-reply.mjs" ENG-123 --as <AGENT> --body "Merged: PR #456" --top
 ```
 
 Better still for a whole transition: `linear-transition.sh --ticket ENG-123 --transition done` does the resolve, the idempotency read and the write in one call.
@@ -28,10 +28,10 @@ When `.catalyst/config.json` contains `catalyst.linear.stateIds`, prefer passing
 
 ```bash
 # Resolve and cache UUIDs once (single GraphQL query)
-plugins/dev/scripts/resolve-linear-ids.sh
+"${CLAUDE_SKILL_DIR}/scripts/resolve-linear-ids.sh"
 
 # Then transitions use UUIDs from config — 1 fewer API call per update
-plugins/dev/scripts/linear-transition.sh --ticket ENG-123 --transition done
+"${CLAUDE_SKILL_DIR}/scripts/linear-transition.sh" --ticket ENG-123 --transition done
 ```
 
 ## Team-key allowlist cache (CTL-633)

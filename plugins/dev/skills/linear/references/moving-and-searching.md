@@ -4,7 +4,7 @@
 
 > ⛔ **`linearis issues discuss` posts AS THE HUMAN — do not use it for machine replies.** It authenticates with the personal `lin_api_…` token, so the comment carries the human's identity — and the ask-resolution gate (CTL-1567) reads a human-identity comment as *the human deciding* and clears the escalation hold. Post machine replies through the app actor (`Catalyst Cloud`) instead, via `linear-reply.mjs <TICKET-ID> --as <AGENT>` — the canonical copyable invocation is owned by the `linearis` skill's "Core Operations" section; use it from there. For decision/ask tickets use the `catalyst-dev:ask` skill. Full syntax and rationale: `linearis` skill (CTL-1922).
 
-1. Determine which ticket — from conversation context, or read it via the replica (`source "${CLAUDE_PLUGIN_ROOT}/scripts/lib/linear-read-replica.sh"; linear_read_ticket "$TICKET"`) per the `linearis` skill's "Reading Linear" rule.
+1. Determine which ticket — from conversation context, or read it via the replica (`source "${CLAUDE_SKILL_DIR}/scripts/lib/linear-read-replica.sh"; linear_read_ticket "$TICKET"`) per the `linearis` skill's "Reading Linear" rule.
 2. Keep comments concise (~10 lines); focus on key insight; include file references with backticks and GitHub links, for both `thoughts/` and code files.
 3. Example:
 

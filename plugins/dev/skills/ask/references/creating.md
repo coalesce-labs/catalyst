@@ -33,10 +33,10 @@ cfg=.catalyst/config.json
 team=$(jq -r '.catalyst.linear.teamKey' "$cfg")
 human=$(jq -r '.catalyst.human.linearUserId' "$cfg")
 # ⛔ CTL-2300: the label NAMES are the tenant's too, and they are team-scoped in Linear —
-# `node "$CLAUDE_PLUGIN_ROOT/scripts/ask.mjs"` resolves them to ids ON THIS TEAM. Typing them
+# `node "${CLAUDE_SKILL_DIR}/scripts/ask.mjs"` resolves them to ids ON THIS TEAM. Typing them
 # resolves against whichever team linearis picked, which fails loudly across teams and
 # silently within one.
-labels=$(node -e 'import("'"$CLAUDE_PLUGIN_ROOT"'/scripts/lib/board-vocabulary.mjs").then(m=>console.log(m.resolveAskLabelNames().names.join(",")))')
+labels=$(node -e 'import("'"${CLAUDE_SKILL_DIR}"'/scripts/lib/board-vocabulary.mjs").then(m=>console.log(m.resolveAskLabelNames().names.join(",")))')
 linearis issues create "ASK: <one line>" --team "$team" --priority 2 \
   --assignee "$human" \
   --labels "$labels" \
