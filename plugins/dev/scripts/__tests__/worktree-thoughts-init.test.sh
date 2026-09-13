@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# Tests for scripts/worktree-thoughts-init.sh (CTL-845) — the vendored,
-# humanlayer-free thoughts layout creator.
+# Tests for plugins/dev/scripts/worktree-thoughts-init.sh (CTL-845) — the vendored,
+# humanlayer-free thoughts layout creator. CTL-2306 moved it into the plugin, beside
+# create-worktree.sh; scripts/worktree-thoughts-init.sh forwards to it for setup-catalyst.sh.
 # Run: bash plugins/dev/scripts/__tests__/worktree-thoughts-init.test.sh
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
-INIT="${REPO_ROOT}/scripts/worktree-thoughts-init.sh"
+INIT="${REPO_ROOT}/plugins/dev/scripts/worktree-thoughts-init.sh"
+FORWARDER="${REPO_ROOT}/scripts/worktree-thoughts-init.sh"
 
 FAILURES=0
 PASSES=0
@@ -109,6 +111,20 @@ if [[ "$SHARED_TARGET2" == "$TR/top/repos/myrepo/shared" ]]; then
 else
 	fail "symlink broke on re-run: $SHARED_TARGET2"
 fi
+rm -rf "$SCRATCH"
+
+# Case 6: the repo-root forwarder (setup-catalyst.sh, setup-workspace.sh) runs the plugin's copy.
+echo "Test 6: scripts/worktree-thoughts-init.sh forwards to the plugin script"
+setup_env ryan ""
+OUT="$(cd "$WT" && HOME="$FAKEHOME" bash "$FORWARDER" --directory myrepo 2>&1)"
+EXIT=$?
+assert_eq "0" "$EXIT" "forwarder exits 0"
+if [[ "$(readlink "$WT/thoughts/shared")" == "$TR/top/repos/myrepo/shared" ]]; then
+	pass "forwarder built the layout"
+else
+	fail "forwarder did not build the layout: $OUT"
+fi
+if [[ "$(wc -l <"$FORWARDER")" -lt 15 ]]; then pass "forwarder carries no second copy of the logic"; else fail "forwarder is not a thin forwarder"; fi
 rm -rf "$SCRATCH"
 
 echo ""

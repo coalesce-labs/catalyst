@@ -18,7 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 SKILLS_ROOT="${REPO_ROOT}/plugins/dev/skills"
 
-SKILLS="agent-browser ask briefing-followup commit compound-estimate concierge create-handoff create-plan create-pr describe-pr fix-typescript gherkin-ticket implement-plan iterate-plan linear linearis merge-pr morning-briefing project-orchestrator remediate-plan research-codebase resume-handoff review-comments scan-reward-hacking steward ticket-compound ticket-retro triage-aging-prs validate-plan validate-type-safety"
+SKILLS="agent-browser ask briefing-followup commit compound-estimate concierge create-handoff create-plan create-pr create-worktree describe-pr fix-typescript gherkin-ticket implement-plan iterate-plan linear linearis merge-pr morning-briefing project-orchestrator remediate-plan research-codebase resume-handoff review-comments scan-reward-hacking steward ticket-compound ticket-retro triage-aging-prs validate-plan validate-type-safety"
 
 PASS=0
 FAIL=0
@@ -216,6 +216,29 @@ run_isolated "ticket-retro: gather-retro's compound-log is carried and executabl
   'test -x "$CLAUDE_SKILL_DIR/scripts/compound-log.sh" && test -s "$CLAUDE_SKILL_DIR/scripts/lib/linear-read-replica.sh"'
 run_isolated "ticket-retro: gather-retro --help" ticket-retro \
   'bash "$CLAUDE_SKILL_DIR/scripts/ticket-retro/gather-retro.sh" --help >/dev/null 2>&1'
+
+# Cluster 4d — create-worktree. It runs in the repository it branches, so these cases build a
+# scratch repo; HOME, the thoughts repo and the worktree base all live in the scratch dir.
+mkdir -p "$SCRATCH/cw-bin" "$SCRATCH/cw-thoughts" "$SCRATCH/cw-wt"
+git -C "$SCRATCH" init -q cw-src
+git -C "$SCRATCH/cw-src" -c user.email=t@t.t -c user.name=t commit -q --allow-empty -m init
+cat > "$SCRATCH/cw-bin/humanlayer" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+chmod +x "$SCRATCH/cw-bin/humanlayer"
+CW_RUN='cd "'"$SCRATCH"'/cw-src" && PATH="'"$SCRATCH"'/cw-bin:$PATH" "$CLAUDE_SKILL_DIR/scripts/create-worktree.sh"'
+run_isolated_expect "create-worktree: no name prints its usage" create-worktree "Usage: ./create-worktree.sh" \
+  '"$CLAUDE_SKILL_DIR/scripts/create-worktree.sh"'
+# The thoughts layout comes from worktree-thoughts-init.sh beside the script, not the humanlayer CLI (CTL-845).
+run_isolated "create-worktree: a new worktree gets thoughts/shared from the carried thoughts-init script" create-worktree \
+  'mkdir -p "$HOME/.config/humanlayer" && printf "{\"thoughts\":{\"thoughtsRepo\":\"%s\",\"user\":\"t\"}}\n" "'"$SCRATCH"'/cw-thoughts" > "$HOME/.config/humanlayer/humanlayer.json" && '"$CW_RUN"' cw-ok main --worktree-dir "'"$SCRATCH"'/cw-wt" --skip-fetch > "$HOME/cw-ok.log" 2>&1 && test -L "'"$SCRATCH"'/cw-wt/cw-ok/thoughts/shared" && test -d "'"$SCRATCH"'/cw-wt/cw-ok/thoughts/shared"'
+# A failed thoughts init rolls the worktree back, and the rollback refuses to force-remove anything
+# unless the removal guard loaded (CTL-1417), so the guard must travel with the script.
+run_isolated "create-worktree: a failed thoughts init rolls the new worktree back" create-worktree \
+  'rm -f "$HOME/.config/humanlayer/humanlayer.json"; if '"$CW_RUN"' cw-rollback main --worktree-dir "'"$SCRATCH"'/cw-wt" --skip-fetch > "$HOME/cw-rollback.log" 2>&1; then exit 1; fi; grep -qF "Cleaning up worktree" "$HOME/cw-rollback.log" && test ! -d "'"$SCRATCH"'/cw-wt/cw-rollback"'
+run_isolated "create-worktree: catalyst-thoughts --version (the reuse-path repair script)" create-worktree \
+  '"$CLAUDE_SKILL_DIR/scripts/catalyst-thoughts.sh" --version >/dev/null'
 
 for agent in codebase-locator codebase-analyzer codebase-pattern-finder thoughts-locator thoughts-analyzer external-research; do
   for skill in research-codebase create-plan; do
