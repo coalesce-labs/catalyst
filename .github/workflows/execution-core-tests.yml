@@ -115,6 +115,10 @@ on:
       # PR touching only scripts/ would skip the job that runs it.
       - "scripts/__tests__/**"
       - "scripts/worktree-thoughts-exclude-backfill.sh"
+      # CTL-2306: the thoughts-init forwarder and the plugin script it forwards to are guarded by
+      # worktree-thoughts-init.test.sh (run below); neither path is under a tests glob.
+      - "scripts/worktree-thoughts-init.sh"
+      - "plugins/dev/scripts/worktree-thoughts-init.sh"
       # CTL-2266: the plugin-version monotonicity assertion ships its own bash test
       # (check-plugin-version.test.sh, run below); without this path a PR touching only
       # scripts/check-plugin-version.sh would skip the job that runs it.
@@ -233,6 +237,9 @@ jobs:
               # PR touching only scripts/ would skip the job that runs it.
               - "scripts/__tests__/**"
               - "scripts/worktree-thoughts-exclude-backfill.sh"
+              # CTL-2306: mirror the push-path entry above — the forwarder and its target.
+              - "scripts/worktree-thoughts-init.sh"
+              - "plugins/dev/scripts/worktree-thoughts-init.sh"
               # CTL-2266: mirror the push-path entry above — check-plugin-version.test.sh
               # guards this script and must run whenever a PR touches only it.
               - "scripts/check-plugin-version.sh"
@@ -389,6 +396,13 @@ jobs:
         # touched) and a zero-discovery case that must exit 2, not report a clean pass.
         working-directory: .
         run: bash scripts/__tests__/worktree-thoughts-exclude-backfill.test.sh
+
+      - name: worktree thoughts-init script and forwarder test (CTL-845, CTL-2306)
+        # The layout creator create-worktree.sh runs, plus the repo-root forwarder setup-catalyst.sh
+        # calls: a symlinked forwarder must still find the plugin script, and a lone copy of it
+        # (the plugin-cache hand repair) must exit 1 naming the canonical script, not bash's 127.
+        working-directory: .
+        run: bash plugins/dev/scripts/__tests__/worktree-thoughts-init.test.sh
 
       - name: plugin version monotonicity guard test (CTL-2266)
         # Two lanes independently bumping the SAME plugin to the SAME target version merge

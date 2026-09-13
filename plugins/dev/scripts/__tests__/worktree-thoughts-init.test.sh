@@ -124,7 +124,38 @@ if [[ "$(readlink "$WT/thoughts/shared")" == "$TR/top/repos/myrepo/shared" ]]; t
 else
 	fail "forwarder did not build the layout: $OUT"
 fi
-if [[ "$(wc -l <"$FORWARDER")" -lt 15 ]]; then pass "forwarder carries no second copy of the logic"; else fail "forwarder is not a thin forwarder"; fi
+if ! grep -q 'repoMappings' "$FORWARDER"; then pass "forwarder carries no second copy of the logic"; else fail "forwarder is not a thin forwarder"; fi
+rm -rf "$SCRATCH"
+
+# Case 7: a symlink to the forwarder, from another directory and through a relative link, still
+# reaches the plugin script — the forwarder locates its real file, not the link.
+echo "Test 7: the forwarder resolves symlinks to find itself"
+setup_env ryan ""
+mkdir -p "$SCRATCH/bin/links"
+ln -s "$FORWARDER" "$SCRATCH/bin/abs-link.sh"
+ln -s ../abs-link.sh "$SCRATCH/bin/links/rel-link.sh"
+OUT="$(cd "$WT" && HOME="$FAKEHOME" bash "$SCRATCH/bin/links/rel-link.sh" --directory myrepo 2>&1)"
+EXIT=$?
+assert_eq "0" "$EXIT" "forwarder run through a relative symlink chain exits 0"
+if [[ "$(readlink "$WT/thoughts/shared")" == "$TR/top/repos/myrepo/shared" ]]; then
+	pass "symlinked forwarder built the layout"
+else
+	fail "symlinked forwarder did not build the layout: $OUT"
+fi
+rm -rf "$SCRATCH"
+
+# Case 8: the forwarder copied on its own (the plugin-cache hand repair) has no plugin tree beside it.
+# It must fail loudly, exit 1, and name the canonical script to copy instead — never bash's bare 127.
+echo "Test 8: a lone copy of the forwarder names the canonical script"
+setup_env ryan ""
+mkdir -p "$SCRATCH/cache/scripts"
+cp "$FORWARDER" "$SCRATCH/cache/scripts/worktree-thoughts-init.sh"
+OUT="$(cd "$WT" && HOME="$FAKEHOME" bash "$SCRATCH/cache/scripts/worktree-thoughts-init.sh" --directory myrepo 2>&1)"
+EXIT=$?
+assert_eq "1" "$EXIT" "lone forwarder exits 1"
+assert_contains "$OUT" "copy the canonical plugins/dev/scripts/worktree-thoughts-init.sh" "lone forwarder names the canonical script"
+if [[ "$OUT" != *"No such file"* ]]; then pass "lone forwarder fails with its own message, not bash's"; else fail "lone forwarder fell through to bash: $OUT"; fi
+if [[ ! -e "$WT/thoughts" ]]; then pass "lone forwarder built no partial layout"; else fail "lone forwarder left a partial layout"; fi
 rm -rf "$SCRATCH"
 
 echo ""
