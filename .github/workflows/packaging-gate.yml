@@ -58,6 +58,8 @@ jobs:
         run: bash scripts/packaging/__tests__/drift-gate.test.sh
       - name: Rehearse a plugin-deletion cut (scratch copy, not this checkout)
         run: bash scripts/packaging/__tests__/inventory-cut.test.sh
+      - name: Skill directories run on their own (CTL-2306)
+        run: bash scripts/packaging/__tests__/skill-dir-isolation.test.sh
       - name: Regenerate all three targets
         run: bun scripts/packaging/cli.mjs render --write --allow-losses
       - name: agentskills.io conformance (spec-check the regenerated portable pack)

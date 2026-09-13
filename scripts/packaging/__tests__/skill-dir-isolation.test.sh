@@ -79,8 +79,8 @@ run_isolated "implement-plan: draft-pr helper sources and defines its functions"
   'source "$CLAUDE_SKILL_DIR/scripts/lib/draft-pr.sh" && declare -F draft_pr_enabled >/dev/null && declare -F draft_pr_push >/dev/null'
 run_isolated "implement-plan: add-finding --help" implement-plan \
   '"$CLAUDE_SKILL_DIR/scripts/add-finding.sh" --help >/dev/null'
-run_isolated "implement-plan: feedback-consent --help" implement-plan \
-  '"$CLAUDE_SKILL_DIR/scripts/feedback-consent.sh" --help >/dev/null'
+run_isolated "implement-plan: feedback-consent check (read-only)" implement-plan \
+  '"$CLAUDE_SKILL_DIR/scripts/feedback-consent.sh" check >/dev/null'
 run_isolated "implement-plan: file-feedback --help (sources its Linear read helper)" implement-plan \
   '"$CLAUDE_SKILL_DIR/scripts/file-feedback.sh" --help >/dev/null'
 

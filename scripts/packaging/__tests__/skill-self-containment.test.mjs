@@ -102,7 +102,25 @@ describe("the checker sees each violation it exists to catch (positive controls)
   test("an optional reference marked in the script is not a violation", () => {
     const dir = fixtureSkill("optional-sibling", {
       "SKILL.md": "---\nname: x\n---\nno commands\n",
-      "scripts/a.sh": '#!/usr/bin/env bash\nJSON="${LIB_DIR}/../../.claude-plugin/plugin.json" # self-containment: optional\n',
+      "scripts/a.sh": '#!/usr/bin/env bash\nLIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\nJSON="${LIB_DIR}/../../.claude-plugin/plugin.json" # self-containment: optional\n',
+    });
+    expect(checkSkillSelfContainment(dir).violations).toEqual([]);
+  });
+
+  test("a sibling reached through an inline dirname of a self-file variable is checked too", () => {
+    const dir = fixtureSkill("inline-dirname", {
+      "SKILL.md": "---\nname: x\n---\nno commands\n",
+      "scripts/a.sh":
+        '#!/usr/bin/env bash\nsource_path="${BASH_SOURCE[0]:-$0}"\ncontract="$(cd "$(dirname "$source_path")" 2>/dev/null && pwd)/contract.sh"\n',
+    });
+    expect(checkSkillSelfContainment(dir).violations.map((v) => v.detail)).toEqual(["contract.sh"]);
+  });
+
+  test("a path under the repo root, $HOME or the cwd is not the skill's concern", () => {
+    const dir = fixtureSkill("external-paths", {
+      "SKILL.md": "---\nname: x\n---\nno commands\n",
+      "scripts/a.sh":
+        '#!/usr/bin/env bash\nREPO_ROOT="$(git rev-parse --show-toplevel)"\ncfg="${REPO_ROOT}/.catalyst/config.json"\nhere="$(pwd)/.catalyst/config.json"\n',
     });
     expect(checkSkillSelfContainment(dir).violations).toEqual([]);
   });

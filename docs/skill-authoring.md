@@ -69,6 +69,15 @@ A plugin's `hooks.toml`'s mere **presence** vetoes every skill in that plugin fr
 
 The measured result today: exactly **2** skills reach the portable pack — `catalyst-foundry/setup-catalyst` and `catalyst-meta/validate-frontmatter`, the only two skills carrying a valid `catalog`-exposed sidecar. The total skill and plugin counts are deliberately omitted here — they drift with every skill or plugin added or removed, which is exactly what made an earlier version of this sentence stale the day it was written. Run `bun scripts/packaging/cli.mjs render --dry-run --target agentsSkills` to see the current census and loss counts for yourself rather than trusting a number embedded in this document.
 
+## A skill carries its own files (CTL-2306)
+
+A skill must run from its own directory: installed by `npx skills`, read by path from the cloud runner, or loaded by any harness that is not Claude Code's plugin rail. So nothing in `SKILL.md`, `references/` or `assets/` may reach a file through `${CLAUDE_PLUGIN_ROOT}` or `plugins/dev/scripts/`.
+
+- **Name your own files as `${CLAUDE_SKILL_DIR}/…`.** Claude Code substitutes the variable. Any skill that does this needs the one-paragraph **Paths** note telling another harness to set `CLAUDE_SKILL_DIR` to the directory holding the `SKILL.md`, and to report `skill_dir_unresolved` when it cannot. A step that must not silently skip, such as `implement-plan`'s draft-PR push under a phase, prints that token when its file is missing.
+- **Shared files have one source and generated copies.** List a script (`scripts/<path>`, which keeps its path) or a subagent prompt (`agents/<name>.md`, which lands at `assets/agents/<name>.md`) in the skill's `agents/vendor.yaml`, then run `bun scripts/packaging/cli.mjs vendor --write`; `render --write` does the same. Edit the source, never a copy: `packaging-gate.yml` regenerates and fails on drift, and `scripts/packaging/__tests__/skill-self-containment.test.mjs` checks every copy byte for byte.
+- **Host tooling is not skill logic.** Session telemetry, the thoughts fast-forward and the full setup doctor belong to the machine, not to the skill. Call the installed CLI when it is on `PATH` (`catalyst-session`, `thoughts-pull-sync`) and skip it otherwise. Never vendor a host doctor into a skill.
+- **Proof.** `skill-self-containment.test.mjs` checks the paths statically, including a script's own sibling `source`s. `skill-dir-isolation.test.sh` copies each listed skill directory alone into a scratch directory and runs its entry points there. Both cover the skills in `SELF_CONTAINED`, which grows one skill cluster per PR.
+
 ## Practical steps to make a skill portable
 
 1. Confirm the skill's pack has no `hooks.toml` (no Catalyst plugin ships one), and that everything the skill runs lives inside its own directory — a skill that reaches helpers through `${CLAUDE_PLUGIN_ROOT}` will not run on another harness.

@@ -27,20 +27,22 @@ You are tasked with conducting comprehensive research across the codebase to ans
 3. Do NOT use the EnterPlanMode tool, create plans, or start implementing
 4. Your job ends when the research document is written and synced to thoughts/
 
+**Paths.** Commands below name files inside this skill's own directory as `${CLAUDE_SKILL_DIR}/…`. Claude Code fills that in. On any other harness, set CLAUDE_SKILL_DIR to the absolute directory that contains this SKILL.md before running them. If you cannot, stop and report `skill_dir_unresolved`.
+
 ## Prerequisites
 
 ```bash
-# Check project setup (thoughts, CLAUDE.md snippet, config)
-if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" ]]; then
-  "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" || exit 1
-fi
+# Thoughts must exist for this skill's documents. CTL-2306: the full host setup check (daemon,
+# registry, house rules) belongs to the setup-catalyst skill, not to a skill that must run anywhere.
+[[ -e thoughts/shared ]] || echo "⚠️ thoughts/shared is missing in $(pwd) — run \`humanlayer thoughts init\` or the setup-catalyst skill; if the prompt names an output path, write there" >&2
 ```
 
 ## Session Tracking
 
 ```bash
-SESSION_SCRIPT="${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-session.sh"
-if [[ -x "$SESSION_SCRIPT" ]]; then
+# Session tracking uses the installed catalyst-session CLI when this host has one; skipped otherwise.
+SESSION_SCRIPT="$(command -v catalyst-session 2>/dev/null || true)"
+if [[ -n "$SESSION_SCRIPT" ]]; then
   CATALYST_SESSION_ID=$("$SESSION_SCRIPT" start --skill "research-codebase" \
     --ticket "${TICKET_ID:-}" \
     --workflow "${CATALYST_SESSION_ID:-}")
@@ -61,11 +63,11 @@ Then wait for the user's research query.
 
 ## Pull-Before-Read (CTL-1236)
 
-Before the first thoughts read, fast-forward all HumanLayer thoughts checkouts so research picks up the freshest peer state. Roster-gated, ff-only, non-fatal — skips on single-host setups and never blocks research if offline:
+Before the first thoughts read, fast-forward the HumanLayer thoughts checkouts so research picks up the freshest peer state. Fast-forward only and non-fatal; it runs through the installed `thoughts-pull-sync` CLI when this host has one and is skipped otherwise:
 
 ```bash
-# Pull-before-read (CTL-1236): roster-gated, ff-only, non-fatal.
-"${CLAUDE_PLUGIN_ROOT}/scripts/lib/thoughts-pull-sync-gate.sh" || true
+# Pull-before-read (CTL-1236): ff-only, non-fatal, host tooling — never a dependency of the research.
+if command -v thoughts-pull-sync >/dev/null 2>&1; then thoughts-pull-sync >/dev/null 2>&1 || true; fi
 ```
 
 ## Steps to Follow After Receiving the Research Query
@@ -107,6 +109,8 @@ Create multiple Task agents to research different aspects concurrently.
 - **thoughts-locator** — discover relevant documents in thoughts/ (if configured)
 - **thoughts-analyzer** — extract key insights from specific thoughts documents
 - **external-research** — research external repos/frameworks (only if user asks)
+
+Each agent's instructions ship with this skill as `${CLAUDE_SKILL_DIR}/assets/agents/<name>.md` (for example `${CLAUDE_SKILL_DIR}/assets/agents/codebase-locator.md`). With the catalyst-dev Claude Code plugin, spawn them as `catalyst-dev:<name>`. On any other harness, spawn a general-purpose subagent with that file's instructions plus your request, or do the task inline if the harness has no subagents.
 
 The key is to use these agents intelligently:
 

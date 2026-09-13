@@ -59,21 +59,24 @@ echo ""
 
 # ─── Test 1: research-codebase has session start/end/phase ────────────────────
 run_test "research-codebase has session tracking"
-assert_contains "$RESEARCH" 'catalyst-session.sh' "research references catalyst-session.sh"
+# CTL-2306: portable skills call the installed catalyst-session CLI, not the plugin-root script.
+assert_contains "$RESEARCH" 'command -v catalyst-session' "research uses the installed catalyst-session CLI"
 assert_contains "$RESEARCH" 'start --skill' "research has session start"
 assert_contains "$RESEARCH" '"$SESSION_SCRIPT" end' "research has session end"
 assert_contains "$RESEARCH" '"$SESSION_SCRIPT" phase' "research has phase transition"
 
 # ─── Test 2: create-plan has session start/end/phase ──────────────────────────
 run_test "create-plan has session tracking"
-assert_contains "$PLAN" 'catalyst-session.sh' "plan references catalyst-session.sh"
+# CTL-2306: portable skills call the installed catalyst-session CLI, not the plugin-root script.
+assert_contains "$PLAN" 'command -v catalyst-session' "plan uses the installed catalyst-session CLI"
 assert_contains "$PLAN" 'start --skill' "plan has session start"
 assert_contains "$PLAN" '"$SESSION_SCRIPT" end' "plan has session end"
 assert_contains "$PLAN" '"$SESSION_SCRIPT" phase' "plan has phase transition"
 
 # ─── Test 3: implement-plan has session start/end/phase ───────────────────────
 run_test "implement-plan has session tracking"
-assert_contains "$IMPLEMENT" 'catalyst-session.sh' "implement references catalyst-session.sh"
+# CTL-2306: portable skills call the installed catalyst-session CLI, not the plugin-root script.
+assert_contains "$IMPLEMENT" 'command -v catalyst-session' "implement uses the installed catalyst-session CLI"
 assert_contains "$IMPLEMENT" 'start --skill' "implement has session start"
 assert_contains "$IMPLEMENT" '"$SESSION_SCRIPT" end' "implement has session end"
 assert_contains "$IMPLEMENT" '"$SESSION_SCRIPT" phase' "implement has phase transition"
