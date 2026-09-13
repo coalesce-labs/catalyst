@@ -33,7 +33,7 @@ Invoke as `/catalyst-dev:morning-briefing` to produce today's briefing locally a
 | the friction / learnings "since last briefing" digests | `references/digests.md` |
 | suggesting which tickets look ready for a relay-ticket dispatch | `references/suggest-dispatch.md` |
 | rendering the markdown, or fanning it out to Slack/Notion/Loom | `references/render-fanout.md` |
-| this host might have no cloud mirror, or a Linear read looks stale | `steward/references/cloud-detection.md` (canonical) |
+| this host might have no cloud mirror, or a Linear read looks stale | the `steward` skill's cloud-detection reference (canonical) |
 
 ## Loop
 

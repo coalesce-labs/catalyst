@@ -6,3 +6,8 @@ files:
   - scripts/identity-report.mjs
   - scripts/lib/tenant-identity.mjs
   - scripts/lib/cloud-facts.mjs
+  - scripts/lib/linear-read-replica.sh
+  - scripts/lib/canonical-event.sh
+  - scripts/lib/host-identity.sh
+  - scripts/lib/plugin-dirs.sh
+  - references/cloud-detection.md

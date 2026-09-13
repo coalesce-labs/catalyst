@@ -1,6 +1,6 @@
 # Dispatch on a CLOUD tenant — you move the card, the cloud runs the phase
 
-`references/dispatch.md` describes the **local** shape: you launch `/relay-ticket <TICKET>` yourself, in a session on this machine. On a Catalyst Cloud tenant that shape is wrong in its first sentence — the phases run in the tenant's runner containers, dispatched by the tenant's own scheduler. **Read this file instead of `dispatch.md` whenever cloud-detection says you are on a cloud tenant** (`references/cloud-detection.md` — a fresh replica *and* a `.catalyst/config.json` marker; both, or you are not).
+`references/dispatch.md` describes the **local** shape: you launch `/relay-ticket <TICKET>` yourself, in a session on this machine. On a Catalyst Cloud tenant that shape is wrong in its first sentence — the phases run in the tenant's runner containers, dispatched by the tenant's own scheduler. **Read this file instead of `dispatch.md` whenever cloud-detection says you are on a cloud tenant** (`assets/references/cloud-detection.md` — a fresh replica *and* a `.catalyst/config.json` marker; both, or you are not).
 
 The difference matters because the two failure modes are opposite. Launch a local session on a cloud tenant and you get two workers on one ticket, racing on the same branch. Wait for a local session on a cloud tenant and you wait forever for a session nobody started.
 
@@ -8,7 +8,7 @@ The difference matters because the two failure modes are opposite. Launch a loca
 
 Your dispatch is a **state move**, not a launch. The tenant's scheduler picks up eligible cards in its Todo state and claims them into a runner container; there is nothing for you to spawn and no PID for you to watch.
 
-Write it through the cloud **write proxy**, never with a personal Linear credential — a proxied write carries the tenant's app actor, which is what keeps your dispatch from reading as the human typing (`ask/references/threading.md` on why that matters, and `linear-write-proxy.mjs` for the client):
+Write it through the cloud **write proxy**, never with a personal Linear credential — a proxied write carries the tenant's app actor, which is what keeps your dispatch from reading as the human typing (the `ask` skill's `references/threading.md` on why that matters, and `linear-write-proxy.mjs` for the client):
 
 ```
 POST /api/v1/agent/issue-state   {issueId, stateId, hostId}

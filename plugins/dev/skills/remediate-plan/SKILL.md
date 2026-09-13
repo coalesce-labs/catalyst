@@ -34,7 +34,7 @@ If no Validation Report is in context and no report file is named in your prompt
 
 ## Phase-completion evidence
 
-Report what you did in the shape a coordinator can check, per D1's phase-completion-evidence model (`steward/references/dispatch.md`, "Phase-completion evidence"): the fix commit visible in `git log`, the gate's real exit code, and the re-run validate-plan verdict — not a summary of any of those.
+Report what you did in the shape a coordinator can check, per D1's phase-completion-evidence model (the `steward` skill's `references/dispatch.md`, "Phase-completion evidence"): the fix commit visible in `git log`, the gate's real exit code, and the re-run validate-plan verdict — not a summary of any of those.
 
 ## Not this skill
 

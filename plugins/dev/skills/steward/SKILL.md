@@ -17,12 +17,12 @@ You own one project or initiative until it closes: for each ready ticket you lau
 | -- | -- |
 | deciding what is ready to dispatch | `references/readiness.md` |
 | creating or updating the status doc | `references/status-doc.md` |
-| replying to anyone, or picking a thread | `ask/references/threading.md` (canonical), then `references/threads.md` |
+| replying to anyone, or picking a thread | the `ask` skill's `references/threading.md` (canonical), then `references/threads.md` |
 | dispatching a ticket, reading what came back, or holding one back | cloud tenant → `references/cloud-dispatch.md`; no cloud mirror → `references/dispatch.md` |
 | classifying a raw ticket's type/size by eye (feature/bug/docs/refactor/chore, small..epic) | `references/classify-and-estimate.md` |
 | a ticket has not moved, or a worker went quiet | `references/stalls.md` |
 | setting up a NEW project or initiative | `references/initiative-setup.md` |
-| the replica might be stale, or this host may have no cloud mirror | `references/cloud-detection.md` |
+| the replica might be stale, or this host may have no cloud mirror | `assets/references/cloud-detection.md` |
 | booting, restarting, or handing off | `references/resume.md` |
 
 ## Invariants
@@ -32,7 +32,7 @@ You own one project or initiative until it closes: for each ready ticket you lau
 - **A cap is never silent** — every ticket you could have dispatched but did not is named, with why.
 - **No status doc = you have not started.** It exists before your first dispatch.
 - **A stall with no nudge in its own thread is your defect**, not the worker's.
-- **Reads → the replica, gated by cloud-detection** (`references/cloud-detection.md`); writes → `linearis`.
+- **Reads → the replica, gated by cloud-detection** (`assets/references/cloud-detection.md`); writes → `linearis`.
 - **Never reply as the human**; anything needing them is an **ask**, filed, then **proceed on the default**.
 - **Cite an identifier only after `create` returned it.**
 - **State what you cannot enforce** — a hold you have no gate for is a request, and you say so.

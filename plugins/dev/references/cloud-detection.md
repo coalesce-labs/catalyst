@@ -1,6 +1,6 @@
 # Cloud detection — before you trust the replica
 
-Steward (and concierge) assume a live Catalyst Cloud replica by default. That assumption is not always true — a single non-fleet operator, or a host with no mirror running, has neither. Ryan direction (2026-08-25 evening, CTL-2218 Phase D): make the assumption a **checked, recoverable** fact, not a silent one. This is the canonical version — pointed to, not copied, from `concierge`.
+Steward (and concierge) assume a live Catalyst Cloud replica by default. That assumption is not always true — a single non-fleet operator, or a host with no mirror running, has neither. Ryan direction (2026-08-25 evening, CTL-2218 Phase D): make the assumption a **checked, recoverable** fact, not a silent one. This is the canonical version: one source in the plugin's `references/`, carried as a generated copy by each skill that follows it (`steward`, `concierge`; CTL-2306), so its commands resolve against whichever skill is running.
 
 ## The check — both parts, every time you boot or start a new scope pass
 
@@ -26,7 +26,7 @@ When either check fails, say so out loud before reading anything, the same "loud
 
 ```bash
 if [[ "$rf" -ne 0 || -z "$marker" ]]; then
-  echo "⚠️ cloud-detection: NO Catalyst Cloud mirror on this host (replica_fresh_rc=$rf, marker=${marker:-absent}). Falling back to direct linearis reads for list/search — the non-fleet path. See references/cloud-detection.md." >&2
+  echo "⚠️ cloud-detection: NO Catalyst Cloud mirror on this host (replica_fresh_rc=$rf, marker=${marker:-absent}). Falling back to direct linearis reads for list/search — the non-fleet path. See assets/references/cloud-detection.md." >&2
   # list/search go straight to `linearis` for this pass; for any SINGLE-ticket read, still call
   # linear_read_ticket <ID> below rather than `linearis issues read` directly — it owns the timeout
   # cap and fallback telemetry this loop doesn't reproduce.

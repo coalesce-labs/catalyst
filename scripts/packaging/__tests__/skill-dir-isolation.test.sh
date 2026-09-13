@@ -169,6 +169,13 @@ for skill in concierge steward; do
   run_isolated_expect "${skill}: identity-report runs and names the tenant slot" "$skill" "tenant" \
     'node "$CLAUDE_SKILL_DIR/scripts/identity-report.mjs"'
 done
+# Codex review on #4136 (P1): concierge follows the same cloud-detection reference, so it must
+# carry the reference AND the helpers its commands source from concierge's own directory.
+for skill in steward concierge; do
+  run_isolated "${skill}: carries the cloud-detection reference" "$skill" 'test -s "$CLAUDE_SKILL_DIR/assets/references/cloud-detection.md"'
+done
+run_isolated "concierge: cloud-detection helpers source (replica + marker)" concierge \
+  'source "$CLAUDE_SKILL_DIR/scripts/lib/linear-read-replica.sh" && source "$CLAUDE_SKILL_DIR/scripts/lib/plugin-dirs.sh" && declare -F replica_fresh >/dev/null && declare -F plugin_dirs_repo_config_path >/dev/null'
 run_isolated "steward: cloud-detection helpers source (replica + marker)" steward \
   'source "$CLAUDE_SKILL_DIR/scripts/lib/linear-read-replica.sh" && source "$CLAUDE_SKILL_DIR/scripts/lib/plugin-dirs.sh" && declare -F replica_fresh >/dev/null && declare -F plugin_dirs_repo_config_path >/dev/null'
 run_isolated "create-handoff: handoff-durability helper sources and defines its three steps" create-handoff \

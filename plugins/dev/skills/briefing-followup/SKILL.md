@@ -33,7 +33,7 @@ Invoke as `/catalyst-dev:briefing-followup` after `/catalyst-dev:morning-briefin
 | the user picks an action for a decision | `references/actions.md` |
 | the decision carries a `pending:` path (a compound-engineering ADR proposal) | `references/actions.md` (compound section) |
 | writing resolutions back to the briefing markdown | `references/writeback.md` |
-| this host might have no cloud mirror, or a replica read looks stale | `steward/references/cloud-detection.md` (canonical) |
+| this host might have no cloud mirror, or a replica read looks stale | the `steward` skill's cloud-detection reference (canonical) |
 
 ## Loop
 

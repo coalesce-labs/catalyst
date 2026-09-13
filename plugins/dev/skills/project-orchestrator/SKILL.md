@@ -16,16 +16,16 @@ This is the **project-scoped invocation of `catalyst-dev:steward`**, which is th
 
 1. **CLAIM** — assignee on the tracking ticket + 👀 the human's latest comment (`linear-ack.mjs`).
 2. **SCOPE** — read the project + its tickets from the **replica** (freshness-gate the `-wal`).
-3. **SELECT** — keep the READY tickets: four readiness tests → `steward/references/readiness.md`.
+3. **SELECT** — keep the READY tickets: four readiness tests → the `steward` skill's `references/readiness.md`.
 4. **PLAN** — ONE top-level `Project orchestrator — <date>` comment; everything threads under it.
 5. **DISPATCH** — move ready tickets to **Todo**, priority order, capped at the fleet's free slots →
-   `steward/references/dispatch.md`.
+   the `steward` skill's `references/dispatch.md`.
 6. **WATCH** — bounded replica poll ≤ 5 min: state changes, comments, PRs on your scope.
 7. **SPEAK** — reply in the thread the message arrived in; a human decision → an **ask**, then
-   proceed on the default → `steward/references/threads.md`, `ask/references/threading.md`.
+   proceed on the default → the `steward` skill's `references/threads.md`, the `ask` skill's `references/threading.md`.
 8. **CLOSE** — a merged PR's ticket goes to **Done**, stated in the project thread.
 
-(Steward adds STATUS DOC and HAND OFF — `steward/references/{status-doc,resume}.md`. A stalled ticket gets a nudge in its own thread — `steward/references/stalls.md`.)
+(Steward adds STATUS DOC and HAND OFF — the `steward` skill's `references/status-doc.md` and `references/resume.md`. A stalled ticket gets a nudge in its own thread — the `steward` skill's `references/stalls.md`.)
 
 ## Invariants (must survive codification)
 

@@ -10,3 +10,4 @@ files:
   - scripts/lib/canonical-event.sh
   - scripts/lib/host-identity.sh
   - scripts/lib/plugin-dirs.sh
+  - references/cloud-detection.md

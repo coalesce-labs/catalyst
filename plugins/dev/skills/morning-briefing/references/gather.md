@@ -20,7 +20,7 @@ echo "Output path: $OUT_PATH"
 ## Gather "yesterday" — parallel MCP/CLI queries
 
 > **Read source:** per the `linearis` skill's "Reading Linear" section, single-ticket reads go to
-> the replica via direct SQL, gated by cloud-detection (`steward/references/cloud-detection.md`).
+> the replica via direct SQL, gated by cloud-detection (the `steward` skill's cloud-detection reference).
 > `gather-linear.sh` below is a *filtered `issues list`* (an activity window, not a single-ticket
 > read) — the list-shaped case that has no replica form yet, so it correctly stays on `linearis`.
 

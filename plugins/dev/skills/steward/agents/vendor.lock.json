@@ -1,6 +1,7 @@
 {
   "generatedBy": "catalyst-packaging vendor",
   "files": [
+    "assets/references/cloud-detection.md",
     "scripts/identity-report.mjs",
     "scripts/lib/canonical-event.sh",
     "scripts/lib/cloud-facts.mjs",
