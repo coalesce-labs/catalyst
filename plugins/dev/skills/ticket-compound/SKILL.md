@@ -9,7 +9,7 @@ description:
   critical path. **Trigger (CTL-2244):** invoke once merge-pr's post-merge deploy-verification
   (CTL-2232) resolves a terminal sentinel for the ticket's merge — the same relay-native signal
   `compound-estimate` and `ticket-retro` use, see
-  ../compound-estimate/references/trigger.md. Also use when the user says "compound this ticket",
+  the `compound-estimate` skill's `references/trigger.md`. Also use when the user says "compound this ticket",
   "capture learnings", "what did we learn", or run as /catalyst-dev:ticket-compound <TICKET>
   [mode:headless].
 disable-model-invocation: false
@@ -26,6 +26,8 @@ Capture what a ticket taught us into the **shared** store (`thoughts/` + ADRs), 
   `thoughts/shared/CONCEPTS.md`, and prune stale notes in `thoughts/shared/{research,plans}/`.
 - **Propose only (APPROVE-gated)** — any change to `docs/adrs.md`. Never edit an ADR directly; queue
   it for the morning ritual to approve.
+
+**Paths.** Commands below name files inside this skill's own directory as `${CLAUDE_SKILL_DIR}/…`. Claude Code fills that in. On any other harness, set CLAUDE_SKILL_DIR to the absolute directory that contains this SKILL.md before running them. If you cannot, stop and report `skill_dir_unresolved`.
 
 ## Invocation
 
@@ -70,7 +72,7 @@ Spawn via Task, all at once. Each returns text to you; **you** do the single wri
 Then validate frontmatter (fail loud on the YAML traps in `reference.md`):
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT:-plugins/dev}/scripts/compound/validate-learnings.sh" "<written-path>"
+bash "${CLAUDE_SKILL_DIR}/scripts/compound/validate-learnings.sh" "<written-path>"
 ```
 
 ## Step 4 — Curate the store (five outcomes, autonomous in thoughts/)
@@ -127,4 +129,4 @@ ticket-compound complete
 - The estimation loop (separate slice — `compound-estimate` owns estimation numbers).
 - `ticket-retro` (the cross-ticket view — separate slice).
 
-Superseded: this section used to defer the automatic trigger to "the daemon firing this automatically after `monitor-deploy` (manual / morning-ritual triggered for now)" — that daemon hook was never built, and `monitor-deploy` (`phase-monitor-deploy`) is itself retiring. CTL-2244 fulfills that deferred wiring instead: `merge-pr` Step 14 ([post-merge.md](../merge-pr/references/post-merge.md)) now invokes this skill directly once Step 13b's deploy verification resolves a terminal sentinel — see ../compound-estimate/references/trigger.md for the full contract.
+Superseded: this section used to defer the automatic trigger to "the daemon firing this automatically after `monitor-deploy` (manual / morning-ritual triggered for now)" — that daemon hook was never built, and `monitor-deploy` (`phase-monitor-deploy`) is itself retiring. CTL-2244 fulfills that deferred wiring instead: `merge-pr` Step 14 (the `merge-pr` skill's `references/post-merge.md`) now invokes this skill directly once Step 13b's deploy verification resolves a terminal sentinel — see the `compound-estimate` skill's `references/trigger.md` for the full contract.

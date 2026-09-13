@@ -40,7 +40,7 @@ Convert a T-shirt letter to its integer before passing it to the helper.
 ## 4. Invoke the helper
 
 ```bash
-plugins/dev/scripts/compound-log.sh write "$TICKET_ID" \
+"${CLAUDE_SKILL_DIR}/scripts/compound-log.sh" write "$TICKET_ID" \
   --estimate-actual "$EST_ACTUAL_INT" \
   --what-worked "$WHAT_WORKED" \
   --what-surprised-me "$WHAT_SURPRISED"

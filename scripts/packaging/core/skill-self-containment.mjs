@@ -6,7 +6,8 @@
 //   plugin-root-reference       SKILL.md, references/ or assets/ names ${CLAUDE_PLUGIN_ROOT} or a
 //                               repo-relative plugins/<plugin>/{scripts,skills,references,templates,agents}/
 //                               path — only Claude Code's plugin rail, or a cwd inside the catalyst
-//                               checkout, resolves those.
+//                               checkout, resolves those. A line marked `(catalyst-checkout only)`
+//                               is a maintainer instruction for that checkout and is exempt.
 //   sibling-skill-path          prose points into another skill's directory (`steward/references/x.md`,
 //                               `../merge-pr/references/y.md`); it is read with THIS skill's directory
 //                               as the base, and a flat skills-CLI install renames the sibling anyway.
@@ -36,6 +37,9 @@ const PROSE_DIRS = ["references", "assets"];
 const PLUGIN_ROOT_PATTERN = /\$\{?CLAUDE_PLUGIN_ROOT\}?|plugins\/[a-z0-9-]+\/(?:scripts|skills|references|templates|agents)\//;
 const SKILL_DIR_PATH_PATTERN = /\$\{CLAUDE_SKILL_DIR\}\/([A-Za-z0-9_./-]+)/g;
 const PREAMBLE_MARKER = "skill_dir_unresolved";
+// A line addressed to catalyst maintainers working inside a catalyst checkout says so; only such a
+// line may name a repo-relative plugin path.
+const CATALYST_CHECKOUT_MARKER = "(catalyst-checkout only)";
 const OPTIONAL_MARKER = "# self-containment: optional";
 const FILE_REF = String.raw`((?:\.\.\/)*[A-Za-z0-9_.-][A-Za-z0-9_./-]*\.(?:sh|mjs|cjs|js|json|py))\b`;
 const ASSIGNMENT = /^\s*(?:local\s+|export\s+|readonly\s+|declare\s+(?:-\w+\s+)?)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
@@ -139,7 +143,7 @@ export function checkSkillSelfContainment(skillDir) {
     filesScanned += 1;
     const lines = readFileSync(file, "utf8").split("\n");
     lines.forEach((text, idx) => {
-      if (PLUGIN_ROOT_PATTERN.test(text)) {
+      if (PLUGIN_ROOT_PATTERN.test(text) && !text.includes(CATALYST_CHECKOUT_MARKER)) {
         violations.push({ rule: "plugin-root-reference", file: rel(skillDir, file), line: idx + 1, detail: text.trim() });
       }
       if (siblingPath) {

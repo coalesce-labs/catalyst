@@ -18,7 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 SKILLS_ROOT="${REPO_ROOT}/plugins/dev/skills"
 
-SKILLS="agent-browser ask briefing-followup commit concierge create-handoff create-plan create-pr describe-pr fix-typescript gherkin-ticket implement-plan iterate-plan linear linearis merge-pr morning-briefing project-orchestrator remediate-plan research-codebase resume-handoff review-comments scan-reward-hacking steward triage-aging-prs validate-plan validate-type-safety"
+SKILLS="agent-browser ask briefing-followup commit compound-estimate concierge create-handoff create-plan create-pr describe-pr fix-typescript gherkin-ticket implement-plan iterate-plan linear linearis merge-pr morning-briefing project-orchestrator remediate-plan research-codebase resume-handoff review-comments scan-reward-hacking steward ticket-compound ticket-retro triage-aging-prs validate-plan validate-type-safety"
 
 PASS=0
 FAIL=0
@@ -192,6 +192,30 @@ run_isolated "briefing-followup: writeback's frontmatter lib and event lib are c
   'test -s "$CLAUDE_SKILL_DIR/scripts/briefing-frontmatter-lib.sh" && test -s "$CLAUDE_SKILL_DIR/scripts/lib/canonical-event.sh" && test -s "$CLAUDE_SKILL_DIR/scripts/lib/task-type.sh"'
 run_isolated_expect "briefing-followup: parse-briefing prints its usage" briefing-followup "sage" \
   'bash "$CLAUDE_SKILL_DIR/scripts/briefing-followup/parse-briefing.sh"'
+
+# Cluster 4c — estimation and retro.
+run_isolated "compound-estimate: compound-log --help (sources its replica helper)" compound-estimate \
+  '"$CLAUDE_SKILL_DIR/scripts/compound-log.sh" --help >/dev/null'
+run_isolated "compound-estimate: compound-log aggregate over an empty store is silent success" compound-estimate \
+  'mkdir -p "$HOME/thoughts" && "$CLAUDE_SKILL_DIR/scripts/compound-log.sh" aggregate --thoughts-dir "$HOME/thoughts" >/dev/null'
+# Codex review on #4138 (P1): from a skill copy, compound-log's cost probe must reach the host's
+# installed catalyst-session CLI (the live default cost source) — its plugin-root sibling path is
+# not in the skill, and without a cost the closing ritual refuses to write the record.
+mkdir -p "$SCRATCH/stub-bin"
+cat > "$SCRATCH/stub-bin/catalyst-session" <<'STUB'
+#!/usr/bin/env bash
+[ "$1" = "history" ] && printf '[{"cost_usd": 1.25}]\n'
+STUB
+chmod +x "$SCRATCH/stub-bin/catalyst-session"
+run_isolated "compound-estimate: the cost probe reaches an installed catalyst-session CLI" compound-estimate \
+  'export PATH="'"$SCRATCH"'/stub-bin:$PATH"; eval "$(sed -n "/^is_numeric()/,/^}/p;/^probe_cost_local()/,/^}/p" "$CLAUDE_SKILL_DIR/scripts/compound-log.sh")"; test "$(probe_cost_local CTL-1 "$CLAUDE_SKILL_DIR/scripts")" = "1.25"'
+run_isolated_expect "ticket-compound: validate-learnings runs and reports the missing file" ticket-compound "file not found" \
+  'bash "$CLAUDE_SKILL_DIR/scripts/compound/validate-learnings.sh" "$HOME/absent.md"'
+# gather-retro skips calibration SILENTLY when compound-log is not executable beside it.
+run_isolated "ticket-retro: gather-retro's compound-log is carried and executable" ticket-retro \
+  'test -x "$CLAUDE_SKILL_DIR/scripts/compound-log.sh" && test -s "$CLAUDE_SKILL_DIR/scripts/lib/linear-read-replica.sh"'
+run_isolated "ticket-retro: gather-retro --help" ticket-retro \
+  'bash "$CLAUDE_SKILL_DIR/scripts/ticket-retro/gather-retro.sh" --help >/dev/null 2>&1'
 
 for agent in codebase-locator codebase-analyzer codebase-pattern-finder thoughts-locator thoughts-analyzer external-research; do
   for skill in research-codebase create-plan; do

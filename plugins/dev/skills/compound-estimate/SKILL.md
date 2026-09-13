@@ -10,13 +10,15 @@ description:
   estimate_at_start, estimate_actual, cost_usd, wall_time_hours, what_worked, what_surprised_me)
   to thoughts/shared/retros/estimate/YYYY-WW-compound-log.md — one file per ISO week, appends."
 disable-model-invocation: false
-allowed-tools: Bash(gh *), Bash(linearis *), Bash(jq *), Bash(git *), Bash(./plugins/dev/scripts/compound-log.sh *), Bash(plugins/dev/scripts/compound-log.sh *), Bash(./plugins/dev/scripts/estimate/refresh-corpus.sh *), Bash(plugins/dev/scripts/estimate/refresh-corpus.sh *), Read, Write
+allowed-tools: Bash(gh *), Bash(linearis *), Bash(jq *), Bash(git *), Bash(${CLAUDE_SKILL_DIR}/scripts/compound-log.sh *), Read, Write
 version: 1.1.0
 ---
 
 # Compound Estimate — Closing Ritual at PR Merge
 
-Write a compound-log entry for a just-shipped ticket. This is the Phase 1 exit gate for AI-native estimation: without this closer, cost/wall-time signals never feed future estimates and the calibration loop stays open. All mechanical work delegates to `plugins/dev/scripts/compound-log.sh` — your job is collecting the three human-authored inputs and invoking it.
+Write a compound-log entry for a just-shipped ticket. This is the Phase 1 exit gate for AI-native estimation: without this closer, cost/wall-time signals never feed future estimates and the calibration loop stays open. All mechanical work delegates to this skill's `scripts/compound-log.sh` — your job is collecting the three human-authored inputs and invoking it.
+
+**Paths.** Commands below name files inside this skill's own directory as `${CLAUDE_SKILL_DIR}/…`. Claude Code fills that in. On any other harness, set CLAUDE_SKILL_DIR to the absolute directory that contains this SKILL.md before running them. If you cannot, stop and report `skill_dir_unresolved`.
 
 ## Invocation
 
