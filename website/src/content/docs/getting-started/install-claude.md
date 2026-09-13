@@ -9,7 +9,7 @@ Catalyst also publishes a small, hook-free subset of its skills as a **portable 
 
 ## What's in the portable pack today
 
-Two skills: `setup-catalyst` and `validate-frontmatter`. This is not a curation choice you can expand by asking — most of Catalyst's skills live in `catalyst-dev`, and that plugin's safety hooks (`hooks.toml`) veto the **entire plugin** from every portable target, regardless of any individual skill's own settings. See `docs/skill-authoring.md` in the source repo if you're a Catalyst contributor and want the full mechanism.
+Two skills: `setup-catalyst` and `validate-frontmatter`. Most of Catalyst's skills live in `catalyst-dev`, which no longer ships hooks, but its skills still reach their helper scripts through the Claude plugin root, so they join the portable pack only once each one carries its own scripts. See `docs/skill-authoring.md` in the source repo if you're a Catalyst contributor and want the full mechanism.
 
 ## Install into a project
 

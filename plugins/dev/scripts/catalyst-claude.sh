@@ -13,7 +13,7 @@
 # If catalyst-session.sh is unavailable, falls through to plain claude.
 #
 # The wrapper:
-#   1. Detects ticket from --ticket flag, .catalyst/workflow-context, or branch
+#   1. Detects ticket from --ticket flag or branch
 #   2. Starts a catalyst session (records PID, working dir, branch)
 #   3. Exports CATALYST_SESSION_ID so skills inside claude inherit it
 #   4. Spawns a background watcher for heartbeat + cleanup
@@ -98,11 +98,6 @@ BRANCH=""
 WORKTREE_PATH="$(pwd)"
 
 BRANCH=$(git branch --show-current 2>/dev/null || echo "")
-
-# Auto-detect ticket from workflow context
-if [[ -z "$TICKET" && -f ".catalyst/.workflow-context.json" ]]; then
-  TICKET=$(jq -r '.currentTicket // empty' .catalyst/.workflow-context.json 2>/dev/null || echo "")
-fi
 
 # Auto-detect ticket from git branch name
 if [[ -z "$TICKET" && -n "$BRANCH" ]]; then

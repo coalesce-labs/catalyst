@@ -4,7 +4,7 @@ This directory contains **one-time setup scripts** for initializing HumanLayer t
 workflows. These scripts are **not bundled in the Catalyst plugin** - they're used during initial
 setup only.
 
-**Note**: Runtime scripts (workflow-context.sh, check-prerequisites.sh, create-worktree.sh, etc.)
+**Note**: Runtime scripts (check-prerequisites.sh, create-worktree.sh, etc.)
 are bundled in the plugin at `plugins/dev/scripts/` and `plugins/meta/scripts/`.
 
 ## Directory Structure
@@ -253,7 +253,7 @@ These scripts used to be in `scripts/` but are now bundled in the Catalyst plugi
 
 - ❌ `check-prerequisites.sh` → `plugins/playground/pm-ops/scripts/check-prerequisites.sh` and `plugins/meta/scripts/check-prerequisites.sh` (live callers). The dev plugin's copy was deleted in CTL-489 — it was orphaned.
 - ❌ `create-worktree.sh` → `plugins/dev/scripts/create-worktree.sh`
-- ❌ `workflow-context.sh` → `plugins/dev/scripts/workflow-context.sh`
+- ❌ `workflow-context.sh` → removed entirely in CTL-2306 (skills take explicit input; nothing is remembered between runs)
 - ❌ `frontmatter-utils.sh` → `plugins/dev/scripts/frontmatter-utils.sh`
 - ❌ `validate-frontmatter.sh` → `plugins/meta/scripts/validate-frontmatter.sh`
 

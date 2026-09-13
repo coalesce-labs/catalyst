@@ -23,10 +23,10 @@ exposure: ["catalog"]
 ```
 
 ```yaml
-# plugins/dev/skills/linearis/agents/portability.yaml
+# plugins/dev/skills/linearis/agents/portability.yaml (held `internal` until CTL-2306 Phase 2 makes it self-contained)
 effects: []
 invocation: auto
-exposure: ["catalog"]
+exposure: ["internal"]
 ```
 
 All three keys are required; an extra or misspelled key, a value outside the accepted set, or a missing key is a hard error at render time naming the sidecar file, the offending key or value, and the accepted set (`core/neutral-schema.mjs`'s `validateNeutralDeclaration` — it fails closed by design, the same discipline `providers/local.mjs` applies to `SKILL.md` frontmatter keys).
@@ -61,15 +61,17 @@ This is `core/safety-gate.mjs`'s `checkInvocationParity`, generalized from a pro
 
 ## The pack-wide hooks veto — the single most surprising fact about this pipeline
 
-`plugins/dev/hooks.toml`'s mere **presence** vetoes all **53** `catalyst-dev` skills from every non-Claude target, pack-wide — including skills that carry a perfectly valid `agents/portability.yaml` with `exposure: ["catalog"]`. `linearis` above is exactly this case: a well-formed sidecar, `catalog` exposure, and it is still omitted, because `catalyst-dev` as a whole has hooks and `classifySkillEmission`'s `HOOKS_PRESENT` check runs before a skill's own declaration is even consulted. The rationale (`core/safety-gate.mjs`): "hooks.toml is never projected to non-Claude targets — emitting this skill would silently remove a pack-level safety guard." A hook is pack-level infrastructure (audit logging, workflow-context tracking, etc.); a non-Claude target has no mechanism to carry it, so emitting the skill without its hooks would ship a *different*, less-guarded skill under the same name.
+A plugin's `hooks.toml`'s mere **presence** vetoes every skill in that plugin from every non-Claude target, pack-wide — including skills that carry a perfectly valid `agents/portability.yaml` with `exposure: ["catalog"]`. `classifySkillEmission`'s `HOOKS_PRESENT` check runs before a skill's own declaration is even consulted. The rationale (`core/safety-gate.mjs`): "hooks.toml is never projected to non-Claude targets — emitting this skill would silently remove a pack-level safety guard." A hook is pack-level infrastructure; a non-Claude target has no mechanism to carry it, so emitting the skill without its hooks would ship a *different*, less-guarded skill under the same name.
 
-**Adding a portability sidecar to a `catalyst-dev` skill will not make it appear in `catalyst-skills`.** This is the confusion this section exists to preempt: a green `render` build with a correctly-authored sidecar and zero errors can still emit nothing for that skill, because the veto operates one level above the skill. The only way out is removing `catalyst-dev`'s pack-level hooks entirely, which is a safety decision for the plugin as a whole, not a per-skill authoring choice.
+**No Catalyst plugin ships hooks any more.** `catalyst-dev` carried one `hooks.toml` until CTL-2306 removed it and everything it fed (ADR-030), precisely because this veto kept the whole plugin off every non-Claude harness; `plugins/dev/skills/__tests__/no-plugin-hooks.test.sh` fails the build if a hook layer reappears there. A future cross-harness hook is emitted at build time outside `plugins/` (CTL-2306 Phase 5), never added to a plugin.
 
-The measured result today: exactly **2** skills reach the portable pack — `catalyst-foundry/setup-catalyst` and `catalyst-meta/validate-frontmatter`, the only two skills that are simultaneously (a) in a hook-free pack and (b) carrying a valid `catalog`-exposed sidecar. The total skill and plugin counts are deliberately omitted here — they drift with every skill or plugin added or removed, which is exactly what made an earlier version of this sentence stale the day it was written. Run `bun scripts/packaging/cli.mjs render --dry-run --target agentsSkills` to see the current census and loss counts for yourself rather than trusting a number embedded in this document.
+**Lifting the veto does not by itself make a `catalyst-dev` skill portable.** Most dev skills have no sidecar yet, and the ones that do still reach their helpers through `${CLAUDE_PLUGIN_ROOT}`, which no non-Claude harness sets — so `linearis` is held at `exposure: ["internal"]` until CTL-2306 Phase 2 co-locates its scripts. Publishing a skill that cannot run is worse than omitting it.
+
+The measured result today: exactly **2** skills reach the portable pack — `catalyst-foundry/setup-catalyst` and `catalyst-meta/validate-frontmatter`, the only two skills carrying a valid `catalog`-exposed sidecar. The total skill and plugin counts are deliberately omitted here — they drift with every skill or plugin added or removed, which is exactly what made an earlier version of this sentence stale the day it was written. Run `bun scripts/packaging/cli.mjs render --dry-run --target agentsSkills` to see the current census and loss counts for yourself rather than trusting a number embedded in this document.
 
 ## Practical steps to make a skill portable
 
-1. Confirm the skill's pack has no `hooks.toml`. If it does, stop — no sidecar will help (see above).
+1. Confirm the skill's pack has no `hooks.toml` (no Catalyst plugin ships one), and that everything the skill runs lives inside its own directory — a skill that reaches helpers through `${CLAUDE_PLUGIN_ROOT}` will not run on another harness.
 2. Decide the skill's real `effects`. Be honest about `file-write`/`shell-exec` — under-declaring is a safety bug the invocation-parity rule cannot catch (parity only fires when effects are declared truthfully), and over-declaring only costs you the `explicit`-invocation requirement below.
 3. If any effect is mutating, set `invocation: explicit` in the sidecar **and** add `disable-model-invocation: true` to the `SKILL.md` frontmatter. If no effect is mutating, either value is legal; match whether you want the skill to auto-trigger under Claude Code today.
 4. Set `exposure: ["catalog"]` if the skill is meant for a public, cross-harness audience; `["internal"]` if it is maintainer-only.

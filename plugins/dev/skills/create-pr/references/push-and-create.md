@@ -57,12 +57,6 @@ gh pr create --title "$title" --body "$body" --base "$base"
 
 The commit-message body makes the PR immediately readable even before `/describe-pr` runs.
 
-## Track in Workflow Context (required)
-
-```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" add prs "https://github.com/org/repo/pull/NUMBER" "TICKET-ID"
-```
-
 ## Step 10 — Auto-call /describe-pr
 
 Immediately call `/describe-pr` with the PR number to generate the full description, run verification, refine the title, save to `thoughts/`, and update Linear.

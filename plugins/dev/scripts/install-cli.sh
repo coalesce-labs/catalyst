@@ -56,8 +56,6 @@ CLI_ENTRIES=(
 	"catalyst-monitor.sh:catalyst-monitor"
 	"catalyst-thoughts.sh:catalyst-thoughts"
 	"catalyst-claude.sh:catalyst-claude"
-	"register-thought.sh:register-thought"
-	"workflow-context.sh:workflow-context"
 	"catalyst-hud:catalyst-hud"
 	"catalyst-hud-classic.sh:catalyst-hud-classic"
 	"catalyst-stack:catalyst-stack"
@@ -354,8 +352,8 @@ mkdir -p "$BIN_DIR"
 # shadowed cache-aware shims and silently bypassed plugin version pinning.
 #
 # Filter:
-#   - glob limited to catalyst-* (preserves register-thought, workflow-context
-#     source symlinks — those are still valid)
+#   - glob limited to catalyst-* (preserves any non-catalyst-* symlink a user
+#     placed there, e.g. a legacy register-thought or workflow-context link)
 #   - only symlinks
 #   - readlink target contains /plugins/dev/scripts/ but is NOT under the
 #     plugin cache (~/.claude/plugins/cache/) — i.e. direct clone, not cache

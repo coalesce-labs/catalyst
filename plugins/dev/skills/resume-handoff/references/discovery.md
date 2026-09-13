@@ -1,6 +1,6 @@
 # Finding the handoff to resume from
 
-SKILL.md's Prerequisites already ran auto-discovery (`workflow-context.sh recent handoffs`, CTL-2104-guarded against a stale/phantom path). This reference covers what to do with that result, and the two other discovery paths.
+SKILL.md's Prerequisites already searched `thoughts/shared/handoffs/` on disk for the newest handoff of the ticket this run was given (the argument, or `$CATALYST_TICKET` under a phase), CTL-2104-guarded against a phantom path; with no ticket in an interactive run it offers the newest handoff on disk. Nothing is remembered between runs (CTL-2306). This reference covers what to do with that result, and the other discovery paths.
 
 ## When a cited handoff is missing on disk
 

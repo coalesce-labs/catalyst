@@ -37,6 +37,6 @@ For a **single ticket** read, don't hand-roll this at all — `linear_read_ticke
 
 ## This fallback is the non-fleet path, not an equal alternative
 
-The replica exists specifically so bulk Linear reads never hit the Linear API directly: a bare `linearis`/API read draws on the **shared, rate-limited 2500/hr quota** the whole fleet shares, and exhausting it stalls every agent on the host — measured, not hypothetical (the incident history behind `detect-bare-linear-read.sh` and the replica-first house rule in `catalyst-dev:linearis`).
+The replica exists specifically so bulk Linear reads never hit the Linear API directly: a bare `linearis`/API read draws on the **shared, rate-limited 2500/hr quota** the whole fleet shares, and exhausting it stalls every agent on the host — measured, not hypothetical (the incident history, CTL-1397 and CTL-1420, behind the replica-first house rule in `catalyst-dev:linearis`).
 
 That makes the fallback **correct and safe for a single operator working alone without the cloud stack**, and **actively wrong to recommend to anyone running the fleet-scale workflow this repo is built for.** If you find yourself on the fallback path while other agents are active on this host, that is a writer/mirror gap worth a ticket — not a state to normalize as "either path is fine."
