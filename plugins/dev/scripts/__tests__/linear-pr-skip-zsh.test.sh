@@ -112,6 +112,23 @@ else
 	fail "zsh fail-open passthrough emits skips" "got: $out"
 fi
 
+# ─── Case 5 (CTL-2306): a copy with no CLAUDE_PLUGIN_ROOT still finds its lib under zsh ───
+# Skills now carry this helper inside their own directory and source it by
+# ${CLAUDE_SKILL_DIR}, so the plugin-root anchor is absent. zsh's own sourced-file
+# expansion must locate the sibling team-keys lib, or the allowlist silently stops applying.
+echo "Test: populated allowlist filters under zsh with no CLAUDE_PLUGIN_ROOT (self-located)"
+COPY="$(mktemp -d)"
+cp "$HELPER" "${SCRIPT_DIR}/../lib/linear-team-keys.sh" "$COPY/"
+printf '{"keys":["ADV"]}\n' >"$TK_SANDBOX/catalyst/linear-team-keys.json"
+out="$(zsh -f -c "cd /tmp; unset CLAUDE_PLUGIN_ROOT; source '$COPY/linear-pr-skip.sh'; linear_sibling_skip_block_from_body CTL-633 'see ENG-50 and ADV-200'" 2>&1)"
+if grep -q '^skip ADV-200$' <<<"$out" && ! grep -q '^skip ENG-50$' <<<"$out"; then
+	pass "zsh self-located: allowlist applied from a lone copy (ADV-200 kept, ENG-50 dropped)"
+else
+	fail "zsh self-located: allowlist applied from a lone copy" "got: $out"
+fi
+rm -f "$TK_SANDBOX/catalyst/linear-team-keys.json"
+rm -rf "$COPY"
+
 echo ""
 echo "─────────────────────────────────────────"
 echo "Results: ${PASSES} pass, ${FAILURES} fail"

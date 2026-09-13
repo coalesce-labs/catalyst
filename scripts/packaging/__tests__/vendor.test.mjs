@@ -30,9 +30,14 @@ describe("vendorDestination", () => {
     expect(vendorDestination("agents/codebase-locator.md")).toBe("assets/agents/codebase-locator.md");
   });
 
-  test("anything outside scripts/ and agents/*.md is refused, naming the path", () => {
+  test("a shared plugin reference lands under assets/references/ (outside the skill-shape budget of references/)", () => {
+    expect(vendorDestination("references/merge-blocker-diagnosis.md")).toBe("assets/references/merge-blocker-diagnosis.md");
+  });
+
+  test("anything outside scripts/, agents/*.md and references/*.md is refused, naming the path", () => {
     expect(() => vendorDestination("templates/CLAUDE_SNIPPET.md")).toThrow(/templates\/CLAUDE_SNIPPET\.md/);
     expect(() => vendorDestination("agents/nested/x.md")).toThrow(/agents\/nested\/x\.md/);
+    expect(() => vendorDestination("references/nested/x.md")).toThrow(/references\/nested\/x\.md/);
     expect(() => vendorDestination("scripts/../hooks.toml")).toThrow(/\.\./);
     expect(() => vendorDestination("/etc/passwd")).toThrow();
     expect(() => vendorDestination("scripts/")).toThrow();

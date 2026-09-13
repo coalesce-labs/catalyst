@@ -27,25 +27,33 @@ import { planPluginVendoring } from "../cli.mjs";
 const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const skillsRoot = join(repoRoot, "plugins/dev/skills");
 
-// Cluster 1 (the runner's phase skills and the plan skills that share their subagents).
+// Cluster 1: the runner's phase skills and the plan skills that share their subagents.
+// Cluster 2: the PR/merge skills.
 export const SELF_CONTAINED = [
+  "commit",
   "create-plan",
+  "create-pr",
+  "describe-pr",
   "implement-plan",
   "iterate-plan",
+  "merge-pr",
   "remediate-plan",
   "research-codebase",
+  "review-comments",
   "scan-reward-hacking",
+  "triage-aging-prs",
   "validate-plan",
   "validate-type-safety",
 ];
 
-// catalyst-cloud's derived required set (scripts/skills-derived-skills.ts) minus
-// describe-pr, which lands with the PR/merge cluster.
+// catalyst-cloud's derived required set (scripts/skills-derived-skills.ts): every skill the
+// runner dispatches, by argv or in-session. CTC-2171 re-bakes the runner image on these.
 const RUNNER_PHASE_SKILLS = [
   "research-codebase",
   "create-plan",
   "implement-plan",
   "validate-plan",
+  "describe-pr",
   "remediate-plan",
   "validate-type-safety",
   "scan-reward-hacking",
@@ -137,7 +145,7 @@ describe("the checker sees each violation it exists to catch (positive controls)
   });
 });
 
-describe("cluster 1 of catalyst-dev is self-contained (CTL-2306)", () => {
+describe("the converted catalyst-dev skill clusters are self-contained (CTL-2306)", () => {
   test("skill-dir-isolation.test.sh runs exactly the same skills", () => {
     const shell = readFileSync(join(repoRoot, "scripts/packaging/__tests__/skill-dir-isolation.test.sh"), "utf8");
     const match = shell.match(/^SKILLS="([^"]*)"$/m);
