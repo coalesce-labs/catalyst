@@ -52,9 +52,7 @@ catalyst-session|Session & state|1|Lifecycle CLI for Catalyst agent sessions (st
 catalyst-state|Session & state|1|Manage global orchestrator state at ~/catalyst/state.json (flock-protected RMW + event log).
 boot-resume-approve|Session & state|0|List boot-resume-gated tickets and approve one — writes the .boot-resume-approved sentinel so the daemon dispatches the gated phase without a restart (CTL-1443).
 catalyst-db|Session & state|1|SQLite-backed durable session store for agent runs (init/migrate, sessions, events, metrics).
-workflow-context|Session & state|1|Workflow context management utilities (recent docs, orchestration pointers, skill chaining).
 catalyst-thoughts|Thoughts|1|Repair and verify the HumanLayer thoughts system for a Catalyst project.
-register-thought|Thoughts|0|PostToolUse Write hook that auto-registers thoughts/shared writes (reads hook JSON on stdin).
 thoughts-pull-sync|Thoughts|0|Fast-forward every HumanLayer thoughts checkout so cross-host research reads fresh peer state.
 catalyst-cluster|Cluster & Linear|1|Cluster administration — join tokens, roster, drain, concurrency tuning.
 catalyst-linear|Cluster & Linear|1|Replica-first Linear READ CLI — reads the local Catalyst-Cloud SQLite replica when opted in (CATALYST_LINEAR_REPLICA=on), else linearis; read-only (writes via linearis).

@@ -131,14 +131,6 @@ SQLite-backed durable session store for agent runs (init/migrate, sessions, even
 
 [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/catalyst-db.sh)
 
-### workflow-context
-
-Workflow context management utilities (recent docs, orchestration pointers, skill chaining).
-
-**Key subcommands:** `init`, `add`, `recent`, `most-recent`, `set-ticket`, `set-orchestration`, `ticket`
-
-[Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/workflow-context.sh)
-
 ## Thoughts
 
 ### catalyst-thoughts
@@ -148,12 +140,6 @@ Repair and verify the HumanLayer thoughts system for a Catalyst project.
 **Key subcommands:** `init-or-repair`, `when`, `directory`, `check`
 
 [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/catalyst-thoughts.sh)
-
-### register-thought
-
-PostToolUse Write hook that auto-registers thoughts/shared writes (reads hook JSON on stdin).
-
-[Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/register-thought.sh)
 
 ### thoughts-pull-sync
 

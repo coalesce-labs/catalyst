@@ -437,9 +437,9 @@ run "preserves register-thought source symlink (not catalyst-* prefix)" bash -c 
   PATH='$BIN24:/usr/bin:/bin' HOME='$HOME24' \
     CATALYST_CLI_SOURCE='$SCRATCH/plugin24/scripts' CATALYST_BIN_DIR='$BIN24' \
     $INSTALL_CLI > '$SCRATCH/out24' 2>&1 || true
-  # register-thought was either replaced by the install loop (since it IS in
-  # CLI_ENTRIES) OR preserved if missing from source. The sweep itself must
-  # NOT touch it — re-create + verify the sweep alone leaves it.
+  # register-thought is no longer in CLI_ENTRIES (CTL-2306), so this is a
+  # user-placed non-catalyst-* symlink the sweep itself must NOT touch —
+  # re-create + verify the sweep alone leaves it.
   rm -f '$BIN24/register-thought'
   ln -s '$FAKE_CLONE24/register-thought.sh' '$BIN24/register-thought'
   # Run a sweep-only scenario: source has no register-thought.sh, so the install

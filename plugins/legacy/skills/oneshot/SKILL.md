@@ -35,7 +35,7 @@ provides persistent handoff documents between phases.
 source "${CLAUDE_PLUGIN_ROOT:-plugins/legacy}/scripts/require-catalyst-dev.sh" \
     "${CLAUDE_PLUGIN_ROOT:-plugins/legacy}" || exit 1
 
-# 0. Check project setup (thoughts, config, workflow context init)
+# 0. Check project setup (thoughts, config)
 if [[ -f "${CATALYST_DEV_SCRIPTS}/check-project-setup.sh" ]]; then
   "${CATALYST_DEV_SCRIPTS}/check-project-setup.sh" || exit 1
 fi
@@ -566,27 +566,20 @@ fi
 This phase runs in the current session to allow user interaction during research.
 
 1. **Parse input**: Determine if ticket ID or freeform query
-2. **Register ticket in workflow context (REQUIRED if ticket-based)** — immediately after parsing:
-   ```bash
-   "${CATALYST_DEV_SCRIPTS}/workflow-context.sh" set-ticket "TICKET-ID"
-   ```
-   This ensures `.catalyst/.workflow-context.json` exists and `currentTicket` is set before any
-   other work begins. Downstream skills and hooks depend on this file existing.
-3. **If ticket**: Read ticket details via Linearis CLI, move to `stateMap.research` (default: "In
+2. **If ticket**: Read ticket details via Linearis CLI, move to `stateMap.research` (default: "In
    Progress")
-4. **If freeform (and NOT `--no-ticket`)**: After research completes, offer to create a Linear
+3. **If freeform (and NOT `--no-ticket`)**: After research completes, offer to create a Linear
    ticket from the findings:
    ```
    Research complete. Would you like to create a Linear ticket from these findings?
    [y/N]
    ```
    If yes, create a ticket via the Linearis CLI (run `linearis issues usage` for create syntax)
-   using the research summary as description, then register the ticket ID:
-   `workflow-context.sh set-ticket "NEW-TICKET-ID"`
-5. **Conduct research** — follow the `/catalyst-dev:research-codebase` process exactly. This is the
+   using the research summary as description, and use that ticket ID from here on.
+4. **Conduct research** — follow the `/catalyst-dev:research-codebase` process exactly. This is the
    single source of truth for how codebase research works (including sub-agent
    spawning, synthesis, and document creation). The research document MUST be written to
-   `thoughts/shared/research/` and tracked in workflow context before proceeding to Phase 2.
+   `thoughts/shared/research/` before proceeding to Phase 2.
 
 ### Phase 2: Plan (Current Session)
 

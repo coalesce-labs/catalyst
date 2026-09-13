@@ -36,3 +36,9 @@ jobs:
         run: bash plugins/dev/skills/__tests__/project-orchestrator-shape.test.sh
       - name: Check handoff write-then-cite contract (CTL-2104)
         run: bash plugins/dev/skills/__tests__/handoff-contract.test.sh
+      - name: catalyst-dev ships no hooks (CTL-2306)
+        run: bash plugins/dev/skills/__tests__/no-plugin-hooks.test.sh
+      - name: Skills find their input explicitly, never from remembered workflow state (CTL-2306)
+        run: bash plugins/dev/skills/__tests__/workflow-inputs.test.sh
+      - name: Linear write steps carry their own guards (CTL-2306)
+        run: bash plugins/dev/skills/__tests__/linear-write-guards.test.sh

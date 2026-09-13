@@ -27,15 +27,22 @@ if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" ]]; then
   "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" || exit 1
 fi
 
-# Auto-discover most recent research (workflow context + filesystem fallback)
+# CTL-2306 explicit-input discovery: begin
+# Find the research to plan from on disk for the ticket this run was given — the argument (TICKET_ID)
+# or, under a phase, $CATALYST_TICKET. Nothing is remembered between runs (no workflow state).
+# `[!0-9]` keeps PROJ-1 from matching PROJ-10's documents.
+TICKET_ID="${TICKET_ID:-${CATALYST_TICKET:-}}"
 RECENT_RESEARCH=""
-if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ]]; then
-  RECENT_RESEARCH=$("${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent research)
+if [[ -n "$TICKET_ID" ]]; then
+  RECENT_RESEARCH=$(find -H thoughts/shared/research -type f -name '*.md' -ipath "*${TICKET_ID}[!0-9]*" -exec ls -t {} + 2>/dev/null | head -1)
+elif [[ -z "${CATALYST_PHASE:-}" ]]; then
+  RECENT_RESEARCH=$(find -H thoughts/shared/research -type f -name '*.md' -exec ls -t {} + 2>/dev/null | head -1)
 fi
+# CTL-2306 explicit-input discovery: end
 if [[ -n "$RECENT_RESEARCH" ]]; then
-  echo "📋 Auto-discovered recent research: $RECENT_RESEARCH"
+  echo "📋 Found research: $RECENT_RESEARCH"
 else
-  echo "⚠️ No recent research found in workflow context or filesystem"
+  echo "⚠️ No research found on disk for ${TICKET_ID:-this run} — ask for it (or read the paths the prompt names)"
 fi
 ```
 

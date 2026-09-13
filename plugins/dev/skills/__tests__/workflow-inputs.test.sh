@@ -73,12 +73,16 @@ extract_block() {
   ' "${SKILLS_DIR}/$1/SKILL.md"
 }
 
-# make_tree <root> <kind> — three docs with fixed, ordered mtimes:
-#   ABC-1 old (oldest) < ABC-1 new < XYZ-9 (newest overall, a different ticket).
+# make_tree <root> <kind> — four docs with fixed, ordered mtimes:
+#   ABC-1 old (oldest) < ABC-1 new < ABC-10 lookalike < XYZ-9 (newest overall).
+# The ABC-10 doc is newer than ABC-1's, so a substring match on "ABC-1" would
+# wrongly pick it: the ticket must match on a boundary.
 make_tree() {
   local root="$1" kind="$2" d="$1/thoughts/shared/$2"
   if [ "$kind" = handoffs ]; then
-    mkdir -p "$d/ABC-1" "$d/XYZ-9"
+    mkdir -p "$d/ABC-1" "$d/ABC-10" "$d/XYZ-9"
+    printf 'x\n' > "$d/ABC-10/2026-01-02_12-00-00_lookalike.md"
+    touch -t 202601021200 "$d/ABC-10/2026-01-02_12-00-00_lookalike.md"
     printf 'x\n' > "$d/ABC-1/2026-01-01_10-00-00_old.md"
     printf 'x\n' > "$d/ABC-1/2026-01-02_10-00-00_new.md"
     printf 'x\n' > "$d/XYZ-9/2026-01-03_10-00-00_other.md"
@@ -87,6 +91,8 @@ make_tree() {
     touch -t 202601031000 "$d/XYZ-9/2026-01-03_10-00-00_other.md"
   else
     mkdir -p "$d"
+    printf 'x\n' > "$d/2026-01-02-ABC-10-lookalike.md"
+    touch -t 202601021200 "$d/2026-01-02-ABC-10-lookalike.md"
     printf 'x\n' > "$d/2026-01-01-ABC-1-old.md"
     printf 'x\n' > "$d/2026-01-02-ABC-1-new.md"
     printf 'x\n' > "$d/2026-01-03-XYZ-9-other.md"
@@ -124,13 +130,13 @@ while IFS='|' read -r skill var kind; do
   for sh in $SHELLS; do
     got="$(run_block "$sh" "$tree" "$block_file" "$var" CATALYST_PHASE=plan CATALYST_TICKET=ABC-1)"
     case "$got" in
-      *ABC-1*new*) ok "${skill} [${sh}]: under a phase, \$CATALYST_TICKET selects that ticket's newest doc" ;;
+      *ABC-1[/-]*new*) ok "${skill} [${sh}]: under a phase, \$CATALYST_TICKET selects that ticket's newest doc" ;;
       *) fail "${skill} [${sh}]: under a phase, \$CATALYST_TICKET selects that ticket's newest doc" "got '${got}'" ;;
     esac
 
     got="$(run_block "$sh" "$tree" "$block_file" "$var" TICKET_ID=ABC-1)"
     case "$got" in
-      *ABC-1*new*) ok "${skill} [${sh}]: an explicit TICKET_ID selects that ticket's newest doc" ;;
+      *ABC-1[/-]*new*) ok "${skill} [${sh}]: an explicit TICKET_ID selects that ticket's newest doc" ;;
       *) fail "${skill} [${sh}]: an explicit TICKET_ID selects that ticket's newest doc" "got '${got}'" ;;
     esac
 

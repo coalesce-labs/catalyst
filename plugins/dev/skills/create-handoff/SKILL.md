@@ -134,14 +134,6 @@ Install the content and classify what actually happened. Both commands echo the 
 HANDOFF_ABS="$(handoff_write_verified "$HANDOFF_ABS" "$HANDOFF_TMP")" || exit 1
 rm -f "$HANDOFF_TMP"
 
-# ⚠️ REGISTER THE INSTALL. The `Track Handoff Documents` hook in hooks.toml matches
-# `tool_name = "Write"` only, and this install path is Bash — so nothing records the
-# handoff for you. `workflow-context.sh recent handoffs` returns the FIRST recorded
-# entry and only falls back to the filesystem when there is none, so skipping this
-# leaves the next `resume-handoff` auto-discovering an OLDER handoff.
-"${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" add handoffs "$HANDOFF_REL" "<scope>" \
-  || echo "warning: could not register the handoff in workflow context (auto-discovery may return an older one)" >&2
-
 # Echoes exactly one verdict token: `synced`, or `local-only:<reason>`.
 HANDOFF_VERDICT="$(handoff_sync_and_classify "$HANDOFF_ABS")"
 printf 'absolute: %s\nrelative: %s\nverdict: %s\n' "$HANDOFF_ABS" "$HANDOFF_REL" "$HANDOFF_VERDICT"

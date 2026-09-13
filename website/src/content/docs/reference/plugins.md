@@ -33,11 +33,7 @@ Most sessions run with just `catalyst-dev`.
 
 ## Hooks (catalyst-dev)
 
-The dev plugin adds three hooks that run on their own in Claude Code:
-
-- `inject-plan-template` — adds Catalyst's plan layout when you enter plan mode
-- `sync-plan-to-thoughts` — saves your plan to `thoughts/shared/plans/` when you leave plan mode
-- `update-workflow-context` — records what you wrote so the next step can find it
+The dev plugin ships no hooks, so its skills behave the same in every coding agent. To pick up an earlier research doc, plan or handoff, pass its path or name the ticket; the skill finds that ticket's newest document in `thoughts/shared/`.
 
 ## Updating
 

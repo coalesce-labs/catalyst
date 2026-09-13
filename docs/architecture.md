@@ -5,14 +5,14 @@ For the local Linear writer, freshness gate, read tiers, configuration order, an
 ## Three-Layer System
 
 1. **Plugin Source** (`plugins/dev/`, `plugins/meta/`, `plugins/playground/pm-ops/`, `plugins/legacy/`, …) — canonical agent/skill definitions; edit these.
-2. **Installation Layer** — `.claude/` (symlinks Claude Code reads plugins from) + `.catalyst/` (workflow state: `config.json`, `.workflow-context.json`).
+2. **Installation Layer** — `.claude/` (symlinks Claude Code reads plugins from) + `.catalyst/` (`config.json`).
 3. **Thoughts System** — external git-backed context at `~/thoughts/`, shared across worktrees, initialized per-project via `init-project.sh`.
 
 ## Multi-Target Packaging (CTL-1463, CTL-1461)
 
 Each plugin's canonical identity/distribution metadata lives in a hand-authored `pack.json` (`plugins/<name>/pack.json`) — everything except the version (exclusively owned by Release Please via each target's `plugin.json` `extra-files` jsonpath, see `docs/releases.md`) and per-skill neutral classification. `scripts/packaging/cli.mjs render --target <claude|codex|agentsSkills> --write` compiles the pack manifest plus each skill's own `agents/portability.yaml` sidecar (`providers/local.mjs`, CTL-1461's real render interface — it replaced the provisional CTL-1463 adapter wholesale, a pure relocation of the same `effects`/`invocation`/`exposure` shape) into three targets: Claude (`.claude-plugin/`, byte-exact regeneration of the existing tree), Codex (`.codex-plugin/` + `.agents/plugins/marketplace.json`, both drift-gated with a `.generated-by-catalyst-packaging` marker), and a plain `.agents/skills/` bundle for skills whose sidecar declares `exposure: ["catalog"]`.
 
-A non-negotiable safety gate (`core/safety-gate.mjs`) makes the emit/omit/degrade decision a declared table rather than inline conditionals: a pack with `hooks.toml`, an unclassified skill, or a non-catalog `exposure` is OMITTED (safety); an explicit-invocation skill on a target that cannot yet guarantee enforcement is emitted but DEGRADED (capability, named and counted, never silent); a mutating skill (`file-write`/`shell-exec`) must declare `invocation: "explicit"` in its sidecar AND `disable-model-invocation: true` in its `SKILL.md` — a disagreement between the two vocabularies is a hard error at render time (the invocation-parity rule, generalized from catalyst-cloud's proven mutating-pair check). A CI drift gate (`packaging-gate.yml`) regenerates all three targets on every PR and fails on any tracked-file diff OR any new untracked file — the two checks are not redundant, since a diff alone is blind to a brand-new generated file nobody committed. CTL-1461 shipped the provider swap, the safety gate, the drift gate, and inventory-agreement checking (a plugin listed in `release-please-config.json` but absent from disk, or vice versa, is a named error rather than a crash or a silent drop) — conformance fixtures, loss-report quantification, and the install/authoring docs are its follow-on scope. See the full model, the seam contract, and the day-one scope in `docs/specs/accepted/vendor-neutral-packaging/spec.md`.
+A non-negotiable safety gate (`core/safety-gate.mjs`) makes the emit/omit/degrade decision a declared table rather than inline conditionals: a pack with `hooks.toml` (no Catalyst pack ships one since CTL-2306), an unclassified skill, or a non-catalog `exposure` is OMITTED (safety); an explicit-invocation skill on a target that cannot yet guarantee enforcement is emitted but DEGRADED (capability, named and counted, never silent); a mutating skill (`file-write`/`shell-exec`) must declare `invocation: "explicit"` in its sidecar AND `disable-model-invocation: true` in its `SKILL.md` — a disagreement between the two vocabularies is a hard error at render time (the invocation-parity rule, generalized from catalyst-cloud's proven mutating-pair check). A CI drift gate (`packaging-gate.yml`) regenerates all three targets on every PR and fails on any tracked-file diff OR any new untracked file — the two checks are not redundant, since a diff alone is blind to a brand-new generated file nobody committed. CTL-1461 shipped the provider swap, the safety gate, the drift gate, and inventory-agreement checking (a plugin listed in `release-please-config.json` but absent from disk, or vice versa, is a named error rather than a crash or a silent drop) — conformance fixtures, loss-report quantification, and the install/authoring docs are its follow-on scope. See the full model, the seam contract, and the day-one scope in `docs/specs/accepted/vendor-neutral-packaging/spec.md`.
 
 **CTL-2215 turns the `agentsSkills` target into a real distribution channel.** `bun scripts/packaging/cli.mjs conformance --target agentsSkills` (`core/agentskills-spec.mjs`) grades the planned emit set against the real `skills@1.5.23` CLI's own parser contract — verified by reading `dist/cli.mjs`, not by citation: `name`/`description` must be non-empty strings, only `license`/`metadata` are otherwise allowed, no two skills may share a `name` (the CLI keys install destination and dedup on it), and an emitted `metadata.internal: true` is a violation (Catalyst omits internal-exposure skills rather than flagging them — the safety gate already decided that upstream). An empty emit set or an unreadable source tree is `inconclusive`, never a clean pass. `packaging-gate.yml` runs this check on every PR, after regeneration and before the drift gate, because the two guard different failures (drift: "disagrees with what's committed"; conformance: "would not install cleanly via `npx skills add`"). `TARGET_CAPABILITIES.agentsSkills.canExpressInvocationConstraint` stays `false` — the real CLI has no mechanism equivalent to `disable-model-invocation` (a case-sensitive search of its whole bundle for `allow_implicit_invocation`/`openai.yaml` returns zero matches), so that degradation stays a named, counted loss-report entry, not a flip.
 
@@ -20,21 +20,18 @@ On a published GitHub Release, `.github/workflows/publish-skills.yml` regenerate
 
 ## Memory & Workflow State
 
-Three memory layers manage context across projects:
+Two memory layers manage context across projects:
 
 1. **Project config** (`.catalyst/config.json`, committable) — ticket prefix, Linear team, etc. HumanLayer maps cwd → profile via `repoMappings`.
 2. **Long-term memory** — HumanLayer thoughts repo (git-backed, synced via `humanlayer thoughts sync`): `shared/research/`, `shared/plans/`, `shared/prs/`, `shared/handoffs/`.
-3. **Short-term memory** (`.catalyst/.workflow-context.json`, per-worktree, not committed) — pointers to recent docs enabling skill chaining: `/research-codebase`→`/create-plan`→`/implement-plan`, `/create-handoff`→`/resume-handoff`. Auto-updated by workflow skills.
+
+There is no third, short-term layer any more (CTL-2306 removed `.catalyst/.workflow-context.json` and the hooks that wrote it). Skill chaining — `/research-codebase`→`/create-plan`→`/implement-plan`, `/create-handoff`→`/resume-handoff` — runs on explicit input: a path passed in, or the newest thoughts document for the ticket the run was given (the argument, or `$CATALYST_TICKET` under a phase). Nothing a skill needs is carried between runs.
 
 ```
 .catalyst/config.json              <- project config (committable)
    ↓
 ~/thoughts/repos/<proj>/{research,plans,prs,handoffs}/   <- long-term (git-backed)
-   ↓
-.catalyst/.workflow-context.json   <- short-term (session pointers)
 ```
-
-`.workflow-context.json` structure: `{lastUpdated, currentTicket, orchestration, mostRecentDocument:{type,path,created,ticket}, workflow:{research[],plans[],handoffs[],prs[]}}`.
 
 ## Global Orchestrator State
 

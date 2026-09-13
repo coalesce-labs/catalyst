@@ -1,4 +1,9 @@
 ---
+# CTL-2306: held `internal` until the skill is self-contained. Removing the dev
+# plugin's hooks lifted the pack-wide veto, and this skill still reaches its
+# helpers through ${CLAUDE_PLUGIN_ROOT}, which no non-Claude harness sets — a
+# `catalog` exposure here would publish a skill that silently cannot run.
+# CTL-2306 Phase 2 co-locates its scripts; Phase 3 restores `catalog`.
 effects: []
 invocation: auto
-exposure: ["catalog"]
+exposure: ["internal"]

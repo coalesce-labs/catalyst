@@ -26,19 +26,27 @@ if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" ]]; then
   "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" || exit 1
 fi
 
-# Auto-discover the most recent handoff. CTL-2104: guard the discovered path — workflow-context.sh returns a REMEMBERED path, and a remembered path is exactly what goes stale (thoughts/shared is a per-project symlink). An unguarded read of a phantom path yields an empty document that reads like an empty handoff.
+# CTL-2306 explicit-input discovery: begin
+# Find the handoff to resume on disk for the ticket this run was given — the argument (TICKET_ID)
+# or, under a phase, $CATALYST_TICKET. Nothing is remembered between runs (no workflow state).
+# `[!0-9]` keeps PROJ-1 from matching PROJ-10's documents.
+TICKET_ID="${TICKET_ID:-${CATALYST_TICKET:-}}"
 RECENT_HANDOFF=""
-if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ]]; then
-  RECENT_HANDOFF=$("${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent handoffs)
+if [[ -n "$TICKET_ID" ]]; then
+  RECENT_HANDOFF=$(find -H thoughts/shared/handoffs -type f -name '*.md' -ipath "*${TICKET_ID}[!0-9]*" -exec ls -t {} + 2>/dev/null | head -1)
+elif [[ -z "${CATALYST_PHASE:-}" ]]; then
+  RECENT_HANDOFF=$(find -H thoughts/shared/handoffs -type f -name '*.md' -exec ls -t {} + 2>/dev/null | head -1)
 fi
+# CTL-2306 explicit-input discovery: end
+# CTL-2104: guard the discovered path anyway — thoughts/shared is a per-project symlink and a path can vanish mid-run; an unguarded read of a phantom path yields an empty document that reads like an empty handoff.
 if [[ -n "$RECENT_HANDOFF" && ! -f "$RECENT_HANDOFF" ]]; then
   echo "⚠️ Cited handoff is not on disk: $RECENT_HANDOFF"
   echo "   The channel is authoritative — recover from the last turn's text, see references/discovery.md."
   RECENT_HANDOFF=""
 elif [[ -n "$RECENT_HANDOFF" ]]; then
-  echo "📋 Auto-discovered recent handoff: $RECENT_HANDOFF"
+  echo "📋 Found handoff: $RECENT_HANDOFF"
 else
-  echo "⚠️ No recent handoff found in workflow context or filesystem"
+  echo "⚠️ No handoff found on disk for ${TICKET_ID:-this run}"
 fi
 ```
 
