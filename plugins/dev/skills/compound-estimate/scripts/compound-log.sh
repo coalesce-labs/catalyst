@@ -109,17 +109,23 @@ probe_linear_estimate() {
 }
 
 # Probe local cost data. Tries (in order):
-#   1. catalyst-state.sh worker aggregate for current orchestrator
-#   2. catalyst-session.sh history --ticket
+#   1. catalyst-state worker aggregate for current orchestrator
+#   2. catalyst-session history --ticket
 # Prints numeric cost on stdout, exits non-zero if no data found.
+#
+# CTL-2306: both are host tooling. In the plugin tree they sit beside this script; a skill carries
+# only this script, so each falls back to the CLI install-cli.sh puts on PATH (catalyst-state,
+# catalyst-session) — the live default cost source must not vanish because the caller is a skill.
 probe_cost_local() {
   local ticket="$1"
   local script_dir="$2"
-  local state_script="${script_dir}/catalyst-state.sh"     # self-containment: optional (host cost probe; absent → next probe)
-  local session_script="${script_dir}/catalyst-session.sh" # self-containment: optional (host cost probe; absent → next probe)
+  local state_script="${script_dir}/catalyst-state.sh"     # self-containment: optional (falls back to the catalyst-state CLI)
+  [ -x "$state_script" ] || state_script="$(command -v catalyst-state 2>/dev/null || true)"
+  local session_script="${script_dir}/catalyst-session.sh" # self-containment: optional (falls back to the catalyst-session CLI)
+  [ -x "$session_script" ] || session_script="$(command -v catalyst-session 2>/dev/null || true)"
 
   # State aggregate (orchestrator mode)
-  if [ -n "${CATALYST_ORCHESTRATOR_ID:-}" ] && [ -x "$state_script" ]; then
+  if [ -n "${CATALYST_ORCHESTRATOR_ID:-}" ] && [ -n "$state_script" ] && [ -x "$state_script" ]; then
     local agg
     agg=$("$state_script" worker-usage "${CATALYST_ORCHESTRATOR_ID}" "$ticket" 2>/dev/null \
       | jq -r '.cost_usd // empty' 2>/dev/null)
@@ -130,7 +136,7 @@ probe_cost_local() {
   fi
 
   # Session history fallback
-  if [ -x "$session_script" ]; then
+  if [ -n "$session_script" ] && [ -x "$session_script" ]; then
     local hist
     hist=$("$session_script" history --ticket "$ticket" --limit 1 2>/dev/null \
       | jq -r '.[0].cost_usd // empty' 2>/dev/null)
