@@ -27,7 +27,7 @@ You own one project or initiative until it closes: for each ready ticket you lau
 
 ## Invariants
 
-- **Run the setup check before you act as anyone** — `bash "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh"`, the same gate `create-pr`/`merge-pr` run. Since CTL-2300 it also names every identity it could NOT resolve (tenant, human, team, cloud host); a `Tenant identity — <slot> UNRESOLVED` line is a stop-and-say, because this skill acts **as** someone **on** someone's board and a wrong identity there reaches nobody, silently.
+- **Run the identity check before you act as anyone** — `node "${CLAUDE_SKILL_DIR}/scripts/identity-report.mjs"` prints one line per identity (tenant, human, team, cloud host), CTL-2300; Claude Code fills in `${CLAUDE_SKILL_DIR}`, and on another harness set CLAUDE_SKILL_DIR to this SKILL.md's directory or stop and report `skill_dir_unresolved`. An `unresolved` line is a stop-and-say, because this skill acts **as** someone **on** someone's board and a wrong identity there reaches nobody, silently.
 - **One dispatch verb, and cloud-detection picks it** — off-cloud you launch `/relay-ticket <TICKET>`; on a cloud tenant you move the card to Todo through the write proxy and launch nothing (`references/cloud-dispatch.md`). Never a worktree, hand-rolled worker, or phase agent: you write no product code.
 - **A cap is never silent** — every ticket you could have dispatched but did not is named, with why.
 - **No status doc = you have not started.** It exists before your first dispatch.

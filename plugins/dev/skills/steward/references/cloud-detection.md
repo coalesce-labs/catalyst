@@ -7,14 +7,14 @@ Steward (and concierge) assume a live Catalyst Cloud replica by default. That as
 **1. Replica existence + freshness.** Reuse the existing freshness-gate helper — do not write a second one:
 
 ```bash
-source "${CLAUDE_PLUGIN_ROOT:?}/scripts/lib/linear-read-replica.sh"
+source "${CLAUDE_SKILL_DIR}/scripts/lib/linear-read-replica.sh"
 replica_fresh; rf=$?   # rc 0: writer heartbeat lock recent AND sync_meta has a cursor row. rc 1: stale/absent.
 ```
 
 **2. The `.catalyst` project-config marker.** Presence of a `.catalyst/config.json` walking up from the worktree says this host is configured to run against the Catalyst Cloud stack at all — reuse the existing resolver, do not hand-roll a second walk:
 
 ```bash
-source "${CLAUDE_PLUGIN_ROOT:?}/scripts/lib/plugin-dirs.sh"
+source "${CLAUDE_SKILL_DIR}/scripts/lib/plugin-dirs.sh"
 marker="$(plugin_dirs_repo_config_path)"   # path to .catalyst/config.json, or "" if none found
 ```
 

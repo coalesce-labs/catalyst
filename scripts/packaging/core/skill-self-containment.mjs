@@ -3,8 +3,10 @@
 // checkSkillSelfContainment(skillDir) → { filesScanned, violations: [{ rule, file, line, detail }] }
 //
 // Rules, each with a positive control in skill-self-containment.test.mjs:
-//   plugin-root-reference       SKILL.md, references/ or assets/ names ${CLAUDE_PLUGIN_ROOT} or
-//                               plugins/dev/scripts — only Claude Code's plugin rail resolves those.
+//   plugin-root-reference       SKILL.md, references/ or assets/ names ${CLAUDE_PLUGIN_ROOT} or a
+//                               repo-relative plugins/<plugin>/{scripts,skills,references,templates,agents}/
+//                               path — only Claude Code's plugin rail, or a cwd inside the catalyst
+//                               checkout, resolves those.
 //   skill-dir-path-missing      a `${CLAUDE_SKILL_DIR}/<path>` names a file the skill does not carry.
 //   missing-skill-dir-preamble  the skill runs a `${CLAUDE_SKILL_DIR}` command but never tells a
 //                               non-Claude harness how to set the variable (`skill_dir_unresolved`).
@@ -27,7 +29,8 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, normalize, relative, sep } from "node:path";
 
 const PROSE_DIRS = ["references", "assets"];
-const PLUGIN_ROOT_PATTERN = /\$\{?CLAUDE_PLUGIN_ROOT\}?|plugins\/dev\/scripts\//;
+// ${CLAUDE_PLUGIN_ROOT}, or a repo-relative path into the plugin tree (resolves only inside the catalyst checkout).
+const PLUGIN_ROOT_PATTERN = /\$\{?CLAUDE_PLUGIN_ROOT\}?|plugins\/[a-z0-9-]+\/(?:scripts|skills|references|templates|agents)\//;
 const SKILL_DIR_PATH_PATTERN = /\$\{CLAUDE_SKILL_DIR\}\/([A-Za-z0-9_./-]+)/g;
 const PREAMBLE_MARKER = "skill_dir_unresolved";
 const OPTIONAL_MARKER = "# self-containment: optional";

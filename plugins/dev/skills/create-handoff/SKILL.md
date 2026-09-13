@@ -11,13 +11,14 @@ version: 1.0.0
 
 # Create Handoff
 
+**Paths.** Commands below name files inside this skill's own directory as `${CLAUDE_SKILL_DIR}/…`. Claude Code fills that in. On any other harness, set CLAUDE_SKILL_DIR to the absolute directory that contains this SKILL.md before running them. If you cannot, stop and report `skill_dir_unresolved`.
+
 ## Prerequisites
 
 ```bash
-# Check project setup (thoughts, CLAUDE.md snippet, config)
-if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" ]]; then
-  "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" || exit 1
-fi
+# Thoughts must exist for this skill's documents. CTL-2306: the full host setup check (daemon,
+# registry, house rules) belongs to the setup-catalyst skill, not to a skill that must run anywhere.
+[[ -e thoughts/shared ]] || echo "⚠️ thoughts/shared is missing in $(pwd) — run \`humanlayer thoughts init\` or the setup-catalyst skill; if the prompt names an output path, write there" >&2
 ```
 
 ## Configuration Note
@@ -42,7 +43,7 @@ You are tasked with writing a handoff document to hand off your work to another 
 **Do NOT compose the filename yourself.** `thoughts/shared` is a *per-project symlink*: the same relative path resolves to a different physical subtree depending on which worktree you are in, and a hand-typed `HH-MM-SS` drifts between the filename, the frontmatter and the citation. Both produce a path you announce and the next turn cannot find (CTL-2104). Ask the helper instead — it stamps the time mechanically and resolves the symlink for you:
 
 ```bash
-source "${CLAUDE_PLUGIN_ROOT}/scripts/lib/handoff-durability.sh"
+source "${CLAUDE_SKILL_DIR}/scripts/lib/handoff-durability.sh"
 
 # <scope> = the ticket id (e.g. PROJ-123), or `general` when there is no ticket.
 # <description> = brief kebab-case description.

@@ -12,7 +12,7 @@ version: 1.1.0
 
 ## What it consumes
 
-Read `plugins/dev/skills/validate-plan/SKILL.md` for the schema this skill reads — its `allowed-tools`, and the exact headings its "Validation Report" renders into the conversation. That report is this skill's entire input; do not re-derive or copy its contract here, since `validate-plan` is the owning skill and the only source that stays current when its report shape changes. See `references/single-session-fix.md` for a worked example of turning that report into fixes.
+Load the `validate-plan` skill (`/catalyst-dev:validate-plan`; in a skills-CLI install, its SKILL.md sits in the sibling `validate-plan` skill directory) for the schema this skill reads — its `allowed-tools`, and the exact headings its "Validation Report" renders into the conversation. That report is this skill's entire input; do not re-derive or copy its contract here, since `validate-plan` is the owning skill and the only source that stays current when its report shape changes. See `references/single-session-fix.md` for a worked example of turning that report into fixes.
 
 ## When to run it
 

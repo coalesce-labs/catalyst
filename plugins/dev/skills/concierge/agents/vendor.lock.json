@@ -1,0 +1,8 @@
+{
+  "generatedBy": "catalyst-packaging vendor",
+  "files": [
+    "scripts/identity-report.mjs",
+    "scripts/lib/cloud-facts.mjs",
+    "scripts/lib/tenant-identity.mjs"
+  ]
+}
