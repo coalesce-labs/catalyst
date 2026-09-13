@@ -75,7 +75,7 @@ documentation. The list below is the current inventory only.
 
 ## No Hooks, No Remembered Workflow State
 
-The plugin ships no hooks (CTL-2306), so every skill behaves the same on Claude Code, Codex, Cursor and OpenCode. Skills that pick up a prior document (`create-plan`, `iterate-plan`, `validate-plan`, `implement-plan`, `resume-handoff`) take it explicitly: a path you pass, or the newest `thoughts/shared/` document for the ticket they were given (the argument, or `$CATALYST_TICKET` under a phase). Nothing is remembered between runs.
+The plugin ships no hooks (CTL-2306). That removes the pack-wide veto that kept every catalyst-dev skill out of the portable pack, but it does not make the skills portable yet: most have no portability sidecar, and they still reach their helper scripts through `${CLAUDE_PLUGIN_ROOT}`, which only Claude Code sets. Until later CTL-2306 phases co-locate those scripts, treat catalyst-dev as a Claude Code plugin. Skills that pick up a prior document (`create-plan`, `iterate-plan`, `validate-plan`, `implement-plan`, `resume-handoff`) take it explicitly: a path you pass, or the newest `thoughts/shared/` document for the ticket they were given (a ticket in the skill's argument, or `$CATALYST_TICKET` under a phase). Nothing is remembered between runs.
 
 ## Installation
 

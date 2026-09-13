@@ -33,7 +33,7 @@ Most sessions run with just `catalyst-dev`.
 
 ## Hooks (catalyst-dev)
 
-The dev plugin ships no hooks, so its skills behave the same in every coding agent. To pick up an earlier research doc, plan or handoff, pass its path or name the ticket; the skill finds that ticket's newest document in `thoughts/shared/`.
+The dev plugin ships no hooks. Its skills still expect Claude Code for now (they reach helper scripts through the Claude plugin root); portable packaging for other coding agents is in progress. To pick up an earlier research doc, plan or handoff, pass its path or name the ticket; the skill finds that ticket's newest document in `thoughts/shared/`.
 
 ## Updating
 

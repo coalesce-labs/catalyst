@@ -102,6 +102,13 @@ make_tree() {
   fi
 }
 
+# claude_substitute <block-file> <arguments> <out-file> — what Claude Code does to a skill
+# body before the model sees it: every literal `$ARGUMENTS` becomes the invocation's
+# argument text, verbatim. Another harness leaves the token as written.
+claude_substitute() {
+  ARGS_TEXT="$2" awk '{ gsub(/\$ARGUMENTS/, ENVIRON["ARGS_TEXT"]); print }' "$1" > "$3"
+}
+
 # run_block <shell> <dir> <block-file> <var> <env assignments...> → the variable's value
 run_block() {
   local sh="$1" dir="$2" block="$3" var="$4"
@@ -151,6 +158,22 @@ while IFS='|' read -r skill var kind; do
     case "$got" in
       *XYZ-9*other*) ok "${skill} [${sh}]: interactive with no ticket offers the newest doc on disk" ;;
       *) fail "${skill} [${sh}]: interactive with no ticket offers the newest doc on disk" "got '${got}'" ;;
+    esac
+
+    # Codex review on #4132: `/catalyst-dev:<skill> ABC-1` reaches the skill as
+    # $ARGUMENTS text, not a TICKET_ID env var.
+    claude_substitute "$block_file" "ABC-1" "${block_file}.args"
+    got="$(run_block "$sh" "$tree" "${block_file}.args" "$var")"
+    case "$got" in
+      *ABC-1[/-]*new*) ok "${skill} [${sh}]: a ticket given as the skill argument selects that ticket's newest doc" ;;
+      *) fail "${skill} [${sh}]: a ticket given as the skill argument selects that ticket's newest doc" "got '${got}'" ;;
+    esac
+
+    claude_substitute "$block_file" "abc-1 — don't forget the \"quoted\" \$HOME bits" "${block_file}.args2"
+    got="$(run_block "$sh" "$tree" "${block_file}.args2" "$var")"
+    case "$got" in
+      *ABC-1[/-]*new*) ok "${skill} [${sh}]: a lowercase ticket inside free text with quotes is found and normalized" ;;
+      *) fail "${skill} [${sh}]: a lowercase ticket inside free text with quotes is found and normalized" "got '${got}'" ;;
     esac
   done
 done <<READERS_EOF
