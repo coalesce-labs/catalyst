@@ -1,0 +1,6 @@
+{
+  "generatedBy": "catalyst-packaging vendor",
+  "files": [
+    "scripts/lib/handoff-durability.sh"
+  ]
+}

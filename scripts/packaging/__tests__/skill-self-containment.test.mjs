@@ -30,22 +30,30 @@ const skillsRoot = join(repoRoot, "plugins/dev/skills");
 // Cluster 1: the runner's phase skills and the plan skills that share their subagents.
 // Cluster 2: the PR/merge skills.
 // Cluster 3: the Linear skills.
+// Cluster 4a: coordination (concierge, steward, handoffs) and the skills that were already clean.
 export const SELF_CONTAINED = [
+  "agent-browser",
   "ask",
   "commit",
+  "concierge",
+  "create-handoff",
   "create-plan",
   "create-pr",
   "describe-pr",
+  "fix-typescript",
   "gherkin-ticket",
   "implement-plan",
   "iterate-plan",
   "linear",
   "linearis",
   "merge-pr",
+  "project-orchestrator",
   "remediate-plan",
   "research-codebase",
+  "resume-handoff",
   "review-comments",
   "scan-reward-hacking",
+  "steward",
   "triage-aging-prs",
   "validate-plan",
   "validate-type-safety",
@@ -84,6 +92,34 @@ describe("the checker sees each violation it exists to catch (positive controls)
       "SKILL.md": '---\nname: x\n---\n```bash\n"${CLAUDE_PLUGIN_ROOT}/scripts/check.sh"\n```\n',
     });
     expect(checkSkillSelfContainment(dir).violations.map((v) => v.rule)).toContain("plugin-root-reference");
+  });
+
+  // A repo-relative path into another part of the plugin is the same defect as a plugin-root
+  // path: it resolves only with cwd inside the catalyst checkout (remediate-plan pointed the
+  // runner at plugins/dev/skills/validate-plan/SKILL.md, which no tenant repo has).
+  test("a repo-relative path into the plugin's skills, references, templates or agents", () => {
+    const dir = fixtureSkill("repo-relative-paths", {
+      "SKILL.md": "---\nname: x\n---\nRead `plugins/dev/skills/ask/references/threading.md` first.\n",
+      "references/more.md": "See plugins/dev/references/review-thread-resolution.md and plugins/dev/templates/x.json.\n",
+    });
+    expect(checkSkillSelfContainment(dir).violations.filter((v) => v.rule === "plugin-root-reference").length).toBe(2);
+  });
+
+  // Codex review on #4136 (P1): concierge followed `steward/references/cloud-detection.md`, whose
+  // commands source helpers from ${CLAUDE_SKILL_DIR} — concierge's directory, not steward's. A
+  // pointer into a sibling skill's directory breaks the same way a plugin-root path does.
+  test("a path into a sibling skill's references, scripts or assets", () => {
+    const parent = join(scratch, "siblings");
+    mkdirSync(join(parent, "steward", "references"), { recursive: true });
+    writeFileSync(join(parent, "steward", "SKILL.md"), "---\nname: steward\n---\n");
+    writeFileSync(join(parent, "steward", "references", "cloud-detection.md"), "x\n");
+    mkdirSync(join(parent, "concierge"), { recursive: true });
+    writeFileSync(
+      join(parent, "concierge", "SKILL.md"),
+      "---\nname: concierge\n---\nGate reads on `steward/references/cloud-detection.md`. The `ask` skill decides asks.\n"
+    );
+    const v = checkSkillSelfContainment(join(parent, "concierge")).violations;
+    expect(v.map((x) => [x.rule, x.detail])).toEqual([["sibling-skill-path", "steward/references/cloud-detection.md"]]);
   });
 
   test("a skill-dir path that does not exist", () => {

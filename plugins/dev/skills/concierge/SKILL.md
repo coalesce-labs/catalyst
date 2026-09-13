@@ -21,13 +21,13 @@ You are the human's **single desk**. Everything they need arrives through you, a
 | a human asks for something that is not yet a project | `references/scaffold.md` |
 | deciding who answers a comment — you, a steward, or nobody | `references/routing.md` |
 | an ask is stale, unanswered, or needs re-surfacing | `references/asks.md` |
-| replying to anyone | `ask/references/threading.md` (canonical) |
-| the replica might be stale, or this host may have no cloud mirror | `steward/references/cloud-detection.md` (canonical) |
+| replying to anyone | the `ask` skill's `references/threading.md` (canonical) |
+| the replica might be stale, or this host may have no cloud mirror | `assets/references/cloud-detection.md` (canonical) |
 | booting, restarting, or handing off | `references/resume.md` |
 
 ## Invariants
 
-- **Run the setup check before you act as anyone** — `bash "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh"`, the same gate `create-pr`/`merge-pr` run. Since CTL-2300 it also names every identity it could NOT resolve (tenant, human, team, cloud host); a `Tenant identity — <slot> UNRESOLVED` line is a stop-and-say, because this skill acts **as** someone **on** someone's board and a wrong identity there reaches nobody, silently.
+- **Run the identity check before you act as anyone** — `node "${CLAUDE_SKILL_DIR}/scripts/identity-report.mjs"` prints one line per identity (tenant, human, team, cloud host), CTL-2300; Claude Code fills in `${CLAUDE_SKILL_DIR}`, and on another harness set CLAUDE_SKILL_DIR to this SKILL.md's directory or stop and report `skill_dir_unresolved`. An `unresolved` line is a stop-and-say, because this skill acts **as** someone **on** someone's board and a wrong identity there reaches nobody, silently.
 - **One page.** If the human needs two surfaces to know where things stand, the board is broken.
 - **You are the only role that grills a human**, and only interactively, bounded, one question at a time,
   each with a recommended answer. "Use your recommendations" ends it immediately.
@@ -39,7 +39,7 @@ You are the human's **single desk**. Everything they need arrives through you, a
 - **An ask never silently expires** — unanswered > 24 h goes to the top of the board.
 - **A steward's "I cannot enforce this" is a RISK on the board, not a decision** for the human to make.
 - **Cite an identifier only after `create` returned it.**
-- **Reads → the replica, gated by cloud-detection** (`steward/references/cloud-detection.md`); stale/absent means a loud fallback to direct `linearis` — the non-fleet path, never a silent one.
+- **Reads → the replica, gated by cloud-detection** (`assets/references/cloud-detection.md`); stale/absent means a loud fallback to direct `linearis` — the non-fleet path, never a silent one.
 
 ## Loop
 
@@ -49,7 +49,7 @@ You are the human's **single desk**. Everything they need arrives through you, a
 4. **ASKS** — every open ask: still live? > 24 h? → top of the board (`references/asks.md`).
 5. **SCAFFOLD** — a request that is not yet a project becomes one, and a steward is launched for it.
 6. **ORPHANS** — a scope with no steward is yours until one exists: dispatch it exactly as a steward does
-   (`steward/references/dispatch.md`), confirming **phase-completion evidence** before advancing; scaffold a real steward rather than keep it.
+   (the `steward` skill's `references/dispatch.md`), confirming **phase-completion evidence** before advancing; scaffold a real steward rather than keep it.
 7. **PUSH** — P1 asks any hour; everything else batched into the next 07:00–22:00 CT window.
 8. **HAND OFF** — write the handoff your supervisor resumes from, then stop.
 

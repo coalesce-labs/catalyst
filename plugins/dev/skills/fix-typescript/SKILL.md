@@ -12,7 +12,7 @@ Fix TypeScript type errors for **runtime type safety**, not just to satisfy the 
 
 ## Forbidden patterns
 
-The canonical, exhaustive forbidden-pattern table — `as any`, `as unknown as`, `@ts-ignore` / `@ts-expect-error`, void tricks, underscore-prefixed unused locals, non-null assertions without a guard, `forEach(async`, and exported unused types, each with severity and acceptable/unacceptable examples — lives in `/catalyst-dev:scan-reward-hacking` (`plugins/dev/skills/scan-reward-hacking/SKILL.md`). Run it before marking this work complete; don't re-derive the list here.
+The canonical, exhaustive forbidden-pattern table — `as any`, `as unknown as`, `@ts-ignore` / `@ts-expect-error`, void tricks, underscore-prefixed unused locals, non-null assertions without a guard, `forEach(async`, and exported unused types, each with severity and acceptable/unacceptable examples — lives in the `/catalyst-dev:scan-reward-hacking` skill. Run it before marking this work complete; don't re-derive the list here.
 
 Two more rules are process-level, not grep-able code patterns, so `/catalyst-dev:scan-reward-hacking` doesn't scan for them — they are still forbidden:
 

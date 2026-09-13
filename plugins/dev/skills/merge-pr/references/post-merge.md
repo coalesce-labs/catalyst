@@ -48,7 +48,7 @@ fi
 
 ## Step 14 — Compound closing ritual (CTL-189 / CTL-813 / CTL-831 / CTL-2244)
 
-This is the one relay-native trigger point for all three compound tools — see [`compound-estimate/references/trigger.md`](../../compound-estimate/references/trigger.md) for the full contract and why it replaced the daemon-era wiring. Run this step only when Step 13b's sentinel is **terminal** — `DEPLOYED`, `NOT_APPLICABLE`, `NO_DEPLOY_CONFIG`, `DEPLOY_FAILED`, or `SMOKE_FAILED` (a failed deploy is itself a learning). On `DEPLOY_PENDING` — the bounded-poll ceiling hit with no answer yet — skip this step for now; a coordinator re-checks later rather than the ritual firing on an unresolved signal.
+This is the one relay-native trigger point for all three compound tools — see the `compound-estimate` skill's `references/trigger.md` for the full contract and why it replaced the daemon-era wiring. Run this step only when Step 13b's sentinel is **terminal** — `DEPLOYED`, `NOT_APPLICABLE`, `NO_DEPLOY_CONFIG`, `DEPLOY_FAILED`, or `SMOKE_FAILED` (a failed deploy is itself a learning). On `DEPLOY_PENDING` — the bounded-poll ceiling hit with no answer yet — skip this step for now; a coordinator re-checks later rather than the ritual firing on an unresolved signal.
 
 Three learning steps run for every merged ticket that reaches a terminal sentinel, in order:
 

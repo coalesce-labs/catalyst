@@ -3,8 +3,13 @@
 // checkSkillSelfContainment(skillDir) → { filesScanned, violations: [{ rule, file, line, detail }] }
 //
 // Rules, each with a positive control in skill-self-containment.test.mjs:
-//   plugin-root-reference       SKILL.md, references/ or assets/ names ${CLAUDE_PLUGIN_ROOT} or
-//                               plugins/dev/scripts — only Claude Code's plugin rail resolves those.
+//   plugin-root-reference       SKILL.md, references/ or assets/ names ${CLAUDE_PLUGIN_ROOT} or a
+//                               repo-relative plugins/<plugin>/{scripts,skills,references,templates,agents}/
+//                               path — only Claude Code's plugin rail, or a cwd inside the catalyst
+//                               checkout, resolves those.
+//   sibling-skill-path          prose points into another skill's directory (`steward/references/x.md`,
+//                               `../merge-pr/references/y.md`); it is read with THIS skill's directory
+//                               as the base, and a flat skills-CLI install renames the sibling anyway.
 //   skill-dir-path-missing      a `${CLAUDE_SKILL_DIR}/<path>` names a file the skill does not carry.
 //   missing-skill-dir-preamble  the skill runs a `${CLAUDE_SKILL_DIR}` command but never tells a
 //                               non-Claude harness how to set the variable (`skill_dir_unresolved`).
@@ -27,7 +32,8 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, normalize, relative, sep } from "node:path";
 
 const PROSE_DIRS = ["references", "assets"];
-const PLUGIN_ROOT_PATTERN = /\$\{?CLAUDE_PLUGIN_ROOT\}?|plugins\/dev\/scripts\//;
+// ${CLAUDE_PLUGIN_ROOT}, or a repo-relative path into the plugin tree (resolves only inside the catalyst checkout).
+const PLUGIN_ROOT_PATTERN = /\$\{?CLAUDE_PLUGIN_ROOT\}?|plugins\/[a-z0-9-]+\/(?:scripts|skills|references|templates|agents)\//;
 const SKILL_DIR_PATH_PATTERN = /\$\{CLAUDE_SKILL_DIR\}\/([A-Za-z0-9_./-]+)/g;
 const PREAMBLE_MARKER = "skill_dir_unresolved";
 const OPTIONAL_MARKER = "# self-containment: optional";
@@ -96,6 +102,24 @@ function listFiles(absDir) {
   return out;
 }
 
+// siblingSkillPathPattern(skillDir) → a regex matching `<sibling>/{references,scripts,assets}/…`
+// (optionally `../`-prefixed) for every other skill beside this one, or null when it has none.
+// Such a pointer is read with this skill's directory as the base, which is never the sibling's.
+function siblingSkillPathPattern(skillDir) {
+  const parent = dirname(skillDir);
+  let names = [];
+  try {
+    names = readdirSync(parent).filter(
+      (n) => join(parent, n) !== skillDir && existsSync(join(parent, n, "SKILL.md"))
+    );
+  } catch {
+    return null;
+  }
+  if (names.length === 0) return null;
+  const escaped = names.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+  return new RegExp(String.raw`(?<![A-Za-z0-9_-])(?:\.\.\/)*((?:${escaped})\/(?:references|scripts|assets)\/[A-Za-z0-9_./-]*[A-Za-z0-9_-])`, "g");
+}
+
 function rel(skillDir, abs) {
   return relative(skillDir, abs).split(sep).join("/");
 }
@@ -109,6 +133,7 @@ export function checkSkillSelfContainment(skillDir) {
   );
   let usesSkillDir = false;
   let hasPreamble = false;
+  const siblingPath = siblingSkillPathPattern(skillDir);
 
   for (const file of proseFiles) {
     filesScanned += 1;
@@ -116,6 +141,11 @@ export function checkSkillSelfContainment(skillDir) {
     lines.forEach((text, idx) => {
       if (PLUGIN_ROOT_PATTERN.test(text)) {
         violations.push({ rule: "plugin-root-reference", file: rel(skillDir, file), line: idx + 1, detail: text.trim() });
+      }
+      if (siblingPath) {
+        for (const match of text.matchAll(siblingPath)) {
+          violations.push({ rule: "sibling-skill-path", file: rel(skillDir, file), line: idx + 1, detail: match[1] });
+        }
       }
       if (text.includes(PREAMBLE_MARKER)) hasPreamble = true;
       for (const match of text.matchAll(SKILL_DIR_PATH_PATTERN)) {

@@ -2,7 +2,7 @@
 
 ## `estimate_at_start` — the replica, gated
 
-The helper reads the ticket's starting estimate via `linear_read_ticket`, the same replica-backed, freshness-gated helper `linearis`/`steward` use (`steward/references/cloud-detection.md`) — never a bare `linearis issues read`. The team's estimation config (T-shirt, Fibonacci, linear) is applied client-side when re-scoring in the process's step 3.
+The helper reads the ticket's starting estimate via `linear_read_ticket`, the same replica-backed, freshness-gated helper `linearis`/`steward` use (the `steward` skill's cloud-detection reference) — never a bare `linearis issues read`. The team's estimation config (T-shirt, Fibonacci, linear) is applied client-side when re-scoring in the process's step 3.
 
 ## `cost_usd` — local aggregates, in this order
 

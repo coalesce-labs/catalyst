@@ -1,6 +1,6 @@
 # Threads — where a steward's words go
 
-⛔ **The threading and identity rules are NOT restated here.** They are shared by every role and live in one place: **`plugins/dev/skills/ask/references/threading.md`** — one-level threads, the app actor + `createAsUser` tag grammar, why `linearis issues discuss` corrupts state, the newest-first sort, 👀 on pickup, and what a reply must contain. Read it first. This file covers only what is specific to a steward.
+⛔ **The threading and identity rules are NOT restated here.** They are shared by every role and live in one place: **the `ask` skill's `references/threading.md`** — one-level threads, the app actor + `createAsUser` tag grammar, why `linearis issues discuss` corrupts state, the newest-first sort, 👀 on pickup, and what a reply must contain. Read it first. This file covers only what is specific to a steward.
 
 ## Your three surfaces, and what belongs on each
 
