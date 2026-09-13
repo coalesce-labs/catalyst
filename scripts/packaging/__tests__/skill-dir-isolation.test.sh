@@ -18,7 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 SKILLS_ROOT="${REPO_ROOT}/plugins/dev/skills"
 
-SKILLS="commit create-plan create-pr describe-pr implement-plan iterate-plan merge-pr remediate-plan research-codebase review-comments scan-reward-hacking triage-aging-prs validate-plan validate-type-safety"
+SKILLS="ask commit create-plan create-pr describe-pr gherkin-ticket implement-plan iterate-plan linear linearis merge-pr remediate-plan research-codebase review-comments scan-reward-hacking triage-aging-prs validate-plan validate-type-safety"
 
 PASS=0
 FAIL=0
@@ -45,6 +45,25 @@ run_isolated() {
     fail "$label" "exit $rc: ${out:0:400}"
   elif printf '%s' "$out" | grep -qiE 'no such file|not found|cannot open'; then
     fail "$label" "a missing file was reported: ${out:0:400}"
+  else
+    ok "$label"
+  fi
+}
+
+# run_isolated_expect <label> <skill> <expected output substring> <command...> — for an entry
+# point whose no-argument run exits non-zero by design (a usage error, a refusal): it passes
+# when the expected text appears and no module or file failed to load. Static ES imports load
+# before any argument handling, so a usage message proves the import graph resolved.
+run_isolated_expect() {
+  local label="$1" skill="$2" expected="$3"
+  shift 3
+  local copy="${SCRATCH}/installed/${skill}" out
+  out="$(cd "$SCRATCH/cwd" && env -u CLAUDE_PLUGIN_ROOT -u CATALYST_DEV_SCRIPTS HOME="$SCRATCH/home" \
+    CLAUDE_SKILL_DIR="$copy" CATALYST_DIR="$SCRATCH/home/catalyst" bash -c "$*" 2>&1)"
+  if printf '%s' "$out" | grep -qE 'ERR_MODULE_NOT_FOUND|Cannot find module|[Nn]o such file'; then
+    fail "$label" "a module or file failed to load: ${out:0:400}"
+  elif ! printf '%s' "$out" | grep -qF -- "$expected"; then
+    fail "$label" "expected output containing '${expected}': ${out:0:400}"
   else
     ok "$label"
   fi
@@ -115,6 +134,35 @@ if command -v zsh >/dev/null 2>&1; then
 else
   echo "  SKIP: zsh not installed — the zsh self-location case did not run"
 fi
+
+# Cluster 3 — Linear skills. identity-report is the setup check these skills run first (CTL-2300).
+for skill in ask linear linearis; do
+  run_isolated_expect "${skill}: identity-report runs and names the tenant slot" "$skill" "tenant" \
+    'node "$CLAUDE_SKILL_DIR/scripts/identity-report.mjs"'
+done
+for skill in ask gherkin-ticket linear linearis; do
+  run_isolated "${skill}: replica read helper sources" "$skill" \
+    'source "$CLAUDE_SKILL_DIR/scripts/lib/linear-read-replica.sh" && declare -F linear_read_ticket >/dev/null'
+done
+for skill in linear linearis; do
+  run_isolated "${skill}: cloud-detection marker helper sources" "$skill" \
+    'source "$CLAUDE_SKILL_DIR/scripts/lib/plugin-dirs.sh" && declare -F plugin_dirs_repo_config_path >/dev/null'
+done
+run_isolated "linearis: linear-transition --help (sources its replica helper)" linearis \
+  '"$CLAUDE_SKILL_DIR/scripts/linear-transition.sh" --help 2>/dev/null'
+for skill in ask linearis; do
+  run_isolated_expect "${skill}: linear-reply loads its import graph (usage error, no missing module)" "$skill" "usage: linear-reply.mjs" \
+    'node "$CLAUDE_SKILL_DIR/scripts/linear-reply.mjs"'
+done
+run_isolated_expect "ask: ask.mjs loads its import graph (usage, no missing module)" ask "Usage:" \
+  'node "$CLAUDE_SKILL_DIR/scripts/ask.mjs" --help'
+run_isolated_expect "ask: linear-ack loads its import graph" ask "linear-ack" \
+  'node "$CLAUDE_SKILL_DIR/scripts/linear-ack.mjs"'
+run_isolated "ask: board vocabulary resolves the ask label names" ask \
+  'node --input-type=module -e "const m = await import(process.env.CLAUDE_SKILL_DIR + \"/scripts/lib/board-vocabulary.mjs\"); if (!m.resolveAskLabelNames().names.length) process.exit(1)"'
+for script in ask-triage.sh human-blocked.sh; do
+  run_isolated "ask: ${script} parses and sources its replica helper" ask "bash -n \"\$CLAUDE_SKILL_DIR/scripts/${script}\" && test -s \"\$CLAUDE_SKILL_DIR/scripts/lib/linear-read-replica.sh\""
+done
 
 for agent in codebase-locator codebase-analyzer codebase-pattern-finder thoughts-locator thoughts-analyzer external-research; do
   for skill in research-codebase create-plan; do

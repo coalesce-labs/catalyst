@@ -29,13 +29,18 @@ const skillsRoot = join(repoRoot, "plugins/dev/skills");
 
 // Cluster 1: the runner's phase skills and the plan skills that share their subagents.
 // Cluster 2: the PR/merge skills.
+// Cluster 3: the Linear skills.
 export const SELF_CONTAINED = [
+  "ask",
   "commit",
   "create-plan",
   "create-pr",
   "describe-pr",
+  "gherkin-ticket",
   "implement-plan",
   "iterate-plan",
+  "linear",
+  "linearis",
   "merge-pr",
   "remediate-plan",
   "research-codebase",
@@ -129,6 +134,24 @@ describe("the checker sees each violation it exists to catch (positive controls)
       "SKILL.md": "---\nname: x\n---\nno commands\n",
       "scripts/a.sh":
         '#!/usr/bin/env bash\nREPO_ROOT="$(git rev-parse --show-toplevel)"\ncfg="${REPO_ROOT}/.catalyst/config.json"\nhere="$(pwd)/.catalyst/config.json"\n',
+    });
+    expect(checkSkillSelfContainment(dir).violations).toEqual([]);
+  });
+
+  test("a JS module importing a relative module the skill does not carry", () => {
+    const dir = fixtureSkill("broken-import", {
+      "SKILL.md": "---\nname: x\n---\nno commands\n",
+      "scripts/a.mjs":
+        'import { x } from "./lib/present.mjs";\nimport { y } from "../scripts/lib/absent.mjs";\nconst helper = new URL("./lib/gone.sh", import.meta.url).pathname;\n',
+      "scripts/lib/present.mjs": "export const x = 1;\n",
+    });
+    expect(checkSkillSelfContainment(dir).violations.map((v) => v.detail).sort()).toEqual(["../scripts/lib/absent.mjs", "./lib/gone.sh"]);
+  });
+
+  test("a type-only import inside a JSDoc comment is not a runtime dependency", () => {
+    const dir = fixtureSkill("jsdoc-import", {
+      "SKILL.md": "---\nname: x\n---\nno commands\n",
+      "scripts/a.mjs": '/**\n * @param {import("./types.d.mts").Spec} spec\n */\nexport function f(spec) { return spec; }\n// import("./also-not-real.mjs")\n',
     });
     expect(checkSkillSelfContainment(dir).violations).toEqual([]);
   });
