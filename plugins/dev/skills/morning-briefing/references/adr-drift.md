@@ -72,7 +72,7 @@ Each assertion produces at most one drift record per detector run.
 }
 ```
 
-The shape conforms to `plugins/dev/templates/briefing-frontmatter.schema.json` — `type: adr_drift` is already in the schema's enum and `adr` is a permitted optional property. The renderer surfaces these in the "Surface decisions" section of the canonical briefing markdown.
+The shape conforms to the briefing frontmatter schema (`assets/templates/briefing-frontmatter.schema.json` in this skill) — `type: adr_drift` is already in the schema's enum and `adr` is a permitted optional property. The renderer surfaces these in the "Surface decisions" section of the canonical briefing markdown.
 
 ## Configuration
 
@@ -111,13 +111,13 @@ For this MVP, the flag is parsed but emits a stderr note and does no LLM work. W
 Standalone:
 
 ```bash
-bash plugins/dev/scripts/morning-briefing/adr-drift.sh --root .
+bash "${CLAUDE_SKILL_DIR}/scripts/morning-briefing/adr-drift.sh" --root .
 ```
 
 From a morning-briefing run, Step 3 of the skill calls the detector and merges the result into the `decisions:` block of the briefing's YAML frontmatter.
 
 ## Testing
 
-`plugins/dev/scripts/__tests__/adr-drift-detector.test.sh` exercises the detector against isolated fixture projects covering: missing directory, passing assertions, both drift directions, ADRs without frontmatter, multiple assertions in one ADR, schema conformance, malformed YAML tolerance, and config-driven directory resolution.
+The catalyst repository's adr-drift detector test (`adr-drift-detector.test.sh`) exercises the detector against isolated fixture projects covering: missing directory, passing assertions, both drift directions, ADRs without frontmatter, multiple assertions in one ADR, schema conformance, malformed YAML tolerance, and config-driven directory resolution.
 
-Run with `bash plugins/dev/scripts/__tests__/adr-drift-detector.test.sh`.
+Run it from a catalyst checkout.

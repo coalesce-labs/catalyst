@@ -1,0 +1,19 @@
+---
+# CTL-2306: files this skill carries as generated copies of one source in plugins/dev.
+# Edit the source, never a copy; `bun scripts/packaging/cli.mjs vendor --write` refreshes them
+# (render --write does it too) and packaging-gate.yml fails on drift.
+files:
+  - scripts/briefing-followup/action-adr.sh
+  - scripts/briefing-followup/action-compound.sh
+  - scripts/briefing-followup/action-email.sh
+  - scripts/briefing-followup/action-orchestrate.sh
+  - scripts/briefing-followup/action-schedule.sh
+  - scripts/briefing-followup/action-ticket.sh
+  - scripts/briefing-followup/parse-briefing.sh
+  - scripts/briefing-followup/record-resolution.sh
+  - scripts/briefing-followup/writeback.sh
+  - scripts/briefing-frontmatter-lib.sh
+  - scripts/lib/task-type.sh
+  - scripts/lib/canonical-event.sh
+  - scripts/lib/host-identity.sh
+  - templates/briefing-frontmatter.schema.json

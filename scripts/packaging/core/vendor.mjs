@@ -19,6 +19,7 @@ const KNOWN_MANIFEST_KEYS = new Set(["files"]);
  *   agents/<name>.md    → assets/agents/<name>.md
  *   references/<name>.md → assets/references/<name>.md (a skill's own references/ is held to
  *                          skill-shape.test.sh's budget; a shared plugin reference is not its prose)
+ *   templates/<name>     → assets/templates/<name>
  * Anything else throws, naming the path.
  */
 export function vendorDestination(from) {
@@ -32,7 +33,8 @@ export function vendorDestination(from) {
   if (parts[0] === "scripts" && parts.length >= 2) return from;
   if (parts[0] === "agents" && parts.length === 2 && parts[1].endsWith(".md")) return `assets/agents/${parts[1]}`;
   if (parts[0] === "references" && parts.length === 2 && parts[1].endsWith(".md")) return `assets/references/${parts[1]}`;
-  throw new Error(`vendor: source ${JSON.stringify(from)} is not scripts/<path>, agents/<name>.md or references/<name>.md`);
+  if (parts[0] === "templates" && parts.length === 2) return `assets/templates/${parts[1]}`;
+  throw new Error(`vendor: source ${JSON.stringify(from)} is not scripts/<path>, agents/<name>.md, references/<name>.md or templates/<name>`);
 }
 
 /** validateVendorManifest(parsed, label) → { files } or throws naming `label`. */

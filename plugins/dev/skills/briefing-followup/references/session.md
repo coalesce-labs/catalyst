@@ -3,8 +3,9 @@
 ## Prelude: start session, resolve date, load briefing
 
 ```bash
-SCRIPT_DIR="${CLAUDE_PLUGIN_ROOT:-plugins/dev}/scripts/briefing-followup"
-SESSION_SCRIPT="${CLAUDE_PLUGIN_ROOT:-plugins/dev}/scripts/catalyst-session.sh"
+SCRIPT_DIR="${CLAUDE_SKILL_DIR}/scripts/briefing-followup"
+# Session tracking uses the installed catalyst-session CLI when this host has one (CTL-2306, D8).
+SESSION_SCRIPT="$(command -v catalyst-session 2>/dev/null || echo true)"
 
 CATALYST_SESSION_ID=$("$SESSION_SCRIPT" start --skill "briefing-followup" \
   --ticket "" --workflow "${CATALYST_SESSION_ID:-}")
