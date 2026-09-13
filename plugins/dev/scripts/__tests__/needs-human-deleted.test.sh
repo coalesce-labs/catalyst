@@ -124,10 +124,41 @@ trap cleanup EXIT
 export HOME="${FAKE_HOME}"
 
 # ── The instrument ───────────────────────────────────────────────────────────
+# identical_vendored_copies → repo-relative paths of CTL-2306 vendored copies that are
+# byte-identical to their source. A skill lists the copies it carries in
+# agents/vendor.lock.json; the destination maps back to the source the same way
+# scripts/packaging/core/vendor.mjs maps it forward (scripts/x ← scripts/x,
+# assets/agents/x ← agents/x, assets/references/x ← references/x). Fails closed: a missing
+# jq, an unreadable lock or an edited copy yields no path, so the copy is scanned as new.
+identical_vendored_copies() {
+  (
+    cd "${REPO_ROOT}" || exit 1
+    find plugins -name node_modules -prune -o -path '*/skills/*/agents/vendor.lock.json' -print 2>/dev/null |
+      while IFS= read -r lock; do
+        skill_dir="${lock%/agents/vendor.lock.json}"
+        plugin_dir="${skill_dir%/skills/*}"
+        jq -r '.files[]?' "${lock}" 2>/dev/null | while IFS= read -r to; do
+          case "${to}" in
+            assets/agents/*) from="agents/${to#assets/agents/}" ;;
+            assets/references/*) from="references/${to#assets/references/}" ;;
+            scripts/*) from="${to}" ;;
+            *) continue ;;
+          esac
+          if [[ -f "${skill_dir}/${to}" && -f "${plugin_dir}/${from}" ]] && cmp -s "${skill_dir}/${to}" "${plugin_dir}/${from}"; then
+            printf '%s\n' "${skill_dir}/${to}"
+          fi
+        done
+      done
+  )
+}
+
 # scan_tree → "<count>\t<repo-relative path>" for every file carrying the token,
-# allow-listed files removed, sorted by path. rg prints "path:count"; the path is
-# split off at the LAST colon so a path containing ':' cannot corrupt a row.
+# allow-listed files and identical vendored copies removed (their source is scanned),
+# sorted by path. rg prints "path:count"; the path is split off at the LAST colon so a
+# path containing ':' cannot corrupt a row.
 scan_tree() {
+  local copies="${SCRATCH}/vendored-copies.$$.txt"
+  identical_vendored_copies > "${copies}"
   (
     cd "${REPO_ROOT}" || exit 1
     rg --no-ignore --hidden -c "${PATTERN}" "${SCAN_EXCLUDES[@]}" . 2>/dev/null
@@ -137,6 +168,7 @@ scan_tree() {
         path = substr($0, 1, length($0) - length(cnt) - 1);
         print cnt "\t" path }' \
     | awk -F'\t' -v re="${ALLOWLIST_RE}" '$2 !~ re' \
+    | awk -F'\t' 'NR == FNR { copy[$0] = 1; next } !($2 in copy)' "${copies}" - \
     | sort -t$'\t' -k2,2
 }
 
@@ -239,6 +271,39 @@ else
   fi
 fi
 rm -f "${CONTROL_FILE}"
+
+# ── Case 2b — CTL-2306: a vendored copy is its source's surface, not a new one ──
+# catalyst-dev skills carry byte-identical copies of shared scripts (listed in each skill's
+# agents/vendor.lock.json, drift-gated by packaging-gate.yml). A copy of a survivor adds no
+# needs-human surface of its own, so the scan resolves it to its source. An EDITED copy is
+# not identical and must still count as new — otherwise vendoring would be a way around the
+# ratchet. Both halves run against a transient skill planted inside the scanned tree.
+VCTRL_DIR="${REPO_ROOT}/plugins/dev/skills/.needs-human-vendor-control.$$"
+cleanup_vctrl() { rm -rf "${VCTRL_DIR}"; }
+trap 'cleanup; cleanup_vctrl' EXIT
+mkdir -p "${VCTRL_DIR}/agents" "${VCTRL_DIR}/scripts"
+cp "${REPO_ROOT}/plugins/dev/scripts/linear-reply.mjs" "${VCTRL_DIR}/scripts/linear-reply.mjs"
+printf '{"generatedBy":"catalyst-packaging vendor","files":["scripts/linear-reply.mjs"]}\n' > "${VCTRL_DIR}/agents/vendor.lock.json"
+
+VC_NEW="${SCRATCH}/vctrl-new.txt"
+VC_GROWN="${SCRATCH}/vctrl-grown.txt"
+evaluate_scan "${VC_NEW}" "${VC_GROWN}" || true
+if grep -q 'needs-human-vendor-control' "${VC_NEW}"; then
+  fail "a byte-identical vendored copy of a survivor is not new surface" \
+       "the scan named the identical copy as NEW: $(grep 'needs-human-vendor-control' "${VC_NEW}")"
+else
+  ok "a byte-identical vendored copy of a survivor is not new surface"
+fi
+
+printf '// needs-human\n' >> "${VCTRL_DIR}/scripts/linear-reply.mjs"
+evaluate_scan "${VC_NEW}" "${VC_GROWN}" || true
+if grep -q 'needs-human-vendor-control' "${VC_NEW}"; then
+  ok "positive control: an EDITED vendored copy is still new surface (vendoring is not a way around the ratchet)"
+else
+  fail "positive control: an EDITED vendored copy is still new surface" \
+       "the scan did not name the edited copy — identical-copy resolution is too broad"
+fi
+cleanup_vctrl
 
 # ── Case 3 — no enrolment/setup script creates the label ──────────────────────
 # The label is recreated on every fresh host by the worker-status group
