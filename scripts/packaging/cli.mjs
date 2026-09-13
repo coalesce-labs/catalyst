@@ -328,6 +328,8 @@ export function planPluginVendoring(repoRootPath = repoRoot) {
     writes: plan.writes.map(absolute),
     drift: plan.drift.map(absolute),
     errors: plan.errors.map(absolute),
+    prunes: plan.prunes.map(absolute),
+    locks: plan.locks.map(absolute),
   };
 }
 
@@ -344,19 +346,28 @@ export function applyVendoring(repoRootPath = repoRoot) {
     writeFileEnsuringDir(dest, Buffer.from(w.base64, "base64"));
     chmodSync(dest, w.mode);
   }
+  for (const p of plan.prunes) {
+    rmSync(resolve(repoRootPath, p.skillDirRelPath, p.to), { force: true });
+  }
+  for (const l of plan.locks) {
+    const lockPath = resolve(repoRootPath, l.skillDirRelPath, "agents/vendor.lock.json");
+    if (l.files.length === 0) rmSync(lockPath, { force: true });
+    else writeFileEnsuringDir(lockPath, JSON.stringify({ generatedBy: "catalyst-packaging vendor", files: l.files }, null, 2) + "\n");
+  }
   return plan;
 }
 
 function cmdVendor(args) {
   if (args.includes("--write")) {
     const plan = applyVendoring(repoRoot);
-    console.log(`VENDOR: ${plan.skillCount} skill(s), wrote ${plan.writes.length} copy(ies)`);
+    console.log(`VENDOR: ${plan.skillCount} skill(s), wrote ${plan.writes.length} copy(ies), pruned ${plan.prunes.length}`);
     for (const w of plan.writes) console.log(`  ${w.skillDirRelPath}/${w.to}  ← ${w.from}`);
+    for (const p of plan.prunes) console.log(`  pruned ${p.skillDirRelPath}/${p.to} (no longer in agents/vendor.yaml)`);
     return 0;
   }
   const plan = planPluginVendoring(repoRoot);
   for (const e of plan.errors) console.error(`ERROR  ${e.skillDirRelPath}: ${e.from} (${e.reason})`);
-  for (const d of plan.drift) console.error(`DRIFT  ${d.skillDirRelPath}/${d.to} ${d.reason} (source ${d.from})`);
+  for (const d of plan.drift) console.error(`DRIFT  ${d.skillDirRelPath}/${d.to} ${d.reason}${d.from ? ` (source ${d.from})` : ""}`);
   console.log(`VENDOR: ${plan.skillCount} skill(s), ${plan.drift.length} drifted, ${plan.errors.length} error(s)`);
   if (plan.errors.length > 0 || plan.drift.length > 0) {
     console.error("Run 'bun scripts/packaging/cli.mjs vendor --write' and commit the copies — edit the source, never a copy.");

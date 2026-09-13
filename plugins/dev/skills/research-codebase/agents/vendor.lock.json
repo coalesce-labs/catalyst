@@ -1,0 +1,11 @@
+{
+  "generatedBy": "catalyst-packaging vendor",
+  "files": [
+    "assets/agents/codebase-analyzer.md",
+    "assets/agents/codebase-locator.md",
+    "assets/agents/codebase-pattern-finder.md",
+    "assets/agents/external-research.md",
+    "assets/agents/thoughts-analyzer.md",
+    "assets/agents/thoughts-locator.md"
+  ]
+}
