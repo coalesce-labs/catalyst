@@ -56,8 +56,6 @@ CLI_ENTRIES=(
 	"catalyst-monitor.sh:catalyst-monitor"
 	"catalyst-thoughts.sh:catalyst-thoughts"
 	"catalyst-claude.sh:catalyst-claude"
-	"register-thought.sh:register-thought"
-	"workflow-context.sh:workflow-context"
 	"catalyst-hud:catalyst-hud"
 	"catalyst-hud-classic.sh:catalyst-hud-classic"
 	"catalyst-stack:catalyst-stack"
@@ -319,7 +317,43 @@ ensure_agent_browser() {
 	return 0
 }
 
+# CTL-2306: CLIs that left CLI_ENTRIES. Neither the install loop nor --uninstall
+# visits them any more, so an upgraded machine would keep launchers into a retired
+# state layer. Remove only what this installer wrote — a symlink to
+# plugins/dev/scripts/<name>.sh, or a wrapper shim carrying WRAPPER_MARKER — in
+# $BIN_DIR and the legacy ~/.local/bin; a same-named file the user owns stays.
+RETIRED_CLI_NAMES=(register-thought workflow-context)
+retire_removed_clis() {
+	local removed=0 dir name candidate target head_lines
+	for dir in "$BIN_DIR" "${HOME}/.local/bin"; do
+		[[ -d $dir ]] || continue
+		for name in "${RETIRED_CLI_NAMES[@]}"; do
+			candidate="$dir/$name"
+			if [[ -L $candidate ]]; then
+				target=$(readlink "$candidate" 2>/dev/null || true)
+				case "$target" in
+				*"/plugins/dev/scripts/${name}.sh")
+					rm -f "$candidate"
+					removed=$((removed + 1))
+					;;
+				esac
+			elif [[ -f $candidate ]]; then
+				head_lines=$(head -n 4 "$candidate" 2>/dev/null || true)
+				if [[ $head_lines == *"$WRAPPER_MARKER"* ]]; then
+					rm -f "$candidate"
+					removed=$((removed + 1))
+				fi
+			fi
+		done
+	done
+	if [[ $removed -gt 0 ]]; then
+		echo "  Removed $removed retired launcher(s): ${RETIRED_CLI_NAMES[*]}"
+	fi
+	return 0
+}
+
 if [[ $mode == "uninstall" ]]; then
+	retire_removed_clis
 	if [[ -d $BIN_DIR ]]; then
 		for entry in "${CLI_ENTRIES[@]}"; do
 			dest_name="${entry##*:}"
@@ -354,8 +388,8 @@ mkdir -p "$BIN_DIR"
 # shadowed cache-aware shims and silently bypassed plugin version pinning.
 #
 # Filter:
-#   - glob limited to catalyst-* (preserves register-thought, workflow-context
-#     source symlinks — those are still valid)
+#   - glob limited to catalyst-* (preserves any non-catalyst-* symlink a user
+#     placed there; retired launchers are handled by retire_removed_clis)
 #   - only symlinks
 #   - readlink target contains /plugins/dev/scripts/ but is NOT under the
 #     plugin cache (~/.claude/plugins/cache/) — i.e. direct clone, not cache
@@ -423,6 +457,7 @@ sweep_local_bin() {
 
 sweep_stale_target_symlinks
 sweep_local_bin
+retire_removed_clis
 
 # When source is inside the plugin cache, write version-discovering wrappers so
 # plugin upgrades take effect immediately without re-running install-cli.sh.

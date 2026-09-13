@@ -12,8 +12,7 @@
 #   - project       (from argument or directory name)
 #   - hostname      (machine short name)
 #   - branch        (current branch, if in a git repo)
-#   - linear.key    (ticket ID from branch name, e.g. ADV-167 or ENG-123,
-#                    with fallback to .catalyst/.workflow-context.json)
+#   - linear.key    (ticket ID from branch name, e.g. ADV-167 or ENG-123)
 #   - catalyst.orchestration  (orchestration name, set when in a Catalyst worktree;
 #                              groups orchestrator + workers from the same run)
 #
@@ -104,22 +103,6 @@ use_otel_context() {
       match_count=$(echo "$all_ticket_matches" | wc -l | tr -d ' ')
       linear_key=$(echo "$all_ticket_matches" | tail -1 | tr '[:lower:]' '[:upper:]')
     fi
-  fi
-
-  # Fallback: read from .catalyst/.workflow-context.json if branch had no ticket
-  if [ -z "$linear_key" ] && [ -f "${PWD}/.catalyst/.workflow-context.json" ]; then
-    local ctx_ticket
-    ctx_ticket=$(python3 -c "
-import json, sys
-try:
-    d = json.load(open('${PWD}/.catalyst/.workflow-context.json'))
-    t = d.get('currentTicket')
-    if t and t not in ('null', 'general', 'None'):
-        print(t)
-except Exception:
-    pass
-" 2>/dev/null)
-    [ -n "$ctx_ticket" ] && linear_key="$ctx_ticket"
   fi
 
   [ -n "$linear_key" ] && attrs="${attrs},linear.key=${linear_key}"

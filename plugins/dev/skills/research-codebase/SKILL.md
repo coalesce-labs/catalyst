@@ -93,7 +93,7 @@ Serena's results are a starting point — always verify against live code via th
 - Break down the user's query into composable research areas
 - Think deeply about underlying patterns, connections, and architectural implications
 - Create a research plan using TodoWrite to track all subtasks
-- If a Linear ticket is provided, update it to the configured research state via Linearis CLI (from `stateMap.research`)
+- If a Linear ticket is provided, update it to the configured research state via Linearis CLI (from `stateMap.research`). **Skip this when `CATALYST_PHASE` is set** — under a phase agent or a relay session the coordinator owns the Linear status write-back, and a phase container holds no Linear credential. If Linearis CLI is not available, skip silently and continue research.
 
 ### Step 3: Spawn parallel sub-agent tasks for comprehensive research
 
@@ -242,7 +242,7 @@ source_ticket: { TICKET-ID or null }
 humanlayer thoughts sync
 ```
 
-**8b. Linear comment** (if ticket detected): Add a comment noting research is complete and linking the document path. Use Linearis CLI (run `linearis comments usage` for syntax).
+**8b. Linear comment** (if ticket detected): Add a comment noting research is complete and linking the document path. Use Linearis CLI (run `linearis comments usage` for syntax). **Skip this when `CATALYST_PHASE` is set** — the runner publishes the phase outcome to the ticket itself. If Linearis CLI is not available, skip silently and continue.
 
 **8e. Present summary to user:**
 
@@ -297,6 +297,6 @@ State names (`stateMap.*`) come from the `linearis` skill's single-source transi
 
 If a ticket is detected (provided as argument, mentioned in query, or from context):
 
-- **At research start**: Update ticket status to `stateMap.research` from config using Linearis CLI (run `linearis issues usage` for syntax).
-- **After document saved**: Add a comment with the document link — this is an agent-authored comment, so post it through the app actor (`linear-reply.mjs --as <role>`, or the `linear-comment-post.sh` helper), never bare `linearis issues discuss`/`reply` (those post as the human — see the `linearis` skill's "Comment on a ticket" section).
+- **At research start**: Update ticket status to `stateMap.research` from config using Linearis CLI (run `linearis issues usage` for syntax) — interactive runs only; skip when `CATALYST_PHASE` is set.
+- **After document saved** (interactive runs only; skip when `CATALYST_PHASE` is set): Add a comment with the document link — this is an agent-authored comment, so post it through the app actor (`linear-reply.mjs --as <role>`, or the `linear-comment-post.sh` helper), never bare `linearis issues discuss`/`reply` (those post as the human — see the `linearis` skill's "Comment on a ticket" section).
 - If the tooling is not available, skip silently and continue research

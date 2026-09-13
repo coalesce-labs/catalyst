@@ -36,20 +36,18 @@ assert_help_contract() {           # <label> <tool-name-substr> <script> [args..
 
 echo "catalyst-broker";          assert_help_contract "broker"   "catalyst-broker"   "${SCRIPTS}/catalyst-broker"
 echo "catalyst-thoughts.sh";     assert_help_contract "thoughts" "catalyst-thoughts" "${SCRIPTS}/catalyst-thoughts.sh"
-echo "workflow-context (dev)";   assert_help_contract "wc-dev"   "workflow-context"  "${SCRIPTS}/workflow-context.sh"
+# CTL-2306: catalyst-dev no longer ships workflow-context.sh; only the pm-ops copy remains.
 echo "workflow-context (pm-ops)";assert_help_contract "wc-pm"    "workflow-context"  "$PMOPS_WC"
 
-# dev copy advertises set-orchestration; pm-ops copy must NOT
-dev_help="$("${SCRIPTS}/workflow-context.sh" --help 2>/dev/null)"
+# pm-ops copy must NOT advertise a subcommand it does not implement
 pm_help="$("$PMOPS_WC" --help 2>/dev/null)"
-expect_contains "wc-dev advertises set-orchestration" "$dev_help" "set-orchestration"
 if [[ "$pm_help" == *"set-orchestration"* ]]; then
   fail "wc-pm omits set-orchestration" "pm-ops copy lists a subcommand it does not implement"
 else ok "wc-pm omits set-orchestration"; fi
 
 # "no work on --help": running --help in an empty cwd must not create .catalyst/
-TMP="$(mktemp -d)"; ( cd "$TMP" && "${SCRIPTS}/workflow-context.sh" --help >/dev/null 2>&1 )
-if [[ -e "$TMP/.catalyst" ]]; then fail "wc-dev --help does no work" ".catalyst created"; else ok "wc-dev --help does no work"; fi
+TMP="$(mktemp -d)"; ( cd "$TMP" && "$PMOPS_WC" --help >/dev/null 2>&1 )
+if [[ -e "$TMP/.catalyst" ]]; then fail "wc-pm --help does no work" ".catalyst created"; else ok "wc-pm --help does no work"; fi
 rm -rf "$TMP"
 
 # --- catalyst-why: -h/--help → stdout exit 0; bare → usage stderr exit 1 ---

@@ -817,6 +817,12 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash lib/__tests__/handoff-durability.test.sh
 
+      - name: branch → ticket rule is case-insensitive and normalized (CTL-2306)
+        # catalyst-claude.sh's only ticket source after CTL-2306 removed the
+        # workflow-context fallback; a lowercase branch must keep its ticket.
+        working-directory: plugins/dev/scripts
+        run: bash lib/__tests__/ticket-from-text.test.sh
+
       - name: worktree-salvage destroy-site wiring tests (CTL-1639)
         # Deterministic source-order invariant: each destructive bash site
         # (phase-agent-dispatch L3 and orphan-sweep) must source the salvage lib

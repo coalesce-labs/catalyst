@@ -5,7 +5,7 @@
 # Options:
 #   --worktree-dir <path>       Override worktree base directory (used by orchestrator)
 #   --hooks-json <json>         JSON array of setup hook commands to run after creation
-#   --orchestration <name>      Set orchestration run name in workflow context
+#   --orchestration <name>      Accepted for compatibility; no effect (CTL-2306 removed workflow context)
 #   --reuse-existing            If the worktree already exists, skip creation/setup
 #                               and succeed. Makes the script idempotent for tab-config
 #                               launchers that re-open a long-lived worktree (e.g. "pm").
@@ -80,7 +80,6 @@ catalyst_git_exclude_worktree_artifacts() {
 POSITIONAL=()
 OVERRIDE_WORKTREE_DIR=""
 HOOKS_JSON=""
-ORCHESTRATION_NAME=""
 REUSE_EXISTING=false
 SKIP_FETCH=false
 EXPECTED_BRANCH=""
@@ -94,7 +93,8 @@ while [[ $# -gt 0 ]]; do
 	case $1 in
 		--worktree-dir) OVERRIDE_WORKTREE_DIR="$2"; shift 2 ;;
 		--hooks-json) HOOKS_JSON="$2"; shift 2 ;;
-		--orchestration) ORCHESTRATION_NAME="$2"; shift 2 ;;
+		# CTL-2306: --orchestration only fed the removed workflow context; still accepted so callers do not break.
+		--orchestration) shift 2 ;;
 		--reuse-existing) REUSE_EXISTING=true; shift ;;
 		--skip-fetch) SKIP_FETCH=true; shift ;;
 		--from-remote) FROM_REMOTE=true; shift ;;
@@ -471,9 +471,6 @@ if [ -f "${CLAUDE_JSON:-${HOME}/.claude.json}" ]; then
 fi
 unset _CW_CJM_DIR
 
-# Initialize workflow context with ticket from worktree name (before setup runs)
-# This ensures .catalyst/.workflow-context.json exists with currentTicket set
-# so that direnv's use_otel_context can read it when someone enters the directory.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # CTL-1417: self-protection guard for the rollback --force removals below.
 # shellcheck source=lib/worktree-remove-guard.sh
@@ -530,32 +527,6 @@ _worktree_install_rollback() {
 	_worktree_rollback_remove
 	exit 1
 }
-if [ -f "${SCRIPT_DIR}/workflow-context.sh" ]; then
-	# Remove stale workflow-context.json if copied from main repo
-	rm -f "${WORKTREE_PATH}/.catalyst/.workflow-context.json"
-	mkdir -p "${WORKTREE_PATH}/.catalyst"
-
-	# Extract ticket from worktree name, anchored to end to avoid false matches
-	# on date fragments in orchestrator prefixes (e.g., "import-2026" in
-	# "orch-data-import-2026-04-13-ADV-220" — we want ADV-220, not IMPORT-2026)
-	WT_TICKET=""
-	if [[ "$WORKTREE_NAME" =~ ([A-Za-z]+-[0-9]+)$ ]]; then
-		WT_TICKET=$(echo "${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]')
-	fi
-
-	(cd "$WORKTREE_PATH" && bash "${SCRIPT_DIR}/workflow-context.sh" init)
-	if [ -n "$WT_TICKET" ]; then
-		(cd "$WORKTREE_PATH" && bash "${SCRIPT_DIR}/workflow-context.sh" set-ticket "$WT_TICKET")
-		echo "📋 Workflow context initialized with ticket: ${WT_TICKET}"
-	else
-		echo "📋 Workflow context initialized (no ticket in worktree name)"
-	fi
-
-	if [ -n "$ORCHESTRATION_NAME" ]; then
-		(cd "$WORKTREE_PATH" && bash "${SCRIPT_DIR}/workflow-context.sh" set-orchestration "$ORCHESTRATION_NAME")
-		echo "📋 Orchestration context set: ${ORCHESTRATION_NAME}"
-	fi
-fi
 
 # Keep Catalyst's own worktree-local runtime artifacts (thoughts/,
 # .catalyst/.workflow-context.json, etc.) out of `git status` for every

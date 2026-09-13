@@ -77,7 +77,7 @@ Claude Code has 200K token limit. This workspace **monitors context usage** and 
 - **70% usage**: Strong recommendation - create handoff now
 - **80% usage**: Critical - create handoff immediately
 
-**Context tracking**: `.catalyst/.workflow-context.json` (gitignored) tracks all workflow documents, enabling commands to auto-find recent files.
+**Finding prior documents**: pass the path, or name the ticket — skills pick the newest `thoughts/shared/` document for that ticket. Nothing is remembered between runs.
 
 **Use handoffs between phases**:
 ```bash

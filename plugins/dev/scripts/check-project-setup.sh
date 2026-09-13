@@ -31,12 +31,6 @@ elif [[ -f ".claude/config.json" ]]; then
 	fi
 fi
 
-# Migrate workflow-context.json if needed
-if [[ -f ".claude/.workflow-context.json" && ! -f ".catalyst/.workflow-context.json" ]]; then
-	mkdir -p ".catalyst"
-	cp ".claude/.workflow-context.json" ".catalyst/.workflow-context.json"
-fi
-
 # 1. Check thoughts system is initialized
 # Fatal: thoughts/shared or thoughts/global is a regular directory when humanlayer-is-configured
 # or .catalyst/config.json declares a thoughts directory. In that scenario humanlayer's symlink
@@ -498,14 +492,6 @@ if [[ -x $MONITOR_SCRIPT ]]; then
 			esac
 		fi
 	fi
-fi
-
-# 6. Ensure workflow context file exists
-#    This is the auto-discovery backing store; skills and hooks depend on it.
-if [[ -f "${SCRIPT_DIR}/workflow-context.sh" ]]; then
-	"${SCRIPT_DIR}/workflow-context.sh" init 2>/dev/null || true
-elif [[ -n ${CLAUDE_PLUGIN_ROOT-} && -f "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ]]; then
-	"${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" init 2>/dev/null || true
 fi
 
 # 6. Check catalyst-* CLIs are on PATH (CTL-227)

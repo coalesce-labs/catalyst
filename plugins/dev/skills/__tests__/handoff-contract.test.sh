@@ -90,13 +90,16 @@ assert_grep "$CREATE" '## Durability contract' \
   "create-handoff has a 'Durability contract' section (AC-b)"
 
 # ── Codex review round 1 on #3931/#3933: three claims that must stay true ─────
-# 1. The Bash install path is invisible to the `Track Handoff Documents` hook,
-#    which matches tool_name = "Write". Without an explicit registration the next
-#    resume-handoff auto-discovers an OLDER handoff, because
-#    `workflow-context.sh recent handoffs` only falls back to the filesystem when
-#    the context has NO entry for the type.
-assert_grep "$CREATE" 'workflow-context\.sh. add handoffs' \
-  "create-handoff registers the installed handoff in workflow context (the Write hook cannot see a Bash install)"
+# 1. CTL-2306 retired the workflow-context registry and the hook that fed it:
+#    the installed file on disk IS the record, and resume-handoff finds it by
+#    ticket with a within-run filesystem search. A registration call left behind
+#    would name a script that no longer exists.
+if grep -Eq 'workflow-context' "$CREATE"; then
+  fail "create-handoff registers nothing in workflow context (CTL-2306)" \
+       "create-handoff still names workflow-context"
+else
+  ok "create-handoff registers nothing in workflow context (CTL-2306)"
+fi
 
 # 2. The next-tick promise is true only for the async verdict. A rebase conflict
 #    or missing tooling persists until someone fixes it, so promising ≤300 s for
@@ -122,14 +125,16 @@ fi
 echo ""
 echo "resume-handoff (read side: guard every path source)"
 
-# The env-var source was already guarded; the workflow-context source was not.
+# CTL-2104: every discovered path is existence-guarded before it is read. The
+# source is now a within-run filesystem search (CTL-2306), but the guard stays —
+# thoughts/shared is a per-project symlink and a path can vanish mid-run.
 assert_grep "$RESUME" 'RECENT_HANDOFF' \
   "resume-handoff still resolves RECENT_HANDOFF (subject is present)"
 if grep -Eq '\[\[ -f "\$RECENT_HANDOFF" \]\]|-f "\$RECENT_HANDOFF"' "$RESUME"; then
   ok "resume-handoff guards the discovered handoff path with -f"
 else
   fail "resume-handoff guards the discovered handoff path with -f" \
-       "the workflow-context source is still read without an existence guard"
+       "the discovered handoff path is read without an existence guard"
 fi
 assert_grep "$RESUME" '(channel is authoritative|channel.{0,20}authoritative)' \
   "resume-handoff documents the channel-authoritative fallback"

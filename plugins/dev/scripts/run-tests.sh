@@ -6,7 +6,7 @@
 #   SHELL_TEST_DIR        dir of *.test.sh files  (default: <scripts>/__tests__)
 #   LIB_SHELL_TEST_DIR    dir of lib suites       (default: <scripts>/lib/__tests__)
 #   SKILLS_SHELL_TEST_DIR dir of skill suites     (default: <repo>/plugins/dev/skills/__tests__)
-#   EXTRA_SHELL_TESTS  space-separated extra files (default: test-workflow-context.sh)
+#   EXTRA_SHELL_TESTS  space-separated extra files (default: none)
 #   SKIP_BUN=1         skip the bun surfaces entirely
 set -uo pipefail
 
@@ -125,7 +125,7 @@ _lib_suite_wrapper_present() {
 }
 # +x test: distinguishes "unset" (use default) from "set to empty" (smoke test).
 if [[ -z ${EXTRA_SHELL_TESTS+x} ]]; then
-	EXTRA_SHELL_TESTS="${SCRIPT_DIR}/test-workflow-context.sh"
+	EXTRA_SHELL_TESTS=""
 fi
 SKIP_BUN="${SKIP_BUN:-0}"
 

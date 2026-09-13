@@ -104,14 +104,22 @@ describe("renderPluginPack — round-trip against every real plugin", () => {
 });
 
 describe("hooks detection — positive/negative control pair", () => {
-  test("plugins/dev reports hooks.present === true (positive control)", () => {
-    const pack = renderPluginPack({ repoRoot, pluginRelPath: "plugins/dev", packId: "catalyst-dev" });
+  // CTL-2306 removed plugins/dev/hooks.toml, the only real hook file this pair
+  // used to lean on, so the positive control is now a fixture plugin.
+  test("a fixture plugin with a two-entry hooks.toml reports hooks.present === true (positive control)", () => {
+    const root = fixtureDir();
+    const pluginDir = join(root, "plugin-with-hooks");
+    mkdirSync(join(pluginDir, ".claude-plugin"), { recursive: true });
+    mkdirSync(join(pluginDir, "skills"), { recursive: true });
+    writeFileSync(join(pluginDir, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "plugin-with-hooks" }));
+    writeFileSync(join(pluginDir, "hooks.toml"), '[[hooks]]\nname = "a"\n\n[[hooks]]\nname = "b"\n');
+    const pack = renderPluginPack({ repoRoot: root, pluginRelPath: "plugin-with-hooks", packId: "plugin-with-hooks" });
     expect(pack.hooks.present).toBe(true);
-    expect(pack.hooks.entryCount).toBeGreaterThan(0);
+    expect(pack.hooks.entryCount).toBe(2);
   });
 
-  test("every other real plugin reports hooks.present === false (negative control — a detector returning true for everything would pass the positive test alone)", () => {
-    const others = listPluginRelPaths(repoRoot).filter((p) => p !== "plugins/dev");
+  test("every real plugin reports hooks.present === false (negative control — a detector returning true for everything would pass the positive test alone)", () => {
+    const others = listPluginRelPaths(repoRoot);
     expect(others.length).toBeGreaterThan(0);
     for (const pluginRelPath of others) {
       const pack = renderPluginPack({ repoRoot, pluginRelPath, packId: pluginRelPath });
@@ -238,7 +246,9 @@ describe("relocation identity — the provider's neutral output equals the froze
   // the code under test — an expected value produced by the code under test
   // can only ever confirm itself.
   const EXPECTED = {
-    "plugins/dev": { packId: "catalyst-dev", skillId: "linearis", neutral: { effects: [], invocation: "auto", exposure: ["catalog"] } },
+    // CTL-2306 deliberately moved linearis to `internal` (held until the skill is
+    // self-contained); this literal records that change, not the relocation.
+    "plugins/dev": { packId: "catalyst-dev", skillId: "linearis", neutral: { effects: [], invocation: "auto", exposure: ["internal"] } },
     "plugins/foundry": {
       packId: "catalyst-foundry",
       skillId: "setup-catalyst",

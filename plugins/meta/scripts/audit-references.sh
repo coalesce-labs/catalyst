@@ -212,7 +212,7 @@ if [[ "$SHOW_ALL" == true ]]; then
 	for doc_source in docs/ scripts/ CLAUDE.md README.md; do
 		[[ -e "$doc_source" ]] && audit_source_files "$doc_source" "$INFO_FILE"
 	done
-	for readme in plugins/*/README.md plugins/*/HOOKS.md plugins/*/WORKFLOW_CONTEXT.md plugins/*/templates/README.md; do
+	for readme in plugins/*/README.md plugins/*/templates/README.md; do
 		[[ -f "$readme" ]] && audit_source_files "$readme" "$INFO_FILE"
 	done
 fi

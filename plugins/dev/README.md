@@ -73,18 +73,9 @@ documentation. The list below is the current inventory only.
 - `@catalyst-dev:github-research` — Research GitHub PRs and issues (Haiku)
 - `@catalyst-dev:sentry-research` — Research Sentry errors (Haiku)
 
-## Automatic Workflow Context Tracking
+## No Hooks, No Remembered Workflow State
 
-The plugin ships Claude Code hooks that keep `.catalyst/.workflow-context.json` up to date
-automatically. See [HOOKS.md](./HOOKS.md) and [WORKFLOW_CONTEXT.md](./WORKFLOW_CONTEXT.md) for the
-full mechanism.
-
-Summary:
-
-- Writes to `thoughts/shared/{research,plans,handoffs,prs}/*.md` are tracked
-- Ticket IDs are extracted from filenames and directories
-- Plan Mode hooks inject Catalyst's plan-structure guidance and sync plans to thoughts
-- Skills read workflow context to discover prior artifacts without explicit paths
+The plugin ships no hooks (CTL-2306). That removes the pack-wide veto that kept every catalyst-dev skill out of the portable pack, but it does not make the skills portable yet: most have no portability sidecar, and they still reach their helper scripts through `${CLAUDE_PLUGIN_ROOT}`, which only Claude Code sets. Until later CTL-2306 phases co-locate those scripts, treat catalyst-dev as a Claude Code plugin. Skills that pick up a prior document (`create-plan`, `iterate-plan`, `validate-plan`, `implement-plan`, `resume-handoff`) take it explicitly: a path you pass, or the newest `thoughts/shared/` document for the ticket they were given (a ticket in the skill's argument, or `$CATALYST_TICKET` under a phase). Nothing is remembered between runs.
 
 ## Installation
 
@@ -144,13 +135,6 @@ Runtime utilities under `scripts/`:
   patterns)
 - `pre-assign-migrations.sh` — Pre-assign database migration numbers to avoid conflicts
 - `resolve-ticket.sh` — Extract ticket IDs from various contexts
-- `workflow-context.sh` — Read/write `.catalyst/.workflow-context.json`
-
-Hooks under `hooks/`:
-
-- `update-workflow-context.sh` — PostToolUse hook that tracks thoughts writes
-- `sync-plan-to-thoughts.sh` — Plan mode exit hook
-- `inject-plan-template.sh` — Plan mode enter hook
 
 ## Philosophy
 

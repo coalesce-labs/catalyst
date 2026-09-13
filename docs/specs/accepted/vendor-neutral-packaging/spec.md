@@ -61,7 +61,7 @@ The enumeration is closed (it comes from the ratified design's schema-field-shap
 
 | Component | Class | Policy for a non-Claude target |
 | --- | --- | --- |
-| `hooks.toml` | **safety** | never projected; marks the pack's skills guard-reduced |
+| `hooks.toml` | **safety** | never projected; marks the pack's skills guard-reduced (no Catalyst plugin ships one since CTL-2306 / ADR-030) |
 | `allowed-tools:` / `disable-model-invocation:` | **safety** | skill **omitted** unless `pack.json` declares a neutral classification |
 | `agents/*.md` subagents | **capability** | omitted + warned (a capability the target lacks, not a guard) |
 | `model:` / `color:` / `argument-hint:` / `user-invocable:` / `version:` (skill/agent frontmatter) | **cosmetic** | dropped + warned |

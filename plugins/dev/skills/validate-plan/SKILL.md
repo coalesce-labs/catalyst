@@ -18,15 +18,31 @@ if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" ]]; then
   "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" || exit 1
 fi
 
-# Auto-discover most recent plan (workflow context + filesystem fallback)
-RECENT_PLAN=""
-if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ]]; then
-  RECENT_PLAN=$("${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent plans)
+# CTL-2306 explicit-input discovery: begin
+# Find the plan to validate on disk for the ticket this run was given: $CATALYST_TICKET under a
+# phase, else a ticket named in the skill's argument text (Claude Code substitutes the token in
+# the heredoc below; another harness leaves it literal, which names no ticket). Nothing is
+# remembered between runs. `[!0-9]` keeps PROJ-1 from matching PROJ-10's documents.
+TICKET_ID="${TICKET_ID:-${CATALYST_TICKET:-}}"
+if [[ -z "$TICKET_ID" ]]; then
+  SKILL_ARGS=$(cat <<'CATALYST_SKILL_ARGS'
+$ARGUMENTS
+CATALYST_SKILL_ARGS
+)
+  TICKET_ID=$(printf '%s' "$SKILL_ARGS" | grep -oE '[A-Z]+-[0-9]+' | head -1)
+  [[ -n "$TICKET_ID" ]] || TICKET_ID=$(printf '%s' "$SKILL_ARGS" | tr '[:lower:]' '[:upper:]' | grep -oE '[A-Z]+-[0-9]+' | head -1)
 fi
+RECENT_PLAN=""
+if [[ -n "$TICKET_ID" ]]; then
+  RECENT_PLAN=$(find -H thoughts/shared/plans -type f -name '*.md' -ipath "*${TICKET_ID}[!0-9]*" -exec ls -t {} + 2>/dev/null | head -1)
+elif [[ -z "${CATALYST_PHASE:-}" ]]; then
+  RECENT_PLAN=$(find -H thoughts/shared/plans -type f -name '*.md' -exec ls -t {} + 2>/dev/null | head -1)
+fi
+# CTL-2306 explicit-input discovery: end
 if [[ -n "$RECENT_PLAN" ]]; then
-  echo "📋 Auto-discovered recent plan: $RECENT_PLAN"
+  echo "📋 Found plan: $RECENT_PLAN"
 else
-  echo "⚠️ No recent plan found in workflow context or filesystem"
+  echo "⚠️ No plan found on disk for ${TICKET_ID:-this run}"
 fi
 ```
 
