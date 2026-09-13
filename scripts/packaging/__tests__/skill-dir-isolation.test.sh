@@ -18,7 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 SKILLS_ROOT="${REPO_ROOT}/plugins/dev/skills"
 
-SKILLS="ask commit create-plan create-pr describe-pr gherkin-ticket implement-plan iterate-plan linear linearis merge-pr remediate-plan research-codebase review-comments scan-reward-hacking triage-aging-prs validate-plan validate-type-safety"
+SKILLS="agent-browser ask commit concierge create-handoff create-plan create-pr describe-pr fix-typescript gherkin-ticket implement-plan iterate-plan linear linearis merge-pr project-orchestrator remediate-plan research-codebase resume-handoff review-comments scan-reward-hacking steward triage-aging-prs validate-plan validate-type-safety"
 
 PASS=0
 FAIL=0
@@ -163,6 +163,16 @@ run_isolated "ask: board vocabulary resolves the ask label names" ask \
 for script in ask-triage.sh human-blocked.sh; do
   run_isolated "ask: ${script} parses and sources its replica helper" ask "bash -n \"\$CLAUDE_SKILL_DIR/scripts/${script}\" && test -s \"\$CLAUDE_SKILL_DIR/scripts/lib/linear-read-replica.sh\""
 done
+
+# Cluster 4a — coordination.
+for skill in concierge steward; do
+  run_isolated_expect "${skill}: identity-report runs and names the tenant slot" "$skill" "tenant" \
+    'node "$CLAUDE_SKILL_DIR/scripts/identity-report.mjs"'
+done
+run_isolated "steward: cloud-detection helpers source (replica + marker)" steward \
+  'source "$CLAUDE_SKILL_DIR/scripts/lib/linear-read-replica.sh" && source "$CLAUDE_SKILL_DIR/scripts/lib/plugin-dirs.sh" && declare -F replica_fresh >/dev/null && declare -F plugin_dirs_repo_config_path >/dev/null'
+run_isolated "create-handoff: handoff-durability helper sources and defines its three steps" create-handoff \
+  'source "$CLAUDE_SKILL_DIR/scripts/lib/handoff-durability.sh" && declare -F handoff_resolve_path >/dev/null && declare -F handoff_write_verified >/dev/null && declare -F handoff_sync_and_classify >/dev/null'
 
 for agent in codebase-locator codebase-analyzer codebase-pattern-finder thoughts-locator thoughts-analyzer external-research; do
   for skill in research-codebase create-plan; do

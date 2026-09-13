@@ -30,22 +30,30 @@ const skillsRoot = join(repoRoot, "plugins/dev/skills");
 // Cluster 1: the runner's phase skills and the plan skills that share their subagents.
 // Cluster 2: the PR/merge skills.
 // Cluster 3: the Linear skills.
+// Cluster 4a: coordination (concierge, steward, handoffs) and the skills that were already clean.
 export const SELF_CONTAINED = [
+  "agent-browser",
   "ask",
   "commit",
+  "concierge",
+  "create-handoff",
   "create-plan",
   "create-pr",
   "describe-pr",
+  "fix-typescript",
   "gherkin-ticket",
   "implement-plan",
   "iterate-plan",
   "linear",
   "linearis",
   "merge-pr",
+  "project-orchestrator",
   "remediate-plan",
   "research-codebase",
+  "resume-handoff",
   "review-comments",
   "scan-reward-hacking",
+  "steward",
   "triage-aging-prs",
   "validate-plan",
   "validate-type-safety",
@@ -84,6 +92,17 @@ describe("the checker sees each violation it exists to catch (positive controls)
       "SKILL.md": '---\nname: x\n---\n```bash\n"${CLAUDE_PLUGIN_ROOT}/scripts/check.sh"\n```\n',
     });
     expect(checkSkillSelfContainment(dir).violations.map((v) => v.rule)).toContain("plugin-root-reference");
+  });
+
+  // A repo-relative path into another part of the plugin is the same defect as a plugin-root
+  // path: it resolves only with cwd inside the catalyst checkout (remediate-plan pointed the
+  // runner at plugins/dev/skills/validate-plan/SKILL.md, which no tenant repo has).
+  test("a repo-relative path into the plugin's skills, references, templates or agents", () => {
+    const dir = fixtureSkill("repo-relative-paths", {
+      "SKILL.md": "---\nname: x\n---\nRead `plugins/dev/skills/ask/references/threading.md` first.\n",
+      "references/more.md": "See plugins/dev/references/review-thread-resolution.md and plugins/dev/templates/x.json.\n",
+    });
+    expect(checkSkillSelfContainment(dir).violations.filter((v) => v.rule === "plugin-root-reference").length).toBe(2);
   });
 
   test("a skill-dir path that does not exist", () => {
