@@ -30,7 +30,7 @@ gh pr edit $pr_number --title "$new_title"
 body_file="thoughts/shared/prs/${pr_number}_description.md"
 
 # shellcheck source=/dev/null
-source "${CLAUDE_PLUGIN_ROOT}/scripts/lib/linear-pr-skip.sh"
+source "${CLAUDE_SKILL_DIR}/scripts/lib/linear-pr-skip.sh"
 body="$(cat "$body_file")"
 skip_block="$( {
     linear_sibling_skip_block_from_branch "$ticket" "$branch"

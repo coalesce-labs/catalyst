@@ -13,19 +13,21 @@ version: 1.0.0
 
 Safely merges a PR after comprehensive verification, with Linear integration and automated cleanup.
 
+**Paths.** Commands below name files inside this skill's own directory as `${CLAUDE_SKILL_DIR}/…`. Claude Code fills that in. On any other harness, set CLAUDE_SKILL_DIR to the absolute directory that contains this SKILL.md before running them. If you cannot, stop and report `skill_dir_unresolved`.
+
 ## Prerequisites
 
 ```bash
-if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" ]]; then
-  "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" || exit 1
-fi
+# Thoughts must exist for this skill's documents. CTL-2306: the full host setup check (daemon,
+# registry, house rules) belongs to the setup-catalyst skill, not to a skill that must run anywhere.
+[[ -e thoughts/shared ]] || echo "⚠️ thoughts/shared is missing in $(pwd) — run \`humanlayer thoughts init\` or the setup-catalyst skill; if the prompt names an output path, write there" >&2
 ```
 
 ## Safety rules
 
 **NEVER** use `--admin`, `--force`, or any flag that bypasses branch protection. Always resolve
 blockers legitimately or escalate with specifics. See
-`"${CLAUDE_PLUGIN_ROOT}/references/merge-blocker-diagnosis.md"` for the full safety rules section.
+`"${CLAUDE_SKILL_DIR}/assets/references/merge-blocker-diagnosis.md"` for the full safety rules section.
 
 ## Process overview
 

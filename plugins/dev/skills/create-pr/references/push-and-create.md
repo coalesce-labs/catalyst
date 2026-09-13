@@ -5,7 +5,7 @@
 PR titles follow `<type>(<scope>): <ticket> ...` (CTL-783) so active work is identifiable from GitHub alone. Prefer the first commit subject (it carries type/scope); inject the ticket via `draft_pr_title`. Branch-derived title is the no-commit fallback.
 
 ```bash
-source "${CLAUDE_PLUGIN_ROOT}/scripts/lib/draft-pr.sh"
+source "${CLAUDE_SKILL_DIR}/scripts/lib/draft-pr.sh"
 commit_subj=$(git log --no-merges --format='%s' "origin/${base}..HEAD" 2>/dev/null | tail -1)
 if [[ -n "$commit_subj" ]]; then
     title="$(draft_pr_title "$ticket" "$commit_subj")"
@@ -19,7 +19,7 @@ fi
 ## Step 8 — Push
 
 ```bash
-source "${CLAUDE_PLUGIN_ROOT}/scripts/lib/draft-pr.sh"
+source "${CLAUDE_SKILL_DIR}/scripts/lib/draft-pr.sh"
 PUSH_VERIFY_RC=0
 VERIFIED_SHA="$(draft_pr_push_verify)" || PUSH_VERIFY_RC=$?
 [[ $PUSH_VERIFY_RC -ne 0 ]] && { echo "create-pr: push-verify failed (rc=${PUSH_VERIFY_RC})" >&2; exit "$PUSH_VERIFY_RC"; }
@@ -42,11 +42,11 @@ Refs: $ticket"
 
 # Neutralize sibling Linear tokens embedded in the branch (CTL-623/633) before
 # they can auto-link on PR-open. Full rationale:
-# ../../describe-pr/references/linear-sibling-guard.md — this call site is
+# the describe-pr skill's linear-sibling-guard reference — this call site is
 # branch-only (the transient body here is assembled from commit subjects, not
 # prose, so there's nothing for body-mode to scan).
 # shellcheck source=/dev/null
-source "${CLAUDE_PLUGIN_ROOT}/scripts/lib/linear-pr-skip.sh"
+source "${CLAUDE_SKILL_DIR}/scripts/lib/linear-pr-skip.sh"
 skip_block="$(linear_sibling_skip_block_from_branch "$ticket" "$branch")"
 [[ -n "$skip_block" ]] && body="$body
 

@@ -18,7 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 SKILLS_ROOT="${REPO_ROOT}/plugins/dev/skills"
 
-SKILLS="create-plan implement-plan iterate-plan remediate-plan research-codebase scan-reward-hacking validate-plan validate-type-safety"
+SKILLS="commit create-plan create-pr describe-pr implement-plan iterate-plan merge-pr remediate-plan research-codebase review-comments scan-reward-hacking triage-aging-prs validate-plan validate-type-safety"
 
 PASS=0
 FAIL=0
@@ -83,6 +83,38 @@ run_isolated "implement-plan: feedback-consent check (read-only)" implement-plan
   '"$CLAUDE_SKILL_DIR/scripts/feedback-consent.sh" check >/dev/null'
 run_isolated "implement-plan: file-feedback --help (sources its Linear read helper)" implement-plan \
   '"$CLAUDE_SKILL_DIR/scripts/file-feedback.sh" --help >/dev/null'
+
+# Cluster 2 — PR/merge.
+run_isolated "create-pr: draft-pr helper sources and defines draft_pr_ensure" create-pr \
+  'source "$CLAUDE_SKILL_DIR/scripts/lib/draft-pr.sh" && declare -F draft_pr_ensure >/dev/null'
+for skill in create-pr describe-pr; do
+  run_isolated "${skill}: sibling-skip helper sources its team-keys lib" "$skill" \
+    'source "$CLAUDE_SKILL_DIR/scripts/lib/linear-pr-skip.sh" && declare -F linear_sibling_skip_block_from_branch >/dev/null && declare -F linear_team_keys_filter >/dev/null'
+done
+run_isolated "describe-pr: replica read helper sources" describe-pr \
+  'source "$CLAUDE_SKILL_DIR/scripts/lib/linear-read-replica.sh" && declare -F linear_read_ticket >/dev/null'
+run_isolated "merge-pr: linear-transition --help (sources its replica helper)" merge-pr \
+  '"$CLAUDE_SKILL_DIR/scripts/linear-transition.sh" --help 2>/dev/null; test $? -eq 0'
+# pull-primary-worktree runs inside the repository it merges in; a scratch repo is its real shape.
+run_isolated "merge-pr: pull-primary-worktree from the primary checkout of a scratch repo exits 0" merge-pr \
+  'git init -q "$HOME/repo" && cd "$HOME/repo" && "$CLAUDE_SKILL_DIR/scripts/pull-primary-worktree.sh" --branch main'
+for skill in create-pr merge-pr; do
+  run_isolated "${skill}: carries merge-blocker-diagnosis" "$skill" 'test -s "$CLAUDE_SKILL_DIR/assets/references/merge-blocker-diagnosis.md"'
+done
+for skill in create-pr merge-pr review-comments; do
+  run_isolated "${skill}: carries review-thread-resolution" "$skill" 'test -s "$CLAUDE_SKILL_DIR/assets/references/review-thread-resolution.md"'
+done
+# The Catalyst Bash tool runs zsh, where ${BASH_SOURCE[0]} is unset: the sibling-skip helper
+# must still find its team-keys lib from a lone copy with no CLAUDE_PLUGIN_ROOT (CTL-633 shape).
+if command -v zsh >/dev/null 2>&1; then
+  out="$(cd "$SCRATCH/cwd" && env -u CLAUDE_PLUGIN_ROOT zsh -f -c "source '$SCRATCH/installed/create-pr/scripts/lib/linear-pr-skip.sh'; whence -w linear_team_keys_filter" 2>&1)"
+  case "$out" in
+    *function*) ok "create-pr (zsh): sibling-skip helper resolves its team-keys lib without CLAUDE_PLUGIN_ROOT" ;;
+    *) fail "create-pr (zsh): sibling-skip helper resolves its team-keys lib without CLAUDE_PLUGIN_ROOT" "got: ${out:0:300}" ;;
+  esac
+else
+  echo "  SKIP: zsh not installed — the zsh self-location case did not run"
+fi
 
 for agent in codebase-locator codebase-analyzer codebase-pattern-finder thoughts-locator thoughts-analyzer external-research; do
   for skill in research-codebase create-plan; do

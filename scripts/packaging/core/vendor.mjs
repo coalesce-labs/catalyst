@@ -17,6 +17,8 @@ const KNOWN_MANIFEST_KEYS = new Set(["files"]);
  * vendorDestination(from) → the path the copy takes inside the skill directory.
  *   scripts/<path>      → scripts/<path>   (sibling `source`/import paths keep working)
  *   agents/<name>.md    → assets/agents/<name>.md
+ *   references/<name>.md → assets/references/<name>.md (a skill's own references/ is held to
+ *                          skill-shape.test.sh's budget; a shared plugin reference is not its prose)
  * Anything else throws, naming the path.
  */
 export function vendorDestination(from) {
@@ -29,7 +31,8 @@ export function vendorDestination(from) {
   }
   if (parts[0] === "scripts" && parts.length >= 2) return from;
   if (parts[0] === "agents" && parts.length === 2 && parts[1].endsWith(".md")) return `assets/agents/${parts[1]}`;
-  throw new Error(`vendor: source ${JSON.stringify(from)} is neither scripts/<path> nor agents/<name>.md`);
+  if (parts[0] === "references" && parts.length === 2 && parts[1].endsWith(".md")) return `assets/references/${parts[1]}`;
+  throw new Error(`vendor: source ${JSON.stringify(from)} is not scripts/<path>, agents/<name>.md or references/<name>.md`);
 }
 
 /** validateVendorManifest(parsed, label) → { files } or throws naming `label`. */
