@@ -1,0 +1,14 @@
+{
+  "generatedBy": "catalyst-packaging vendor",
+  "files": [
+    "assets/references/merge-blocker-diagnosis.md",
+    "assets/references/review-thread-resolution.md",
+    "scripts/lib/canonical-event.sh",
+    "scripts/lib/host-identity.sh",
+    "scripts/lib/linear-identity.sh",
+    "scripts/lib/linear-read-replica.sh",
+    "scripts/linear-transition.sh",
+    "scripts/pull-primary-worktree.sh",
+    "scripts/resolve-linear-ids.sh"
+  ]
+}

@@ -61,7 +61,7 @@ fi
 ```bash
 # Use the shared transition helper (CTL-69). Reads stateMap from .catalyst/config.json,
 # is idempotent, and silently skips when the linearis CLI is not installed.
-"${CLAUDE_PLUGIN_ROOT}/scripts/linear-transition.sh" \
+"${CLAUDE_SKILL_DIR}/scripts/linear-transition.sh" \
   --ticket "$ticket_id" --transition done --config .catalyst/config.json
 
 # Then add a comment with PR number, merge commit, and base branch.
@@ -94,5 +94,5 @@ fi
 If running in a git worktree, update the primary checkout of main:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/pull-primary-worktree.sh" --branch "$base_branch"
+"${CLAUDE_SKILL_DIR}/scripts/pull-primary-worktree.sh" --branch "$base_branch"
 ```

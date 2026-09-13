@@ -64,7 +64,7 @@ If any comments/reviews exist, run `/review-comments $pr_number`: fetch and cate
 
 ## Step 12c — Diagnose and resolve merge blockers
 
-Read `"${CLAUDE_PLUGIN_ROOT}/references/merge-blocker-diagnosis.md"` and run the full loop (max 3 rounds): `ci-failing` → fix + push + re-poll; `unresolved-threads` → `/review-comments`; `branch-behind` → rebase + push; `draft` → `gh pr ready`; `changes-requested` → check/attempt fix.
+Read `"${CLAUDE_SKILL_DIR}/assets/references/merge-blocker-diagnosis.md"` and run the full loop (max 3 rounds): `ci-failing` → fix + push + re-poll; `unresolved-threads` → `/review-comments`; `branch-behind` → rebase + push; `draft` → `gh pr ready`; `changes-requested` → check/attempt fix.
 
 **Don't confuse "unresolved review threads" with "needs approving reviewer."** Automated-reviewer threads are yours to resolve by addressing the feedback. Only `review-required` (no approving reviews at all) is a genuine human gate.
 

@@ -11,6 +11,8 @@ argument-hint: "[PR-number]"
 
 Pull PR review comments and feedback, understand the reviewer's intent, implement fixes, and push updates. The goal is to resolve all actionable feedback in a single pass so the PR can move forward.
 
+**Paths.** Commands below name files inside this skill's own directory as `${CLAUDE_SKILL_DIR}/…`. Claude Code fills that in. On any other harness, set CLAUDE_SKILL_DIR to the absolute directory that contains this SKILL.md before running them. If you cannot, stop and report `skill_dir_unresolved`.
+
 ## Input
 
 If `$ARGUMENTS` provides a PR number, use it. Otherwise, detect the current PR:
@@ -157,7 +159,7 @@ git push
 
 After pushing fixes (or posting replies for disagreements), resolve each addressed thread on GitHub so it no longer blocks merge under branch protection rules that require resolved conversations.
 
-Read and follow `"${CLAUDE_PLUGIN_ROOT}/references/review-thread-resolution.md"` for the full workflow. Summary:
+Read and follow `"${CLAUDE_SKILL_DIR}/assets/references/review-thread-resolution.md"` for the full workflow. Summary:
 
 1. Fetch unresolved review threads via GraphQL
 2. For each thread addressed in steps above, resolve it via `resolveReviewThread` mutation

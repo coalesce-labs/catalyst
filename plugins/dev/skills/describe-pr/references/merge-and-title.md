@@ -24,7 +24,7 @@ Get the ticket's title/description via direct SQL against the replica (see the `
 ## Step 8 — Generate the updated title
 
 ```bash
-source "${CLAUDE_PLUGIN_ROOT}/scripts/lib/linear-read-replica.sh"
+source "${CLAUDE_SKILL_DIR}/scripts/lib/linear-read-replica.sh"
 if [[ "$ticket" ]]; then
     ticket_title=$(linear_read_ticket "$ticket" 2>/dev/null | jq -r '.title // empty')
     if [[ -n "$ticket_title" ]]; then
