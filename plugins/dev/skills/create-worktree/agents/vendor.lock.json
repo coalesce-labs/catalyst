@@ -1,0 +1,19 @@
+{
+  "generatedBy": "catalyst-packaging vendor",
+  "files": [
+    "scripts/catalyst-thoughts.sh",
+    "scripts/create-worktree.sh",
+    "scripts/lib/canonical-event.sh",
+    "scripts/lib/catalyst-secret-contract.sh",
+    "scripts/lib/catalyst-version.sh",
+    "scripts/lib/claude-ids.sh",
+    "scripts/lib/claude-json-mutate.sh",
+    "scripts/lib/draft-pr.sh",
+    "scripts/lib/emit-reap-intent.sh",
+    "scripts/lib/executor.sh",
+    "scripts/lib/host-identity.sh",
+    "scripts/lib/worktree-presweep.sh",
+    "scripts/lib/worktree-remove-guard.sh",
+    "scripts/worktree-thoughts-init.sh"
+  ]
+}

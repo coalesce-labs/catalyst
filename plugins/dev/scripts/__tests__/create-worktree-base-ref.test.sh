@@ -65,7 +65,7 @@ build_scratch() {
 	printf '{"catalyst":{"projectKey":"t"}}\n' >"$SRC/.catalyst/config.json"
 
 	# Hermetic humanlayer.json under the fake HOME so the CTL-845 vendored
-	# thoughts-init (scripts/worktree-thoughts-init.sh) resolves a thoughtsRepo
+	# thoughts-init (plugins/dev/scripts/worktree-thoughts-init.sh) resolves a thoughtsRepo
 	# INSIDE the scratch and succeeds. On CI (no `humanlayer` binary installed)
 	# create-worktree skips thoughts-init entirely and this file is never read;
 	# on a dev box that HAS humanlayer, without it the vendored init exits 1

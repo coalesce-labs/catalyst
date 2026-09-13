@@ -131,7 +131,7 @@ if [[ ! -d $WT_PATH ]]; then pass "worktree removed"; else fail "worktree not re
 rm -rf "$SCRATCH"
 
 # Case 7 — CTL-845: auto-detected path uses the vendored script (not humanlayer thoughts init).
-# Stub exits 1 for 'thoughts init', but create-worktree now calls scripts/worktree-thoughts-init.sh
+# Stub exits 1 for 'thoughts init', but create-worktree now calls the worktree-thoughts-init.sh beside it
 # instead. WITH_HL_JSON=1 seeds a valid humanlayer.json + thoughtsRepo so the vendored script
 # resolves. Result: exit 0 + thoughts/shared present as a symlink, even on a "fresh" host where
 # humanlayer thoughts init is broken.

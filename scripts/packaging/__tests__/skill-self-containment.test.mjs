@@ -8,15 +8,11 @@
 // ${CLAUDE_PLUGIN_ROOT}, which only Claude Code's plugin rail sets — on Codex and
 // OpenCode every such step silently skipped or failed.
 //
-// SELF_CONTAINED grows one skill cluster per PR; the last cluster replaces it with
-// every skill. The runner's phase skills (catalyst-cloud's derived required set)
-// come first because CTC-2171 re-bakes the runner image on them.
-//
 // Positive controls: fixture skills that violate each rule must be reported, so a
 // clean result on the real tree is an absence and not a checker that stopped looking.
 
 import { describe, test, expect, afterAll } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,44 +23,11 @@ import { planPluginVendoring } from "../cli.mjs";
 const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const skillsRoot = join(repoRoot, "plugins/dev/skills");
 
-// Cluster 1: the runner's phase skills and the plan skills that share their subagents.
-// Cluster 2: the PR/merge skills.
-// Cluster 3: the Linear skills.
-// Cluster 4a: coordination (concierge, steward, handoffs) and the skills that were already clean.
-// Cluster 4b: the briefings.
-// Cluster 4c: estimation and retro.
-export const SELF_CONTAINED = [
-  "agent-browser",
-  "ask",
-  "briefing-followup",
-  "commit",
-  "compound-estimate",
-  "concierge",
-  "create-handoff",
-  "create-plan",
-  "create-pr",
-  "describe-pr",
-  "fix-typescript",
-  "gherkin-ticket",
-  "implement-plan",
-  "iterate-plan",
-  "linear",
-  "linearis",
-  "merge-pr",
-  "morning-briefing",
-  "project-orchestrator",
-  "remediate-plan",
-  "research-codebase",
-  "resume-handoff",
-  "review-comments",
-  "scan-reward-hacking",
-  "steward",
-  "ticket-compound",
-  "ticket-retro",
-  "triage-aging-prs",
-  "validate-plan",
-  "validate-type-safety",
-];
+// SELF_CONTAINED is every catalyst-dev skill. It grew one cluster per PR (#4133 to #4138) and
+// cluster 4d, create-worktree, completed it; a skill added later is checked from its first commit.
+export const SELF_CONTAINED = readdirSync(skillsRoot)
+  .filter((name) => existsSync(join(skillsRoot, name, "SKILL.md")))
+  .sort();
 
 // catalyst-cloud's derived required set (scripts/skills-derived-skills.ts): every skill the
 // runner dispatches, by argv or in-session. CTC-2171 re-bakes the runner image on these.
@@ -166,6 +129,19 @@ describe("the checker sees each violation it exists to catch (positive controls)
     expect(v.map((x) => x.rule)).toContain("script-sibling-missing");
   });
 
+  test("a sibling path that climbs out of the skill is a violation even when the file exists there", () => {
+    // create-worktree.sh reached the thoughts-init script as ${SCRIPT_DIR}/../../../scripts/…, which
+    // resolves only in the catalyst checkout layout.
+    const dir = fixtureSkill("climbs-out", {
+      "SKILL.md": "---\nname: x\n---\nno commands\n",
+      "scripts/a.sh": '#!/usr/bin/env bash\nSCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\nbash "${SCRIPT_DIR}/../../outside-scripts/init.sh"\n',
+    });
+    mkdirSync(join(dir, "..", "outside-scripts"), { recursive: true });
+    writeFileSync(join(dir, "..", "outside-scripts", "init.sh"), "#!/usr/bin/env bash\n");
+    const v = checkSkillSelfContainment(dir).violations;
+    expect(v).toEqual([expect.objectContaining({ rule: "script-sibling-missing", detail: "../../outside-scripts/init.sh" })]);
+  });
+
   test("an optional reference marked in the script is not a violation", () => {
     const dir = fixtureSkill("optional-sibling", {
       "SKILL.md": "---\nname: x\n---\nno commands\n",
@@ -246,7 +222,12 @@ describe("the checker sees each violation it exists to catch (positive controls)
   });
 });
 
-describe("the converted catalyst-dev skill clusters are self-contained (CTL-2306)", () => {
+describe("every catalyst-dev skill is self-contained (CTL-2306)", () => {
+  test("the skill set is read from the tree, not an empty directory listing", () => {
+    expect(SELF_CONTAINED.length).toBeGreaterThanOrEqual(31);
+    expect(SELF_CONTAINED).toContain("create-worktree");
+  });
+
   test("skill-dir-isolation.test.sh runs exactly the same skills", () => {
     const shell = readFileSync(join(repoRoot, "scripts/packaging/__tests__/skill-dir-isolation.test.sh"), "utf8");
     const match = shell.match(/^SKILLS="([^"]*)"$/m);
