@@ -220,7 +220,8 @@ run_isolated "ticket-retro: gather-retro --help" ticket-retro \
 # Cluster 4d — create-worktree. It runs in the repository it branches, so these cases build a
 # scratch repo; HOME, the thoughts repo and the worktree base all live in the scratch dir.
 mkdir -p "$SCRATCH/cw-bin" "$SCRATCH/cw-thoughts" "$SCRATCH/cw-wt"
-git -C "$SCRATCH" init -q cw-src
+# -b main: the cases branch from main, whatever init.defaultBranch the host has.
+git -C "$SCRATCH" init -q -b main cw-src
 git -C "$SCRATCH/cw-src" -c user.email=t@t.t -c user.name=t commit -q --allow-empty -m init
 cat > "$SCRATCH/cw-bin/humanlayer" <<'STUB'
 #!/usr/bin/env bash
