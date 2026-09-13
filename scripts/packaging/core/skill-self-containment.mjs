@@ -12,7 +12,8 @@
 //                               that holds the script's own location (`${SCRIPT_DIR}/lib/x.sh`,
 //                               `$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/x.sh`) that the skill does
 //                               not carry. Repo-root, $HOME and cwd paths are not the skill's concern.
-//                               A JS module's relative imports (`from "./x.mjs"`, `import("./x.mjs")`,
+//                               A JS module's relative imports (`from "./x.mjs"`, `import "./x.mjs"`,
+//                               `import("./x.mjs")`, `require("./x.cjs")`,
 //                               `new URL("./x.sh", import.meta.url)`, `join(dirname(fileURLToPath(
 //                               import.meta.url)), "x.json")`) must resolve inside the skill too.
 //                               A line marked `# self-containment: optional` is a reference the script
@@ -35,7 +36,9 @@ const ASSIGNMENT = /^\s*(?:local\s+|export\s+|readonly\s+|declare\s+(?:-\w+\s+)?
 // The script's own file: ${BASH_SOURCE[0]}, $0, zsh's ${(%):-%x}.
 const SELF_FILE_EXPANSION = /BASH_SOURCE|\$\{?0\b|%x/;
 // A JS module's relative dependency: a static or dynamic import, or a file located from import.meta.url.
-const JS_RELATIVE_REF = /(?:\bfrom\s*|\bimport\s*\(\s*|new URL\(\s*)["'](\.{1,2}\/[^"']+)["']/g;
+// Covers `from "./x"`, a side-effect `import "./x"`, `import("./x")`, `require("./x")` and
+// `new URL("./x", import.meta.url)`.
+const JS_RELATIVE_REF = /(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*|new URL\(\s*)["'](\.{1,2}\/[^"']+)["']/g;
 // …or a file joined onto the module's own directory: join(dirname(fileURLToPath(import.meta.url)), "x").
 const JS_DIR_JOIN_REF = /(?:dirname\(\s*fileURLToPath\(\s*import\.meta\.url\s*\)\s*\)|import\.meta\.dirname)\s*,\s*["']([^"']+)["']/g;
 

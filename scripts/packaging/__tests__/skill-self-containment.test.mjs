@@ -148,6 +148,18 @@ describe("the checker sees each violation it exists to catch (positive controls)
     expect(checkSkillSelfContainment(dir).violations.map((v) => v.detail).sort()).toEqual(["../scripts/lib/absent.mjs", "./lib/gone.sh"]);
   });
 
+  // Codex review on #4135: a side-effect import and a CommonJS require are dependencies too.
+  test("a bare side-effect import and a CommonJS require of a missing relative module", () => {
+    const dir = fixtureSkill("bare-and-require", {
+      "SKILL.md": "---\nname: x\n---\nno commands\n",
+      "scripts/a.mjs": 'import "./polyfill-missing.mjs";\nimport "./present.mjs";\n',
+      "scripts/b.cjs": 'const x = require("./gone.cjs");\nconst y = require( "./present.cjs" );\nconst fs = require("node:fs");\n',
+      "scripts/present.mjs": "export {};\n",
+      "scripts/present.cjs": "module.exports = {};\n",
+    });
+    expect(checkSkillSelfContainment(dir).violations.map((v) => v.detail).sort()).toEqual(["./gone.cjs", "./polyfill-missing.mjs"]);
+  });
+
   // Found by skill-dir-isolation.test.sh, not by this checker: board-vocabulary.mjs reads a JSON
   // file located from its own URL. The static rule now sees that shape too.
   test("a JS module reading a file joined onto its own directory", () => {
