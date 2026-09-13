@@ -34,7 +34,7 @@ The tag is what appears in `botActor.userDisplayName`, so **the tag is the vocab
 ## The helper (do not hand-roll the write)
 
 ```bash
-direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" CTL-NNNN --as <ROLE> --body-file <path>
+direnv exec . node "${CLAUDE_SKILL_DIR}/scripts/linear-reply.mjs" CTL-NNNN --as <ROLE> --body-file <path>
 #   --body-file <path>  post the FILE'S CONTENTS (preferred for anything multi-line)
 #   --body "<markdown>" post a literal string
 #   --body -            read the body from stdin
@@ -53,7 +53,7 @@ The helper posts through the cloud write proxy as the app actor and needs no cli
 The human is looking at the **last message they wrote**, not the top of the thread.
 
 - **On pickup** — the moment you start reading a human comment — react `eyes` on that human's **latest**
-  comment: `node "$CLAUDE_PLUGIN_ROOT/scripts/linear-ack.mjs" <ISSUE>` (app actor). It means "read, working on it", not "resolved".
+  comment: `node "${CLAUDE_SKILL_DIR}/scripts/linear-ack.mjs" <ISSUE>` (app actor). It means "read, working on it", not "resolved".
 - **On reply** — `linear-reply.mjs` removes the eyes automatically when the reply posts (`--keep-eyes`
   to leave it).
 
@@ -84,7 +84,7 @@ Before starting work on a scope: set the assignee on the tracking ticket **and**
 | `issue-comment`, `issue-state`, `issue-label`, `me/ask-answer` | exists |
 | `reaction`, `issue-create` | exists (CTL-1961 / CTC-724 / CTC-725) |
 
-⚠️ **This table was wrong in the direction of under-claiming, and the correction matters (CTL-2300).** It said `reaction` and `issue-create` did not exist while `linear-ack.mjs` was already calling `reaction` through the proxy and the cloud was already serving both — so a reader following this reference reached for `linearis` and the personal token for a write the app actor could have made. The single source is `DEFAULT_ROUTES` in `plugins/dev/scripts/execution-core/linear-write-proxy.mjs`; read it rather than trusting a table in prose.
+⚠️ **This table was wrong in the direction of under-claiming, and the correction matters (CTL-2300).** It said `reaction` and `issue-create` did not exist while `linear-ack.mjs` was already calling `reaction` through the proxy and the cloud was already serving both — so a reader following this reference reached for `linearis` and the personal token for a write the app actor could have made. The single source is `DEFAULT_ROUTES` in `scripts/execution-core/linear-write-proxy.mjs` (this skill carries a copy); read it rather than trusting a table in prose.
 
 ⚠️ **A route existing is not the same as this plugin using it.** `linear-ack.mjs` sends `reaction` through the proxy; `ask.mjs` still calls `linearis issues create` directly, so an ask filed by the skill is attributed to the host's personal token even though `issue-create` is live. Read the route table as "what the cloud will accept", and the caller as "what we actually send" — they are two facts, and only the first one is above.
 

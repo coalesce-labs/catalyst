@@ -29,13 +29,18 @@ const skillsRoot = join(repoRoot, "plugins/dev/skills");
 
 // Cluster 1: the runner's phase skills and the plan skills that share their subagents.
 // Cluster 2: the PR/merge skills.
+// Cluster 3: the Linear skills.
 export const SELF_CONTAINED = [
+  "ask",
   "commit",
   "create-plan",
   "create-pr",
   "describe-pr",
+  "gherkin-ticket",
   "implement-plan",
   "iterate-plan",
+  "linear",
+  "linearis",
   "merge-pr",
   "remediate-plan",
   "research-codebase",
@@ -129,6 +134,48 @@ describe("the checker sees each violation it exists to catch (positive controls)
       "SKILL.md": "---\nname: x\n---\nno commands\n",
       "scripts/a.sh":
         '#!/usr/bin/env bash\nREPO_ROOT="$(git rev-parse --show-toplevel)"\ncfg="${REPO_ROOT}/.catalyst/config.json"\nhere="$(pwd)/.catalyst/config.json"\n',
+    });
+    expect(checkSkillSelfContainment(dir).violations).toEqual([]);
+  });
+
+  test("a JS module importing a relative module the skill does not carry", () => {
+    const dir = fixtureSkill("broken-import", {
+      "SKILL.md": "---\nname: x\n---\nno commands\n",
+      "scripts/a.mjs":
+        'import { x } from "./lib/present.mjs";\nimport { y } from "../scripts/lib/absent.mjs";\nconst helper = new URL("./lib/gone.sh", import.meta.url).pathname;\n',
+      "scripts/lib/present.mjs": "export const x = 1;\n",
+    });
+    expect(checkSkillSelfContainment(dir).violations.map((v) => v.detail).sort()).toEqual(["../scripts/lib/absent.mjs", "./lib/gone.sh"]);
+  });
+
+  // Codex review on #4135: a side-effect import and a CommonJS require are dependencies too.
+  test("a bare side-effect import and a CommonJS require of a missing relative module", () => {
+    const dir = fixtureSkill("bare-and-require", {
+      "SKILL.md": "---\nname: x\n---\nno commands\n",
+      "scripts/a.mjs": 'import "./polyfill-missing.mjs";\nimport "./present.mjs";\n',
+      "scripts/b.cjs": 'const x = require("./gone.cjs");\nconst y = require( "./present.cjs" );\nconst fs = require("node:fs");\n',
+      "scripts/present.mjs": "export {};\n",
+      "scripts/present.cjs": "module.exports = {};\n",
+    });
+    expect(checkSkillSelfContainment(dir).violations.map((v) => v.detail).sort()).toEqual(["./gone.cjs", "./polyfill-missing.mjs"]);
+  });
+
+  // Found by skill-dir-isolation.test.sh, not by this checker: board-vocabulary.mjs reads a JSON
+  // file located from its own URL. The static rule now sees that shape too.
+  test("a JS module reading a file joined onto its own directory", () => {
+    const dir = fixtureSkill("dirname-join", {
+      "SKILL.md": "---\nname: x\n---\nno commands\n",
+      "scripts/a.mjs":
+        'import { dirname, join } from "node:path";\nimport { fileURLToPath } from "node:url";\nexport const P = join(dirname(fileURLToPath(import.meta.url)), "contract.default.json");\nexport const Q = join(import.meta.dirname, "present.json");\n',
+      "scripts/present.json": "{}\n",
+    });
+    expect(checkSkillSelfContainment(dir).violations.map((v) => v.detail)).toEqual(["contract.default.json"]);
+  });
+
+  test("a type-only import inside a JSDoc comment is not a runtime dependency", () => {
+    const dir = fixtureSkill("jsdoc-import", {
+      "SKILL.md": "---\nname: x\n---\nno commands\n",
+      "scripts/a.mjs": '/**\n * @param {import("./types.d.mts").Spec} spec\n */\nexport function f(spec) { return spec; }\n// import("./also-not-real.mjs")\n',
     });
     expect(checkSkillSelfContainment(dir).violations).toEqual([]);
   });

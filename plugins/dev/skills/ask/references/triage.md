@@ -16,7 +16,7 @@ Search open asks before creating (replica only — never the Linear API, it is a
 # Resolve the path and the freshness gate the canonical way — CATALYST_REPLICA_DB /
 # CATALYST_DIR are honored, and replica_fresh checks writer-lock recency AND a
 # non-empty sync_meta cursor (seed complete, not mid-reseed).
-. "$CLAUDE_PLUGIN_ROOT/scripts/lib/linear-read-replica.sh"
+. "${CLAUDE_SKILL_DIR}/scripts/lib/linear-read-replica.sh"
 if ! replica_fresh "$CATALYST_REPLICA_DB"; then
   echo "INCONCLUSIVE — replica stale/absent; do NOT create an ask on this evidence." >&2
 else
@@ -58,8 +58,8 @@ Age is the wrong sort key. "Waiting 71h" and "blocks an urgent production bug" a
 Ready-made:
 
 ```bash
-bash "$CLAUDE_PLUGIN_ROOT/scripts/ask-triage.sh"      # ranked, with the one-line roll-up
-bash "$CLAUDE_PLUGIN_ROOT/scripts/human-blocked.sh"   # genuinely blocked vs missing-link vs phantom label
+bash "${CLAUDE_SKILL_DIR}/scripts/ask-triage.sh"      # ranked, with the one-line roll-up
+bash "${CLAUDE_SKILL_DIR}/scripts/human-blocked.sh"   # genuinely blocked vs missing-link vs phantom label
 ```
 
 `ask-triage.sh` sorts by weighted score, then by the highest priority it blocks, then by age — and flags any ask with no blocking link, because that is a data defect to fix, not a low-priority item.

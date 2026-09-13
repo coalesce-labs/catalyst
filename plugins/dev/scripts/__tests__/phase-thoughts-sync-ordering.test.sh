@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# CTL-866: assert thoughts-sync-gate is wired into research-codebase and that
-# the call site precedes Step 0.
+# CTL-866: assert the pull-before-read step is wired into research-codebase and
+# that the call site precedes Step 0.
+# CTL-2306 (D8): the step calls the installed thoughts-pull-sync CLI when the
+# host has it (the roster-gated plugin-root gate is host tooling a portable skill
+# cannot carry), so the anchor is that call, not the gate script.
 # CTL-2239: the phase-research/phase-plan assertions this file used to carry
 # were removed along with those skills (B2 of the CTL-2218 cleanup plan) —
 # their customer, the execution-core phase-agent dispatch loop, no longer has
@@ -18,18 +21,18 @@ PASSES=0
 fail() { FAILURES=$((FAILURES + 1)); echo "  FAIL: $1"; [ $# -ge 2 ] && echo "    $2"; }
 pass() { PASSES=$((PASSES + 1)); echo "  PASS: $1"; }
 
-# research-codebase: thoughts-pull-sync-gate.sh is referenced AND before Step 0
-echo "Test: research-codebase references thoughts-pull-sync-gate.sh"
+# research-codebase: the thoughts-pull-sync call is present AND before Step 0
+echo "Test: research-codebase calls the thoughts-pull-sync CLI"
 RC_FILE="${SKILLS_DIR}/research-codebase/SKILL.md"
-if grep -q "thoughts-pull-sync-gate.sh" "$RC_FILE"; then
-  pass "research-codebase references thoughts-pull-sync-gate.sh"
+if grep -q "command -v thoughts-pull-sync" "$RC_FILE"; then
+  pass "research-codebase calls the thoughts-pull-sync CLI"
 else
-  fail "research-codebase references thoughts-pull-sync-gate.sh" \
-    "thoughts-pull-sync-gate.sh not found in ${RC_FILE}"
+  fail "research-codebase calls the thoughts-pull-sync CLI" \
+    "no 'command -v thoughts-pull-sync' call in ${RC_FILE}"
 fi
 
 echo "Test: research-codebase — pull gate is before Step 0"
-rc_pull_gate_line=$(grep -n "thoughts-pull-sync-gate.sh" "$RC_FILE" | head -1 | cut -d: -f1)
+rc_pull_gate_line=$(grep -n "command -v thoughts-pull-sync" "$RC_FILE" | head -1 | cut -d: -f1)
 step0_line=$(grep -n "### Step 0" "$RC_FILE" | head -1 | cut -d: -f1)
 if [[ -z "$rc_pull_gate_line" ]]; then
   fail "research-codebase pull gate ordering: pull gate not found"
@@ -42,7 +45,7 @@ else
 fi
 
 echo "Test: research-codebase pull gate does not use 'humanlayer thoughts sync'"
-if grep -A2 "thoughts-pull-sync-gate.sh" "$RC_FILE" | grep -q "humanlayer thoughts sync"; then
+if grep -A2 "command -v thoughts-pull-sync" "$RC_FILE" | grep -q "humanlayer thoughts sync"; then
   fail "research-codebase pull gate must not use 'humanlayer thoughts sync'"
 else
   pass "research-codebase pull gate does not use 'humanlayer thoughts sync'"

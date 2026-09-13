@@ -13,9 +13,11 @@ version: 1.0.0
 
 Create tickets from thoughts documents, update existing tickets, and follow the Linearis-CLI workflow.
 
+**Paths.** Commands below name files inside this skill's own directory as `${CLAUDE_SKILL_DIR}/…`. Claude Code fills that in. On any other harness, set CLAUDE_SKILL_DIR to the absolute directory that contains this SKILL.md before running them. If you cannot, stop and report `skill_dir_unresolved`.
+
 ## Setup check (first, every session)
 
-`bash "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh"` — the same gate `create-pr`/`merge-pr` run, and since CTL-2300 it also names every identity it could NOT resolve (tenant, human, team, cloud host). A write addressed to the wrong team or the wrong workspace does not error; it lands somewhere plausible, which is why this runs before the first read as well as the first write.
+`node "${CLAUDE_SKILL_DIR}/scripts/identity-report.mjs"` — one line per identity (tenant, human, team, cloud host), and every `unresolved` line is a stop-and-say (CTL-2300). A write addressed to the wrong team or the wrong workspace does not error; it lands somewhere plausible, which is why this runs before the first read as well as the first write.
 
 ## REQUIRED: ticket format gate
 
@@ -23,9 +25,9 @@ Create tickets from thoughts documents, update existing tickets, and follow the 
 
 ## Reading Linear, and cloud detection
 
-A **single ticket** read goes through the `linearis` skill's ["Reading Linear"](../linearis/SKILL.md#reading-linear) rule and its `linear_read_ticket` helper (source `"${CLAUDE_PLUGIN_ROOT}/scripts/lib/linear-read-replica.sh"`) — do NOT hand-roll a second version. A **scope-wide list/search** (across a project, team, or query) is NOT something that helper does — it covers one ticket at a time — so that stays on the `linearis` CLI directly, same as the `linearis` skill's Core Operations.
+A **single ticket** read goes through the `linearis` skill's "Reading Linear" rule and its `linear_read_ticket` helper (source `"${CLAUDE_SKILL_DIR}/scripts/lib/linear-read-replica.sh"`, which this skill carries) — do NOT hand-roll a second version. A **scope-wide list/search** (across a project, team, or query) is NOT something that helper does — it covers one ticket at a time — so that stays on the `linearis` CLI directly, same as the `linearis` skill's Core Operations.
 
-Either way, run the **same cloud-detection check** before trusting the replica for anything: confirm `replica_fresh` **and** the `.catalyst/config.json` marker (`plugin_dirs_repo_config_path`). Either failing is a loud, non-silent fallback to direct `linearis`/API reads — the non-fleet path, never an equal alternative; it protects the shared 2500/hr Linear API quota. Writes always go through `linearis`.
+Either way, run the **same cloud-detection check** before trusting the replica for anything: confirm `replica_fresh` **and** the `.catalyst/config.json` marker (`plugin_dirs_repo_config_path`, from `"${CLAUDE_SKILL_DIR}/scripts/lib/plugin-dirs.sh"`). Either failing is a loud, non-silent fallback to direct `linearis`/API reads — the non-fleet path, never an equal alternative; it protects the shared 2500/hr Linear API quota. Writes always go through `linearis`.
 
 ## Configuration
 

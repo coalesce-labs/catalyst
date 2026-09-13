@@ -12,6 +12,10 @@
 //                               that holds the script's own location (`${SCRIPT_DIR}/lib/x.sh`,
 //                               `$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/x.sh`) that the skill does
 //                               not carry. Repo-root, $HOME and cwd paths are not the skill's concern.
+//                               A JS module's relative imports (`from "./x.mjs"`, `import "./x.mjs"`,
+//                               `import("./x.mjs")`, `require("./x.cjs")`,
+//                               `new URL("./x.sh", import.meta.url)`, `join(dirname(fileURLToPath(
+//                               import.meta.url)), "x.json")`) must resolve inside the skill too.
 //                               A line marked `# self-containment: optional` is a reference the script
 //                               already tolerates being absent.
 //
@@ -31,6 +35,12 @@ const FILE_REF = String.raw`((?:\.\.\/)*[A-Za-z0-9_.-][A-Za-z0-9_./-]*\.(?:sh|mj
 const ASSIGNMENT = /^\s*(?:local\s+|export\s+|readonly\s+|declare\s+(?:-\w+\s+)?)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
 // The script's own file: ${BASH_SOURCE[0]}, $0, zsh's ${(%):-%x}.
 const SELF_FILE_EXPANSION = /BASH_SOURCE|\$\{?0\b|%x/;
+// A JS module's relative dependency: a static or dynamic import, or a file located from import.meta.url.
+// Covers `from "./x"`, a side-effect `import "./x"`, `import("./x")`, `require("./x")` and
+// `new URL("./x", import.meta.url)`.
+const JS_RELATIVE_REF = /(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*|new URL\(\s*)["'](\.{1,2}\/[^"']+)["']/g;
+// …or a file joined onto the module's own directory: join(dirname(fileURLToPath(import.meta.url)), "x").
+const JS_DIR_JOIN_REF = /(?:dirname\(\s*fileURLToPath\(\s*import\.meta\.url\s*\)\s*\)|import\.meta\.dirname)\s*,\s*["']([^"']+)["']/g;
 
 // scriptLocationVars(lines) → the variables that hold the script's own directory (or a directory
 // under it), learned from the script's assignments: SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")"
@@ -132,6 +142,19 @@ export function checkSkillSelfContainment(skillDir) {
     const contents = readFileSync(file, "utf8");
     if (!/\.(sh|mjs|cjs|js|py)$/.test(file) && !contents.startsWith("#!")) continue;
     const lines = contents.split("\n");
+    if (/\.(mjs|cjs|js)$/.test(file)) {
+      lines.forEach((text, idx) => {
+        // JSDoc `@param {import("./x.d.mts")}` and commented-out code are not runtime dependencies.
+        if (text.includes(OPTIONAL_MARKER) || /^\s*(\/\/|\*|\/\*)/.test(text)) return;
+        for (const match of [...text.matchAll(JS_RELATIVE_REF), ...text.matchAll(JS_DIR_JOIN_REF)]) {
+          const target = normalize(join(dirname(file), match[1]));
+          if (relative(skillDir, target).startsWith("..") || !existsSync(target)) {
+            violations.push({ rule: "script-sibling-missing", file: rel(skillDir, file), line: idx + 1, detail: match[1] });
+          }
+        }
+      });
+      continue;
+    }
     const vars = scriptLocationVars(lines);
     lines.forEach((text, idx) => {
       if (text.includes(OPTIONAL_MARKER) || /^\s*#/.test(text)) return;

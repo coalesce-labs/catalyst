@@ -10,16 +10,16 @@ description:
 
 ## Setup check (first, every session)
 
-`bash "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh"` — the same gate `create-pr`/`merge-pr` run, and since CTL-2300 it also names every identity it could NOT resolve (tenant, human, team, cloud host). A write addressed to the wrong team or the wrong workspace does not error; it lands somewhere plausible, which is why this runs before the first read as well as the first write.
+`node "${CLAUDE_SKILL_DIR}/scripts/identity-report.mjs"` — one line per identity (tenant, human, team, cloud host), and every `unresolved` line is a stop-and-say (CTL-2300). Paths like that name files inside this skill: Claude Code fills in `${CLAUDE_SKILL_DIR}`; on another harness set CLAUDE_SKILL_DIR to this SKILL.md's directory, or stop and report `skill_dir_unresolved`. A write addressed to the wrong team or the wrong workspace does not error; it lands somewhere plausible, which is why this runs before the first read as well as the first write.
 
 ## Reading Linear
 > **Single source of the Linear read rule** — other skills point here, they don't restate it.
 
 1. **Cloud detection, every session** — reuse the existing helpers, never write new ones:
    ```bash
-   source "${CLAUDE_PLUGIN_ROOT:?}/scripts/lib/linear-read-replica.sh"
+   source "${CLAUDE_SKILL_DIR}/scripts/lib/linear-read-replica.sh"
    replica_fresh; rf=$?                      # 0 = writer heartbeat <5min AND seeded
-   source "${CLAUDE_PLUGIN_ROOT:?}/scripts/lib/plugin-dirs.sh"
+   source "${CLAUDE_SKILL_DIR}/scripts/lib/plugin-dirs.sh"
    marker="$(plugin_dirs_repo_config_path)"  # "" if no .catalyst/config.json found
    ```
    Either failing → **no cloud mirror**: say so **loudly** (never silent) and fall back to direct `linearis`/API reads — the **non-fleet path** (protects the 2500/hr quota), wrong to recommend on the fleet. Same pattern: `steward`'s `references/cloud-detection.md`.
@@ -39,14 +39,14 @@ Raw SQL syntax (only after the helper's gate already ran), schema discovery, app
 Reads → direct SQL via the gated helper above; writes always `linearis` — run `linearis usage` / `linearis <domain> usage` for authoritative, current flag syntax. **`linear_read_ticket` covers a single ticket only** — a scope-wide list/search still goes through `linearis` (no bulk-query replica form yet; see [Reading Linear](references/reading-linear-detail.md#still-needs-linearis)).
 
 ```bash
-state() { bash "$CLAUDE_PLUGIN_ROOT/scripts/linear-transition.sh" --print-state --transition "$1" --team "$TEAM"; }  # ⛔ never TYPE a stage name
+state() { bash "${CLAUDE_SKILL_DIR}/scripts/linear-transition.sh" --print-state --transition "$1" --team "$TEAM"; }  # ⛔ never TYPE a stage name
 linearis issues search "auth bug" --team "$TEAM" --status "$(state todo)"
 linearis issues update ENG-123 --status "$(state inProgress)" --labels "bug" --label-mode add
 ```
 
 > ⛔ **Agent comments → `linear-reply.mjs`, never `issues discuss`/`reply`** — those post AS THE HUMAN (personal token; ask-resolution gate reads that as the human deciding, CTL-1567).
 ```bash
-direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" ENG-123 --as <AGENT> --body-file <path> --top
+direnv exec . node "${CLAUDE_SKILL_DIR}/scripts/linear-reply.mjs" ENG-123 --as <AGENT> --body-file <path> --top
 #   --body-file <path>  for anything longer than a one-line body; --body REFUSES a path (CTL-2204)
 ```
 `issues discussions <id>` (read-only) is safe. Full CRUD, comment-thread commands, common mistakes, other domains: [`references/core-operations.md`](references/core-operations.md).

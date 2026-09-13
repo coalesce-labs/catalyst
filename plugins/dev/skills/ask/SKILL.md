@@ -11,9 +11,11 @@ description:
 > Rules v3 (Ryan, 2026-08-15 → 08-17). Applies to every Catalyst-managed Linear project and every agent,
 > Claude or Codex. Full plugin verb: **CTL-1922**.
 
+**Paths.** Commands below name files inside this skill's own directory as `${CLAUDE_SKILL_DIR}/…`. Claude Code fills that in. On any other harness, set CLAUDE_SKILL_DIR to the absolute directory that contains this SKILL.md before running them. If you cannot, stop and report `skill_dir_unresolved`.
+
 ## 0. Setup check (first, every session)
 
-`bash "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh"` — the same gate `create-pr`/`merge-pr`/`create-handoff` run. Since CTL-2300 it also names every identity it could NOT resolve (tenant, human, team, cloud host). A `Tenant identity — <slot> UNRESOLVED` line is a stop-and-say: this skill files a decision **for** a human **on** a team, and an unresolved identity there is an ask that reaches nobody while looking filed.
+`node "${CLAUDE_SKILL_DIR}/scripts/identity-report.mjs"` — one line per identity (tenant, human, team, cloud host), CTL-2300. An `unresolved` line is a stop-and-say: this skill files a decision **for** a human **on** a team, and an unresolved identity there is an ask that reaches nobody while looking filed.
 
 ## 1. What an ask ticket is
 
@@ -25,7 +27,7 @@ A ticket that exists ONLY to obtain one human decision or action. It is **not** 
 
 ```bash
 TEAM="$(jq -r '.catalyst.linear.teamKey' .catalyst/config.json)"   # or omit --team entirely; the verb resolves it
-node "$CLAUDE_PLUGIN_ROOT/scripts/ask.mjs" create \
+node "${CLAUDE_SKILL_DIR}/scripts/ask.mjs" create \
   --team "$TEAM" --priority 2 \
   --title "ASK: <one line>" \
   --why "<what it unblocks>" \
@@ -51,7 +53,7 @@ A comment on the ticket — top-level or a threaded reply — reaches the monito
 what a reply must contain. Read it before your first reply.
 
 ```bash
-direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" CTL-NNNN --as <ROLE> --body-file <path>
+direnv exec . node "${CLAUDE_SKILL_DIR}/scripts/linear-reply.mjs" CTL-NNNN --as <ROLE> --body-file <path>
 ```
 
 ## 5. Closing (the raising agent)
@@ -59,7 +61,7 @@ direnv exec . node "$CLAUDE_PLUGIN_ROOT/scripts/linear-reply.mjs" CTL-NNNN --as 
 When the answer satisfies the ask, **verify that it does** (e.g. the token really carries the permission), then:
 
 ```bash
-node "$CLAUDE_PLUGIN_ROOT/scripts/ask.mjs" accept CTL-NNNN --as <ROLE> --body "accepted — …"
+node "${CLAUDE_SKILL_DIR}/scripts/ask.mjs" accept CTL-NNNN --as <ROLE> --body "accepted — …"
 #   --body-file <path>  for anything longer than a one-line body; --body REFUSES a path (CTL-2204)
 ```
 

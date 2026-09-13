@@ -3,7 +3,7 @@
 When the answer satisfies the ask: **verify** that it does (e.g. a token really carries the permission), then:
 
 ```bash
-node "$CLAUDE_PLUGIN_ROOT/scripts/ask.mjs" accept CTL-NNNN --as <AGENT> --body "accepted — …"
+node "${CLAUDE_SKILL_DIR}/scripts/ask.mjs" accept CTL-NNNN --as <AGENT> --body "accepted — …"
 #   --body-file <path>  post a FILE'S CONTENTS (preferred for anything multi-line)
 #   --body -            read the reply from stdin
 #   --dry-run           show what it would reply and close, without writing
