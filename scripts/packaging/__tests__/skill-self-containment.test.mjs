@@ -32,11 +32,13 @@ const skillsRoot = join(repoRoot, "plugins/dev/skills");
 // Cluster 3: the Linear skills.
 // Cluster 4a: coordination (concierge, steward, handoffs) and the skills that were already clean.
 // Cluster 4b: the briefings.
+// Cluster 4c: estimation and retro.
 export const SELF_CONTAINED = [
   "agent-browser",
   "ask",
   "briefing-followup",
   "commit",
+  "compound-estimate",
   "concierge",
   "create-handoff",
   "create-plan",
@@ -57,6 +59,8 @@ export const SELF_CONTAINED = [
   "review-comments",
   "scan-reward-hacking",
   "steward",
+  "ticket-compound",
+  "ticket-retro",
   "triage-aging-prs",
   "validate-plan",
   "validate-type-safety",
@@ -123,6 +127,17 @@ describe("the checker sees each violation it exists to catch (positive controls)
     );
     const v = checkSkillSelfContainment(join(parent, "concierge")).violations;
     expect(v.map((x) => [x.rule, x.detail])).toEqual([["sibling-skill-path", "steward/references/cloud-detection.md"]]);
+  });
+
+  // Some instructions are genuinely for catalyst maintainers working in a catalyst checkout
+  // (regenerating the reference-class corpus, running this repo's own tests). They say so on
+  // the line, and only those lines may name a repo-relative plugin path.
+  test("a line marked `(catalyst-checkout only)` may name a repo-relative plugin path; an unmarked line may not", () => {
+    const dir = fixtureSkill("maintainer-line", {
+      "SKILL.md": "---\nname: x\n---\n```bash\nplugins/dev/scripts/estimate/refresh-corpus.sh   # (catalyst-checkout only)\nplugins/dev/scripts/compound-log.sh write X\n```\n",
+    });
+    const v = checkSkillSelfContainment(dir).violations;
+    expect(v.map((x) => [x.rule, x.line])).toEqual([["plugin-root-reference", 6]]);
   });
 
   test("a skill-dir path that does not exist", () => {
