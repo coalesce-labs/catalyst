@@ -1,0 +1,6 @@
+{
+  "generatedBy": "catalyst-packaging vendor",
+  "files": [
+    "scripts/compound/validate-learnings.sh"
+  ]
+}

@@ -1,0 +1,9 @@
+---
+# CTL-2306: files this skill carries as generated copies of one source in plugins/dev.
+# Edit the source, never a copy; `bun scripts/packaging/cli.mjs vendor --write` refreshes them
+# (render --write does it too) and packaging-gate.yml fails on drift.
+files:
+  - scripts/compound-log.sh
+  - scripts/lib/linear-read-replica.sh
+  - scripts/lib/canonical-event.sh
+  - scripts/lib/host-identity.sh

@@ -4,7 +4,7 @@ description:
   "Cross-ticket retrospective VIEW (CTL-789 Loop C / CTL-814). **ALWAYS use when** a ticket's PR
   has merged and merge-pr's post-merge deploy-verification (CTL-2232) has resolved a terminal
   sentinel for it (the workflow's compound closing step — relay-native trigger, CTL-2244; see
-  `../compound-estimate/references/trigger.md`), or when the user says 'ticket retro', 'run a
+  the `compound-estimate` skill's `references/trigger.md`), or when the user says 'ticket retro', 'run a
   retro', 'retrospective', 'what did we learn lately',
   or 'how are the estimates calibrating'. Synthesizes everything the compound loops captured since
   the last retro — friction logs, learnings, compound-log calibration, catalyst.db / merged-PR
@@ -17,7 +17,7 @@ allowed-tools: Bash, Read, Write, Grep, Glob
 
 Loop C of compound engineering: a human-readable reflection across a SET of tickets. It mostly **reads** what Loop B (friction logs, learnings) and Loop A (compound-log, estimation corpus) captured, then writes ONE artifact: the retro document.
 
-**Runs automatically per ticket, relay-native (CTL-2244):** `merge-pr` Step 14 ([post-merge.md](../merge-pr/references/post-merge.md)) invokes this skill last — after `compound-estimate` and `ticket-compound` — once Step 13b's deploy verification (`merge-pr/references/post-merge-deploy-verify.md`, CTL-2232) resolves a terminal sentinel for the merge, so the system learns from every ticket it ships without being asked, and this ticket's own learning (just written by `ticket-compound`) is already in the store by the time this runs — see [`../compound-estimate/references/trigger.md`](../compound-estimate/references/trigger.md) for the shared trigger contract and why this no longer depends on the retiring daemon-era `phase-monitor-merge` phase agent. Best-effort in that context — a retro failure never blocks a merge. Several merges per day are normal: same-day re-runs REGENERATE today's file cumulatively (the gather floor skips today — see Step 3).
+**Runs automatically per ticket, relay-native (CTL-2244):** `merge-pr` Step 14 (the `merge-pr` skill's `references/post-merge.md`) invokes this skill last — after `compound-estimate` and `ticket-compound` — once Step 13b's deploy verification (the `merge-pr` skill's `references/post-merge-deploy-verify.md`, CTL-2232) resolves a terminal sentinel for the merge, so the system learns from every ticket it ships without being asked, and this ticket's own learning (just written by `ticket-compound`) is already in the store by the time this runs — see the `compound-estimate` skill's `references/trigger.md` for the shared trigger contract and why this no longer depends on the retiring daemon-era `phase-monitor-merge` phase agent. Best-effort in that context — a retro failure never blocks a merge. Several merges per day are normal: same-day re-runs REGENERATE today's file cumulatively (the gather floor skips today — see Step 3).
 
 **Hard contract — read-only VIEW:**
 
@@ -25,6 +25,8 @@ Loop C of compound engineering: a human-readable reflection across a SET of tick
 - It must NOT curate the learnings store, edit `thoughts/shared/CONCEPTS.md`, or touch ADRs —
   that is `ticket-compound`'s job (per-ticket curator). No Linear writes, no corpus writes.
 - Every input store degrades to `_none_` — empty stores are the normal early state, never an error.
+
+**Paths.** Commands below name files inside this skill's own directory as `${CLAUDE_SKILL_DIR}/…`. Claude Code fills that in. On any other harness, set CLAUDE_SKILL_DIR to the absolute directory that contains this SKILL.md before running them. If you cannot, stop and report `skill_dir_unresolved`.
 
 ## Invocation
 
@@ -43,7 +45,7 @@ line 114): the window floor is the date of the most recent retro in
 All reads go through the gather helper — one JSON document, every section degrades to empty:
 
 ```bash
-GATHER="${CLAUDE_PLUGIN_ROOT:-plugins/dev}/scripts/ticket-retro/gather-retro.sh"
+GATHER="${CLAUDE_SKILL_DIR}/scripts/ticket-retro/gather-retro.sh"
 RETRO_JSON=$(mktemp)
 bash "$GATHER" --thoughts-dir thoughts "$@" > "$RETRO_JSON"
 jq '{window, prior_retro: (.prior_retro != null), friction: (.friction|length),
@@ -73,7 +75,7 @@ What it returns (see the script header for the full shape):
    underlying problem (same component, same failure shape — NOT necessarily same wording). A pattern needs **≥2 records** (across tickets or phases). One-off frictions are listed only if severe. For each pattern: a name, the supporting records (`ticket·phase`), and one sentence of synthesis.
 3. **Watch-item recurrence** — for each `prior_retro.watch_items[]` pattern, check whether this
    window's friction/learnings show it again. Verdict per item: `recurred` (cite evidence), `quiet` (no sighting), or `resolved` (a learning/ADR/fix landed that addresses it — cite it).
-4. **Estimation calibration** — from `calibration`: count/exact/mean-signed-delta/median-abs-delta plus a per-ticket start→actual table. When `calibration.entries == 0`, render `_none_` and note the sink fills once the post-merge deploy-verification signal resolves (see `../compound-estimate/references/trigger.md`).
+4. **Estimation calibration** — from `calibration`: count/exact/mean-signed-delta/median-abs-delta plus a per-ticket start→actual table. When `calibration.entries == 0`, render `_none_` and note the sink fills once the post-merge deploy-verification signal resolves (see the `compound-estimate` skill's `references/trigger.md`).
 5. **Next watch items** — carry forward unresolved prior items (keep their `first_seen`) and add
    new patterns from (2) worth tracking. Cap at ~7 — a watch list longer than that is a backlog, not a watch list.
 

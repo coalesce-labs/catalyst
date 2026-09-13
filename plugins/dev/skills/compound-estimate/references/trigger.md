@@ -12,7 +12,7 @@ Both daemon-shaped things — `phase-monitor-merge`'s redundant invocation and `
 
 ## After CTL-2244 — one relay-native signal, no daemon
 
-All three tools now share a single call site: **`merge-pr` Step 14** ([`merge-pr/references/post-merge.md`](../../merge-pr/references/post-merge.md), "Compound closing ritual"), which fires only after Step 13b's `verify_post_merge_deploy` call ([`merge-pr/references/post-merge-deploy-verify.md`](../../merge-pr/references/post-merge-deploy-verify.md), CTL-2232) resolves a **terminal** sentinel for the merge:
+All three tools now share a single call site: **`merge-pr` Step 14** (the `merge-pr` skill's `references/post-merge.md`, "Compound closing ritual"), which fires only after Step 13b's `verify_post_merge_deploy` call (the `merge-pr` skill's `references/post-merge-deploy-verify.md`, CTL-2232) resolves a **terminal** sentinel for the merge:
 
 - `DEPLOYED`, `NOT_APPLICABLE`, `NO_DEPLOY_CONFIG`, `DEPLOY_FAILED`, `SMOKE_FAILED` — all terminal; run the closing ritual regardless of which one it is (a failed deploy is itself a learning — `ticket-compound`'s "what didn't work" is exactly this signal).
 - `DEPLOY_PENDING` — the bounded-poll ceiling was hit with no answer yet; **do not** run the ritual on this one. Re-check later (a coordinator re-dispatching the check), the same way bounded-poll itself treats `PENDING` as "not done," never a silent skip.
