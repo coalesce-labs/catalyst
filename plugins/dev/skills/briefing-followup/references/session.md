@@ -3,12 +3,16 @@
 ## Prelude: start session, resolve date, load briefing
 
 ```bash
-SCRIPT_DIR="${CLAUDE_PLUGIN_ROOT:-plugins/dev}/scripts/briefing-followup"
-SESSION_SCRIPT="${CLAUDE_PLUGIN_ROOT:-plugins/dev}/scripts/catalyst-session.sh"
-
-CATALYST_SESSION_ID=$("$SESSION_SCRIPT" start --skill "briefing-followup" \
-  --ticket "" --workflow "${CATALYST_SESSION_ID:-}")
-export CATALYST_SESSION_ID
+SCRIPT_DIR="${CLAUDE_SKILL_DIR}/scripts/briefing-followup"
+# Session tracking uses the installed catalyst-session CLI when this host has one (CTL-2306, D8).
+# Empty when the CLI is absent: every call below is guarded, and a parent CATALYST_SESSION_ID
+# handed down by the invoking workflow is kept rather than overwritten.
+SESSION_SCRIPT="$(command -v catalyst-session 2>/dev/null || true)"
+if [[ -n "$SESSION_SCRIPT" ]]; then
+  CATALYST_SESSION_ID=$("$SESSION_SCRIPT" start --skill "briefing-followup" \
+    --ticket "" --workflow "${CATALYST_SESSION_ID:-}")
+  export CATALYST_SESSION_ID
+fi
 
 # Resolve briefing path. Pass --date / --file straight through from the user.
 BRIEFING_PATH=$(bash "$SCRIPT_DIR/parse-briefing.sh" path "$@")
@@ -19,7 +23,7 @@ echo "Briefing path: $BRIEFING_PATH"
 # Load + validate frontmatter (exits 1 with a helpful suggestion if missing,
 # exits 2 if frontmatter is malformed or absent).
 if ! FRONTMATTER_JSON=$(bash "$SCRIPT_DIR/parse-briefing.sh" load "$@"); then
-  "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status failed \
+  [[ -n "$SESSION_SCRIPT" ]] && "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status failed \
     --reason "briefing not found or malformed"
   exit 1
 fi
@@ -39,7 +43,7 @@ echo
 DECISION_COUNT=$(bash "$SCRIPT_DIR/parse-briefing.sh" decisions "$@" | jq 'length')
 if [[ "$DECISION_COUNT" -eq 0 ]]; then
   echo "No open decisions in this briefing. Nothing to follow up on."
-  "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status done \
+  [[ -n "$SESSION_SCRIPT" ]] && "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status done \
     --reason "no open decisions"
   exit 0
 fi
@@ -77,6 +81,6 @@ record_resolution() {
 ```bash
 echo
 echo "Logged $(wc -l < "$LOG_FILE" | tr -d ' ') response(s) to $LOG_FILE"
-"$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status done \
+[[ -n "$SESSION_SCRIPT" ]] && "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status done \
   --reason "briefing-followup completed for $DATE"
 ```

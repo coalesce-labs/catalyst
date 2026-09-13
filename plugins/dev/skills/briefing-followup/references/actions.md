@@ -42,7 +42,7 @@ The same pattern applies to `action-ticket.sh`, `action-email.sh`, and `action-a
 
 ## Dispatching work — launch `/relay-ticket`, not a script
 
-There is no dedicated script handler for this one, unlike the actions above. Dispatching a ticket's work is launching a `/relay-ticket <TICKET>` session yourself (`Task`, or your environment's background session primitive) — the same dispatch verb `steward` uses (`steward/references/dispatch.md`). The legacy single-session runner and any retired background-dispatch path are gone (CTL-2218); do not fall back to either.
+There is no dedicated script handler for this one, unlike the actions above. Dispatching a ticket's work is launching a `/relay-ticket <TICKET>` session yourself (`Task`, or your environment's background session primitive) — the same dispatch verb `steward` uses (the `steward` skill's `references/dispatch.md`). The legacy single-session runner and any retired background-dispatch path are gone (CTL-2218); do not fall back to either.
 
 ```bash
 # TICKET comes from the decision's `.ticket` field (present on blocked_pr / judgment_call types).
@@ -58,7 +58,7 @@ record_resolution "$ID" dispatch_relay_ticket "$RESULT"
 log_response "$ID" dispatch_relay_ticket "$(echo "$RESULT" | jq -r .status)"
 ```
 
-Confirming the dispatch actually landed a phase is **phase-completion evidence** (`steward/references/dispatch.md`) — this skill only launches the session; it does not itself watch it to completion.
+Confirming the dispatch actually landed a phase is **phase-completion evidence** (the `steward` skill's `references/dispatch.md`) — this skill only launches the session; it does not itself watch it to completion.
 
 ## Compound-engineering ADR proposals (`pending:`)
 

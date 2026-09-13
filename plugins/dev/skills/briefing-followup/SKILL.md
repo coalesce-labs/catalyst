@@ -17,6 +17,8 @@ allowed-tools: Read, Write, Edit, Bash, Task, mcp__*
 
 Invoke as `/catalyst-dev:briefing-followup` after `/catalyst-dev:morning-briefing` has produced today's briefing. Reads its `decisions:` block, presents each open decision, and records what the user chose.
 
+**Paths.** Commands below name files inside this skill's own directory as `${CLAUDE_SKILL_DIR}/…`. Claude Code fills that in. On any other harness, set CLAUDE_SKILL_DIR to the absolute directory that contains this SKILL.md before running them. If you cannot, stop and report `skill_dir_unresolved`.
+
 ## Flags
 
 | Flag | Meaning |
@@ -52,7 +54,7 @@ Invoke as `/catalyst-dev:briefing-followup` after `/catalyst-dev:morning-briefin
 
 ## Output contract
 
-- **Input**: `thoughts/briefings/YYYY-MM-DD.md`, produced by `morning-briefing`, validated against `plugins/dev/templates/briefing-frontmatter.schema.json`.
+- **Input**: `thoughts/briefings/YYYY-MM-DD.md`, produced by `morning-briefing`, validated against the briefing frontmatter schema this skill carries (`assets/templates/briefing-frontmatter.schema.json`).
 - **Scratch log**: `${TMPDIR:-/tmp}/catalyst-briefing-followup/<date>.log`, one TSV line per resolved decision.
 - **Resolutions JSON**: `<log-dir>/briefing-followup-<date>-resolutions.json`, one entry per action-handler invocation — `{decision_id, action, timestamp, result}`. Consumed by the write-back step.
 

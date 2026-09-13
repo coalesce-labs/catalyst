@@ -78,6 +78,6 @@ Sanitization profiles (`sanitize.sh`): `dm` preserves full content; `channel` / 
 ## End the session
 
 ```bash
-"$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status done --reason "morning-briefing rendered + fan-out"
+[[ -n "$SESSION_SCRIPT" ]] && "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status done --reason "morning-briefing rendered + fan-out"
 echo "Wrote: $OUT_PATH"
 ```

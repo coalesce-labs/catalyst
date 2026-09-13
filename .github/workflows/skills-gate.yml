@@ -42,3 +42,5 @@ jobs:
         run: bash plugins/dev/skills/__tests__/workflow-inputs.test.sh
       - name: Linear write steps carry their own guards (CTL-2306)
         run: bash plugins/dev/skills/__tests__/linear-write-guards.test.sh
+      - name: Session tracking is optional and never drops a parent session (CTL-2306)
+        run: bash plugins/dev/skills/__tests__/session-tracking-guard.test.sh

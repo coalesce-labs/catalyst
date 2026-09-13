@@ -3,12 +3,16 @@
 ## Prelude: start session, resolve date
 
 ```bash
-SCRIPT_DIR="${CLAUDE_PLUGIN_ROOT:-plugins/dev}/scripts/morning-briefing"
-SESSION_SCRIPT="${CLAUDE_PLUGIN_ROOT:-plugins/dev}/scripts/catalyst-session.sh"
-
-CATALYST_SESSION_ID=$("$SESSION_SCRIPT" start --skill "morning-briefing" \
-  --ticket "" --workflow "${CATALYST_SESSION_ID:-}")
-export CATALYST_SESSION_ID
+SCRIPT_DIR="${CLAUDE_SKILL_DIR}/scripts/morning-briefing"
+# Session tracking uses the installed catalyst-session CLI when this host has one (CTL-2306, D8).
+# Empty when the CLI is absent: every call below is guarded, and a parent CATALYST_SESSION_ID
+# handed down by the invoking workflow is kept rather than overwritten.
+SESSION_SCRIPT="$(command -v catalyst-session 2>/dev/null || true)"
+if [[ -n "$SESSION_SCRIPT" ]]; then
+  CATALYST_SESSION_ID=$("$SESSION_SCRIPT" start --skill "morning-briefing" \
+    --ticket "" --workflow "${CATALYST_SESSION_ID:-}")
+  export CATALYST_SESSION_ID
+fi
 
 # Resolve target date + output path. Pass --dry-run / --date through from the user.
 OUT_PATH=$(bash "$SCRIPT_DIR/output-path.sh" "$@")

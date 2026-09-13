@@ -1,0 +1,27 @@
+---
+# CTL-2306: files this skill carries as generated copies of one source in plugins/dev.
+# Edit the source, never a copy; `bun scripts/packaging/cli.mjs vendor --write` refreshes them
+# (render --write does it too) and packaging-gate.yml fails on drift.
+files:
+  - scripts/morning-briefing/adr-drift.sh
+  - scripts/morning-briefing/fanout-loom-script.sh
+  - scripts/morning-briefing/fanout-notion.sh
+  - scripts/morning-briefing/fanout-slack-channel.sh
+  - scripts/morning-briefing/fanout-slack-dm.sh
+  - scripts/morning-briefing/gather-calendar.sh
+  - scripts/morning-briefing/gather-drive.sh
+  - scripts/morning-briefing/gather-github.sh
+  - scripts/morning-briefing/gather-granola.sh
+  - scripts/morning-briefing/gather-linear.sh
+  - scripts/morning-briefing/output-path.sh
+  - scripts/morning-briefing/render.sh
+  - scripts/morning-briefing/sanitize.sh
+  - scripts/morning-briefing/validate-frontmatter.sh
+  - scripts/morning-briefing/write-output-status.sh
+  - templates/briefing-frontmatter.schema.json
+  - scripts/linear-transition.sh
+  - scripts/resolve-linear-ids.sh
+  - scripts/lib/linear-identity.sh
+  - scripts/lib/linear-read-replica.sh
+  - scripts/lib/canonical-event.sh
+  - scripts/lib/host-identity.sh
