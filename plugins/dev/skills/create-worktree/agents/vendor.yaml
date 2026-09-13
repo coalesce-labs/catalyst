@@ -1,0 +1,19 @@
+---
+# CTL-2306: files this skill carries as generated copies of one source in plugins/dev.
+# Edit the source, never a copy; `bun scripts/packaging/cli.mjs vendor --write` refreshes them
+# (render --write does it too) and packaging-gate.yml fails on drift.
+files:
+  - scripts/create-worktree.sh
+  - scripts/worktree-thoughts-init.sh
+  - scripts/catalyst-thoughts.sh
+  - scripts/lib/draft-pr.sh
+  - scripts/lib/catalyst-secret-contract.sh
+  - scripts/lib/claude-json-mutate.sh
+  - scripts/lib/worktree-remove-guard.sh
+  - scripts/lib/worktree-presweep.sh
+  - scripts/lib/claude-ids.sh
+  - scripts/lib/executor.sh
+  - scripts/lib/emit-reap-intent.sh
+  - scripts/lib/canonical-event.sh
+  - scripts/lib/host-identity.sh
+  - scripts/lib/catalyst-version.sh

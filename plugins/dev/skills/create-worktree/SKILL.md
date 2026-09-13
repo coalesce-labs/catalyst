@@ -19,6 +19,8 @@ This command uses ticket references like `PROJ-123`. Replace `PROJ` with your Li
 
 You are tasked with creating a git worktree for parallel development work.
 
+**Paths.** Commands below name files inside this skill's own directory as `${CLAUDE_SKILL_DIR}/…`. Claude Code fills that in. On any other harness, set CLAUDE_SKILL_DIR to the absolute directory that contains this SKILL.md before running them. If you cannot, stop and report `skill_dir_unresolved`.
+
 ## Process
 
 When this command is invoked:
@@ -33,7 +35,7 @@ When this command is invoked:
 3. **Create the worktree**: Use the create-worktree.sh script:
 
    ```bash
-   "${CLAUDE_PLUGIN_ROOT}/scripts/create-worktree.sh" <worktree_name> [base_branch] [--no-from-remote] [--skip-fetch]
+   "${CLAUDE_SKILL_DIR}/scripts/create-worktree.sh" <worktree_name> [base_branch] [--no-from-remote] [--skip-fetch]
    ```
 
    The script automatically:
