@@ -7,13 +7,14 @@
 // no writes); Phase 3 adds loss reporting; Phase 4 adds `--target`/`--write`;
 // Phase 6 adds `extraction-readiness`.
 
-import { readFileSync, existsSync, mkdirSync, writeFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, writeFileSync, readdirSync, rmSync, statSync, chmodSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 
 import { validateRenderedPack } from "./core/contract.mjs";
 import { readPackManifest } from "./core/pack-manifest.mjs";
-import { renderPluginPack, listPluginRelPaths } from "./providers/local.mjs";
+import { renderPluginPack, listPluginRelPaths, readVendorInputs } from "./providers/local.mjs";
+import { planVendoredCopies } from "./core/vendor.mjs";
 import { buildLossReport, hasUnacknowledgedLosses, lossCounts, renderLossReportMarkdown } from "./core/loss.mjs";
 import { checkInvocationParity } from "./core/safety-gate.mjs";
 import { renderPluginJson, renderMarketplaceJson, readExistingVersion } from "./emitters/claude.mjs";
@@ -310,12 +311,80 @@ const TARGET_WRITERS = {
   agentsSkills: writeAgentsSkillsTarget,
 };
 
+/**
+ * planPluginVendoring(repoRootPath) → planVendoredCopies' result over every plugin,
+ * each write carrying the absolute destination (CTL-2306 Phase 2). Exported for
+ * skill-self-containment.test.mjs's drift assertion.
+ */
+export function planPluginVendoring(repoRootPath = repoRoot) {
+  const entries = listPluginRelPaths(repoRootPath).flatMap((pluginRelPath) =>
+    readVendorInputs({ repoRoot: repoRootPath, pluginRelPath })
+  );
+  const plan = planVendoredCopies(entries);
+  const dirBySkill = new Map(entries.map((e) => [e.skillId, e.skillDirRelPath]));
+  const absolute = (item) => ({ ...item, skillDirRelPath: dirBySkill.get(item.skillId) });
+  return {
+    ...plan,
+    writes: plan.writes.map(absolute),
+    drift: plan.drift.map(absolute),
+    errors: plan.errors.map(absolute),
+    prunes: plan.prunes.map(absolute),
+    locks: plan.locks.map(absolute),
+  };
+}
+
+/** applyVendoring(repoRootPath) — writes every planned copy (keeping the source's mode); throws on a missing source. */
+export function applyVendoring(repoRootPath = repoRoot) {
+  const plan = planPluginVendoring(repoRootPath);
+  if (plan.errors.length > 0) {
+    throw new Error(
+      `vendor: ${plan.errors.map((e) => `${e.skillDirRelPath}: ${e.from} (${e.reason})`).join("; ")}`
+    );
+  }
+  for (const w of plan.writes) {
+    const dest = resolve(repoRootPath, w.skillDirRelPath, w.to);
+    writeFileEnsuringDir(dest, Buffer.from(w.base64, "base64"));
+    chmodSync(dest, w.mode);
+  }
+  for (const p of plan.prunes) {
+    rmSync(resolve(repoRootPath, p.skillDirRelPath, p.to), { force: true });
+  }
+  for (const l of plan.locks) {
+    const lockPath = resolve(repoRootPath, l.skillDirRelPath, "agents/vendor.lock.json");
+    if (l.files.length === 0) rmSync(lockPath, { force: true });
+    else writeFileEnsuringDir(lockPath, JSON.stringify({ generatedBy: "catalyst-packaging vendor", files: l.files }, null, 2) + "\n");
+  }
+  return plan;
+}
+
+function cmdVendor(args) {
+  if (args.includes("--write")) {
+    const plan = applyVendoring(repoRoot);
+    console.log(`VENDOR: ${plan.skillCount} skill(s), wrote ${plan.writes.length} copy(ies), pruned ${plan.prunes.length}`);
+    for (const w of plan.writes) console.log(`  ${w.skillDirRelPath}/${w.to}  ← ${w.from}`);
+    for (const p of plan.prunes) console.log(`  pruned ${p.skillDirRelPath}/${p.to} (no longer in agents/vendor.yaml)`);
+    return 0;
+  }
+  const plan = planPluginVendoring(repoRoot);
+  for (const e of plan.errors) console.error(`ERROR  ${e.skillDirRelPath}: ${e.from} (${e.reason})`);
+  for (const d of plan.drift) console.error(`DRIFT  ${d.skillDirRelPath}/${d.to} ${d.reason}${d.from ? ` (source ${d.from})` : ""}`);
+  console.log(`VENDOR: ${plan.skillCount} skill(s), ${plan.drift.length} drifted, ${plan.errors.length} error(s)`);
+  if (plan.errors.length > 0 || plan.drift.length > 0) {
+    console.error("Run 'bun scripts/packaging/cli.mjs vendor --write' and commit the copies — edit the source, never a copy.");
+    return 1;
+  }
+  return 0;
+}
+
 function cmdRender(args) {
   const dryRun = args.includes("--dry-run");
   const allowLosses = args.includes("--allow-losses");
   const write = args.includes("--write");
   const targetIdx = args.indexOf("--target");
   const target = targetIdx >= 0 ? args[targetIdx + 1] : null;
+  // CTL-2306: copies are generated output like every target below, so a write
+  // refreshes them first and the packs render from the refreshed tree.
+  if (write) applyVendoring(repoRoot);
   const results = renderAllPacks(repoRoot);
 
   // Runs unconditionally, for every invocation shape (Codex #4015 P2): a
@@ -504,6 +573,11 @@ function main() {
     case "extraction-readiness":
       cmdExtractionReadiness();
       break;
+    case "vendor": {
+      const exitCode = cmdVendor(args);
+      if (exitCode !== 0) process.exit(exitCode);
+      break;
+    }
     case "conformance": {
       const { exitCode } = cmdConformance(args);
       if (exitCode !== 0) process.exit(exitCode);
@@ -511,7 +585,7 @@ function main() {
     }
     default:
       console.error(
-        `Unknown command: ${command ?? "(none)"}. Usage: cli.mjs render [--dry-run] [--allow-losses] [--write] [--target <claude|codex|agentsSkills>] | cli.mjs extraction-readiness | cli.mjs conformance --target agentsSkills`
+        `Unknown command: ${command ?? "(none)"}. Usage: cli.mjs render [--dry-run] [--allow-losses] [--write] [--target <claude|codex|agentsSkills>] | cli.mjs vendor [--write] | cli.mjs extraction-readiness | cli.mjs conformance --target agentsSkills`
       );
       process.exit(1);
   }

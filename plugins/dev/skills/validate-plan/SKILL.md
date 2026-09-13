@@ -13,10 +13,9 @@ You are tasked with validating that an implementation plan was correctly execute
 ## Prerequisites
 
 ```bash
-# Check project setup (thoughts, CLAUDE.md snippet, config)
-if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" ]]; then
-  "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" || exit 1
-fi
+# Thoughts must exist for this skill's documents. CTL-2306: the full host setup check (daemon,
+# registry, house rules) belongs to the setup-catalyst skill, not to a skill that must run anywhere.
+[[ -e thoughts/shared ]] || echo "⚠️ thoughts/shared is missing in $(pwd) — run \`humanlayer thoughts init\` or the setup-catalyst skill; if the prompt names an output path, write there" >&2
 
 # CTL-2306 explicit-input discovery: begin
 # Find the plan to validate on disk for the ticket this run was given: $CATALYST_TICKET under a

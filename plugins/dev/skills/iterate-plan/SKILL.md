@@ -10,13 +10,14 @@ version: 1.0.0
 
 You are tasked with updating an existing implementation plan based on user feedback, partial implementation results, or changed requirements. You update plans with research-backed modifications, not just text edits.
 
+**Paths.** Commands below name files inside this skill's own directory as `${CLAUDE_SKILL_DIR}/…`. Claude Code fills that in. On any other harness, set CLAUDE_SKILL_DIR to the absolute directory that contains this SKILL.md before running them. If you cannot, stop and report `skill_dir_unresolved`.
+
 ## Prerequisites
 
 ```bash
-# Check project setup (thoughts, CLAUDE.md snippet, config)
-if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" ]]; then
-  "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" || exit 1
-fi
+# Thoughts must exist for this skill's documents. CTL-2306: the full host setup check (daemon,
+# registry, house rules) belongs to the setup-catalyst skill, not to a skill that must run anywhere.
+[[ -e thoughts/shared ]] || echo "⚠️ thoughts/shared is missing in $(pwd) — run \`humanlayer thoughts init\` or the setup-catalyst skill; if the prompt names an output path, write there" >&2
 
 # CTL-2306 explicit-input discovery: begin
 # Find the plan to update on disk for the ticket this run was given: $CATALYST_TICKET under a
@@ -82,6 +83,8 @@ If the changes require new technical understanding:
    - **codebase-locator** to find relevant files
    - **codebase-analyzer** to understand current implementation
    - **codebase-pattern-finder** to find similar patterns
+
+   Each agent's instructions ship with this skill as `${CLAUDE_SKILL_DIR}/assets/agents/<name>.md` (for example `${CLAUDE_SKILL_DIR}/assets/agents/codebase-locator.md`). With the catalyst-dev Claude Code plugin, spawn them as `catalyst-dev:<name>`. On any other harness, spawn a general-purpose subagent with that file's instructions plus your request, or do the task inline if the harness has no subagents.
 
 2. Wait for ALL agents to complete before modifying the plan
 

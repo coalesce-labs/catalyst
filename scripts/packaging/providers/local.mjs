@@ -29,6 +29,7 @@ import { join, relative, sep } from "node:path";
 
 import { SUPPORTED_CONTRACT_VERSION } from "../core/contract.mjs";
 import { validateNeutralDeclaration } from "../core/neutral-schema.mjs";
+import { validateVendorManifest, vendorDestination } from "../core/vendor.mjs";
 
 // NOTE on `version`: the RenderedPack contract has no per-skill/per-agent
 // version slot — the plugin's own version is owned exclusively by
@@ -297,4 +298,62 @@ export function listPluginRelPaths(repoRoot) {
     }
   }
   return roots.sort();
+}
+
+/**
+ * readVendorInputs({ repoRoot, pluginRelPath }) → the input core/vendor.mjs's
+ * planVendoredCopies takes, one entry per skill that has an `agents/vendor.yaml` or an
+ * `agents/vendor.lock.json` (CTL-2306 Phase 2): the listed sources' bytes and modes (null
+ * when a source is absent), the lock's recorded copies, and the current bytes and mode of
+ * every declared or recorded copy. Reads only; cli.mjs writes.
+ */
+export function readVendorInputs({ repoRoot, pluginRelPath }) {
+  const pluginAbsPath = join(repoRoot, pluginRelPath);
+  const entries = [];
+  for (const skillId of listSkillDirNames(pluginAbsPath)) {
+    const skillDir = join(pluginAbsPath, "skills", skillId);
+    const manifestPath = join(skillDir, "agents", "vendor.yaml");
+    const lockPath = join(skillDir, "agents", "vendor.lock.json");
+    if (!existsSync(manifestPath) && !existsSync(lockPath)) continue;
+    let files = [];
+    if (existsSync(manifestPath)) {
+      let parsed;
+      try {
+        parsed = Bun.YAML.parse(readFileSync(manifestPath, "utf8"));
+      } catch (err) {
+        throw new Error(`local: ${manifestPath} is not valid YAML: ${err.message}`);
+      }
+      files = validateVendorManifest(parsed, manifestPath).files;
+    }
+    let lock = null;
+    if (existsSync(lockPath)) {
+      const parsedLock = JSON.parse(readFileSync(lockPath, "utf8"));
+      if (!Array.isArray(parsedLock.files) || parsedLock.files.some((f) => typeof f !== "string")) {
+        throw new Error(`local: ${lockPath} must carry a "files" list of strings`);
+      }
+      lock = parsedLock.files;
+    }
+    const readCopy = (to) => {
+      const copyPath = join(skillDir, to);
+      return existsSync(copyPath) ? { base64: readFileSync(copyPath).toString("base64"), mode: statSync(copyPath).mode & 0o777 } : null;
+    };
+    const sources = {};
+    const current = {};
+    for (const from of files) {
+      const sourcePath = join(pluginAbsPath, from);
+      sources[from] =
+        existsSync(sourcePath) && statSync(sourcePath).isFile()
+          ? { base64: readFileSync(sourcePath).toString("base64"), mode: statSync(sourcePath).mode & 0o777 }
+          : null;
+      const copy = readCopy(vendorDestination(from));
+      if (copy) current[vendorDestination(from)] = copy;
+    }
+    for (const to of lock ?? []) {
+      if (current[to]) continue;
+      const copy = readCopy(to);
+      if (copy) current[to] = copy;
+    }
+    entries.push({ skillId, skillDirRelPath: `${pluginRelPath}/skills/${skillId}`, files, sources, current, lock });
+  }
+  return entries;
 }

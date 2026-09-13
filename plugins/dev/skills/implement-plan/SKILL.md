@@ -14,13 +14,14 @@ version: 1.0.0
 
 You are tasked with implementing an approved technical plan from `thoughts/shared/plans/`. These plans contain phases with specific changes and success criteria.
 
+**Paths.** Commands below name files inside this skill's own directory as `${CLAUDE_SKILL_DIR}/…`. Claude Code fills that in. On any other harness, set CLAUDE_SKILL_DIR to the absolute directory that contains this SKILL.md before running them. If you cannot, stop and report `skill_dir_unresolved`.
+
 ## Prerequisites
 
 ```bash
-# Check project setup (thoughts, CLAUDE.md snippet, config)
-if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" ]]; then
-  "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" || exit 1
-fi
+# Thoughts must exist for this skill's documents. CTL-2306: the full host setup check (daemon,
+# registry, house rules) belongs to the setup-catalyst skill, not to a skill that must run anywhere.
+[[ -e thoughts/shared ]] || echo "⚠️ thoughts/shared is missing in $(pwd) — run \`humanlayer thoughts init\` or the setup-catalyst skill; if the prompt names an output path, write there" >&2
 
 # CTL-2306 explicit-input discovery: begin
 # Find the plan to implement on disk for the ticket this run was given: $CATALYST_TICKET under a
@@ -53,8 +54,9 @@ fi
 ## Session Tracking
 
 ```bash
-SESSION_SCRIPT="${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-session.sh"
-if [[ -x "$SESSION_SCRIPT" ]]; then
+# Session tracking uses the installed catalyst-session CLI when this host has one; skipped otherwise.
+SESSION_SCRIPT="$(command -v catalyst-session 2>/dev/null || true)"
+if [[ -n "$SESSION_SCRIPT" ]]; then
   CATALYST_SESSION_ID=$("$SESSION_SCRIPT" start --skill "implement-plan" \
     --ticket "${TICKET_ID:-}" \
     --workflow "${CATALYST_SESSION_ID:-}")
@@ -116,7 +118,7 @@ For each phase, follow **Red → Green → Refactor**:
 
 ```bash implement-plan-commit-green
 # CTL-1490 (Codex round-2, PR #2697): commit BEFORE the draft-pr-push block below —
-# draft_pr_push (plugins/dev/scripts/lib/draft-pr.sh) is a pure `git push`; it commits
+# draft_pr_push (this skill's scripts/lib/draft-pr.sh) is a pure `git push`; it commits
 # nothing itself. Without a commit here, this push re-pushes whatever HEAD already
 # had (the previous phase's/step's commit) and the just-written Green code sits
 # uncommitted in the worktree only — a mid-phase kill after this point still loses
@@ -144,12 +146,17 @@ fi
 # Run after EVERY TDD Green step: first run opens the draft PR, later runs just
 # push (draft_pr_ensure is idempotent). Interactive runs (no CATALYST_PHASE)
 # skip — no surprise pushes. Fail-open: never blocks the phase.
-if [[ -n "${CATALYST_PHASE:-}" && -r "${CLAUDE_PLUGIN_ROOT}/scripts/lib/draft-pr.sh" ]]; then
-  # shellcheck source=/dev/null
-  source "${CLAUDE_PLUGIN_ROOT}/scripts/lib/draft-pr.sh"
-  if [[ "$(draft_pr_enabled)" == "true" ]]; then
-    draft_pr_push || true
-    draft_pr_ensure "main" "${TICKET_ID:-${CATALYST_TICKET:-}}" >/dev/null 2>&1 || true
+# CTL-2306: the helper ships inside this skill; a missing copy under a phase is reported, never silently skipped.
+if [[ -n "${CATALYST_PHASE:-}" ]]; then
+  if [[ -r "${CLAUDE_SKILL_DIR}/scripts/lib/draft-pr.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${CLAUDE_SKILL_DIR}/scripts/lib/draft-pr.sh"
+    if [[ "$(draft_pr_enabled)" == "true" ]]; then
+      draft_pr_push || true
+      draft_pr_ensure "main" "${TICKET_ID:-${CATALYST_TICKET:-}}" >/dev/null 2>&1 || true
+    fi
+  else
+    echo "⚠️ skill_dir_unresolved: draft-pr helper not found under this skill's directory — the draft PR was not pushed" >&2
   fi
 fi
 ```
@@ -307,7 +314,7 @@ If critical gaps exist, write the missing tests.
 **Recording findings during implementation.** When a phase surfaces friction worth fixing — a bug noticed in adjacent code, a step that shouldn't need manual intervention, a gap in tooling — record it the moment it's observed:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/add-finding.sh" \
+"${CLAUDE_SKILL_DIR}/scripts/add-finding.sh" \
   --title "Short imperative title" \
   --body "Reproduction + expected + observed + any links" \
   --skill implement-plan
@@ -316,8 +323,8 @@ If critical gaps exist, write the missing tests.
 Findings go to a shared queue (under orchestrate/oneshot, that skill's queue; direct invocations get a per-session queue). The block below files the queue at end-of-run. It's a safety net: when `implement-plan` runs under `/orchestrate` or `/oneshot`, the parent's filing step drains the same queue first and this block finds an empty file:
 
 ```bash
-FEEDBACK="${CLAUDE_PLUGIN_ROOT}/scripts/file-feedback.sh"
-CONSENT="${CLAUDE_PLUGIN_ROOT}/scripts/feedback-consent.sh"
+FEEDBACK="${CLAUDE_SKILL_DIR}/scripts/file-feedback.sh"
+CONSENT="${CLAUDE_SKILL_DIR}/scripts/feedback-consent.sh"
 FINDINGS_FILE="${CATALYST_FINDINGS_FILE:-.catalyst/findings/${CATALYST_SESSION_ID:-current}.jsonl}"
 
 if [ -x "$FEEDBACK" ] && [ -f "$FINDINGS_FILE" ] && [ -s "$FINDINGS_FILE" ]; then
