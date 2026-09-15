@@ -39,6 +39,6 @@ From the official prompt:
 - issues a linter or type checker will catch — and do not run the linter to verify;
 - general code-quality concerns (lack of test coverage, general security posture, naming, structure) unless a scoped CLAUDE.md/AGENTS.md rule explicitly requires them — then it is a `guideline` finding with the rule quoted;
 - issues mentioned in CLAUDE.md but explicitly silenced in the code on that line (a lint-ignore comment or an inline note);
-- potential issues that depend on specific inputs, timing or state;
+- UNCONFIRMED potential issues that depend on specific inputs, timing or state — a conditional defect you did confirm by reading the code (an empty-input crash, a bypassed permission check, a failed transition) is reportable, MEDIUM per the severity table above;
 - subjective suggestions and improvements;
 - anything in a file outside the scope, or on a line the diff did not touch.

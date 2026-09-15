@@ -22,7 +22,7 @@ Read the diff itself, hunk by hunk, without reaching for outside context. Flag o
 - the code will not compile or parse: a syntax error, a type error visible in the hunk, an import that was removed while a use remains, an unresolved reference, a renamed symbol with a stale caller in the same diff;
 - the code will definitely produce wrong results regardless of input: an inverted condition, a wrong variable, a loop that never runs its body, a returned value ignored where it is the result, a promise dropped where its result is needed, a resource opened on the changed path and never released, a fallthrough the surrounding cases show is unintended.
 
-If confirming the claim needs context outside the diff, keep the candidate and let Step 4 read the file — but a claim that depends on specific inputs, timing or state is not a bug of this kind; drop it here.
+If confirming the claim needs context outside the diff, keep the candidate and let Step 4 read the file. A claim that depends on specific inputs, timing or state is not certain from the diff alone — keep it as a candidate too; Step 4 confirms it (then it is a MEDIUM finding, per `scoring.md`) or drops it.
 
 ## 3. History — does the change contradict a recent, deliberate commit?
 

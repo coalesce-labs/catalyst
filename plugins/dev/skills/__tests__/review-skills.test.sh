@@ -80,8 +80,18 @@ git checkout -qb feature
 printf 'export const a = 2;\n' > src/a.ts
 printf 'export const b = 1;\n' > src/b.ts
 printf '# readme changed\n' > README.md
+mkdir -p plugins/dev/skills/demo .agents/rules
+printf -- '---\nname: demo\n---\n' > plugins/dev/skills/demo/SKILL.md
+printf 'rule\n' > .agents/rules/runner.md
+printf 'y\n' > docs/guide.md
 git add -A && git commit -qm change
 git update-ref refs/catalyst/validate-base "$BASE"
+# Codex P2 on #4144: a git-valid path with a newline cannot ride the newline-delimited scope.
+git checkout -qb newline-path
+printf 'export const c = 1;\n' > "$(printf 'src/evil\nscript.ts')"
+git add -A && git commit -qm newline
+NEWLINE_HEAD="$(git rev-parse HEAD)"
+git checkout -q feature
 
 for skill in $SKILLS; do
   SCOPE="${SKILLS_DIR}/${skill}/scripts/review-scope.sh"
@@ -93,7 +103,7 @@ for skill in $SKILLS; do
   if printf '%s' "$out" | grep -q "^base: ${BASE}$"; then ok "planted ref: resolves to the base sha"; else fail "planted ref: resolves to the base sha" "${out:0:300}"; fi
   if printf '%s' "$out" | grep -q '^ancestry: proven$'; then ok "planted ref: ancestry proven"; else fail "planted ref: ancestry proven" "${out:0:300}"; fi
   if printf '%s' "$out" | grep -q '^  M src/a.ts$' && printf '%s' "$out" | grep -q '^  A src/b.ts$'; then ok "planted ref: lists both code files with status"; else fail "planted ref: lists both code files with status" "${out:0:300}"; fi
-  if printf '%s' "$out" | grep -q '^  M README.md$' && printf '%s' "$out" | grep -q '^code: 2$'; then ok "planted ref: README is listed as non-code and not counted"; else fail "planted ref: README is listed as non-code and not counted" "${out:0:300}"; fi
+  if printf '%s' "$out" | grep -q '^  M README.md$' && printf '%s' "$out" | grep -q '^code: 4$'; then ok "planted ref: README is listed as non-code and not counted"; else fail "planted ref: README is listed as non-code and not counted" "${out:0:300}"; fi
   if printf '%s' "$out" | grep -q "^diff_command: git -c core.quotePath=false diff ${BASE} HEAD -- "; then ok "planted ref: names the two-dot diff command"; else fail "planted ref: names the two-dot diff command" "${out:0:300}"; fi
 
   out="$(bash "$SCOPE" "$BASE" 2>&1)"; rc=$?
@@ -104,6 +114,16 @@ for skill in $SKILLS; do
   # the whole argument text over as one word; the script must re-split it.
   out="$(bash "$SCOPE" "--base $BASE" 2>&1)"; rc=$?
   if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "^base: ${BASE}$"; then ok "one unsplit argument word is re-split"; else fail "one unsplit argument word is re-split" "rc=$rc: ${out:0:300}"; fi
+  # Codex P2 on #4144: the re-split must preserve quoting, so a --files path with a space stays one
+  # path in the one-word form; the multi-arg form needs no quoting; shell-significant characters
+  # are refused (exit 2), never eval'd.
+  mkdir -p "$SCRATCH/my dir" && printf 'src/a.ts\n' > "$SCRATCH/my dir/list.txt"
+  out="$(bash "$SCOPE" "--base $BASE --files '$SCRATCH/my dir/list.txt'" 2>&1)"; rc=$?
+  if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '^bounded_to_list: yes$'; then ok "one-word form: a quoted --files path with a space stays one path"; else fail "one-word form: a quoted --files path with a space stays one path" "rc=$rc: ${out:0:300}"; fi
+  out="$(bash "$SCOPE" --base "$BASE" --files "$SCRATCH/my dir/list.txt" 2>&1)"; rc=$?
+  if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '^bounded_to_list: yes$'; then ok "multi-arg form: a --files path with a space needs no quoting"; else fail "multi-arg form: a --files path with a space needs no quoting" "rc=$rc: ${out:0:300}"; fi
+  out="$(bash "$SCOPE" "--base \$(touch $SCRATCH/pwned)" 2>&1)"; rc=$?
+  if [ "$rc" -eq 2 ] && [ ! -e "$SCRATCH/pwned" ]; then ok "one-word form: shell-significant characters are refused, not evaluated"; else fail "one-word form: shell-significant characters are refused, not evaluated" "rc=$rc pwned=$([ -e "$SCRATCH/pwned" ] && echo yes || echo no): ${out:0:300}"; fi
   # A branch name resolves to the fork point, never to the branch tip (a two-dot diff against a
   # moved main would review main's own commits).
   out="$(bash "$SCOPE" --base master 2>&1 || bash "$SCOPE" --base main 2>&1)"
@@ -117,12 +137,26 @@ for skill in $SKILLS; do
   if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '^  M src/a.ts$' && ! printf '%s' "$out" | grep -q 'src/b.ts'; then ok "--files: the diff is bounded to the runner's list"; else fail "--files: the diff is bounded to the runner's list" "rc=$rc: ${out:0:300}"; fi
   if printf '%s' "$out" | grep -q '^not_in_diff: 1$'; then ok "--files: a listed file the diff never touched is counted, not reviewed"; else fail "--files: a listed file the diff never touched is counted, not reviewed" "${out:0:300}"; fi
 
+  out="$(git checkout -q newline-path && bash "$SCOPE" --base "$BASE" 2>&1; rc=$?; git checkout -q feature; exit $rc)"; rc=$?
+  if [ "$rc" -eq 4 ] && printf '%s' "$out" | grep -q '^status: unavailable$' && printf '%s' "$out" | grep -qi 'newline' && printf '%s' "$out" | grep -q 'src/evil?script.ts'; then ok "a changed path containing a newline: status unavailable, rc 4, names the path"; else fail "a changed path containing a newline: status unavailable, rc 4, names the path" "rc=$rc: ${out:0:300}"; fi
+
   out="$(bash "$SCOPE" --base HEAD 2>&1)"; rc=$?
   if [ "$rc" -eq 3 ] && printf '%s' "$out" | grep -q '^status: skipped$' && printf '%s' "$out" | grep -qi 'empty'; then ok "empty diff: status skipped, rc 3, reason names the empty diff"; else fail "empty diff: status skipped, rc 3, reason names the empty diff" "rc=$rc: ${out:0:300}"; fi
 
   printf 'README.md\n' > "$SCRATCH/docs-only.txt"
   out="$(bash "$SCOPE" --files "$SCRATCH/docs-only.txt" 2>&1)"; rc=$?
   if [ "$rc" -eq 3 ] && printf '%s' "$out" | grep -q '^status: skipped$' && printf '%s' "$out" | grep -qi 'non-code'; then ok "docs-only diff: status skipped, rc 3, reason names non-code"; else fail "docs-only diff: status skipped, rc 3, reason names non-code" "rc=$rc: ${out:0:300}"; fi
+
+  # Codex P1 on #4144: Markdown under a behavioural path is plugin source, not docs.
+  printf 'plugins/dev/skills/demo/SKILL.md\n' > "$SCRATCH/skill-only.txt"
+  out="$(bash "$SCOPE" --files "$SCRATCH/skill-only.txt" 2>&1)"; rc=$?
+  if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '^status: review$' && printf '%s' "$out" | grep -q '^  A plugins/dev/skills/demo/SKILL.md$'; then ok "a diff touching only a SKILL.md is reviewable (status review)"; else fail "a diff touching only a SKILL.md is reviewable (status review)" "rc=$rc: ${out:0:300}"; fi
+  printf '.agents/rules/runner.md\n' > "$SCRATCH/rule-only.txt"
+  out="$(bash "$SCOPE" --files "$SCRATCH/rule-only.txt" 2>&1)"; rc=$?
+  if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '^status: review$'; then ok "a diff touching only an .agents/ rule file is reviewable"; else fail "a diff touching only an .agents/ rule file is reviewable" "rc=$rc: ${out:0:300}"; fi
+  printf 'docs/guide.md\n' > "$SCRATCH/plain-doc.txt"
+  out="$(bash "$SCOPE" --files "$SCRATCH/plain-doc.txt" 2>&1)"; rc=$?
+  if [ "$rc" -eq 3 ] && printf '%s' "$out" | grep -q '^status: skipped$'; then ok "control: a diff touching only docs/guide.md is still skipped"; else fail "control: a diff touching only docs/guide.md is still skipped" "rc=$rc: ${out:0:300}"; fi
 
   out="$(bash "$SCOPE" --base refs/catalyst/no-such-ref 2>&1)"; rc=$?
   if [ "$rc" -eq 4 ] && printf '%s' "$out" | grep -q '^status: unavailable$' && printf '%s' "$out" | grep -q 'refs/catalyst/no-such-ref'; then ok "unresolvable base: status unavailable, rc 4, names the ref"; else fail "unresolvable base: status unavailable, rc 4, names the ref" "rc=$rc: ${out:0:300}"; fi

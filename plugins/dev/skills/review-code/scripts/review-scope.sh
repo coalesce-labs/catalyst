@@ -17,6 +17,8 @@
 #            never to the branch tip. Default: refs/catalyst/validate-base.
 #   --files  the caller's changed-file list, one repo-relative path per line. The diff is bounded
 #            to it; a listed path the diff never touched is counted under `not_in_diff`.
+#   When the arguments arrive as ONE word (the SKILL.md's "$SKILL_ARGS"), quote a path that
+#   contains spaces inside it: --files '/tmp/my list.txt'.
 #
 # Identical copies live in review-code/scripts and review-security/scripts: a skill runs from its
 # own directory on every harness (CTL-2306), so it cannot reach a sibling's file. Bash-3.2 safe.
@@ -33,10 +35,24 @@ emit_unavailable() {
   exit 4
 }
 
-# A shell that does not word-split (zsh, the agent Bash tool on macOS) may hand the whole
-# argument text over as ONE word; re-split it here, where bash does.
+# The SKILL.md hands the whole argument text over as ONE word ("$SKILL_ARGS"; zsh would not
+# word-split it anyway). Re-split it here, PRESERVING quotes so `--files '/tmp/my list.txt'`
+# stays one path: `eval` does that, and is safe only because the text is first restricted to
+# characters that cannot start a command, expansion or redirection. A literal `$ARGUMENTS`
+# token (a harness that did not substitute it) is no argument at all.
 if [ $# -eq 1 ]; then
-  case "$1" in *[[:space:]]*) set -f; set -- $1; set +f ;; esac
+  case "$1" in
+    '$ARGUMENTS'|'') set -- ;;
+    *[[:space:]]*)
+      one="$(printf '%s' "$1" | tr '\n\t' '  ')"
+      case "$one" in
+        *[!A-Za-z0-9_./=:~@+,%\ \'\"-]*)
+          echo "review-scope: refusing to re-split an argument word with shell-significant characters: $one" >&2
+          echo "review-scope: pass each argument separately (--base <ref> --files <list-file>)" >&2
+          exit 2 ;;
+      esac
+      eval "set -- $one" ;;
+  esac
 fi
 
 BASE_INPUT=""
@@ -88,8 +104,15 @@ fi
 
 is_non_code() {
   # Docs, images, fonts, lockfiles: a diff of only these has nothing for a code or security review.
+  # Markdown under a BEHAVIOURAL path is not docs: a SKILL.md, an agent definition, AGENTS.md or
+  # CLAUDE.md, and anything under .agents/ or .claude/ is what an agent executes (Codex P1 on
+  # #4144). Only plain documentation is skippable.
   local p="$1" b
   b="$(basename "$p")"
+  case "$b" in SKILL.md|AGENTS.md|CLAUDE.md) return 1 ;; esac
+  case "$p" in
+    plugins/*/skills/*|plugins/*/agents/*|plugins/*/*/skills/*|plugins/*/*/agents/*|.agents/*|.claude/*|*/.agents/*|*/.claude/*) return 1 ;;
+  esac
   case "$(printf '%s' "$b" | tr '[:upper:]' '[:lower:]')" in
     *.md|*.mdx|*.markdown|*.txt|*.rst|*.adoc|*.png|*.jpg|*.jpeg|*.gif|*.ico|*.webp|*.pdf|*.woff|*.woff2|*.ttf|*.eot|*.snap) return 0 ;;
     bun.lock|bun.lockb|package-lock.json|yarn.lock|pnpm-lock.yaml|cargo.lock|gemfile.lock|poetry.lock|uv.lock|go.sum|composer.lock) return 0 ;;
@@ -118,8 +141,14 @@ CODE_N=0
 NON_CODE_N=0
 CHANGED_N=0
 BOUNDED_OUT=0
+NEWLINE_PATH=""
 while IFS= read -r -d '' st && IFS= read -r -d '' path; do
   CHANGED_N=$((CHANGED_N+1))
+  # The scope below is newline-delimited (the files: block, the --files list, the diff command).
+  # A git-valid path carrying a newline cannot ride it faithfully, and a quietly split path would
+  # make the mandated diff_command diff the wrong files (Codex P2 on #4144): refuse, by name.
+  case "$path" in *"
+"*) NEWLINE_PATH="$(printf '%s' "$path" | tr '\n' '?')" ;; esac
   if ! list_has "$path"; then BOUNDED_OUT=$((BOUNDED_OUT+1)); continue; fi
   if is_non_code "$path"; then
     NON_CODE_N=$((NON_CODE_N+1))
@@ -131,6 +160,9 @@ while IFS= read -r -d '' st && IFS= read -r -d '' path; do
 "
   fi
 done < "$DIFF_TMP"
+if [ -n "$NEWLINE_PATH" ]; then
+  emit_unavailable "a changed path contains a newline and cannot be scoped faithfully: ${NEWLINE_PATH} (newline shown as ?)"
+fi
 
 NOT_IN_DIFF=0
 if [ -n "$LIST_FILE" ]; then

@@ -59,4 +59,4 @@ Write the report in the reference's shape: the scope line, the lenses run, the f
 
 - Never edit code, run a formatter or linter to "check", or post anything to GitHub — this is a verdict, not a fix and not a comment. The `remediate` phase fixes.
 - Never review a file outside the `files:` block, and never raise a finding on a line the diff did not touch.
-- Never report a candidate you could not confirm by reading the code, or one that only holds for specific inputs or state.
+- Never report a candidate you could not confirm by reading the code. A CONFIRMED defect that occurs only under a particular input or state — an empty-input crash, a bypassed permission check, a transition that fails — is a real finding at the confidence `references/scoring.md` gives it (MEDIUM severity); what stays dropped is the hypothetical you could not confirm on this diff. `references/scoring.md` is the authority on what is reported.
