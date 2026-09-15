@@ -18,7 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 SKILLS_ROOT="${REPO_ROOT}/plugins/dev/skills"
 
-SKILLS="agent-browser ask briefing-followup commit compound-estimate concierge create-handoff create-plan create-pr create-worktree describe-pr fix-typescript gherkin-ticket implement-plan iterate-plan linear linearis merge-pr morning-briefing project-orchestrator remediate-plan research-codebase resume-handoff review-comments scan-reward-hacking steward ticket-compound ticket-retro triage-aging-prs validate-plan validate-type-safety"
+SKILLS="agent-browser ask briefing-followup commit compound-estimate concierge create-handoff create-plan create-pr create-worktree describe-pr fix-typescript gherkin-ticket implement-plan iterate-plan linear linearis merge-pr morning-briefing project-orchestrator remediate-plan research-codebase resume-handoff review-code review-comments review-security scan-reward-hacking steward ticket-compound ticket-retro triage-aging-prs validate-plan validate-type-safety"
 
 PASS=0
 FAIL=0
@@ -192,6 +192,15 @@ run_isolated "briefing-followup: writeback's frontmatter lib and event lib are c
   'test -s "$CLAUDE_SKILL_DIR/scripts/briefing-frontmatter-lib.sh" && test -s "$CLAUDE_SKILL_DIR/scripts/lib/canonical-event.sh" && test -s "$CLAUDE_SKILL_DIR/scripts/lib/task-type.sh"'
 run_isolated_expect "briefing-followup: parse-briefing prints its usage" briefing-followup "sage" \
   'bash "$CLAUDE_SKILL_DIR/scripts/briefing-followup/parse-briefing.sh"'
+
+# CTL-2309 — the platform review skills. review-scope.sh decides review / skipped / unavailable
+# itself; from a lone copy, outside any repository, it must say `unavailable` (exit 4), not crash.
+for skill in review-code review-security; do
+  run_isolated "${skill}: review-scope --help from a lone copy" "$skill" \
+    'bash "$CLAUDE_SKILL_DIR/scripts/review-scope.sh" --help | grep -qi usage'
+  run_isolated "${skill}: review-scope outside a repository reports unavailable (exit 4)" "$skill" \
+    'bash "$CLAUDE_SKILL_DIR/scripts/review-scope.sh"; test $? -eq 4'
+done
 
 # Cluster 4c — estimation and retro.
 run_isolated "compound-estimate: compound-log --help (sources its replica helper)" compound-estimate \
