@@ -21,7 +21,7 @@ See the [Skills Reference](https://catalyst.coalescelabs.ai/reference/skills/) a
 [Agents Reference](https://catalyst.coalescelabs.ai/reference/agents/) for detailed per-skill
 documentation. The list below is the current inventory only.
 
-## Skills (18)
+## Skills (20)
 
 ### Research & Planning
 
@@ -35,6 +35,8 @@ documentation. The list below is the current inventory only.
 - `/catalyst-dev:fix-typescript` — Fix TypeScript errors with strict anti-reward-hacking rules
 - `/catalyst-dev:scan-reward-hacking` — Scan for forbidden patterns (`as any`, `@ts-ignore`, etc.)
 - `/catalyst-dev:validate-type-safety` — 5-step type safety gate (typecheck + scan + tests + lint)
+- `/catalyst-dev:review-code` — one-session code review of a branch's diff against its base: five lenses, ≥80-confidence findings, ladder verdict (CTL-2309)
+- `/catalyst-dev:review-security` — one-session security review of the same diff, derived from anthropics/claude-code-security-review (MIT), ladder verdict (CTL-2309)
 
 ### Shipping
 
