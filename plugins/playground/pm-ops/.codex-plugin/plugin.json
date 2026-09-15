@@ -1,6 +1,6 @@
 {
   "name": "catalyst-pm-ops",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "Linear backlog grooming — orphan, stale, and duplicate ticket detection",
   "author": {
     "name": "Coalesce Labs",
