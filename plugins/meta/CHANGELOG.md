@@ -1,5 +1,23 @@
 # Changelog
 
+## [6.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-meta-v5.0.0...catalyst-meta-v6.0.0) (2026-09-15)
+
+
+### ⚠ BREAKING CHANGES
+
+* **dev:** CTL-2306 — catalyst-dev ships no hooks, and skills take their input explicitly ([#4132](https://github.com/coalesce-labs/catalyst/issues/4132))
+
+### Features
+
+* **dev:** CTL-2306 — catalyst-dev ships no hooks, and skills take their input explicitly ([#4132](https://github.com/coalesce-labs/catalyst/issues/4132)) ([c0de85b](https://github.com/coalesce-labs/catalyst/commit/c0de85b53b38b77f247eb877d6a674fe2bdac36f))
+* **packaging:** CTL-1461 — real render interface, safety gate, drift gate, inventory independence ([#4015](https://github.com/coalesce-labs/catalyst/issues/4015)) ([5f4fa48](https://github.com/coalesce-labs/catalyst/commit/5f4fa482bf22e143a9f41a90487f52f113956da5))
+* **packaging:** CTL-1463 — installable plugin packages for Codex + open-spec agents ([#3978](https://github.com/coalesce-labs/catalyst/issues/3978)) ([3b80357](https://github.com/coalesce-labs/catalyst/commit/3b803576f1f801278ebf6ac92da68026d289d6dd))
+
+
+### Bug Fixes
+
+* **meta:** CTL-2231 — validate-frontmatter: correct disable-model-invocation polarity, drop retired Commands shape ([#4030](https://github.com/coalesce-labs/catalyst/issues/4030)) ([e9b5dac](https://github.com/coalesce-labs/catalyst/commit/e9b5dac9608ce8e0fba8cc8147dcc83805ec140e))
+
 ## [4.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-meta-v4.1.0...catalyst-meta-v4.2.0) (2026-08-24)
 
 
