@@ -12,7 +12,15 @@
 // clean result on the real tree is an absence and not a checker that stopped looking.
 
 import { describe, test, expect, afterAll } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync, existsSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+  readFileSync,
+  readdirSync,
+  existsSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -61,7 +69,9 @@ describe("the checker sees each violation it exists to catch (positive controls)
     const dir = fixtureSkill("uses-plugin-root", {
       "SKILL.md": '---\nname: x\n---\n```bash\n"${CLAUDE_PLUGIN_ROOT}/scripts/check.sh"\n```\n',
     });
-    expect(checkSkillSelfContainment(dir).violations.map((v) => v.rule)).toContain("plugin-root-reference");
+    expect(checkSkillSelfContainment(dir).violations.map((v) => v.rule)).toContain(
+      "plugin-root-reference"
+    );
   });
 
   // A repo-relative path into another part of the plugin is the same defect as a plugin-root
@@ -69,10 +79,15 @@ describe("the checker sees each violation it exists to catch (positive controls)
   // runner at plugins/dev/skills/validate-plan/SKILL.md, which no tenant repo has).
   test("a repo-relative path into the plugin's skills, references, templates or agents", () => {
     const dir = fixtureSkill("repo-relative-paths", {
-      "SKILL.md": "---\nname: x\n---\nRead `plugins/dev/skills/ask/references/threading.md` first.\n",
-      "references/more.md": "See plugins/dev/references/review-thread-resolution.md and plugins/dev/templates/x.json.\n",
+      "SKILL.md":
+        "---\nname: x\n---\nRead `plugins/dev/skills/ask/references/threading.md` first.\n",
+      "references/more.md":
+        "See plugins/dev/references/review-thread-resolution.md and plugins/dev/templates/x.json.\n",
     });
-    expect(checkSkillSelfContainment(dir).violations.filter((v) => v.rule === "plugin-root-reference").length).toBe(2);
+    expect(
+      checkSkillSelfContainment(dir).violations.filter((v) => v.rule === "plugin-root-reference")
+        .length
+    ).toBe(2);
   });
 
   // Codex review on #4136 (P1): concierge followed `steward/references/cloud-detection.md`, whose
@@ -89,7 +104,9 @@ describe("the checker sees each violation it exists to catch (positive controls)
       "---\nname: concierge\n---\nGate reads on `steward/references/cloud-detection.md`. The `ask` skill decides asks.\n"
     );
     const v = checkSkillSelfContainment(join(parent, "concierge")).violations;
-    expect(v.map((x) => [x.rule, x.detail])).toEqual([["sibling-skill-path", "steward/references/cloud-detection.md"]]);
+    expect(v.map((x) => [x.rule, x.detail])).toEqual([
+      ["sibling-skill-path", "steward/references/cloud-detection.md"],
+    ]);
   });
 
   // Some instructions are genuinely for catalyst maintainers working in a catalyst checkout
@@ -97,7 +114,8 @@ describe("the checker sees each violation it exists to catch (positive controls)
   // the line, and only those lines may name a repo-relative plugin path.
   test("a line marked `(catalyst-checkout only)` may name a repo-relative plugin path; an unmarked line may not", () => {
     const dir = fixtureSkill("maintainer-line", {
-      "SKILL.md": "---\nname: x\n---\n```bash\nplugins/dev/scripts/estimate/refresh-corpus.sh   # (catalyst-checkout only)\nplugins/dev/scripts/compound-log.sh write X\n```\n",
+      "SKILL.md":
+        "---\nname: x\n---\n```bash\nplugins/dev/scripts/estimate/refresh-corpus.sh   # (catalyst-checkout only)\nplugins/dev/scripts/compound-log.sh write X\n```\n",
     });
     const v = checkSkillSelfContainment(dir).violations;
     expect(v.map((x) => [x.rule, x.line])).toEqual([["plugin-root-reference", 6]]);
@@ -109,7 +127,29 @@ describe("the checker sees each violation it exists to catch (positive controls)
     });
     const v = checkSkillSelfContainment(dir).violations;
     expect(v.map((x) => x.rule)).toContain("skill-dir-path-missing");
-    expect(v.find((x) => x.rule === "skill-dir-path-missing").detail).toContain("scripts/absent.sh");
+    expect(v.find((x) => x.rule === "skill-dir-path-missing").detail).toContain(
+      "scripts/absent.sh"
+    );
+  });
+
+  // CTL-2310: `${CLAUDE_SKILL_DIR}/../../references/x.md` resolves in the catalyst checkout and in
+  // the runner image's baked plugin tree, so skill-dir-path-missing passes it — but a flat skills
+  // install has no plugin directory above the skill. A shared reference is vendored instead.
+  test("a skill-dir path that climbs out of the skill is a violation even when the file exists there", () => {
+    const parent = join(scratch, "climbing-plugin");
+    mkdirSync(join(parent, "references"), { recursive: true });
+    writeFileSync(join(parent, "references", "shared.md"), "x\n");
+    const dir = join(parent, "skills", "climber");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "SKILL.md"),
+      `---\nname: climber\n---\n${PREAMBLE}\nRead \`\${CLAUDE_SKILL_DIR}/../../references/shared.md\` and "$CLAUDE_SKILL_DIR/../../references/shared.md".\n`
+    );
+    const v = checkSkillSelfContainment(dir).violations;
+    expect(v.map((x) => [x.rule, x.detail])).toEqual([
+      ["skill-dir-path-escapes", "../../references/shared.md"],
+      ["skill-dir-path-escapes", "../../references/shared.md"],
+    ]);
   });
 
   test("a skill-dir command with no harness preamble", () => {
@@ -117,13 +157,16 @@ describe("the checker sees each violation it exists to catch (positive controls)
       "SKILL.md": '---\nname: x\n---\n```bash\n"${CLAUDE_SKILL_DIR}/scripts/ok.sh"\n```\n',
       "scripts/ok.sh": "#!/usr/bin/env bash\n",
     });
-    expect(checkSkillSelfContainment(dir).violations.map((v) => v.rule)).toContain("missing-skill-dir-preamble");
+    expect(checkSkillSelfContainment(dir).violations.map((v) => v.rule)).toContain(
+      "missing-skill-dir-preamble"
+    );
   });
 
   test("a script that sources a sibling the skill does not carry", () => {
     const dir = fixtureSkill("broken-sibling", {
       "SKILL.md": `---\nname: x\n---\n${PREAMBLE}\n\`\`\`bash\n"\${CLAUDE_SKILL_DIR}/scripts/a.sh"\n\`\`\`\n`,
-      "scripts/a.sh": '#!/usr/bin/env bash\nSCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\nsource "${SCRIPT_DIR}/lib/b.sh"\n',
+      "scripts/a.sh":
+        '#!/usr/bin/env bash\nSCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\nsource "${SCRIPT_DIR}/lib/b.sh"\n',
     });
     const v = checkSkillSelfContainment(dir).violations;
     expect(v.map((x) => x.rule)).toContain("script-sibling-missing");
@@ -134,18 +177,25 @@ describe("the checker sees each violation it exists to catch (positive controls)
     // resolves only in the catalyst checkout layout.
     const dir = fixtureSkill("climbs-out", {
       "SKILL.md": "---\nname: x\n---\nno commands\n",
-      "scripts/a.sh": '#!/usr/bin/env bash\nSCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\nbash "${SCRIPT_DIR}/../../outside-scripts/init.sh"\n',
+      "scripts/a.sh":
+        '#!/usr/bin/env bash\nSCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\nbash "${SCRIPT_DIR}/../../outside-scripts/init.sh"\n',
     });
     mkdirSync(join(dir, "..", "outside-scripts"), { recursive: true });
     writeFileSync(join(dir, "..", "outside-scripts", "init.sh"), "#!/usr/bin/env bash\n");
     const v = checkSkillSelfContainment(dir).violations;
-    expect(v).toEqual([expect.objectContaining({ rule: "script-sibling-missing", detail: "../../outside-scripts/init.sh" })]);
+    expect(v).toEqual([
+      expect.objectContaining({
+        rule: "script-sibling-missing",
+        detail: "../../outside-scripts/init.sh",
+      }),
+    ]);
   });
 
   test("an optional reference marked in the script is not a violation", () => {
     const dir = fixtureSkill("optional-sibling", {
       "SKILL.md": "---\nname: x\n---\nno commands\n",
-      "scripts/a.sh": '#!/usr/bin/env bash\nLIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\nJSON="${LIB_DIR}/../../.claude-plugin/plugin.json" # self-containment: optional\n',
+      "scripts/a.sh":
+        '#!/usr/bin/env bash\nLIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\nJSON="${LIB_DIR}/../../.claude-plugin/plugin.json" # self-containment: optional\n',
     });
     expect(checkSkillSelfContainment(dir).violations).toEqual([]);
   });
@@ -175,7 +225,11 @@ describe("the checker sees each violation it exists to catch (positive controls)
         'import { x } from "./lib/present.mjs";\nimport { y } from "../scripts/lib/absent.mjs";\nconst helper = new URL("./lib/gone.sh", import.meta.url).pathname;\n',
       "scripts/lib/present.mjs": "export const x = 1;\n",
     });
-    expect(checkSkillSelfContainment(dir).violations.map((v) => v.detail).sort()).toEqual(["../scripts/lib/absent.mjs", "./lib/gone.sh"]);
+    expect(
+      checkSkillSelfContainment(dir)
+        .violations.map((v) => v.detail)
+        .sort()
+    ).toEqual(["../scripts/lib/absent.mjs", "./lib/gone.sh"]);
   });
 
   // Codex review on #4135: a side-effect import and a CommonJS require are dependencies too.
@@ -183,11 +237,16 @@ describe("the checker sees each violation it exists to catch (positive controls)
     const dir = fixtureSkill("bare-and-require", {
       "SKILL.md": "---\nname: x\n---\nno commands\n",
       "scripts/a.mjs": 'import "./polyfill-missing.mjs";\nimport "./present.mjs";\n',
-      "scripts/b.cjs": 'const x = require("./gone.cjs");\nconst y = require( "./present.cjs" );\nconst fs = require("node:fs");\n',
+      "scripts/b.cjs":
+        'const x = require("./gone.cjs");\nconst y = require( "./present.cjs" );\nconst fs = require("node:fs");\n',
       "scripts/present.mjs": "export {};\n",
       "scripts/present.cjs": "module.exports = {};\n",
     });
-    expect(checkSkillSelfContainment(dir).violations.map((v) => v.detail).sort()).toEqual(["./gone.cjs", "./polyfill-missing.mjs"]);
+    expect(
+      checkSkillSelfContainment(dir)
+        .violations.map((v) => v.detail)
+        .sort()
+    ).toEqual(["./gone.cjs", "./polyfill-missing.mjs"]);
   });
 
   // Found by skill-dir-isolation.test.sh, not by this checker: board-vocabulary.mjs reads a JSON
@@ -199,13 +258,16 @@ describe("the checker sees each violation it exists to catch (positive controls)
         'import { dirname, join } from "node:path";\nimport { fileURLToPath } from "node:url";\nexport const P = join(dirname(fileURLToPath(import.meta.url)), "contract.default.json");\nexport const Q = join(import.meta.dirname, "present.json");\n',
       "scripts/present.json": "{}\n",
     });
-    expect(checkSkillSelfContainment(dir).violations.map((v) => v.detail)).toEqual(["contract.default.json"]);
+    expect(checkSkillSelfContainment(dir).violations.map((v) => v.detail)).toEqual([
+      "contract.default.json",
+    ]);
   });
 
   test("a type-only import inside a JSDoc comment is not a runtime dependency", () => {
     const dir = fixtureSkill("jsdoc-import", {
       "SKILL.md": "---\nname: x\n---\nno commands\n",
-      "scripts/a.mjs": '/**\n * @param {import("./types.d.mts").Spec} spec\n */\nexport function f(spec) { return spec; }\n// import("./also-not-real.mjs")\n',
+      "scripts/a.mjs":
+        '/**\n * @param {import("./types.d.mts").Spec} spec\n */\nexport function f(spec) { return spec; }\n// import("./also-not-real.mjs")\n',
     });
     expect(checkSkillSelfContainment(dir).violations).toEqual([]);
   });
@@ -213,7 +275,8 @@ describe("the checker sees each violation it exists to catch (positive controls)
   test("a well-formed skill is clean, and the checker says what it read", () => {
     const dir = fixtureSkill("clean", {
       "SKILL.md": `---\nname: x\n---\n${PREAMBLE}\n\`\`\`bash\n"\${CLAUDE_SKILL_DIR}/scripts/a.sh"\n\`\`\`\n`,
-      "scripts/a.sh": '#!/usr/bin/env bash\nSCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\nsource "${SCRIPT_DIR}/lib/b.sh"\n',
+      "scripts/a.sh":
+        '#!/usr/bin/env bash\nSCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\nsource "${SCRIPT_DIR}/lib/b.sh"\n',
       "scripts/lib/b.sh": "#!/usr/bin/env bash\n",
     });
     const result = checkSkillSelfContainment(dir);
@@ -229,7 +292,10 @@ describe("every catalyst-dev skill is self-contained (CTL-2306)", () => {
   });
 
   test("skill-dir-isolation.test.sh runs exactly the same skills", () => {
-    const shell = readFileSync(join(repoRoot, "scripts/packaging/__tests__/skill-dir-isolation.test.sh"), "utf8");
+    const shell = readFileSync(
+      join(repoRoot, "scripts/packaging/__tests__/skill-dir-isolation.test.sh"),
+      "utf8"
+    );
     const match = shell.match(/^SKILLS="([^"]*)"$/m);
     expect(match).not.toBeNull();
     expect(match[1].split(" ").sort()).toEqual([...SELF_CONTAINED].sort());

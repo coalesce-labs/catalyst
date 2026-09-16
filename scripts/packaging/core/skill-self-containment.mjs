@@ -12,6 +12,10 @@
 //                               `../merge-pr/references/y.md`); it is read with THIS skill's directory
 //                               as the base, and a flat skills-CLI install renames the sibling anyway.
 //   skill-dir-path-missing      a `${CLAUDE_SKILL_DIR}/<path>` names a file the skill does not carry.
+//   skill-dir-path-escapes      a `${CLAUDE_SKILL_DIR}/../<path>` (braced or not) climbs out of the skill.
+//                               It resolves in the catalyst checkout and the runner's baked plugin, but
+//                               a flat skills install has no plugin above the skill (CTL-2310). Vendor
+//                               the shared file instead (vendor.mjs: references/x.md → assets/references/x.md).
 //   missing-skill-dir-preamble  the skill runs a `${CLAUDE_SKILL_DIR}` command but never tells a
 //                               non-Claude harness how to set the variable (`skill_dir_unresolved`).
 //   script-sibling-missing      a script under scripts/ reaches a file through a directory variable
@@ -34,23 +38,28 @@ import { dirname, join, normalize, relative, sep } from "node:path";
 
 const PROSE_DIRS = ["references", "assets"];
 // ${CLAUDE_PLUGIN_ROOT}, or a repo-relative path into the plugin tree (resolves only inside the catalyst checkout).
-const PLUGIN_ROOT_PATTERN = /\$\{?CLAUDE_PLUGIN_ROOT\}?|plugins\/[a-z0-9-]+\/(?:scripts|skills|references|templates|agents)\//;
+const PLUGIN_ROOT_PATTERN =
+  /\$\{?CLAUDE_PLUGIN_ROOT\}?|plugins\/[a-z0-9-]+\/(?:scripts|skills|references|templates|agents)\//;
 const SKILL_DIR_PATH_PATTERN = /\$\{CLAUDE_SKILL_DIR\}\/([A-Za-z0-9_./-]+)/g;
+const ANY_SKILL_DIR_PATH_PATTERN = /\$\{?CLAUDE_SKILL_DIR\}?\/([A-Za-z0-9_./-]+)/g;
 const PREAMBLE_MARKER = "skill_dir_unresolved";
 // A line addressed to catalyst maintainers working inside a catalyst checkout says so; only such a
 // line may name a repo-relative plugin path.
 const CATALYST_CHECKOUT_MARKER = "(catalyst-checkout only)";
 const OPTIONAL_MARKER = "# self-containment: optional";
 const FILE_REF = String.raw`((?:\.\.\/)*[A-Za-z0-9_.-][A-Za-z0-9_./-]*\.(?:sh|mjs|cjs|js|json|py))\b`;
-const ASSIGNMENT = /^\s*(?:local\s+|export\s+|readonly\s+|declare\s+(?:-\w+\s+)?)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
+const ASSIGNMENT =
+  /^\s*(?:local\s+|export\s+|readonly\s+|declare\s+(?:-\w+\s+)?)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
 // The script's own file: ${BASH_SOURCE[0]}, $0, zsh's ${(%):-%x}.
 const SELF_FILE_EXPANSION = /BASH_SOURCE|\$\{?0\b|%x/;
 // A JS module's relative dependency: a static or dynamic import, or a file located from import.meta.url.
 // Covers `from "./x"`, a side-effect `import "./x"`, `import("./x")`, `require("./x")` and
 // `new URL("./x", import.meta.url)`.
-const JS_RELATIVE_REF = /(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*|new URL\(\s*)["'](\.{1,2}\/[^"']+)["']/g;
+const JS_RELATIVE_REF =
+  /(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*|new URL\(\s*)["'](\.{1,2}\/[^"']+)["']/g;
 // …or a file joined onto the module's own directory: join(dirname(fileURLToPath(import.meta.url)), "x").
-const JS_DIR_JOIN_REF = /(?:dirname\(\s*fileURLToPath\(\s*import\.meta\.url\s*\)\s*\)|import\.meta\.dirname)\s*,\s*["']([^"']+)["']/g;
+const JS_DIR_JOIN_REF =
+  /(?:dirname\(\s*fileURLToPath\(\s*import\.meta\.url\s*\)\s*\)|import\.meta\.dirname)\s*,\s*["']([^"']+)["']/g;
 
 // scriptLocationVars(lines) → the variables that hold the script's own directory (or a directory
 // under it), learned from the script's assignments: SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")"
@@ -66,10 +75,14 @@ function scriptLocationVars(lines) {
       const m = text.match(ASSIGNMENT);
       if (!m) continue;
       const [, name, rhs] = m;
-      const mentionsSelfFile = SELF_FILE_EXPANSION.test(rhs) || [...selfFileVars].some((v) => new RegExp(String.raw`\$\{?${v}\b`).test(rhs));
+      const mentionsSelfFile =
+        SELF_FILE_EXPANSION.test(rhs) ||
+        [...selfFileVars].some((v) => new RegExp(String.raw`\$\{?${v}\b`).test(rhs));
       const namesAFile = /\.[a-z]+"?$/.test(rhs.trim());
       const isDirOfSelf = /dirname/.test(rhs) && mentionsSelfFile;
-      const fromDirVar = [...dirVars].some((v) => new RegExp(String.raw`^"?\$\{?${v}\}?(?:/[A-Za-z0-9_./-]*)?"?$`).test(rhs.trim()));
+      const fromDirVar = [...dirVars].some((v) =>
+        new RegExp(String.raw`^"?\$\{?${v}\}?(?:/[A-Za-z0-9_./-]*)?"?$`).test(rhs.trim())
+      );
       if (!namesAFile && (isDirOfSelf || fromDirVar)) {
         if (!dirVars.has(name)) {
           dirVars.add(name);
@@ -87,11 +100,20 @@ function scriptLocationVars(lines) {
 function scriptRelativeRefs(text, { selfFileVars, dirVars }) {
   const refs = [];
   for (const v of dirVars) {
-    for (const m of text.matchAll(new RegExp(String.raw`\$\{?${v}\}?"?\/${FILE_REF}`, "g"))) refs.push(m[1]);
+    for (const m of text.matchAll(new RegExp(String.raw`\$\{?${v}\}?"?\/${FILE_REF}`, "g")))
+      refs.push(m[1]);
   }
   // Inline: $(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/x.sh, or dirname of a self-file variable.
-  const selfFile = [String.raw`BASH_SOURCE`, String.raw`\$\{?0\b`, "%x", ...[...selfFileVars].map((v) => String.raw`\$\{?${v}\b`)].join("|");
-  for (const m of text.matchAll(new RegExp(String.raw`dirname[^)]*(?:${selfFile})[^)]*\).*?pwd\)"?\/${FILE_REF}`, "g"))) refs.push(m[1]);
+  const selfFile = [
+    String.raw`BASH_SOURCE`,
+    String.raw`\$\{?0\b`,
+    "%x",
+    ...[...selfFileVars].map((v) => String.raw`\$\{?${v}\b`),
+  ].join("|");
+  for (const m of text.matchAll(
+    new RegExp(String.raw`dirname[^)]*(?:${selfFile})[^)]*\).*?pwd\)"?\/${FILE_REF}`, "g")
+  ))
+    refs.push(m[1]);
   return refs;
 }
 
@@ -121,7 +143,10 @@ function siblingSkillPathPattern(skillDir) {
   }
   if (names.length === 0) return null;
   const escaped = names.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
-  return new RegExp(String.raw`(?<![A-Za-z0-9_-])(?:\.\.\/)*((?:${escaped})\/(?:references|scripts|assets)\/[A-Za-z0-9_./-]*[A-Za-z0-9_-])`, "g");
+  return new RegExp(
+    String.raw`(?<![A-Za-z0-9_-])(?:\.\.\/)*((?:${escaped})\/(?:references|scripts|assets)\/[A-Za-z0-9_./-]*[A-Za-z0-9_-])`,
+    "g"
+  );
 }
 
 function rel(skillDir, abs) {
@@ -132,9 +157,10 @@ export function checkSkillSelfContainment(skillDir) {
   const violations = [];
   let filesScanned = 0;
 
-  const proseFiles = [join(skillDir, "SKILL.md"), ...PROSE_DIRS.flatMap((d) => listFiles(join(skillDir, d)))].filter(
-    (f) => existsSync(f) && f.endsWith(".md")
-  );
+  const proseFiles = [
+    join(skillDir, "SKILL.md"),
+    ...PROSE_DIRS.flatMap((d) => listFiles(join(skillDir, d))),
+  ].filter((f) => existsSync(f) && f.endsWith(".md"));
   let usesSkillDir = false;
   let hasPreamble = false;
   const siblingPath = siblingSkillPathPattern(skillDir);
@@ -144,19 +170,47 @@ export function checkSkillSelfContainment(skillDir) {
     const lines = readFileSync(file, "utf8").split("\n");
     lines.forEach((text, idx) => {
       if (PLUGIN_ROOT_PATTERN.test(text) && !text.includes(CATALYST_CHECKOUT_MARKER)) {
-        violations.push({ rule: "plugin-root-reference", file: rel(skillDir, file), line: idx + 1, detail: text.trim() });
+        violations.push({
+          rule: "plugin-root-reference",
+          file: rel(skillDir, file),
+          line: idx + 1,
+          detail: text.trim(),
+        });
       }
       if (siblingPath) {
         for (const match of text.matchAll(siblingPath)) {
-          violations.push({ rule: "sibling-skill-path", file: rel(skillDir, file), line: idx + 1, detail: match[1] });
+          violations.push({
+            rule: "sibling-skill-path",
+            file: rel(skillDir, file),
+            line: idx + 1,
+            detail: match[1],
+          });
         }
       }
       if (text.includes(PREAMBLE_MARKER)) hasPreamble = true;
+      const escapes = (target) =>
+        relative(skillDir, normalize(join(skillDir, target))).startsWith("..");
+      for (const match of text.matchAll(ANY_SKILL_DIR_PATH_PATTERN)) {
+        const target = match[1].replace(/[.,;:]+$/, "");
+        if (escapes(target)) {
+          violations.push({
+            rule: "skill-dir-path-escapes",
+            file: rel(skillDir, file),
+            line: idx + 1,
+            detail: target,
+          });
+        }
+      }
       for (const match of text.matchAll(SKILL_DIR_PATH_PATTERN)) {
         usesSkillDir = true;
         const target = match[1].replace(/[.,;:]+$/, "");
-        if (!existsSync(join(skillDir, target))) {
-          violations.push({ rule: "skill-dir-path-missing", file: rel(skillDir, file), line: idx + 1, detail: target });
+        if (!escapes(target) && !existsSync(join(skillDir, target))) {
+          violations.push({
+            rule: "skill-dir-path-missing",
+            file: rel(skillDir, file),
+            line: idx + 1,
+            detail: target,
+          });
         }
       }
     });
@@ -180,10 +234,18 @@ export function checkSkillSelfContainment(skillDir) {
       lines.forEach((text, idx) => {
         // JSDoc `@param {import("./x.d.mts")}` and commented-out code are not runtime dependencies.
         if (text.includes(OPTIONAL_MARKER) || /^\s*(\/\/|\*|\/\*)/.test(text)) return;
-        for (const match of [...text.matchAll(JS_RELATIVE_REF), ...text.matchAll(JS_DIR_JOIN_REF)]) {
+        for (const match of [
+          ...text.matchAll(JS_RELATIVE_REF),
+          ...text.matchAll(JS_DIR_JOIN_REF),
+        ]) {
           const target = normalize(join(dirname(file), match[1]));
           if (relative(skillDir, target).startsWith("..") || !existsSync(target)) {
-            violations.push({ rule: "script-sibling-missing", file: rel(skillDir, file), line: idx + 1, detail: match[1] });
+            violations.push({
+              rule: "script-sibling-missing",
+              file: rel(skillDir, file),
+              line: idx + 1,
+              detail: match[1],
+            });
           }
         }
       });
@@ -193,10 +255,18 @@ export function checkSkillSelfContainment(skillDir) {
     lines.forEach((text, idx) => {
       if (text.includes(OPTIONAL_MARKER) || /^\s*#/.test(text)) return;
       for (const target of scriptRelativeRefs(text, vars)) {
-        const candidates = [normalize(join(dirname(file), target)), normalize(join(scriptsRoot, target))];
+        const candidates = [
+          normalize(join(dirname(file), target)),
+          normalize(join(scriptsRoot, target)),
+        ];
         const inside = candidates.filter((c) => !relative(skillDir, c).startsWith(".."));
         if (!inside.some((c) => existsSync(c))) {
-          violations.push({ rule: "script-sibling-missing", file: rel(skillDir, file), line: idx + 1, detail: target });
+          violations.push({
+            rule: "script-sibling-missing",
+            file: rel(skillDir, file),
+            line: idx + 1,
+            detail: target,
+          });
         }
       }
     });

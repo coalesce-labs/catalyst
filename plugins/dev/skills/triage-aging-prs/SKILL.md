@@ -13,6 +13,10 @@ Drive a stale pull-request backlog to zero without breaking `main`.
 
 The mistake this skill exists to prevent: **grinding through review comments PR by PR while the real blocker is structural.** Fix the gate first, or you will do a night's work and merge nothing.
 
+**Paths.** This skill reads a file inside its own directory as `${CLAUDE_SKILL_DIR}/…`. Claude Code fills that in. On any other harness, set CLAUDE_SKILL_DIR to the absolute directory that contains this SKILL.md before reading it. If you cannot, stop and report `skill_dir_unresolved`.
+
+**Review findings follow one rulebook.** Read `${CLAUDE_SKILL_DIR}/assets/references/resolving-review-findings.md` before Step 2, and give every triage and fix agent the same file. It owns verifying, classifying, scoping, replying to and deferring a finding; this skill keeps the backlog mechanics.
+
 ## Step 0 — Inventory before you touch anything
 
 Resolve the target repo and its **default branch** first — both are used throughout. `$ARGUMENTS` carries `--repo owner/name`; nothing else reads it, so without this an invocation naming another repo silently operates on the current checkout — and every ruleset mutation and merge below would hit the wrong repository. Likewise a repo whose default branch is `master`/`develop` must never be probed as `main`.
@@ -30,19 +34,19 @@ gh pr list --repo "$REPO" --limit 60 \
 
 Classify every PR before doing any work. Do NOT treat the raw open count as the goal:
 
-| Class | What it means | Action |
-|---|---|---|
-| **Genuinely stale** | Opened well before the current work window | The actual target |
-| **Fresh** | Opened in the last day or two | Steady-state flow, not backlog |
-| **Draft** | `isDraft` | Not mergeable by design — exclude |
-| **Do-not-land** | The user has said to leave it | Exclude, and re-check any bulk action against this set |
-| **Release PR** | e.g. release-please's `chore: release main` | Outward-facing — the user's call, never auto-merge |
+| Class               | What it means                               | Action                                                 |
+| ------------------- | ------------------------------------------- | ------------------------------------------------------ |
+| **Genuinely stale** | Opened well before the current work window  | The actual target                                      |
+| **Fresh**           | Opened in the last day or two               | Steady-state flow, not backlog                         |
+| **Draft**           | `isDraft`                                   | Not mergeable by design — exclude                      |
+| **Do-not-land**     | The user has said to leave it               | Exclude, and re-check any bulk action against this set |
+| **Release PR**      | e.g. release-please's `chore: release main` | Outward-facing — the user's call, never auto-merge     |
 
 **Report the split.** "18 open" is meaningless; "3 genuinely stale, 12 opened today, 4 drafts" is a status. A backlog whose count is flat while you merge steadily is not stuck — arrivals are matching your throughput, which is a different problem with a different fix.
 
 ## Step 1 — Find the STRUCTURAL blocker first
 
-Before any review work, ask: *can these PRs merge at all?*
+Before any review work, ask: _can these PRs merge at all?_
 
 ### 1a. What does the branch actually require?
 
@@ -58,10 +62,11 @@ done
 ```
 
 Two traps:
+
 - **Rulesets vs classic protection.** `branches/main/protection` returning 404 "Branch not
   protected" does NOT mean unprotected — modern repos use **Rulesets** (Settings → Rules → Rulesets). Query `/rules/branches/$BASE`, which reports what actually applies.
 - **Thread resolution hides inside `pull_request`.** `required_review_thread_resolution` is a
-  *parameter* of the `pull_request` rule, not a rule type. Filtering by `.type` misses it and you will wrongly conclude threads don't block.
+  _parameter_ of the `pull_request` rule, not a rule type. Filtering by `.type` misses it and you will wrongly conclude threads don't block.
 
 ### 1b. Compare a fork PR's checks against a base PR's
 
@@ -70,15 +75,17 @@ gh pr view <BASE_PR> --repo "$REPO" --json statusCheckRollup --jq '[.statusCheck
 gh pr view <FORK_PR> --repo "$REPO" --json statusCheckRollup --jq '[.statusCheckRollup[]?|(.name//.context)]|sort'
 ```
 
-**The fork gate.** GitHub withholds repository secrets from fork PR workflows (otherwise any fork could exfiltrate them). So any check needing a credential — a deploy preview, a cloud-provider integration — **never runs** on a fork. Its check is *absent*, not failing. If such a check is `required`, every fork PR is permanently unmergeable no matter how clean.
+**The fork gate.** GitHub withholds repository secrets from fork PR workflows (otherwise any fork could exfiltrate them). So any check needing a credential — a deploy preview, a cloud-provider integration — **never runs** on a fork. Its check is _absent_, not failing. If such a check is `required`, every fork PR is permanently unmergeable no matter how clean.
 
 Detect it by the check being **missing** from the fork's rollup while present on a base PR.
 
 Remedies, in order of preference:
+
 1. Give the contributor write access → future branches are in-repo and get the token.
 2. Migrate existing heads to base-repo branches.
 3. Temporarily remove **only the offending context** from `required_status_checks` —
    **ask the user first**, back the ruleset up, and record how to restore it:
+
    ```bash
    BLOCKER="Cloudflare Pages"   # the fork-incompatible check, whatever it is called here
    gh api "repos/$REPO/rulesets/$ID" --jq '{name,target,enforcement,conditions,bypass_actors,rules}' > backup.json
@@ -90,7 +97,8 @@ Remedies, in order of preference:
        else . end)' backup.json > relaxed.json
    gh api -X PUT "repos/$REPO/rulesets/$ID" --input relaxed.json   # restore: --input backup.json
    ```
-   **Do not delete the whole `required_status_checks` rule.** That is the tempting one-liner and it disables *every* other required check plus the strict/up-to-date policy — turning a targeted, reversible unblock into a repo-wide gate outage that is easy to forget to undo. Only when the blocker is genuinely the rule's *sole* context is removing the rule equivalent, and even then the surgical form above is what you want, because it stays correct if someone adds a second check later.
+
+   **Do not delete the whole `required_status_checks` rule.** That is the tempting one-liner and it disables _every_ other required check plus the strict/up-to-date policy — turning a targeted, reversible unblock into a repo-wide gate outage that is easy to forget to undo. Only when the blocker is genuinely the rule's _sole_ context is removing the rule equivalent, and even then the surgical form above is what you want, because it stays correct if someone adds a second check later.
 
    Never `--admin`-merge instead; that bypasses the gate silently and per-PR.
 
@@ -108,11 +116,12 @@ gh api "repos/$REPO/issues/<N>/reactions" -H "Accept: application/vnd.github.squ
 ```
 
 Reviewer signals are **not all review objects** — check reviews, issue comments, AND reactions:
+
 - **👍 (`+1`) on the PR description** = the no-findings **clean pass**.
 - **👀 (`eyes`)** = acknowledged / in progress. **NOT a verdict — do not merge on it.**
 - Review threads with severity badges = findings.
 
-If a connector has been switched to request-only, nothing is reviewed until asked. Request **once** per PR (`@codex review` or the repo's equivalent); do not re-request after each remediation push — that is how a review↔fix treadmill starts.
+If a connector has been switched to request-only, nothing is reviewed until asked. Request **once** for a PR that has never been reviewed (`@codex review` or the repo's equivalent); never re-request after a remediation push (reference rule 10).
 
 ### 1d. Is the base branch itself green?
 
@@ -124,45 +133,44 @@ If the base branch is red, every branch inherits it and you will misattribute fa
 
 ## Step 2 — Triage every thread in parallel, and VERIFY
 
-With many PRs, fan out one agent per PR (Task tool, or a workflow if available). Have each agent **read the cited code on the PR's branch** and decide whether the defect is real — not summarize the finding.
+With many PRs, fan out one agent per PR (Task tool, or a workflow if available). Have each agent **read the cited code on the PR's branch** and classify the finding per the reference (rules 2 and 3) — not summarize it.
 
-Require per thread: `threadId`, `severity`, `is_real`, `assessment` (citing what was read), `fix_approach` (file + function + change), `complexity` (trivial/moderate/deep).
+Require per thread: `threadId`, `severity`, `class` (the reference's five), `assessment` (citing what was read), `fix_approach` (file + function + change, `valid` only), `complexity` (trivial/moderate/deep).
 
 Insist on these, because they change the plan:
-- **`is_real: false` happens.** Findings get fixed by a later commit on the branch, or describe an
-  unreachable path. One in ten is typical. Fixing a non-defect wastes real time.
+
+- **Non-`valid` classes are common.** Findings get fixed by a later commit on the branch (`already-fixed`), or describe an unreachable path (`invalid`). One in ten is typical.
 - **Whole PRs can be superseded.** If the fix already landed via another PR, the right action is
   to **close it with evidence**, not to fix it.
 - Agents must be **read-only** here: no edits, commits, pushes, or thread replies. Triage and
   remediation are separate phases.
 
-Then rank by `complexity`, and clear whole PRs rather than skimming the easy findings across many — a PR is only mergeable when *every* thread is resolved.
+Then rank by `complexity`, and clear whole PRs rather than skimming the easy findings across many — a PR is only mergeable when _every_ thread is resolved.
 
 ## Step 3 — Fix, honoring the severity policy
 
-- **P0/P1: always fix**, on every round.
-- **P2 and below: use judgment on round one; defer on later rounds** to a follow-up ticket, reply
-  with the link, and resolve the thread. Deferral *resolves* the thread — it does not leave it open.
+Fix `valid` findings and answer, defer or escalate the rest exactly as the reference says (rules 4–13). The backlog-specific mechanics:
+
+- **P0/P1: always fix**, on every round. P2 and below defer after round one (reference rule 8).
 - Match the severity string exactly. A regex whose fallback bucket is "P3" will silently
   mislabel a **P0** as low priority. Match P0 explicitly.
 
 While fixing:
-- **Verify the finding yourself.** Reviewers are often right and occasionally wrong; say so with
-  evidence either way.
+
 - **Prefer deleting the wrong thing over patching it.** If a change contradicts a documented
   invariant, removing it and fixing the root cause beats layering a guard.
 - **Mutation-test any fix whose whole value is catching a failure.** Break the code and confirm
-  the new test fails. A test that passes before *and* after your fix is not covering it.
+  the new test fails. A test that passes before _and_ after your fix is not covering it.
 
 ## Step 4 — Conflicts need judgment, not a flag
 
 Never blanket `--ours`/`--theirs`. The three real cases:
 
-| Situation | Resolution |
-|---|---|
-| Both sides added different items (imports, CI test lists, doc sections, test blocks) | **Union.** Dropping either side silently removes coverage. |
+| Situation                                                                                    | Resolution                                                   |
+| -------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| Both sides added different items (imports, CI test lists, doc sections, test blocks)         | **Union.** Dropping either side silently removes coverage.   |
 | One side duplicates something the other already has (a second `push:` key, a repeated block) | **Drop the duplicate** — keeping both can be invalid syntax. |
-| Genuine semantic conflict | Read both, decide, and explain in the commit message. |
+| Genuine semantic conflict                                                                    | Read both, decide, and explain in the commit message.        |
 
 Always re-validate after resolving: `bash -n`, `node --check`, a YAML parse, and the file's own test suite. A union that produces a duplicate YAML key breaks CI for everyone.
 
@@ -218,8 +226,9 @@ gh pr view <N> --repo "$REPO" --json statusCheckRollup --jq '
 ```
 
 If something is red, decide deliberately:
+
 - **Compare against the base branch.** The same failure on `$BASE` = pre-existing, not yours.
-- **Re-run locally against the MERGE BASE, not a stash.** `git stash` only shelves *uncommitted*
+- **Re-run locally against the MERGE BASE, not a stash.** `git stash` only shelves _uncommitted_
   work — once your fix is committed and pushed, stashing changes nothing and the rerun still tests your head. A failure you introduced then reproduces with an identical count and gets mislabeled "pre-existing", which is the worst possible outcome since the skill then merges over it. Check out the base instead and compare:
   ```bash
   git stash list            # only meaningful if you have UNCOMMITTED work
@@ -242,4 +251,4 @@ A merged PR usually means its ticket should advance. After a burndown, check eve
 
 ## Reporting
 
-State the split, not the raw count: how many merged, how many *stale* remain, how many arrived during the run. Name the structural blocker you found and whether it is fixed or worked around. List anything you merged over a red check and why. If a ruleset is still relaxed, say so loudly with the restore command — that is a security-relevant state you are leaving behind.
+State the split, not the raw count: how many merged, how many _stale_ remain, how many arrived during the run. Name the structural blocker you found and whether it is fixed or worked around. List anything you merged over a red check and why. If a ruleset is still relaxed, say so loudly with the restore command — that is a security-relevant state you are leaving behind.

@@ -23,6 +23,10 @@ PR_NUMBER=$(gh pr view --json number --jq '.number' 2>/dev/null)
 
 If no PR is found, ask the user for the PR number.
 
+## Step 0: Read the rules
+
+Read `${CLAUDE_SKILL_DIR}/assets/references/resolving-review-findings.md` before triaging anything, and follow it for every comment. It owns verification, classification (`valid`, `invalid`, `already-fixed`, `pre-existing/out-of-scope`, `needs-decision`), diff scope, reply wording and escalation. This skill keeps only the GitHub mechanics and the per-reviewer round policy below.
+
 ## Step 1: Fetch Comments and Reviews
 
 Gather all review feedback from the PR:
@@ -75,38 +79,30 @@ This exists because fine-grained automated reviewers keep surfacing progressivel
 
 ## Step 2: Categorize Comments
 
-| Category | Action |
-|----------|--------|
-| **Code change requested** | P0/P1: implement the fix, every round. P2/P3: round 1 is a judgment call; round 2+ always defers — see below |
-| **Question / clarification** | Read context and draft a reply |
-| **Suggestion (optional)** | Evaluate — implement if it improves the code, explain trade-off if not |
+| Category                               | Action                                                                                                                                           |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Code change requested**              | P0/P1: implement the fix, every round. P2/P3: round 1 is a judgment call; round 2+ always defers — see below                                     |
+| **Question / clarification**           | Read context and draft a reply                                                                                                                   |
+| **Suggestion (optional)**              | Evaluate — implement if it improves the code, explain trade-off if not                                                                           |
 | **Deferred (P2/P3, per round policy)** | File a follow-up ticket capturing the finding; reply linking it; do not implement inline — see "Deferring low-priority findings after round one" |
-| **Approval / praise** | No action needed |
-| **Already resolved** | Skip (check if thread is marked resolved) |
+| **Approval / praise**                  | No action needed                                                                                                                                 |
+| **Already resolved**                   | Skip (check if thread is marked resolved)                                                                                                        |
 
-For each actionable comment, note:
-- File path and line number
-- What the reviewer is asking for
-- Whether it requires a code change or just a response
-- Whether it's part of a thread (read the full thread for context)
+For each actionable comment, note the file path and line, what the reviewer claims, its thread, and its class from the reference (rule 2). Only a `valid` finding gets a code change; an `invalid` or `already-fixed` one gets an evidence reply (rule 7); a `pre-existing/out-of-scope` one is deferred like a P2 below (rule 8).
 
 ## Step 3: Address Each Comment
 
-For each actionable comment, in order:
-
-1. **Read the relevant file** at the referenced line (with surrounding context)
-2. **Understand the reviewer's concern** — what problem are they pointing out?
-3. **Implement the fix** using Edit tool, or draft a reply if it's a question
-4. **Verify the fix** doesn't break anything (run relevant tests if available)
+For each actionable comment, in order, apply the reference: verify the claim at HEAD (rule 3), then fix a `valid` finding with the smallest diff and one regression test (rules 4–6), or draft the evidence reply for any other class (rule 7). Answer a question with a draft reply.
 
 **Handling disagreements:** If a reviewer's suggestion would introduce a regression, reduce type safety, or conflict with project conventions — regardless of its priority tag or which round produced it — don't silently ignore it and don't auto-defer it via ticket. Draft a respectful reply explaining the trade-off and let the user decide whether to post it. Present it as:
+
 ```
 Reviewer @name suggested X on file.ts:42.
 I think this would [concern]. Draft reply:
-  "Thanks for the suggestion! I considered X but went with Y because [reason].
-   Happy to discuss if you feel strongly about this."
+  "Kept Y rather than X: [reason, with file:line or test evidence]."
 Post this reply? [y/N]
 ```
+
 Classify a finding as a disagreement/judgment call **before** applying the round-based P2 policy below — a P2 tag does not make a finding non-judgmental.
 
 **Deferring low-priority findings after round one:** applies only to **addressable findings authored by the automated reviewer** — never a human reviewer's comment, which always goes through existing human-request handling (`phase-monitor-merge` requires human change requests to be surfaced for operator action, never addressed programmatically) — and only once the disagreement check above has ruled out a judgment call.
@@ -117,6 +113,7 @@ Classify a finding as a disagreement/judgment call **before** applying the round
   one-liner.
 
 To defer a finding:
+
 1. File a follow-up ticket capturing it (file, line, what the reviewer flagged) — same team as the
    PR's ticket, Backlog status.
 2. Reply on the thread linking the follow-up ticket, then resolve the thread (Step 5).
@@ -138,7 +135,7 @@ When `CATALYST_PHASE` is set **or** `--headless` is passed as an argument, this 
   worker directory under the orchestrator dir:
   `${CATALYST_ORCHESTRATOR_DIR:-${ORCH_DIR:-.}}/workers/${CATALYST_TICKET:-unknown}/.review-escalations.jsonl`:
   ```json
-  {"prNumber":42,"threadId":"T1","path":"a.ts","line":5,"finding":"…","why":"…"}
+  { "prNumber": 42, "threadId": "T1", "path": "a.ts", "line": 5, "finding": "…", "why": "…" }
   ```
   (Resolve `CATALYST_ORCHESTRATOR_DIR` **first** — a `claude --bg` worker receives that var, not `ORCH_DIR` — CTL-1496. Keying off `ORCH_DIR` alone wrote the record to `./workers/<ticket>` in the worktree instead of the shared orchestrator dir.) CTL-2141 removed this file's only consumer (the recovery-pass skill, which read `.review-escalations.jsonl` to author a curated escalation brief); the write here is retained as a durable record for manual triage, but nothing currently reads it automatically.
 - **Interactive path preserved** — when neither `CATALYST_PHASE` is set nor `--headless` is
@@ -146,7 +143,7 @@ When `CATALYST_PHASE` is set **or** `--headless` is passed as an argument, this 
 
 ## Step 4: Commit and Push
 
-After all changes are made, stage only the files that were modified to address comments:
+After all changes are made, self-review the diff (reference rule 11), then stage only the files that were modified to address comments:
 
 ```bash
 # Stage specific changed files (NOT git add -A which could catch unrelated changes)
@@ -212,6 +209,7 @@ Read and follow `"${CLAUDE_SKILL_DIR}/assets/references/review-thread-resolution
 6. **@reviewer**: "LGTM" (approval)
 
 ### Summary
+
 - Code changes: {N}
 - Questions answered: {N}
 - Disagreements flagged: {N}

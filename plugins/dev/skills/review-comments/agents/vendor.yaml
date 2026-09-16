@@ -4,3 +4,4 @@
 # (render --write does it too) and packaging-gate.yml fails on drift.
 files:
   - references/review-thread-resolution.md
+  - references/resolving-review-findings.md

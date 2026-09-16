@@ -1,6 +1,7 @@
 {
   "generatedBy": "catalyst-packaging vendor",
   "files": [
+    "assets/references/resolving-review-findings.md",
     "assets/references/review-thread-resolution.md"
   ]
 }

@@ -8,11 +8,11 @@
 
 A validate-plan run reports a failing test suite in `packages/schema` and a missing index on a new foreign key, with a `file:line` pointer. `remediate-plan`'s pass:
 
-1. Triage: the failing tests are must-fix (they keep the verdict off PASS); the missing index is a real finding with a named file:line, also must-fix.
+1. Classify: both findings sit on FAILED steps. The failing tests reproduce locally (`valid`, F1). The missing index is confirmed by reading the migration at the named file:line (`valid`, F2). A plan-only note under a PASS step is not chased.
 2. Edit the migration file to add the index; fix whatever the failing tests actually assert.
 3. Re-run the targeted gate for the touched workspace only (not the full monorepo suite — that is the re-run validate-plan's job, SKILL.md step 6). Print its `exit 0`.
 4. Commit: `fix(schema): CTL-NNNN remediate validate-plan findings (missing index, failing tests)`.
-5. Re-run `/catalyst-dev:validate-plan` against the same plan. A clean report — no more failing gates, the bullets gone — is the only evidence the fix worked; this skill's own transcript claiming so is not.
+5. Re-run `/catalyst-dev:validate-plan` against the same plan (local only; a cloud round leaves re-validation to the pipeline). A clean report — no more failing gates, the bullets gone — is the only evidence the fix worked; this skill's own transcript claiming so is not.
 
 The fresh-session (cloud) mode runs the same pass; the only difference is step 0 — the report is read from the materialized prior-artifact file the dispatch prompt names instead of from the conversation.
 
