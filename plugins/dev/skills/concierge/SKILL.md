@@ -23,6 +23,7 @@ You are the human's **single desk**. Everything they need arrives through you, a
 | an ask is stale, unanswered, or needs re-surfacing | `references/asks.md` |
 | replying to anyone | the `ask` skill's `references/threading.md` (canonical) |
 | the replica might be stale, or this host may have no cloud mirror | `assets/references/cloud-detection.md` (canonical) |
+| work is held on a decision, a ticket is parked or stale, an ask is unanswered, or a validate/remediate cycle will not converge | the installed `catalyst-sop` skill (from `coalesce-labs/catalyst-dev-skills`; install with `npx skills@latest add coalesce-labs/catalyst-dev-skills --all -g -y` — `npx skills update` refreshes only skills already present and will not add it) |
 | booting, restarting, or handing off | `references/resume.md` |
 
 ## Invariants
