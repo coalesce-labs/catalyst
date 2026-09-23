@@ -94,6 +94,16 @@ source_research: "[[research-filename]]" # or null
 
 # Handoff: {TICKET or General} - {very concise description}
 
+## Resume contract
+
+- **Stopped at:** {the exact point you stopped: the file:line, command, or step you were in the middle of, and whether it finished}
+- **Next step:** {ONE concrete action the next session takes first, e.g. "run `bun run test` in <worktree>, then fix the failing contract test"}
+- **Re-arm:** {every loop, wakeup, monitor, watch or background task that was running and died with this session, with the command that restarts it; "none" if none}
+- **Open questions:**
+  - {question} **Default if unanswered:** {what the next session does if no human answers}
+  - {"none" if none}
+- **Autonomy:** {whether this work may continue unattended; list every action that needs a human first (merge, deploy, delete, a message to a person), or "none beyond the repo's normal gates"}
+
 ## Task(s)
 
 {description of the task(s) that you were working on, along with the status of each (completed, work in progress, planned/discussed). If you are working on an implementation plan, make sure to call out which phase you are on. Reference the plan and/or research documents using wiki-links (e.g., [[plan-filename]], [[research-filename]]), if applicable.}
@@ -122,6 +132,8 @@ source_research: "[[research-filename]]" # or null
 
 { other notes, references, or useful information - e.g. where relevant sections of the codebase are, where relevant documents are, or other important things you learned that you want to pass on but that don't fall into the above categories}
 ```
+
+**The Resume contract is required, never "see below".** An automated context reset resumes from this document with no human watching (the `catalyst-dev:resume-handoff` skill's unattended mode). A resumer with no `Next step:` and no `Default if unanswered:` has nothing to act on but a question, and nobody is there to answer it.
 
 ---
 
@@ -161,6 +173,8 @@ The helper returns a verdict so the caller never has to re-verify a citation by 
 ⚠️ **`$HANDOFF_ABS` is this host's path.** It contains this machine's home and thoughts checkout location, so it is the unambiguous citation *here* but may not resolve on another host. Cite **both** forms: the absolute path for same-host use, and `$HANDOFF_REL` — the `thoughts/shared/...` form — as the portable identity a reader on another host resolves in their own tree.
 
 Never announce "synced" on a `local-only:*` verdict. An unconditional durability claim is exactly what made six real files look like phantoms.
+
+**Unattended mode** is ON when the arguments contain `--unattended`, `CATALYST_UNATTENDED=1` is set, the run is a pipeline phase (`$CATALYST_TICKET` set with no interactive user), or the invoking prompt says the session is unattended. In unattended mode the response below is the whole reply: add no question, no offer, and no "want me to…" line, and put `--unattended` on the resume command so the next session inherits the mode.
 
 Then respond to the user with the template matching your verdict, between <template_response></template_response> XML tags. Do NOT include the tags in your response.
 
@@ -210,6 +224,7 @@ for example (between <example_response></example_response> XML tags — do NOT i
 
 ## Additional Notes & Instructions
 
+- **write the Resume contract for a reader who cannot ask you anything**. Name the step, not the area; give every open question a default; say what needs a human.
 - **more information, not less**. This is a guideline that defines the minimum of what a handoff should be. Always feel free to include more information if necessary.
 - **be thorough and precise**. include both top-level objectives, and lower-level details as necessary.
 - **avoid excessive code snippets**. While a brief snippet to describe some key change is important, avoid large code blocks or diffs; do not include one unless it's absolutely necessary. Prefer using `/path/to/file.ext:line` references that an agent can follow later when it's ready, e.g. `packages/dashboard/src/app/dashboard/page.tsx:12-24`
