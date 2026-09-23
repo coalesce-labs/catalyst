@@ -203,6 +203,8 @@ assert_grep "$RESUME_PROCESS" 'Unattended: present it and start' \
   "process.md Step 3 proceeds without confirmation when unattended"
 assert_grep "$RESUME_PROCESS" 'Default if unanswered:' \
   "process.md takes the handoff's recorded default"
+assert_grep "$RESUME_PROCESS" 'verify.*(running|alive).*before.*re-arm' \
+  "process.md checks for a live background task before re-arming it"
 assert_grep "$RESUME_PROCESS" 'most reversible option' \
   "process.md falls back to the most reversible option"
 assert_grep "$RESUME_PROCESS" 'catalyst-dev:ask' \

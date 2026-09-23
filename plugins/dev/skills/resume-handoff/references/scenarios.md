@@ -40,7 +40,7 @@ I've analyzed the handoff from [date]. Here's the current situation...
 [Presents the Step 2 analysis]
 Proceeding with the contract tests, then the PR (unattended).
 
-[Re-arms the CI watch the Re-arm line lists; creates the todo list; runs the tests]
+[Checks whether the CI watch in the Re-arm line is still running; re-arms it only if stopped; creates the todo list; runs the tests]
 Open question on the P3 finding: taking the recorded default, deferring it to a follow-up ticket.
 [Files the follow-up, opens the PR]
 
