@@ -17,4 +17,10 @@ A broken citation is **not** lost work, and it is not a reason to stop. In every
 3. **No parameters, and Prerequisites found a handoff (📋).** Show the user the discovered path and ask: "**Proceed with this handoff?** [Y/n]". Yes → use it. No → fall through to 4.
 4. **No parameters, and Prerequisites found nothing (⚠️).** List the 5 most recent handoffs from `thoughts/shared/handoffs/` with dates, and wait for the user to pick one or give a ticket number.
 
+**Unattended** (triggers in [`process.md`](process.md) → "Unattended mode"), nothing waits for input:
+
+- 2 with no handoff for the ticket: recover from the channel or ticket thread as above; if that holds nothing either, say so in one line and stop on that statement.
+- 3: use the discovered handoff without asking, and name its path in one line.
+- 4: use the newest handoff on disk and name it; if there is none, say so and stop on that statement.
+
 Once a handoff path is settled, go to [`process.md`](process.md) — Step 1.

@@ -9,7 +9,7 @@ version: 1.0.0
 
 # Resume work from a handoff document
 
-You are resuming work from a handoff document through an interactive process. Handoffs carry context, learnings, and next steps from a prior session that need to be understood and continued — never assume the handoff's state still matches the codebase; verify first.
+You are resuming work from a handoff document, interactively by default or unattended when automation reset the session. Handoffs carry context, learnings, and next steps from a prior session that need to be understood and continued. Never assume the handoff's state still matches the codebase; verify first.
 
 ## Load on demand
 
@@ -18,6 +18,7 @@ You are resuming work from a handoff document through an interactive process. Ha
 | finding the handoff to resume from (no path given, path given, ticket given, or the cited path is missing on disk) | [`references/discovery.md`](references/discovery.md) |
 | reading the handoff, verifying it against current state, and building the plan | [`references/process.md`](references/process.md) |
 | deciding what to do given the codebase's divergence from the handoff | [`references/scenarios.md`](references/scenarios.md) |
+| resuming unattended (no human is watching): what replaces each confirmation gate | [`references/process.md`](references/process.md) → "Unattended mode" |
 
 ## Prerequisites
 
@@ -67,7 +68,8 @@ This skill uses ticket references like `PROJ-123`. Replace `PROJ` with your Line
 
 - **Read the handoff document completely** — no `limit`/`offset` — and read every research or plan document it references, before proposing anything.
 - **Never use sub-agents to read the handoff itself.** Sub-agents are fine for verifying the codebase state it describes ([`references/process.md`](references/process.md)).
-- **Get user confirmation** before acting on the analysis, and again before starting implementation.
+- **Unattended mode is ON** when the arguments contain `--unattended`, `CATALYST_UNATTENDED=1` is set, the run is a pipeline phase (`$CATALYST_TICKET` set with no interactive user), or the invoking prompt says the session is unattended. Then skip every confirmation gate, act on the handoff's recorded next step, and **never end the turn on a question** ([`references/process.md`](references/process.md) → "Unattended mode").
+- **Otherwise, get user confirmation** before acting on the analysis, and again before starting implementation.
 - **A missing handoff file is not lost work.** The channel/ticket thread is authoritative; recover from there rather than re-doing landed work ([`references/discovery.md`](references/discovery.md)).
 
 ## CLI tools
