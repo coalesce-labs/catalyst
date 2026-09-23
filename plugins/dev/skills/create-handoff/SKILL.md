@@ -183,7 +183,7 @@ Then respond to the user with the template matching your verdict, between <templ
 <template_response> Handoff written, verified, and synced — the pushed bytes are this handoff. Resume from it in a new session with:
 
 ```bash
-/catalyst-dev:resume-handoff <the echoed absolute path>
+/catalyst-dev:resume-handoff <`--unattended` when this run is unattended> <the echoed absolute path>
 ```
 
 On another host, resolve `<the echoed relative path>` in that host's thoughts tree.
@@ -195,7 +195,7 @@ On another host, resolve `<the echoed relative path>` in that host's thoughts tr
 <template_response> Handoff written and verified on disk, but **not yet in the pushed tree** — safe to cite on this host now; cross-host resume follows the next sync tick (≤300 s). Resume from it with:
 
 ```bash
-/catalyst-dev:resume-handoff <the echoed absolute path>
+/catalyst-dev:resume-handoff <`--unattended` when this run is unattended> <the echoed absolute path>
 ```
 
 </template_response>
@@ -205,7 +205,7 @@ On another host, resolve `<the echoed relative path>` in that host's thoughts tr
 <template_response> Handoff written and verified on disk, but **host-local** (`<the verdict>`) — it is safe to cite on this host now, and it will **not** become cross-host on its own: this verdict means the sync could not run or could not complete, so it stays here until that is resolved. Resume from it on this host with:
 
 ```bash
-/catalyst-dev:resume-handoff <the echoed absolute path>
+/catalyst-dev:resume-handoff <`--unattended` when this run is unattended> <the echoed absolute path>
 ```
 
 </template_response>
