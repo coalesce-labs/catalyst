@@ -1,1 +1,6 @@
-Addressed round-one review: replace two nonexistent legacy docs links, fail closed on grep read errors with a regression control, and unwrap changed prose. Contract test passes 22 checks.
+Revision history for #4155:
+
+rev 2 (content) 2026-09-24 21:24 UTC — Addressed round-one review: replace two nonexistent legacy docs links, fail closed on grep read errors with a regression control, and unwrap changed prose. Contract test passes 22 checks.
+rev 1 (initial) 2026-09-24 21:24 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":4155,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"767927541176247f8ada71aaca91d02fc83d1b8c","timestamp_iso":"2026-09-24T21:24:25Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"767927541176247f8ada71aaca91d02fc83d1b8c","new_sha":"9b400cdd7f1309be450b291e690f647aafd682be","timestamp_iso":"2026-09-24T21:24:25Z","reason":"Addressed round-one review: replace two nonexistent legacy docs links, fail closed on grep read errors with a regression control, and unwrap changed prose. Contract test passes 22 checks.","replay_sha":null,"compare_url":"https://github.com/coalesce-labs/catalyst/compare/767927541176247f8ada71aaca91d02fc83d1b8c...9b400cdd7f1309be450b291e690f647aafd682be"}]} -->
