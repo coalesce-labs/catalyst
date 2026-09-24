@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Contract test: getting-started docs match the real fresh-install flow (CTL-848).
+# Contract test: active website entry points use only the supported skills repositories.
 # Run: bash plugins/dev/scripts/__tests__/getting-started-contract.test.sh
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,66 +20,74 @@ assert_doc_lacks() {
   if grep -qF -- "$needle" "$REPO_ROOT/$file"; then
     FAILURES=$((FAILURES+1)); echo "  FAIL: $label (should be gone from $file): $needle"
   else
-    PASSES=$((PASSES+1)); echo "  PASS: $label"
+    local grep_status=$?
+    if [[ $grep_status -eq 1 ]]; then
+      PASSES=$((PASSES+1)); echo "  PASS: $label"
+    else
+      FAILURES=$((FAILURES+1)); echo "  FAIL: $label (grep exited with $grep_status for $file)"
+    fi
+  fi
+}
+assert_doc_lacks_ere() {
+  local label="$1" file="$2" pattern="$3"
+  if grep -Eq -- "$pattern" "$REPO_ROOT/$file"; then
+    FAILURES=$((FAILURES+1)); echo "  FAIL: $label (should be gone from $file): $pattern"
+  else
+    local grep_status=$?
+    if [[ $grep_status -eq 1 ]]; then
+      PASSES=$((PASSES+1)); echo "  PASS: $label"
+    else
+      FAILURES=$((FAILURES+1)); echo "  FAIL: $label (grep exited with $grep_status for $file)"
+    fi
   fi
 }
 
-echo "=== Phase 1: index.md correctness fixes ==="
-
-# Issue 1 — snippet path
-assert_doc_lacks "index: broken repo-relative snippet path removed" \
-  "$GS/index.md" "cat plugins/dev/templates/CLAUDE_SNIPPET.md"
-assert_doc_has "index: snippet uses installed-cache glob" \
-  "$GS/index.md" ".claude/plugins/cache/catalyst/catalyst-dev/*/templates/CLAUDE_SNIPPET.md"
-
-# Issue 2 — CLI plugin install form
-assert_doc_has "index: CLI marketplace-add form documented" \
-  "$GS/index.md" "claude plugin marketplace add coalesce-labs/catalyst"
-assert_doc_has "index: CLI plugin-install form documented" \
-  "$GS/index.md" "claude plugin install catalyst-dev@catalyst"
-
-# Issue 7 — install-cli glob guard (a not-found guard is present near the install-cli line)
-assert_doc_has "index: install-cli step has a not-found guard" \
-  "$GS/index.md" "plugin not installed"
-
-# CTL-1386 — index cross-links the consolidated CLI command reference
-assert_doc_has "index: cross-links the consolidated CLI reference (CTL-1386)" \
-  "$GS/index.md" "/reference/catalyst-cli/"
-
-# Issue 8 — qualified skill name
-assert_doc_has "index: try-it uses qualified skill name" \
-  "$GS/index.md" "/catalyst-dev:research-codebase"
-
-echo ""
-echo "=== Phase 2: daemon stack naming ==="
-
-# Issue 3/6 — the three services are named and given a one-line role for newcomers
-assert_doc_has "index: names broker service" \
-  "$GS/index.md" "catalyst-broker"
-assert_doc_has "index: names monitor service" \
-  "$GS/index.md" "catalyst-monitor"
-assert_doc_has "index: names execution-core service" \
-  "$GS/index.md" "catalyst-execution-core"
-assert_doc_has "how-it-works: names execution-core (not just 'the executor')" \
-  "$GS/how-catalyst-works.md" "execution-core"
-
-echo ""
-echo "=== Phase 3: remote and unattended hosts page ==="
-
-# Issue 4 — gh keychain migration pattern documented
-REMOTE="$GS/remote-and-unattended-hosts.md"
-if [ -f "$REPO_ROOT/$REMOTE" ]; then
-  PASSES=$((PASSES+1)); echo "  PASS: remote-host page exists"
+missing_doc="$GS/.contract-missing-control-$$"
+if (
+  FAILURES=0; PASSES=0
+  assert_doc_lacks "missing-file negative control" "$missing_doc" "needle" >/dev/null 2>&1
+  [[ $FAILURES -eq 1 && $PASSES -eq 0 ]]
+); then
+  PASSES=$((PASSES+1)); echo "  PASS: a grep read error fails the negative assertion"
 else
-  FAILURES=$((FAILURES+1)); echo "  FAIL: remote-host page missing: $REMOTE"
+  FAILURES=$((FAILURES+1)); echo "  FAIL: a grep read error must fail the negative assertion"
 fi
-assert_doc_has "remote: gh token migration pattern" \
-  "$REMOTE" "gh auth token | ssh"
-# Issue 5 — macOS-only-vs-headless reconciled (unattended host framed as a headless Mac)
-assert_doc_has "remote: clarifies unattended host is a headless Mac" \
-  "$REMOTE" "headless Mac"
-assert_doc_has "remote: post-reboot start documented for unattended host" \
-  "$REMOTE" "catalyst-stack start"
+
+echo "=== Supported workstation skill sources ==="
+INDEX="$GS/index.md"
+assert_doc_has "index: dev pack uses its own repository" \
+  "$INDEX" "npx skills@latest add coalesce-labs/catalyst-dev-skills --all -g"
+assert_doc_has "index: Cloud pack uses its own repository" \
+  "$INDEX" "npx skills@latest add coalesce-labs/catalyst-cloud-skills --all -g"
+assert_doc_has "index: Cloud CLI is a tool dependency" \
+  "$INDEX" "@catalyst-cloud/catalyst-skills"
+assert_doc_has "index: legacy plugin is explicitly rejected" \
+  "$INDEX" "Do not install \`catalyst-dev@catalyst\`"
+assert_doc_has "index: historical setup points to tracked README content" \
+  "$INDEX" "blob/73bc0645252ce8be38f8c87be6b67b950b3f0b56/README.md"
+
+for page in \
+  "$INDEX" \
+  "$GS/install-claude.md" \
+  "$GS/install-codex.md" \
+  "$GS/install-portable.md" \
+  "$GS/remote-and-unattended-hosts.md" \
+  website/src/content/docs/reference/plugins.md; do
+  assert_doc_lacks "$page has no old setup script command" "$page" \
+    "https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-catalyst.sh"
+  assert_doc_lacks_ere "$page has no old marketplace recommendation" "$page" \
+    'marketplace add coalesce-labs/catalyst([[:space:]]|$)'
+done
+
+echo ""
+echo "=== Remote setup uses the same approved repositories ==="
+REMOTE="$GS/remote-and-unattended-hosts.md"
+assert_doc_has "remote: dev pack source" "$REMOTE" "coalesce-labs/catalyst-dev-skills"
+assert_doc_has "remote: Cloud pack source" "$REMOTE" "coalesce-labs/catalyst-cloud-skills"
+assert_doc_has "remote: warns against personal credentials in shared hosts" "$REMOTE" \
+  "Do not put a person's Cloud login in a shared host or image."
+assert_doc_has "remote: historical notes point to tracked README content" "$REMOTE" \
+  "blob/73bc0645252ce8be38f8c87be6b67b950b3f0b56/README.md"
 
 echo ""
 echo "Results: $PASSES passed, $FAILURES failed"

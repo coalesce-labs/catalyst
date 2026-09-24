@@ -1,123 +1,19 @@
 ---
-title: Remote and unattended hosts
-description:
-  Run Catalyst on a headless Mac you reach over SSH — plugin install, gh token migration, and
-  bringing the stack up.
+title: Remote and unattended workstations
+description: Install the supported Catalyst skill packs on a remote workstation.
 sidebar:
   order: 6
 ---
 
-Catalyst is macOS-only, but the host does not have to be the Mac in front of you. A common setup is
-a **headless Mac** (for example, a Mac mini) that you reach over SSH and leave running. This page
-covers the parts of setup that differ from the [interactive install](/getting-started/).
+The old `setup-catalyst.sh` installer provisioned a local Catalyst runtime from the deprecated `coalesce-labs/catalyst` repository. Do not use it for new workstation setup. The supported setup installs skills from their two source repositories:
 
-## Install in one command
-
-The page you were sent here from presents step 1 as interactive. It does not have to be —
-`setup-catalyst.sh` has a full headless contract, so the entire install over SSH is:
-
-```bash
-cd /path/to/your/repo   # ⛔ required — see below
-curl -fsSL https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-catalyst.sh \
-  | bash -s -- --non-interactive \
-      --cloud-token "$CATALYST_CLOUD_TOKEN" --cloud-account "$CATALYST_CLOUD_ACCOUNT"
+```sh
+npx skills@latest add coalesce-labs/catalyst-dev-skills --all -g
+npx skills@latest add coalesce-labs/catalyst-cloud-skills --all -g
 ```
 
-**Run it from inside the repo you are enrolling.** Setup configures Catalyst *for a project*, so a
-non-interactive run refuses rather than guessing which one:
+These commands install the packs globally for agents on the remote workstation. To keep them in one project, omit `-g` and run the commands in that project's root. Use the corresponding Claude Code plugin from each source repository only when choosing the plugin rail for that pack. Do not install `catalyst-dev@catalyst` from the deprecated repository.
 
-```
-✗ Not in a git repository. Run setup from inside the target repo when using --non-interactive.
-```
+An unattended machine can install the public skills without a personal credential. Do not put a person's Cloud login in a shared host or image. Connect a workstation with `catalyst-skills login` when an authorized person can complete the browser approval. See [Install Catalyst skills](/getting-started/) for the Cloud CLI and plugin alternatives.
 
-This page previously showed the `curl` line alone and called it "the entire install", which is why
-this note exists: run from `$HOME` on a fresh host — the most natural thing to do over SSH — and the
-install stops there. Clone the repo first if the host does not have it yet.
-
-`-s --` is required — without it `bash` eats the flags and the script tries to open `/dev/tty` on a
-host that has none. `CATALYST_AUTONOMOUS=1` is an equivalent env-var form.
-
-`--cloud-account` is required the first time a cloud token is supplied, and there is deliberately no
-default (guessing would point the host at another tenant's workspace). **On later runs you can omit
-it** — setup records the account in `~/.config/catalyst/cloud-sync.env` and reads it back from there.
-
-Setup finishes the job rather than printing a list: it installs the `catalyst-*` CLIs, provisions
-`plugin-source`, turns on replica reads, and enrols the project. Anything it could not do is printed
-at the end as a deferred step with a `run:` and a `verify:` line. See
-[what to have ready](/getting-started/#what-to-have-ready) for the credentials.
-
-## Install the plugin over SSH
-
-The in-app `/plugin` commands need an interactive Claude Code session. From a shell, use the CLI
-form instead:
-
-```bash
-claude plugin marketplace add coalesce-labs/catalyst
-claude plugin install catalyst-dev@catalyst
-```
-
-Then install the CLI tools and start the stack exactly as in the
-[main install steps](/getting-started/).
-
-## Move your GitHub login to the remote host
-
-On macOS, `gh auth login` often stores the token in the **macOS keychain**, not in
-`~/.config/gh/hosts.yml`. Copying `hosts.yml` to another machine therefore silently fails — the
-token field is blank. Pipe the token across instead:
-
-```bash
-gh auth token | ssh your-host 'gh auth login --with-token'
-```
-
-`gh auth token` reads from whichever store `gh` is using (keychain or `hosts.yml`), so this works
-regardless of how you logged in locally.
-
-## After a reboot
-
-After the host reboots, reconnect and run:
-
-```bash
-catalyst-stack start
-```
-
-On a headless host you'll usually want this to happen automatically. Install the auto-start
-LaunchAgent once, then a reboot brings the whole stack back on its own:
-
-```bash
-catalyst-stack install-services
-```
-
-It runs `catalyst-stack start` at login plus a keep-alive that self-heals a crashed daemon. Because
-it's a per-user LaunchAgent, enable **automatic login** so it fires on boot without anyone signing
-in. See [Post-reboot and updates](/getting-started/reboot-and-updates/) for the day-to-day boot and
-update flow and the full `install-services` options.
-
-## If the daemon dispatches nothing
-
-The execution-core daemon only dispatches work for **registered** projects. On a fresh or headless
-host the project registry (`~/catalyst/execution-core/registry.json`) may never have been written —
-the daemon then starts cleanly, logs normal ticks, and dispatches nothing.
-
-As of CTL-854 the daemon logs a one-time warning at startup when the registry is empty. To enroll a
-project, run from inside its repo:
-
-```bash
-catalyst-execution-core register --team <TEAM> --repo-root "$(git rev-parse --show-toplevel)"
-```
-
-The running daemon picks up the change on its next reconcile — no restart needed. Confirm with:
-
-```bash
-catalyst-execution-core daemon status
-```
-
-See [configuration reference](/reference/configuration/) for details on the registry and
-eligible-query format.
-
-## Mirroring config to another node
-
-When adding a second host to a cluster, some config items must be copied verbatim from the seed node
-(SHARED) and others must be regenerated on the new host (PER-NODE). See
-[Cluster config mirror contract](/reference/cluster-config-mirror/) for the full classification
-table, correct file locations for bot OAuth credentials, and the quota field-name schema consumed by
-monitoring and heartbeat code.
+This page no longer covers the retired local Catalyst daemon, LaunchAgents, or project registration commands. Historical runtime notes remain in the [previous `catalyst` README](https://github.com/coalesce-labs/catalyst/blob/73bc0645252ce8be38f8c87be6b67b950b3f0b56/README.md).
