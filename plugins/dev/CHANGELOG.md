@@ -1,5 +1,35 @@
 # Changelog
 
+## [15.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v14.0.0...catalyst-dev-v15.0.0) (2026-09-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* **dev:** CTL-2306 — catalyst-dev ships no hooks, and skills take their input explicitly ([#4132](https://github.com/coalesce-labs/catalyst/issues/4132))
+
+### Features
+
+* **dev:** CTC-1219 — merge-pr labels queue:ready in catalyst-cloud instead of hand-merging ([#4072](https://github.com/coalesce-labs/catalyst/issues/4072)) ([8995610](https://github.com/coalesce-labs/catalyst/commit/89956108881c07abe4b2130579c96e14cefb385b))
+* **dev:** CTC-3129 — a resumed handoff carries on unattended instead of stopping on a question ([#4152](https://github.com/coalesce-labs/catalyst/issues/4152)) ([85aac83](https://github.com/coalesce-labs/catalyst/commit/85aac8385b98dd514f10a8dd58e0eaa11ffa6b61))
+* **dev:** CTL-2253 — commit the md-reflow scanner/joiner and its test ([#4058](https://github.com/coalesce-labs/catalyst/issues/4058)) ([2202f79](https://github.com/coalesce-labs/catalyst/commit/2202f7917733c80afdcd2585390190787ce9af9e))
+* **dev:** CTL-2299 — the human, the ask team and the dispatch verb come from the tenant, not from us ([#4121](https://github.com/coalesce-labs/catalyst/issues/4121)) ([cb5052e](https://github.com/coalesce-labs/catalyst/commit/cb5052e0cf4f90ddde39b7a2d28f23b6ddb98aca))
+* **dev:** CTL-2300 — the deny-list covers the whole wrong-today list, from one committed contract ([#4124](https://github.com/coalesce-labs/catalyst/issues/4124)) ([1b117dc](https://github.com/coalesce-labs/catalyst/commit/1b117dc21ec62c3a5a54784d81e11309017e1705))
+* **dev:** CTL-2300 — the plugin's wrong-today cloud facts come from config, not from us ([#4122](https://github.com/coalesce-labs/catalyst/issues/4122)) ([27721f9](https://github.com/coalesce-labs/catalyst/commit/27721f9af5ebacc7af91b35394e8365088616e47))
+* **dev:** CTL-2306 — catalyst-dev ships no hooks, and skills take their input explicitly ([#4132](https://github.com/coalesce-labs/catalyst/issues/4132)) ([c0de85b](https://github.com/coalesce-labs/catalyst/commit/c0de85b53b38b77f247eb877d6a674fe2bdac36f))
+* **dev:** CTL-2306 — create-worktree runs from its own directory; every dev skill is self-contained ([#4139](https://github.com/coalesce-labs/catalyst/issues/4139)) ([bf76fdd](https://github.com/coalesce-labs/catalyst/commit/bf76fdd23183fa61fbce9102f17e0fab70398a13))
+* **dev:** CTL-2306 — the briefing skills run from their own directory ([#4137](https://github.com/coalesce-labs/catalyst/issues/4137)) ([f9773dc](https://github.com/coalesce-labs/catalyst/commit/f9773dc5b92d171fa7fc67f19423c607dd55b5a2))
+* **dev:** CTL-2306 — the coordination skills run from their own directory ([#4136](https://github.com/coalesce-labs/catalyst/issues/4136)) ([0ec8420](https://github.com/coalesce-labs/catalyst/commit/0ec84209dc9f784f13d74197ed7975768d6a9bd7))
+* **dev:** CTL-2306 — the estimation and retro skills run from their own directory ([#4138](https://github.com/coalesce-labs/catalyst/issues/4138)) ([f092d7b](https://github.com/coalesce-labs/catalyst/commit/f092d7b97d7478e551040c8927a7801ad0530852))
+* **dev:** CTL-2306 — the PR/merge skills run from their own directory ([#4134](https://github.com/coalesce-labs/catalyst/issues/4134)) ([a5e3050](https://github.com/coalesce-labs/catalyst/commit/a5e3050b62088c1f4ec5953d1e20718589610c3a))
+* **dev:** CTL-2306 — the runner's phase skills run from their own directory ([#4133](https://github.com/coalesce-labs/catalyst/issues/4133)) ([7d94601](https://github.com/coalesce-labs/catalyst/commit/7d94601263c130c1617666eca320dc4a1c25871f))
+* **dev:** CTL-2309 — validate on every harness runs its own code review and security review through platform skills ([#4144](https://github.com/coalesce-labs/catalyst/issues/4144)) ([10999f5](https://github.com/coalesce-labs/catalyst/commit/10999f548866a09ace53fb39b5380a986c6e0781))
+
+
+### Bug Fixes
+
+* **dev:** CTC-1384 — remediate-plan skill drops the same-session-as-validate assumption ([#4110](https://github.com/coalesce-labs/catalyst/issues/4110)) ([e4212b9](https://github.com/coalesce-labs/catalyst/commit/e4212b9840fce9f1677b6648bd6aacb74ccbc821))
+* **dev:** CTL-2306 — the thoughts-init forwarder survives a symlink and fails loudly as a lone copy ([#4140](https://github.com/coalesce-labs/catalyst/issues/4140)) ([89cfffb](https://github.com/coalesce-labs/catalyst/commit/89cfffb263b7da8b9f359a7e0d1a55bc7bbfb3d4))
+
 ## [12.65.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.65.0...catalyst-dev-v12.65.1) (2026-08-25)
 
 

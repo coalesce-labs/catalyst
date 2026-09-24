@@ -1,5 +1,16 @@
 # Changelog
 
+## [6.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-meta-v5.0.0...catalyst-meta-v6.0.0) (2026-09-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* **dev:** CTL-2306 — catalyst-dev ships no hooks, and skills take their input explicitly ([#4132](https://github.com/coalesce-labs/catalyst/issues/4132))
+
+### Features
+
+* **dev:** CTL-2306 — catalyst-dev ships no hooks, and skills take their input explicitly ([#4132](https://github.com/coalesce-labs/catalyst/issues/4132)) ([c0de85b](https://github.com/coalesce-labs/catalyst/commit/c0de85b53b38b77f247eb877d6a674fe2bdac36f))
+
 ## [4.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-meta-v4.1.0...catalyst-meta-v4.2.0) (2026-08-24)
 
 

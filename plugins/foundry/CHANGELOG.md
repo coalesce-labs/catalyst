@@ -1,5 +1,17 @@
 # Changelog
 
+## [3.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-foundry-v2.5.0...catalyst-foundry-v3.0.0) (2026-09-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* **dev:** CTL-2306 — catalyst-dev ships no hooks, and skills take their input explicitly ([#4132](https://github.com/coalesce-labs/catalyst/issues/4132))
+
+### Features
+
+* **dev:** CTL-2306 — catalyst-dev ships no hooks, and skills take their input explicitly ([#4132](https://github.com/coalesce-labs/catalyst/issues/4132)) ([c0de85b](https://github.com/coalesce-labs/catalyst/commit/c0de85b53b38b77f247eb877d6a674fe2bdac36f))
+* **packaging:** CTL-1461 — real render interface, safety gate, drift gate, inventory independence ([#4015](https://github.com/coalesce-labs/catalyst/issues/4015)) ([5f4fa48](https://github.com/coalesce-labs/catalyst/commit/5f4fa482bf22e143a9f41a90487f52f113956da5))
+
 ## [2.5.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-foundry-v2.4.0...catalyst-foundry-v2.5.0) (2026-08-24)
 
 
