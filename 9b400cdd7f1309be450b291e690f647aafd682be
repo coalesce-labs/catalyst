@@ -1,0 +1,1 @@
+Addressed round-one review: replace two nonexistent legacy docs links, fail closed on grep read errors with a regression control, and unwrap changed prose. Contract test passes 22 checks.
