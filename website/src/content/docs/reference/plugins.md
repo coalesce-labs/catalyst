@@ -1,40 +1,25 @@
 ---
-title: Plugins
-description: Catalyst is a set of Claude Code plugins. Install only the ones you need.
+title: Claude Code plugin alternatives
+description: Optional Claude Code plugins from the two supported Catalyst skills repositories.
 sidebar:
   order: 1
 ---
 
-Catalyst comes as separate Claude Code plugins. Install only what you need, so Claude stays fast.
+The default workstation install uses `npx skills` from each supported repository. Each pack also has an optional Claude Code plugin that installs the same skills from that repository.
 
-## Available plugins
+| Pack | Claude Code plugin | Purpose |
+| --- | --- | --- |
+| [`catalyst-dev-skills`](https://github.com/coalesce-labs/catalyst-dev-skills) | `catalyst-dev@catalyst-dev-skills` | Development workflows |
+| [`catalyst-cloud-skills`](https://github.com/coalesce-labs/catalyst-cloud-skills) | `catalyst@catalyst-cloud` | Catalyst Cloud tenant setup and operation |
 
-| Plugin | What it does | Context cost | Skills | Agents |
-| --- | --- | :---: | :---: | :---: |
-| `catalyst-dev` | Core dev workflow — research, plan, build, verify, ship | ~3.5K | 50 | 9 |
-| `catalyst-pm-ops` | PM work — cycle health, backlog, cadence, Slack | Minimal | 12 | 4 |
-| `catalyst-meta` | Find, build, and manage workflows | Minimal | 6 | — |
+Install the plugin from its own marketplace:
 
-"Context cost" is how much space the plugin takes up when it's on.
+```sh
+claude plugin marketplace add coalesce-labs/catalyst-dev-skills
+claude plugin install catalyst-dev@catalyst-dev-skills
 
-## Install
-
-```bash
-# Add the marketplace
-/plugin marketplace add coalesce-labs/catalyst
-
-# Install plugins (catalyst-dev is required; the rest are optional)
-/plugin install catalyst-dev
-/plugin install catalyst-pm-ops
-/plugin install catalyst-meta
+claude plugin marketplace add coalesce-labs/catalyst-cloud-skills
+claude plugin install catalyst@catalyst-cloud
 ```
 
-Most sessions run with just `catalyst-dev`.
-
-## Hooks (catalyst-dev)
-
-The dev plugin ships no hooks. Its skills still expect Claude Code for now (they reach helper scripts through the Claude plugin root); portable packaging for other coding agents is in progress. To pick up an earlier research doc, plan or handoff, pass its path or name the ticket; the skill finds that ticket's newest document in `thoughts/shared/`.
-
-## Updating
-
-Claude Code updates plugins when a session starts. Restart to load a new one, or force it now with `/plugins update`. Check versions with `/plugins`. See the [changelogs](/changelog/catalyst-dev/) for what's new.
+Choose one install method per pack. The legacy `catalyst-dev@catalyst` plugin is an outdated copy from the deprecated `coalesce-labs/catalyst` repository; remove that plugin when migrating. Preserve unrelated skills.

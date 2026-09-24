@@ -7,8 +7,7 @@ sidebar:
   order: 0
 ---
 
-Catalyst reads two config layers. The setup script (`setup-catalyst.sh`) writes both for you, so you
-rarely edit them by hand. This page covers the keys you're most likely to touch.
+This is a historical reference for the retired local Catalyst runtime. Current development and Catalyst Cloud skills do not use these runtime config files. For current workstation setup, see [Install Catalyst skills](/getting-started/); the deprecated `setup-catalyst.sh` script is not a supported installer.
 
 - **`.catalyst/config.json`** — plain project info. Safe to commit to git.
 - **`~/.config/catalyst/`** — machine-local Layer-2. Never commit these files. Three siblings
@@ -62,13 +61,11 @@ statuses.
 
 ### State map
 
-As work moves, Catalyst updates the ticket's Linear status for you. `stateMap` says which status
-name to use for each step (`research`, `inProgress`, `inReview`, `done`, and so on). Set a key to
-`null` to skip that update.
+As work moves, Catalyst updates the ticket's Linear status for you. `stateMap` says which status name to use for each step (`research`, `inProgress`, `inReview`, `done`, and so on). Set a key to `null` to skip that update.
 
-You usually don't edit this by hand. When you run `setup-catalyst.sh` with a Linear token, it reads
-your real status names and fills `stateMap` in. Pointing `stateMap` at a status that doesn't exist
-makes the next update fail, so only edit it if your status names are unusual.
+Older local-runtime setup populated this mapping from a Linear token. The current skills packs do not
+read or maintain it. Keep this advice only when maintaining an existing legacy runtime; a status
+that does not exist makes its next update fail.
 
 ### Thoughts persistence (`catalyst.thoughts`)
 

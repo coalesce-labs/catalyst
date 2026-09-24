@@ -1,167 +1,45 @@
 ---
-title: Install Catalyst
-description: Get Catalyst installed and running in your project in about five minutes.
+title: Install Catalyst skills
+description: Install Catalyst development skills and Catalyst Cloud tenant skills from their supported repositories.
 sidebar:
   order: 2
 ---
 
-Get Catalyst installed and running in about five minutes.
+The `coalesce-labs/catalyst` repository is deprecated as a local runtime and is no longer a source for workstation skills. Install the two supported packs from their own repositories.
 
-## What you need first
+## Install both packs on a coding workstation
 
-- **macOS** — Catalyst is built and tested on macOS only.
-- **Claude Code** — [install it](https://docs.anthropic.com/en/docs/claude-code) before you start.
-- **Git** — needed to detect your repo and run the thoughts system.
+Run these commands in a terminal. They install globally for the workstation and can serve Claude Code, Codex, OpenCode and other agents supported by the Skills CLI:
 
-The setup script installs the rest for you: `jq`, `sqlite3`, the HumanLayer CLI, and Bun (the
-runtime behind the dashboard and broker). It also offers to set up optional tools — the GitHub CLI
-(`gh`), the Linearis CLI, `agent-browser`, and `direnv`.
-
-## 1. Run the setup script
-
-```bash
-curl -O https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-catalyst.sh
-chmod +x setup-catalyst.sh
-./setup-catalyst.sh
+```sh
+npx skills@latest add coalesce-labs/catalyst-dev-skills --all -g
+npx skills@latest add coalesce-labs/catalyst-cloud-skills --all -g
 ```
 
-It checks your platform, installs the prerequisites, creates your project config, sets up a shared
-thoughts repository, and asks for any API tokens (like Linear).
+The development pack provides coding workflows. The Cloud pack provides tenant setup and operation. Their versions are independent. To install into only the current project, omit `-g` from both commands and run them from the project root.
 
-### On a headless or SSH-only host
+For Claude Code, each pack also offers its own plugin as an alternative to that pack's `npx skills` install:
 
-There are no prompts to answer, so the whole install is one command:
+```sh
+claude plugin marketplace add coalesce-labs/catalyst-dev-skills
+claude plugin install catalyst-dev@catalyst-dev-skills
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-catalyst.sh \
-  | bash -s -- --non-interactive \
-      --cloud-token "$CATALYST_CLOUD_TOKEN" --cloud-account "$CATALYST_CLOUD_ACCOUNT"
+claude plugin marketplace add coalesce-labs/catalyst-cloud-skills
+claude plugin install catalyst@catalyst-cloud
 ```
 
-`-s --` is required: without it `bash` consumes the flags instead of passing them to the script, and
-the install runs interactive on a host with no terminal to be interactive with.
-`CATALYST_AUTONOMOUS=1` is equivalent to `--non-interactive` if you prefer an env var.
+Choose one install method per pack. Do not install `catalyst-dev@catalyst`; it is a separate, outdated copy from the deprecated repository. During migration, remove that exact plugin and remove copied skills only when their lock file records `coalesce-labs/catalyst` as the source. Preserve unrelated skills and local data.
 
-### What to have ready
+## Connect to Catalyst Cloud
 
-| What                   | How to supply it                                    | Notes                                                                                                                                                             |
-| ---------------------- | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Catalyst Cloud token   | `--cloud-token` or `CATALYST_CLOUD_TOKEN`           | Validated with one authenticated call before anything is written. A bad token fails the install loudly rather than leaving green checkmarks over a broken system. |
-| Catalyst Cloud account | `--cloud-account` or `CATALYST_CLOUD_ACCOUNT`       | Required whenever a token is supplied — there is deliberately no default.                                                                                         |
-| Linear API token       | `LINEAR_API_TOKEN`, or a `~/.linear_api_token` file | Must be a **personal** API key, beginning `lin_api_`. An OAuth token (`lin_oauth_…`) is rejected.                                                                 |
-| Sentry, PostHog, Exa   | Prompted, or their usual env vars                   | All optional.                                                                                                                                                     |
+The Cloud skills use the `@catalyst-cloud/catalyst-skills` CLI. Install it when you want to connect this workstation to a tenant:
 
-Both cloud flags are optional. Omit them and setup behaves exactly as it did before they existed.
-
-## 2. Install the plugin
-
-In Claude Code:
-
-```bash
-/plugin marketplace add coalesce-labs/catalyst
-/plugin install catalyst-dev
+```sh
+npm install -g @catalyst-cloud/catalyst-skills
+catalyst-skills login
+catalyst-skills ready
 ```
 
-Restart Claude Code after installing.
+For more detail, see [Claude Code](./install-claude/), [Codex and OpenCode](./install-codex/), and [remote or unattended hosts](./remote-and-unattended-hosts/).
 
-On a headless or SSH-only host, install from the shell instead:
-
-```bash
-claude plugin marketplace add coalesce-labs/catalyst
-claude plugin install catalyst-dev@catalyst
-```
-
-## 3. Install the command-line tools
-
-Several Catalyst features call shell tools by name (`catalyst-monitor`, `catalyst-hud`,
-`catalyst-events`, and more — see the full [CLI command reference](/reference/catalyst-cli/)).
-
-**Setup already installed these.** Its last act is to put the `catalyst-*` commands on your PATH,
-provision `plugin-source`, turn on replica reads, and enrol the project. If the run ended with "No
-steps were deferred", skip to the check below.
-
-If setup listed this as a deferred step, run it by hand:
-
-```bash
-bash ~/catalyst/plugin-source/plugins/dev/scripts/install-cli.sh
-```
-
-They install to `$HOME/.catalyst/bin`. If that folder isn't on your PATH, the installer adds it to
-your shell's startup file. Open a new terminal to pick up the change, then check it worked:
-
-```bash
-which catalyst-events
-catalyst-events help
-```
-
-## 4. Start the stack
-
-Bring the three core Catalyst services up in dependency order (monitor → broker → execution-core),
-plus the opt-in mitmproxy capture service if you pass `--proxy`:
-
-```bash
-catalyst-stack start
-```
-
-Run this once after each reboot or after pulling new code. See
-[catalyst-stack reference](/reference/catalyst-stack/) for flags including `--hotpatch` (apply an
-update without reinstalling) and `--proxy` (opt-in Linear traffic capture via mitmproxy).
-
-The stack is three long-running services (plus an opt-in proxy):
-
-- **`catalyst-broker`** — the event bus every agent and the executor read and write through.
-- **`catalyst-monitor`** — watches your GitHub PRs and CI status and emits events.
-- **`catalyst-execution-core`** — the scheduler: it picks up Todo tickets and dispatches the
-  phase-agent workers.
-- **`mitmproxy`** _(opt-in, `--proxy` only)_ — logs Linear API traffic.
-
-See the [catalyst-stack reference](/reference/catalyst-stack/) for the full command set.
-
-## 5. Add Catalyst to your project
-
-Copy the Catalyst snippet into your project's `CLAUDE.md` so Claude Code knows the available
-workflows:
-
-```bash
-cat ~/.claude/plugins/cache/catalyst/catalyst-dev/*/templates/CLAUDE_SNIPPET.md >> .claude/CLAUDE.md
-```
-
-## 6. Try it
-
-Start a Claude Code session and run:
-
-```
-/catalyst-dev:research-codebase
-```
-
-Follow the prompts. Catalyst spawns helper agents, documents what your code does, and saves the
-findings to `thoughts/shared/research/`.
-
-## Optional plugins
-
-Catalyst is a set of plugins. Install only what you need:
-
-```bash
-/plugin install catalyst-pm-ops       # cycle, backlog, and cadence ops
-/plugin install catalyst-meta         # workflow discovery
-```
-
-See [Plugins](/reference/plugins/) for what each one does.
-
-## Keeping plugins up to date
-
-Claude Code checks for plugin updates when a session starts and pulls them automatically. Restart
-Claude Code to load a new version. To force an update now:
-
-```bash
-/plugins update
-```
-
-Check your installed versions any time with `/plugins`.
-
-## Next steps
-
-- [How Catalyst works](/getting-started/how-catalyst-works/) — the autonomous loop, end to end
-- [Configuration](/reference/configuration/) — the settings Catalyst reads
-- [Remote and unattended hosts](/getting-started/remote-and-unattended-hosts/) — set up on a
-  headless Mac reached over SSH
+The historical local-runtime setup is in the [previous `catalyst` README](https://github.com/coalesce-labs/catalyst/blob/73bc0645252ce8be38f8c87be6b67b950b3f0b56/README.md); its setup and plugin commands are not current install instructions.
