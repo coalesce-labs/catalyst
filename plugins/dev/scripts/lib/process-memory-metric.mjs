@@ -37,7 +37,7 @@ import { buildCatalystResource } from "../execution-core/lib/catalyst-resource.m
 // wants to fall back to it) applies it AFTER resolveCollectorBase — while the per-process
 // gauge does NOT, so an UNconfigured process (notably a unit test) emits nothing instead
 // of posting test-process samples to the production collector (Codex P1 on #2732).
-export const DEFAULT_COLLECTOR_BASE = "http://100.65.193.30:4318";
+export const DEFAULT_COLLECTOR_BASE = "http://otlp.int.catalystcloud.dev:4318";
 
 // Warn-once only after this many CONSECUTIVE failed POSTs, so a single transient blip is
 // silent (and a genuinely-dark pipe is still loud). A success resets the counter.

@@ -58,7 +58,7 @@
 //
 // OVERRIDABLE ENV (all optional; safe defaults below)
 //   CATALYST_HOST_NAME        stable Catalyst node name (REQUIRED for correct node tag)
-//   CATALYST_OTLP_ENDPOINT    collector OTLP/HTTP base  (default http://100.65.193.30:4318)
+//   CATALYST_OTLP_ENDPOINT    collector OTLP/HTTP base  (default http://otlp.int.catalystcloud.dev:4318)
 //   CATALYST_BROKER_LOG       override broker.log path
 //   CATALYST_DAEMON_LOG       override execution-core/daemon.log path
 //   CATALYST_OTEL_FORWARD_LOG override otel-forward.log path
@@ -80,7 +80,7 @@
 otelcol.exporter.otlphttp "catalyst" {
 	client {
 		// Existing shared collector on the Tailscale net. Override via env for tests.
-		endpoint = coalesce(sys.env("CATALYST_OTLP_ENDPOINT"), "http://100.65.193.30:4318")
+		endpoint = coalesce(sys.env("CATALYST_OTLP_ENDPOINT"), "http://otlp.int.catalystcloud.dev:4318")
 
 		tls {
 			// Plain HTTP on the trusted Tailscale net (matches otel-forward / cost-cap).
