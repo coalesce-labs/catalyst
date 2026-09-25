@@ -42,6 +42,11 @@ export const ALERT_KIND_TITLES = Object.freeze({
   rate_limit_exhausted: "A rate limit / budget is exhausted",
   capacity_unavailable: "No execution capacity",
   system_stall: "Tickets are stalled on a system condition",
+  // CTC-2981: the role-supervisor's out-of-fleet instruments (role-supervisor/alarm.mjs).
+  concierge_dead: "The concierge is down",
+  role_silent: "A coordination role went silent",
+  role_restarting: "A coordination role is being restarted",
+  stale_pr_unrescued: "A stale PR could not be rescued",
 });
 
 const isStr = (v) => typeof v === "string" && v !== "";

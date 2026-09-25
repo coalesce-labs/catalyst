@@ -114,8 +114,8 @@ assert_contains "$out" "catalyst-events unknown" "t4: version unknown when versi
 
 # ── 5. whitespace trimmed in version.txt and commit.txt ─────────────────────
 fake=$(make_fake_plugin t5 "  9.2.0  " "  abc123  " "")
-out=$(run_helper "catalyst-comms" "$fake")
-assert_contains "$out" "catalyst-comms 9.2.0" "t5: version whitespace trimmed"
+out=$(run_helper "catalyst-state" "$fake")
+assert_contains "$out" "catalyst-state 9.2.0" "t5: version whitespace trimmed"
 assert_contains "$out" "commit: abc123" "t5: commit whitespace trimmed"
 
 # macOS resolves /var → /private/var; resolve expected paths the same way the

@@ -126,21 +126,10 @@ This shape is intentionally close to OTel `LogRecord` — it is _projectable_ to
 | `catalyst.linear`       | TS webhook handler (`lib/linear-webhook-handler.ts`)                                                       |
 | `catalyst.session`      | Bash (`catalyst-session.sh`)                                                                               |
 | `catalyst.orchestrator` | Bash (`catalyst-state.sh`, `emit-worker-status-change.sh`)                                                 |
-| `catalyst.comms`        | Bash (`catalyst-comms`)                                                                                    |
+| `catalyst.comms`        | none since CTC-2981 (the `catalyst-comms` CLI was removed; the event name stays registered)                |
 | `catalyst.broker`       | Bash/daemon (`plugins/dev/scripts/broker/index.mjs` — the skill that documented it was removed with the daemon, CTL-2240). Supersedes legacy `catalyst.filter` producer (CTL-303). |
 
-`resource."catalyst.node.class"` (CTL-1368) is the node's ROLE — one of `developer`, `worker`, or
-`monitor` — orthogonal to `host.name`/`host.id` (WHICH machine). It is stamped last in the resource
-block by the canonical builder in EACH runtime — MJS `buildCatalystResource()`
-(`execution-core/lib/catalyst-resource.mjs`), the TS twin
-(`orch-monitor/lib/canonical-event-shared.ts`), and Bash `lib/canonical-event.sh` (via
-`catalyst_node_class`, which the Bash producers above — `catalyst-session.sh`, `catalyst-state.sh`,
-`catalyst-comms`, the phase-agent emitters — all route through). It defaults to `worker` when
-`catalyst.node.class` is unset in Layer-2 config (and is overridable via the `CATALYST_NODE_CLASS`
-env var); an unrecognized explicit value degrades to `monitor`. Low-cardinality, so the OTEL
-collector surfaces it as a fleet-wide `node_class` dashboard dimension. It remains optional in the
-schema: a few direct emitters that build a bare resource block (e.g. some webhook paths) may still
-omit it.
+`resource."catalyst.node.class"` (CTL-1368) is the node's ROLE — one of `developer`, `worker`, or `monitor` — orthogonal to `host.name`/`host.id` (WHICH machine). It is stamped last in the resource block by the canonical builder in EACH runtime — MJS `buildCatalystResource()` (`execution-core/lib/catalyst-resource.mjs`), the TS twin (`orch-monitor/lib/canonical-event-shared.ts`), and Bash `lib/canonical-event.sh` (via `catalyst_node_class`, which the Bash producers above — `catalyst-session.sh`, `catalyst-state.sh`, the phase-agent emitters — all route through). It defaults to `worker` when `catalyst.node.class` is unset in Layer-2 config (and is overridable via the `CATALYST_NODE_CLASS` env var); an unrecognized explicit value degrades to `monitor`. Low-cardinality, so the OTEL collector surfaces it as a fleet-wide `node_class` dashboard dimension. It remains optional in the schema: a few direct emitters that build a bare resource block (e.g. some webhook paths) may still omit it.
 
 ---
 
@@ -431,6 +420,8 @@ Emitted by `emit-worker-status-change.sh` when a worker reaches a terminal state
 ---
 
 ### `comms.message.posted` — catalyst.comms bash (including attention variant)
+
+This repo no longer produces this event: its producer, the `catalyst-comms` channel CLI, was removed in CTC-2981. The shape below is kept because the name stays registered in the cloud event vocabulary. Agents coordinate by appending typed events to the shared log (see `docs/architecture.md` → "Phase-Agent Communication").
 
 Normal posted message (`severityText: "INFO"`):
 

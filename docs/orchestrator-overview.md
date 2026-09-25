@@ -205,7 +205,6 @@ flowchart LR
     SESSION["catalyst-session.sh<br/>service.name=catalyst.session"]
     STATE["catalyst-state.sh +<br/>emit-worker-status-change.sh<br/>service.name=catalyst.orchestrator"]
     PHASE["phase-agent-emit-complete<br/>service.name=catalyst.phase-agent"]
-    COMMS["catalyst-comms<br/>service.name=catalyst.comms"]
     GH["orch-monitor webhook (GitHub)<br/>service.name=catalyst.github"]
     LIN["orch-monitor webhook (Linear)<br/>service.name=catalyst.linear"]
     BROKER["catalyst-broker daemon<br/>service.name=catalyst.broker"]
@@ -216,7 +215,6 @@ flowchart LR
   SESSION ==> EL
   STATE ==> EL
   PHASE ==> EL
-  COMMS ==> EL
   GH ==> EL
   LIN ==> EL
   BROKER -- "emits filter.wake.*<br/>+ broker.daemon.*" --> EL

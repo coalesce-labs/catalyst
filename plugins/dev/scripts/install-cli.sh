@@ -35,7 +35,6 @@ set -uo pipefail
 CLI_ENTRIES=(
 	"catalyst-broker:catalyst-broker"
 	"catalyst-cluster:catalyst-cluster"
-	"catalyst-comms:catalyst-comms"
 	"catalyst-config:catalyst-config"
 	"catalyst-events:catalyst-events"
 	"catalyst-execution-core:catalyst-execution-core"
@@ -322,7 +321,8 @@ ensure_agent_browser() {
 # state layer. Remove only what this installer wrote — a symlink to
 # plugins/dev/scripts/<name>.sh, or a wrapper shim carrying WRAPPER_MARKER — in
 # $BIN_DIR and the legacy ~/.local/bin; a same-named file the user owns stays.
-RETIRED_CLI_NAMES=(register-thought workflow-context)
+# CTC-2981: catalyst-comms (no .sh suffix) retired with its channel system.
+RETIRED_CLI_NAMES=(register-thought workflow-context catalyst-comms)
 retire_removed_clis() {
 	local removed=0 dir name candidate target head_lines
 	for dir in "$BIN_DIR" "${HOME}/.local/bin"; do
@@ -332,7 +332,7 @@ retire_removed_clis() {
 			if [[ -L $candidate ]]; then
 				target=$(readlink "$candidate" 2>/dev/null || true)
 				case "$target" in
-				*"/plugins/dev/scripts/${name}.sh")
+				*"/plugins/dev/scripts/${name}.sh" | *"/plugins/dev/scripts/${name}")
 					rm -f "$candidate"
 					removed=$((removed + 1))
 					;;
@@ -352,8 +352,29 @@ retire_removed_clis() {
 	return 0
 }
 
+# CTC-2981: LaunchAgents whose programs left the plugin. channel-watcher was
+# installed as a user LaunchAgent, so an upgraded Mac keeps loading a plist that
+# points at a deleted script. Boot it out (not-loaded is fine) and remove the
+# plist. macOS-only, and idempotent: with no plist left there is nothing to do.
+# CATALYST_LAUNCH_AGENTS_DIR lets tests keep this off the operator's real dir.
+RETIRED_LAUNCH_AGENT_LABELS=(ai.coalesce.catalyst-channel-watcher)
+retire_removed_launch_agents() {
+	[[ "$(uname -s 2>/dev/null)" == "Darwin" ]] || return 0
+	local dir="${CATALYST_LAUNCH_AGENTS_DIR:-${HOME}/Library/LaunchAgents}"
+	local label plist
+	for label in "${RETIRED_LAUNCH_AGENT_LABELS[@]}"; do
+		plist="$dir/${label}.plist"
+		[[ -f $plist ]] || continue
+		launchctl bootout "gui/$(id -u)/${label}" >/dev/null 2>&1 || true
+		rm -f "$plist"
+		echo "  Retired LaunchAgent: ${label}"
+	done
+	return 0
+}
+
 if [[ $mode == "uninstall" ]]; then
 	retire_removed_clis
+	retire_removed_launch_agents
 	if [[ -d $BIN_DIR ]]; then
 		for entry in "${CLI_ENTRIES[@]}"; do
 			dest_name="${entry##*:}"
@@ -458,6 +479,7 @@ sweep_local_bin() {
 sweep_stale_target_symlinks
 sweep_local_bin
 retire_removed_clis
+retire_removed_launch_agents
 
 # When source is inside the plugin cache, write version-discovering wrappers so
 # plugin upgrades take effect immediately without re-running install-cli.sh.

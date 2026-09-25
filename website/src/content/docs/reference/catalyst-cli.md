@@ -61,14 +61,6 @@ Tail and wait-for primitives over the global append-only event log.
 
 [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/catalyst-events)
 
-### catalyst-comms
-
-File-based JSONL agent communication channels (no HTTP, no server).
-
-**Key subcommands:** `join`
-
-[Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/catalyst-comms)
-
 ### catalyst-filter
 
 DEPRECATED alias for catalyst-broker (delegates so legacy callers keep working).

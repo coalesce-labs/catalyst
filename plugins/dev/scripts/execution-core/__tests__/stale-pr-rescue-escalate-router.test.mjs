@@ -9,7 +9,7 @@
 // bare-fn form in the plan sketch never lands a label. Every case here uses a
 // real temp orchDir + injected event/comms sinks so nothing touches the fleet.
 import { test, expect } from "bun:test";
-import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultEscalate } from "../stale-pr-rescue-timer.mjs";
@@ -232,5 +232,70 @@ test("enforce does NOT record a page on a concierge route (no steward → count 
     expect(existsSync(join(orchDir, ".steward-pages", "proj-uuid-1.json"))).toBe(false);
   } finally {
     rmSync(orchDir, { recursive: true, force: true });
+  }
+});
+
+// CTC-2981: the default page is a catalyst.alert.raised on the shared event log
+// (the channel post it replaced was never read). CATALYST_DIR points the append
+// at a temp dir, so nothing reaches the operator's log.
+function readAlerts(catalystDir) {
+  const dir = join(catalystDir, "events");
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .flatMap((f) => readFileSync(join(dir, f), "utf8").trim().split("\n"))
+    .filter(Boolean)
+    .map((l) => JSON.parse(l))
+    .filter((e) => e.attributes?.["event.name"] === "catalyst.alert.raised");
+}
+
+test("enforce, steward route: the default page raises an alert naming the steward and the PR", () => {
+  const orchDir = tmpOrch();
+  const catalystDir = tmpOrch();
+  try {
+    const out = defaultEscalate("CTL-1", { reason: "conflict", prNumber: 9 }, {
+      orchDir,
+      linearWrite: okTransport([]),
+      env: { CATALYST_STEWARD_ESCALATION: "enforce", CATALYST_DIR: catalystDir },
+      appendDelegateEvent: () => {},
+      resolveSteward: (scope) => ({ role: "steward-p13", scope }),
+      readProjectId: () => "proj-1",
+      stewardTookTurn: noTurn,
+    });
+    expect(out.escalatedTo).toBe("steward");
+    const alerts = readAlerts(catalystDir);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].attributes["event.label"]).toBe("stale_pr_unrescued");
+    expect(alerts[0].resource["service.name"]).toBe("catalyst.execution-core");
+    expect(alerts[0].body.payload.target).toBe("steward");
+    expect(alerts[0].body.payload.source).toBe("CTL-1");
+    expect(alerts[0].body.payload.reason).toContain("steward steward-p13");
+    expect(alerts[0].body.payload.reason).toContain("PR #9");
+  } finally {
+    rmSync(orchDir, { recursive: true, force: true });
+    rmSync(catalystDir, { recursive: true, force: true });
+  }
+});
+
+test("enforce, no steward: the default page raises an alert addressed to the concierge", () => {
+  const orchDir = tmpOrch();
+  const catalystDir = tmpOrch();
+  try {
+    defaultEscalate("CTL-2", { reason: "conflict", prNumber: 12 }, {
+      orchDir,
+      linearWrite: okTransport([]),
+      env: { CATALYST_STEWARD_ESCALATION: "enforce", CATALYST_DIR: catalystDir },
+      appendDelegateEvent: () => {},
+      resolveSteward: () => null,
+      readProjectId: noProject,
+      stewardTookTurn: noTurn,
+    });
+    const alerts = readAlerts(catalystDir);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].body.payload.target).toBe("concierge");
+    expect(alerts[0].body.payload.reason).toContain("→ concierge");
+    expect(alerts[0].body.payload.reason).toContain("PR #12");
+  } finally {
+    rmSync(orchDir, { recursive: true, force: true });
+    rmSync(catalystDir, { recursive: true, force: true });
   }
 });

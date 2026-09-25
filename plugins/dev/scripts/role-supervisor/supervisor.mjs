@@ -78,8 +78,15 @@ export function buildStatusDocPrompt(ageMin) {
  *
  * `runSession` is injectable — the tests drive the whole restart ladder with a
  * fake, so none of this policy has to be discovered during an actual outage.
- * It receives {prompt, cwd, env, resumeSessionId} and resolves
- * {exitCode, sessionId, overloaded, quotaExhausted, lastArtifact}.
+ * It receives {prompt, cwd, env, resumeSessionId, onTurn} and resolves
+ * {exitCode, sessionId, overloaded, quotaExhausted, lastArtifact, lastTurnTs}.
+ *
+ * `onTurn` is how the heartbeat's `last_turn_ts` gets populated (CTC-2981): the
+ * session calls it each time the model completes a turn, and every beat after
+ * that carries the time. The dead-man alarm needs BOTH a stale heartbeat and a
+ * stale turn before it asks the human to relaunch the fleet, and a turn field
+ * that nothing writes reads as "no turn ever", which reduced that guard to the
+ * heartbeat alone.
  */
 export async function superviseRole(role, {
   runSession,
@@ -109,6 +116,9 @@ export async function superviseRole(role, {
 
   let attempt = 0;
   let iterations = 0;
+  // The role's most recent completed turn, carried on every beat. Seeded from
+  // the previous heartbeat so a supervisor restart does not reset it to null.
+  let lastTurnTs = numberOrNull(readHeartbeatSafe(role, env)?.last_turn_ts);
   try {
     for (;;) {
       if (++iterations > maxIterations) return { stopped: "max-iterations", attempt };
@@ -119,7 +129,18 @@ export async function superviseRole(role, {
         ? buildIdleReentryPrompt()
         : buildResumePrompt(manifest, { resumedFrom: manifest.handoff_path ?? "the status doc", reason: attempt ? "previous session ended" : null });
 
-      beat(role, { now: now(), sessionId: resumeSessionId, scope: manifest.scope, state: "running" }, env);
+      beat(role, { now: now(), sessionId: resumeSessionId, scope: manifest.scope, state: "running", lastTurnTs }, env);
+
+      // A completed turn is recorded at once, so the dead-man sees it even when
+      // the refresh timer is off or has not fired yet.
+      const onTurn = () => {
+        lastTurnTs = now();
+        try {
+          beat(role, { now: now(), sessionId: resumeSessionId, scope: manifest.scope, state: "running", lastTurnTs }, env);
+        } catch {
+          /* fail-open: a failed turn record must never crash the supervisor */
+        }
+      };
 
       // Keep the heartbeat fresh for the LIFE of the session, not just at its
       // boundary — otherwise a healthy long-running role reads as silent and its
@@ -132,7 +153,7 @@ export async function superviseRole(role, {
       if (livenessRefreshMs > 0 && typeof setInterval === "function") {
         refreshTimer = setInterval(() => {
           try {
-            beat(role, { now: now(), sessionId: resumeSessionId, scope: manifest.scope, state: "running" }, env);
+            beat(role, { now: now(), sessionId: resumeSessionId, scope: manifest.scope, state: "running", lastTurnTs }, env);
           } catch {
             /* fail-open: a failed liveness refresh must never crash the supervisor */
           }
@@ -142,7 +163,7 @@ export async function superviseRole(role, {
 
       let result;
       try {
-        result = await runSession({ prompt, cwd: manifest.cwd, env, resumeSessionId });
+        result = await runSession({ prompt, cwd: manifest.cwd, env, resumeSessionId, onTurn });
       } catch (err) {
         // A thrown error is a crash: classify it the same way as a bad exit so
         // an overload thrown rather than returned still takes the same ladder.
@@ -152,7 +173,7 @@ export async function superviseRole(role, {
       }
 
       if (result?.sessionId) writeSession(role, result.sessionId, env);
-      beat(role, { now: now(), sessionId: result?.sessionId ?? resumeSessionId, scope: manifest.scope, state: "between-sessions", lastArtifact: result?.lastArtifact ?? null }, env);
+      beat(role, { now: now(), sessionId: result?.sessionId ?? resumeSessionId, scope: manifest.scope, state: "between-sessions", lastArtifact: result?.lastArtifact ?? null, lastTurnTs }, env);
 
       const counters = readCounters(role, env);
       const decision = decideRestart({
@@ -169,7 +190,7 @@ export async function superviseRole(role, {
       log(`role-supervisor[${role}]: ${decision.action} — ${decision.reason}`);
 
       if (decision.action === "stop") {
-        beat(role, { now: now(), scope: manifest.scope, state: "stopped" }, env);
+        beat(role, { now: now(), scope: manifest.scope, state: "stopped", lastTurnTs }, env);
         return { stopped: decision.reason, attempt };
       }
 
@@ -178,7 +199,7 @@ export async function superviseRole(role, {
       attempt = decision.action === "resume" || decision.action === "restart" ? attempt + 1 : 0;
 
       if (decision.waitMs > 0) {
-        beat(role, { now: now(), scope: manifest.scope, state: `waiting:${Math.round(decision.waitMs / 1000)}s` }, env);
+        beat(role, { now: now(), scope: manifest.scope, state: `waiting:${Math.round(decision.waitMs / 1000)}s`, lastTurnTs }, env);
         await sleep(decision.waitMs);
       }
     }
@@ -190,6 +211,10 @@ export async function superviseRole(role, {
 /** Is this role silent or dead right now? Used by the quiet-fleet instrument. */
 export function roleLiveness(role, { now = Date.now() } = {}, env = process.env) {
   return classifyHeartbeat(readHeartbeatSafe(role, env), { now });
+}
+
+function numberOrNull(v) {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
 }
 
 function readHeartbeatSafe(role, env) {

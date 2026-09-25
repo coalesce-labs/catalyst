@@ -44,6 +44,7 @@ import { DEFAULTS, classifyMergeTree, decideRescue } from "./stale-pr-rescue.mjs
 import { nextEscalationTarget, resolveSteward as resolveStewardCore, TARGET } from "./escalation-router.mjs";
 import { listRoles } from "../role-supervisor/doctor.mjs";
 import { readManifest, readHeartbeat } from "../role-supervisor/state.mjs";
+import { emitRoleAlarm, ROLE_ALARM_KIND } from "../role-supervisor/alarm.mjs";
 // CTL-2129: the ticket→scope resolution + per-item counter that light up the
 // steward tier. scopeForTicket maps the ticket to its project id (the steward
 // scope key); readItemPages/recordItemPage give Scenario 2 its per-item priorPages
@@ -388,15 +389,12 @@ export function defaultReadProjectId(ticket) {
 
 // CTL-2129: the default per-item reset predicate — has the resolved steward taken
 // a turn since it was last paged on this scope? v1 reads the steward heartbeat's
-// `last_turn_ts`, but note: NO beat() caller populates that field today (state.mjs
-// defaults `lastTurnTs=null` and every supervisor.mjs beat() omits it), so this
-// predicate is currently INERT — it always returns false and the per-item count
-// never resets on a steward turn. The fail direction is safe (the count only
-// climbs → escalates INWARD to the concierge, never a human page, never silence),
-// but the reset does not fire until a real turn signal is wired. The precise
-// "steward commented in THIS ticket's thread since the page" signal — the
-// comms-channel turn dead-man.mjs already reads via `defaultLastChannelTurnMs` —
-// is the documented, injectable drop-in replacement (see the plan's Decisions §4);
+// `last_turn_ts`, which the role-supervisor records on each completed model turn
+// since CTC-2981 (supervisor.mjs onTurn). Before that no beat() carried it and
+// this predicate always returned false. It is any turn, not a turn on THIS
+// ticket, so it resets the per-item count more readily than intended. The precise
+// "steward commented in THIS ticket's thread since the page" signal is the
+// documented, injectable drop-in replacement (see the plan's Decisions §4);
 // deferred, not designed around. Fail-open to false: an unresolvable steward or
 // unreadable heartbeat means "no turn observed", which keeps the count climbing
 // rather than silently clearing it.
@@ -413,29 +411,34 @@ export function defaultStewardTookTurn(scopeKey, lastPagedAtMs) {
   }
 }
 
-// CTL-2000: page the resolved ladder rung on the shared channel (never a human).
-// Honors `target` (from nextEscalationTarget): a STEWARD route is delivered TO
-// the resolved steward, not to the concierge — otherwise the emitted event and
-// return value claim `routed-to-steward` while the message silently goes to the
-// concierge, skipping the mandated steward rung (Codex P2). Falls back to the
+// CTL-2000: page the resolved ladder rung (never a human). Honors `target` (from
+// nextEscalationTarget): a STEWARD route names the resolved steward, not the
+// concierge — otherwise the page would claim `routed-to-steward` while addressing
+// the concierge, skipping the mandated steward rung (Codex P2). Falls back to the
 // concierge when there is no steward (today's only reachable case until CTL-1974
-// populates `scopeKeys`). Fail-open — a failed post must not turn into a silent
-// drop; best-effort spawn, short timeout; the returned bool is advisory.
+// populates `scopeKeys`).
+// CTC-2981: the page used to be a `catalyst-comms --to <role>` channel post. It
+// is now a catalyst.alert.raised (kind stale_pr_unrescued) on the shared event
+// log — the topic the board's fleet-alert strip, Loki and the cloud surface —
+// naming the routed role and the PR in its reason, plus the same body on the
+// daemon log. ⚠️ Like role-supervisor/quiet-fleet.mjs's page, it does NOT reach
+// a running steward or concierge session: no existing path delivers into one
+// (the supervisor injects nothing into a live session and no event name carries
+// a role identity to wake on). The returned bool (did the alert append) stays
+// advisory.
 export function defaultPostConciergePage({ ticket, detail, target, env = process.env } = {}) {
   try {
-    const channel = env?.CATALYST_CONCIERGE_CHANNEL || "concierge";
     const toSteward = target?.target === TARGET.STEWARD && target?.steward?.role ? String(target.steward.role) : null;
     const to = toSteward ?? env?.CATALYST_CONCIERGE_ID ?? "concierge";
     const rung = toSteward ? `steward (${to})` : "the steward";
-    const comms = fileURLToPath(new URL("../catalyst-comms", import.meta.url));
     const body =
-      `instrument/stale-pr-rescue: ${ticket} could not be rescued (${detail?.reason ?? "unresolvable conflict"}` +
+      `instrument/stale-pr-rescue → ${toSteward ? `steward ${to}` : to}: ${ticket} could not be rescued (${detail?.reason ?? "unresolvable conflict"}` +
       `${detail?.prNumber ? `, PR #${detail.prNumber}` : ""}) — ${toSteward ? "your scope" : `page ${rung}`} / decide ask-vs-relaunch.`;
-    const res = spawnSync(comms, ["send", channel, body, "--as", "stale-pr-rescue", "--to", to, "--type", "attention"], {
-      encoding: "utf8",
-      timeout: 15_000,
-    });
-    return res.status === 0;
+    log.warn({ ticket, to, target: target?.target ?? null }, body);
+    return emitRoleAlarm(
+      { action: "raised", kind: ROLE_ALARM_KIND.STALE_PR_UNRESCUED, instrument: "stale-pr-rescue", reason: body, source: ticket, target: target?.target ?? null },
+      { env, serviceName: "catalyst.execution-core" },
+    );
   } catch {
     return false;
   }
@@ -498,7 +501,7 @@ export function defaultEscalate(
     // Count this page ONLY on a STEWARD route — a concierge route is already the
     // inward escalation, so counting it would double-advance the ladder. The count
     // advances on the resolved TARGET, not on postConciergePage's advisory success
-    // bool: a flaky comms send must still let the ladder progress inward toward the
+    // bool: a failed page must still let the ladder progress inward toward the
     // concierge, never stick at the steward rung forever.
     if (t.target === TARGET.STEWARD) recordItemPage(orchDir, scopeKey);
     // Observable page event on the unified log (queryable by ticket). The `type`
