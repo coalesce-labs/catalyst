@@ -155,26 +155,8 @@ describe("CTL-154 — build script", () => {
   });
 });
 
-describe("CTL-154 — README.md wiring", () => {
-  const readme = readFileSync(join(REPO_ROOT, "README.md"), "utf8");
-
-  it("opens with a <picture> element before the first H1", () => {
-    const pictureIdx = readme.indexOf("<picture>");
-    const h1Idx = readme.search(/^#\s+Catalyst/m);
-    expect(pictureIdx).toBeGreaterThanOrEqual(0);
-    expect(h1Idx).toBeGreaterThan(0);
-    expect(pictureIdx).toBeLessThan(h1Idx);
-  });
-
-  it("<picture> references both the light and dark hero PNGs", () => {
-    expect(readme).toContain("readme-hero-light.png");
-    expect(readme).toContain("readme-hero-dark.png");
-  });
-
-  it("<picture> uses prefers-color-scheme for dark mode", () => {
-    expect(readme).toMatch(/media="\(prefers-color-scheme:\s*dark\)"/);
-  });
-});
+// CTC-3316: the README.md <picture> wiring tests were removed when #4154 replaced the root README with
+// the local-runtime deprecation notice, which deliberately carries no hero. The hero assets above still ship.
 
 describe("CTL-154 — V1 catalyst-logo grep-clean", () => {
   it("author-maintained sources have no catalyst-logo.svg references", () => {
