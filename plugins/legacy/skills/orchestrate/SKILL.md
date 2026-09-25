@@ -887,15 +887,12 @@ Write these fields into your signal file as they become available:
   deployment.url      (from deployment_status event, if configured)
   status              (pr-created → done)
 
-On unrecoverable blockers (human changes-requested, DIRTY after attempts,
-CI blocked after 3 fix attempts), write status="stalled" with details and
-post a `comms attention` message — the orchestrator's Phase 4 dispatches
-remediation for stalled workers.
+On unrecoverable blockers (human changes-requested, DIRTY after attempts, CI blocked after 3 fix attempts), write status="stalled" with a stallReason — the orchestrator's Phase 4 surfaces it as a NEEDS ATTENTION item and dispatches remediation for stalled workers. For a blocker that does not stop you (scope conflict, missing access, ambiguous spec), call request_attention "<reason>" instead: it records attentionRequest in the signal file without changing status.
 
 Status transitions you do NOT write (orchestrator-owned fallback only):
   done   (written by orchestrator Phase 4 ONLY when worker stalled before merge)
 
-COMMS DISCIPLINE: when posting to the shared comms channel, follow the rules below (the catalyst-comms skill that documented them was removed with the daemon, CTL-2240):
+COMMS DISCIPLINE: the catalyst-comms channel was removed in CTC-2981, so these posts are no-ops kept for older installs; a blocker reaches the orchestrator only through the signal file (request_attention for an attention-only blocker, status="stalled" + stallReason for a stall). When a channel is present, follow the rules below (the catalyst-comms skill that documented them was removed with the daemon, CTL-2240):
   - info = phase transitions + PR-opened only (default heartbeat, ~5-7 per session)
   - attention = orchestrator action required (0-2 per session, MANDATORY on: scope
     conflict, missing access, ambiguous spec, 3+ repeated CI failures, status=stalled)
@@ -1154,7 +1151,7 @@ scan so the response stays proportional. Every reaction reads authoritative stat
 | `linear.issue.state_changed`                                                                    | Reconcile Linear state with the worker signal                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `filter.wake.${ORCH_NAME}` (matched on full dotted `event.name`)                                | Daemon-filtered semantic wake: read `.body.payload.reason` for log context, then run the full reactive scan. The reason describes what triggered the daemon (e.g., "CI failed on PR #416") but is never the authoritative source                                                                                                                                                                                                                                          |
 | `phase.<name>.complete.<TICKET>` (via phase_lifecycle, CTL-452)                                 | Resolve the next phase via `orchestrate-phase-advance --ticket <T> --completed-phase <name>`; that helper looks up the next phase in this script's own 9-phase sequence (triage..monitor-deploy; this legacy wake table does not dispatch teardown) and calls `orchestrate-dispatch-next --phase <next> --ticket <T>`. If `completed-phase=monitor-deploy`, no advance (terminal). The advance is idempotent under redundant wakes                                                                                                                        |
-| `phase.<name>.failed.<TICKET>` (via phase_lifecycle, CTL-452)                                   | Run `orchestrate-revive` once for the affected ticket; on the **second** failure (reviveCount ≥ MAX_REVIVES), mark worker `stalled` and post `attention` to the shared comms channel. Matches the existing one-retry-then-escalate handling for legacy oneshot workers                                                                                                                                                                                                    |
+| `phase.<name>.failed.<TICKET>` (via phase_lifecycle, CTL-452)                                   | Run `orchestrate-revive` once for the affected ticket; on the **second** failure (reviveCount ≥ MAX_REVIVES), mark worker `stalled` and raise a state-level attention item via catalyst-state. Matches the existing one-retry-then-escalate handling for legacy oneshot workers                                                                                                                                                                                                    |
 | `phase.<name>.turn-cap-exhausted.<TICKET>` (via phase_lifecycle, CTL-484)                       | Run `orchestrate-revive` (same script — its continuation branch handles this status). The branch reads `handoffPath` from the per-phase signal, dispatches a `claude --bg --resume` continuation with `CATALYST_IS_CONTINUATION=true` + `CATALYST_HANDOFF_PATH` + `CATALYST_CONTINUATION_COUNT`, and bumps `.continuationCount` on a budget separate from `.reviveCount` (default 3). On budget exhaustion: `stalled` + `attentionReason="continuation-budget-exhausted"` |
 | `phase.<name>.skipped.<TICKET>` (via phase_lifecycle, CTL-512)                                   | Same as `complete`: resolve via `orchestrate-phase-advance --ticket <T> --completed-phase <name>`. Only emitted by `phase-monitor-deploy` when no `deployment_status` event arrived before `PHASE_DEPLOY_TIMEOUT_SEC`. Because `completed-phase=monitor-deploy`, the advance no-ops (terminal); the wake's purpose is to free the wave slot via the scheduler's in-flight predicate (`scheduler.mjs:isTicketInFlight`)                                                                                                                                                                       |
 | 10-minute idle (no event)                                                                       | Run the full reactive scan as a safety net                                                                                                                                                                                                                                                                                                                                                                                                                                |
@@ -1519,14 +1516,14 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
   STARTED_AT=$(jq -r '.deploy.startedAt // empty' "$WORKER_SIGNAL")
   FAILED_ATTEMPTS=$(jq -r '.deploy.failedAttempts // 0' "$WORKER_SIGNAL")
 
-  # 1. Hard timeout — escalate via comms.attention, set status=stalled.
+  # 1. Hard timeout — raise a deploy-timeout attention, set status=stalled.
   if [ -n "$STARTED_AT" ]; then
     NOW_EPOCH=$(date -u +%s)
     START_EPOCH=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$STARTED_AT" +%s 2>/dev/null \
       || date -u -d "$STARTED_AT" +%s)
     ELAPSED=$((NOW_EPOCH - START_EPOCH))
     if [ "$ELAPSED" -gt "$TIMEOUT_SEC" ]; then
-      jq '.status = "stalled"' "$WORKER_SIGNAL" > "$WORKER_SIGNAL.tmp" \
+      jq '.status = "stalled" | .attentionReason = "deploy-timeout"' "$WORKER_SIGNAL" > "$WORKER_SIGNAL.tmp" \
         && mv "$WORKER_SIGNAL.tmp" "$WORKER_SIGNAL"
       "$STATE_SCRIPT" attention "${ORCH_NAME}" "deploy-timeout" "${TICKET}" \
         "Deploy verification timed out after ${TIMEOUT_SEC}s for ${REPO}@${MERGE_SHA}"
@@ -1606,49 +1603,33 @@ Since CTL-252, workers exit at `status: "done"` after actively merging their own
 orchestrator scan is a safety-net fallback that writes `pr.mergedAt` + `status: "done"` for workers
 that stalled before completing their own merge.
 
-**Drain shared comms channel for attention (CTL-111, CTL-269):**
+**Surface workers that stalled themselves or asked for attention (CTC-2981):**
 
-Workers post `type:attention` messages to `${ORCH_NAME}` when blocked. On each wake-up, the
-orchestrator drains new messages from the channel and promotes any `attention` to a state-level
-attention item so the dashboard's NEEDS ATTENTION banner surfaces it (with author + reason).
+A worker that hits a blocker it cannot clear (human changes-requested, unresolvable conflicts, CI still failing after its fix attempts, a merge REST does not confirm) writes `status: "stalled"` plus a `stallReason` to its signal file and exits. The `catalyst-comms` channel that used to carry its `attention` post was removed in CTC-2981, so on each wake-up the orchestrator reads the signal instead and promotes the stall to a state-level attention item, which is what the dashboard's NEEDS ATTENTION banner shows.
 
-The wake mechanism for comms attention is now **unified with the filter daemon** (CTL-269): when a
-worker posts to comms, `catalyst-comms send` emits a `comms.message.posted` event to the unified
-event log; the filter daemon matches it against the orchestrator's `filter.register` prompt (which
-now mentions "any of my workers posts a comms message of type attention to me") and emits
-`filter.wake.${ORCH_NAME}`. The orchestrator wakes from that single event and runs this drain step
-to act on the attention.
+Stalls that the orchestrator or its scripts raise themselves (deploy timeout, revive or continuation budget exhausted, no session id) already carry `attentionReason`; the scan skips those, and writes `attentionReason` on the ones it surfaces so each stall is raised once.
 
-A small cursor file `${ORCH_DIR}/.comms-cursor` tracks the line count already processed so repeated
-wake-ups don't re-surface the same message. Single-writer (this scan) so no race. The cursor-based
-drain remains the **action** mechanism even though wakes come via `filter.wake`.
+A worker that hits a blocker but keeps working (scope conflict, missing access, ambiguous spec) does not change its status. It calls `request_attention`, which records `attentionRequest` and bumps `attentionRequestSeq` in its signal file. The scan raises each request once and records the sequence it raised in `attentionRequestRaisedSeq`.
 
 ```bash
-if [ -n "$COMMS_BIN" ]; then
-  CURSOR_FILE="${ORCH_DIR}/.comms-cursor"
-  SINCE=$(cat "$CURSOR_FILE" 2>/dev/null || echo 0)
-  CH_FILE="${HOME}/catalyst/comms/channels/${ORCH_NAME}.jsonl"
-  TOTAL=$(wc -l < "$CH_FILE" 2>/dev/null | tr -d ' ' || echo 0)
-
-  if [ "${TOTAL:-0}" -gt "${SINCE:-0}" ]; then
-    # `poll` here is the catalyst-comms CLI subcommand name (read since cursor),
-    # not a poll-loop metaphor — the orchestrator runs this on wake-up only.
-    "$COMMS_BIN" poll "${ORCH_NAME}" --since "$SINCE" 2>/dev/null | \
-    while IFS= read -r MSG; do
-      MSG_TYPE=$(echo "$MSG" | jq -r '.type // ""' 2>/dev/null)
-      MSG_FROM=$(echo "$MSG" | jq -r '.from // ""' 2>/dev/null)
-      MSG_BODY=$(echo "$MSG" | jq -r '.body // ""' 2>/dev/null)
-
-      if [ "$MSG_TYPE" = "attention" ]; then
-        # Extract the ticket id from the author name (workers use their TICKET_ID as --as)
-        MSG_TICKET=$(echo "$MSG_FROM" | grep -oE '^[A-Z]+-[0-9]+' || echo "$MSG_FROM")
-        "$STATE_SCRIPT" attention "${ORCH_NAME}" "comms-attention" "$MSG_TICKET" \
-          "[$MSG_FROM] $MSG_BODY" 2>/dev/null || true
-      fi
-    done
-    echo "$TOTAL" > "$CURSOR_FILE"
+for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
+  TICKET=$(jq -r '.ticket' "$WORKER_SIGNAL")
+  REQ_SEQ=$(jq -r '.attentionRequestSeq // 0' "$WORKER_SIGNAL")
+  if [ "$REQ_SEQ" -gt "$(jq -r '.attentionRequestRaisedSeq // 0' "$WORKER_SIGNAL")" ]; then
+    REQ=$(jq -r '.attentionRequest // "no reason recorded in the signal file"' "$WORKER_SIGNAL")
+    if "$STATE_SCRIPT" attention "${ORCH_NAME}" "worker-attention" "${TICKET}" "[${TICKET}] ${REQ}" 2>/dev/null; then
+      jq --argjson seq "$REQ_SEQ" '.attentionRequestRaisedSeq = $seq' \
+        "$WORKER_SIGNAL" > "$WORKER_SIGNAL.tmp" && mv "$WORKER_SIGNAL.tmp" "$WORKER_SIGNAL"
+    fi
   fi
-fi
+  [ "$(jq -r '.status // ""' "$WORKER_SIGNAL")" = "stalled" ] || continue
+  [ -z "$(jq -r '.attentionReason // ""' "$WORKER_SIGNAL")" ] || continue
+  REASON=$(jq -r '.stallReason // "no reason recorded in the signal file"' "$WORKER_SIGNAL")
+  "$STATE_SCRIPT" attention "${ORCH_NAME}" "worker-stalled" "${TICKET}" \
+    "[${TICKET}] stalled: ${REASON}" 2>/dev/null || continue
+  jq --arg msg "$REASON" '.attentionReason = "worker-stalled" | .attentionMessage = $msg' \
+    "$WORKER_SIGNAL" > "$WORKER_SIGNAL.tmp" && mv "$WORKER_SIGNAL.tmp" "$WORKER_SIGNAL"
+done
 ```
 
 **Detect stalled workers and raise attention:**

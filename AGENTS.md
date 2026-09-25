@@ -127,7 +127,7 @@ Edit plugin files in `plugins/*/`, test locally (symlinks make changes immediate
 
 Catalyst's **execution-core daemon** ships work as **phase-agent workers** — one short-lived background agent job per phase, walking a 10-phase pipeline (triage → research → plan → implement → verify → review → pr → monitor-merge → monitor-deploy → teardown). The legacy wave-orchestration model is preserved in the **catalyst-legacy** plugin as a fallback; the mode is selected by `.catalyst/config.json → catalyst.orchestration.dispatchMode`.
 
-Cross-process communication is built on a **single unified event log** at `~/catalyst/events/YYYY-MM.jsonl`. Workers, the phase dispatcher, the broker, the webhook receiver, and `catalyst-comms send` all append; the broker daemon, the HUD, the orch-monitor web dashboard, and `catalyst-events wait-for` all read.
+Cross-process communication is built on a **single unified event log** at `~/catalyst/events/YYYY-MM.jsonl`. Workers, the phase dispatcher, the broker, and the webhook receiver all append; the broker daemon, the HUD, the orch-monitor web dashboard, and `catalyst-events wait-for` all read.
 
 ## Observability (OpenTelemetry: Loki · Tempo · Prometheus · Grafana)
 

@@ -299,6 +299,5 @@ find ~/catalyst/runs -name "*.json" -path "*/workers/*.json" -not -name "*-rollu
 - `catalyst-archive` — archives completed orchestrators (the `teardown` skill was removed with the daemon, CTL-2240)
 - `catalyst-events` — event-log patterns and filter cookbook (the `monitor-events` skill was removed with the daemon, CTL-2240)
 - The broker daemon — Groq-backed semantic event router (the `catalyst-filter` skill was removed with the daemon, CTL-2240)
-- `catalyst-comms` CLI — agent-to-agent pub/sub; `attention` posts surface in `/god restart` (its skill was removed with the daemon, CTL-2240)
 - `CTL-282` — HUD-panel / 30-minute briefing variant of this skill (child ticket)
 - `CTL-192` — session state tracking and crash-resilient restart (related)

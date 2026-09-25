@@ -11,7 +11,9 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { superviseRole, buildResumePrompt, buildIdleReentryPrompt } from "./supervisor.mjs";
-import { writeManifest, readHeartbeat, readCounters, acquireLease, releaseLease, readLease } from "./state.mjs";
+import { writeManifest, readHeartbeat, readCounters, acquireLease, releaseLease, readLease, beat } from "./state.mjs";
+import { runSdkSession } from "./sdk-session.mjs";
+import { runDeadManOnce } from "./dead-man.mjs";
 import { roleFiles } from "./paths.mjs";
 
 let passes = 0, failures = 0;
@@ -226,6 +228,74 @@ await t("a first boot is NOT told it was restarted", () => {
 await t("the idle re-entry does not ask the role to start over", () => {
   const p = buildIdleReentryPrompt();
   assert.match(p, /do not start over/);
+});
+
+console.log("10. the heartbeat records the role's last completed turn (CTC-2981)");
+await t("a turn the session reports is written to last_turn_ts at once, and every later beat keeps it", async () => {
+  const s = scratch();
+  seedRole(s.env, "concierge", { activity: {} });
+  let clock = 1_000_000;
+  let midTurn = null;
+  await superviseRole("concierge", {
+    env: s.env, sleep: noSleep, log: () => {}, livenessRefreshMs: 0, now: () => clock,
+    runSession: async ({ onTurn }) => {
+      clock = 2_000_000;
+      onTurn();
+      midTurn = readHeartbeat("concierge", s.env).last_turn_ts;
+      clock = 3_000_000;
+      return { exitCode: 0, sessionId: "sess-c" };
+    },
+  });
+  assert.equal(midTurn, 2_000_000, "the turn is on the heartbeat while the session is still running");
+  const hb = readHeartbeat("concierge", s.env);
+  assert.equal(hb.state, "stopped");
+  assert.equal(hb.ts, 3_000_000);
+  assert.equal(hb.last_turn_ts, 2_000_000, "the between-sessions and stopped beats carry the turn forward");
+  s.cleanup();
+});
+await t("a restarted supervisor keeps the previous heartbeat's turn instead of resetting it to null", async () => {
+  const s = scratch();
+  seedRole(s.env, "concierge", { activity: {} });
+  beat("concierge", { now: 500, lastTurnTs: 400 }, s.env);
+  await superviseRole("concierge", {
+    env: s.env, sleep: noSleep, log: () => {}, livenessRefreshMs: 0, now: () => 900,
+    runSession: async () => ({ exitCode: 0, sessionId: "sess-r" }),
+  });
+  assert.equal(readHeartbeat("concierge", s.env).last_turn_ts, 400);
+  s.cleanup();
+});
+await t("the SDK session reports each assistant message as a turn, and a bare result is not one", async () => {
+  const turns = [];
+  let t0 = 10;
+  const query = async function* () {
+    yield { type: "system", session_id: "sess-q" };
+    yield { type: "assistant", session_id: "sess-q" };
+    yield { type: "assistant", session_id: "sess-q" };
+    yield { type: "result", subtype: "success", session_id: "sess-q" };
+  };
+  const r = await runSdkSession({ prompt: "p", cwd: "/tmp", env: {}, query, log: () => {}, now: () => (t0 += 10), onTurn: (ts) => turns.push(ts) });
+  assert.deepEqual(turns, [20, 30]);
+  assert.equal(r.lastTurnTs, 30);
+
+  const errOnly = async function* () { yield { type: "result", subtype: "error_during_execution", session_id: "sess-e" }; };
+  const e = await runSdkSession({ prompt: "p", cwd: "/tmp", env: {}, query: errOnly, log: () => {}, onTurn: () => turns.push("x") });
+  assert.equal(e.lastTurnTs, null);
+  assert.equal(turns.includes("x"), false);
+});
+await t("dead-man reading the supervisor's heartbeat: a recent turn holds off the page, and a dead concierge still pages", async () => {
+  const s = scratch();
+  const M = 60_000;
+  const now = 10_000_000_000;
+  const raised = [];
+  const alarm = (i) => { raised.push(i.action); return true; };
+  // Heartbeat stale (40m), turn recent (5m): alive — no page.
+  beat("concierge", { now: now - 40 * M, lastTurnTs: now - 5 * M }, s.env);
+  assert.equal(runDeadManOnce({ now, env: s.env, alarm }).fired, false);
+  // Both stale: dead — page.
+  beat("concierge", { now: now - 40 * M, lastTurnTs: now - 45 * M }, s.env);
+  assert.equal(runDeadManOnce({ now, env: s.env, alarm }).fired, true);
+  assert.deepEqual(raised, ["raised"]);
+  s.cleanup();
 });
 
 console.log(`\nsupervisor.test.mjs: ${passes} passed, ${failures} failed`);

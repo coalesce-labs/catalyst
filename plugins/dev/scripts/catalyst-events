@@ -10,7 +10,7 @@
 #
 # Both seek to EOF on first run so historical heartbeat noise does not skew
 # filters. Both use fswatch when available and fall back to 1 s sleep polling
-# when not (matches the catalyst-comms poll --wait precedent).
+# when not.
 #
 # Topics in the log today include catalyst.* (orchestrator/worker/session),
 # github.* (CTL-209 webhook fan-out), linear.* (CTL-210), and comms.* (CTL-210).

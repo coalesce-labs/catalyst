@@ -1,6 +1,6 @@
 // paths.mjs — CTL-1994. Where a supervised role's state lives on disk.
 //
-// Everything a role needs to be restarted is either in Linear, on the channel,
+// Everything a role needs to be restarted is either in Linear, in the event log,
 // or in one of these files. Nothing important lives in the process — that is
 // the whole design constraint, and it is why a 529 that killed seven lanes on
 // 2026-08-18 lost nothing that had been written.

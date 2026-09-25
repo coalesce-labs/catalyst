@@ -11,7 +11,7 @@
 #      same SCRIPT_DIR it would compute on direct invocation (i.e. the bug is fixed).
 #
 # Affected CLIs: catalyst-monitor.sh, catalyst-state.sh, catalyst-session.sh,
-# catalyst-db.sh, catalyst-claude.sh, catalyst-comms.
+# catalyst-db.sh, catalyst-claude.sh (catalyst-comms was removed, CTC-2981).
 
 set -uo pipefail
 
@@ -106,7 +106,6 @@ AFFECTED_CLIS=(
 	"catalyst-session.sh"
 	"catalyst-db.sh"
 	"catalyst-claude.sh"
-	"catalyst-comms"
 )
 
 for cli in "${AFFECTED_CLIS[@]}"; do

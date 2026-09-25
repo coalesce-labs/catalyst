@@ -26,8 +26,7 @@ instrument  →  steward of the scope  →  concierge  →  human (as an ask)
   the comment watcher page the **steward**, threaded, tagged `instrument/<name>`. They never label, and they never post into a human's queue.
 - **How the steward rung resolves (CTL-2129):** the router matches a stalled item's **scope key** — its
   Linear **project id** — against each role's `manifest.scopeKeys` (`resolveSteward`). The concierge populates that array at scaffold time via `role-supervisor/install.sh --scope-keys <projectId>` (`scaffold.md`). A project with no registered steward — or a scope key nothing matches — falls through to **you**, which is the correct backstop, not a bug.
-- **Two silences from the same steward on the same item** (≈ 90 min) → the instrument pages **you** on the
-  channel and the doctor goes red. Your call then is **ask vs relaunch** — say which, and why, in a channel turn. Relaunching is usually right; an ask is right when the *work* is ambiguous, not the role.
+- **Two silences from the same steward on the same item** (≈ 90 min) → the instrument addresses its page to **you**, as a `catalyst.alert.raised` on the shared event log that names you in its reason, and the doctor goes red. Nothing delivers that alert into your session: you see it on the board's fleet-alert strip (CTC-2981). Your call then is **ask vs relaunch** — say which, and why, in the item's thread. Relaunching is usually right; an ask is right when the *work* is ambiguous, not the role.
 - **You** reach the human only as an **ask**, with Options and a Default.
 - ⛔ **PR merge-blocker state is steward work (`merge-pr`) — never diagnose it yourself from a bare `gh pr checks` read (CTL-2298).** `Mergify Merge Protections: fail` labelled "waiting on 👀 reviews" names the **`no unresolved review threads before merge`** protection: it almost always means an existing review already left threads open, which is our work to resolve (`catalyst-dev:review-comments`, then `resolveReviewThread`), not a wait for a review to arrive. Confirm before concluding "no review posted": in GraphQL filter `pullRequest.reviewThreads.nodes[]` on `isResolved == false` (there is no `reviewThreads.unresolved` field — the `review-comments` skill's `assets/references/review-thread-resolution.md` (lines 59-65) has the working query), or read the mirror's `/admin/github/pr-activity`, whose `reviewThreads.unresolved` is a computed count; a query that errors is inconclusive, not zero, and say which of the two states you found, with the count. Measured 2026-09-07: catalyst-cloud #3024 had a Codex review with one open P2 thread; the concierge read the rollup, reported "waiting for a review", and asked the human to request one.
 
@@ -35,10 +34,10 @@ instrument  →  steward of the scope  →  concierge  →  human (as an ask)
 
 ⚠️ **"The concierge posts a holding reply" cannot backstop the concierge.** A 529 wave takes stewards and concierge together — measured twice on 2026-08-18. So two mechanisms live **outside** the fleet:
 
-- the launchd-live **sentinel** posts the tagged holding reply *"steward/<slug> is being restarted"* at the
-  15-minute mark, and the supervisor restarts the role;
-- the out-of-fleet **dead-man alarm** fires when there is no concierge heartbeat **and** no channel turn
-  for 30 minutes; it pushes the human once and posts on the channel.
+- the launchd-live **sentinel** raises the tagged holding alert *"steward/<slug> is being restarted"* at the 15-minute mark, and the supervisor restarts the role;
+- the out-of-fleet **dead-man alarm** fires when there is no concierge heartbeat **and** no turn for 30 minutes; it raises one alert, framed as an ask, for the human.
+
+Both raise `catalyst.alert.raised` on the shared event log, which the board's fleet-alert strip shows until the role recovers (CTC-2981; the old channel posts were never read).
 
 Neither is yours to run, and that is the point — you cannot be the thing that notices you are dead.
 

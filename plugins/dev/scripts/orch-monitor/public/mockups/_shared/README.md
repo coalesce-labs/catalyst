@@ -129,7 +129,6 @@ a cheat-sheet overlay. Bindings never fire while focus is on `input`, `textarea`
 | `g h`       | Navigate to `index.html` (gallery home)             |
 | `g d`       | Navigate to `orch.html` (orchestrator dashboard)    |
 | `g w`       | Navigate to `worker.html`                           |
-| `g c`       | Navigate to `comms.html`                            |
 | `g b`       | Navigate to `briefing.html`                         |
 | `g v`       | Navigate to `agent-graph.html`                      |
 | `g r`       | Navigate to `brand.html`                            |

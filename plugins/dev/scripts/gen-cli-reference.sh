@@ -42,7 +42,6 @@ catalyst-execution-core|Daemons|1|Manage the execution-core composing daemon (To
 catalyst-monitor|Daemons|1|On-demand orch-monitor web-dashboard server management.
 catalyst-otel-forward|Daemons|1|Entry wrapper for the otel-forward daemon (forwards OTel telemetry).
 catalyst-events|Event & comms|1|Tail and wait-for primitives over the global append-only event log.
-catalyst-comms|Event & comms|1|File-based JSONL agent communication channels (no HTTP, no server).
 catalyst-filter|Event & comms|1|DEPRECATED alias for catalyst-broker (delegates so legacy callers keep working).
 catalyst-why|Event & comms|1|Explain why the daemon believes a worker is alive, stuck, or dead (belief→rule→facts trace).
 catalyst-transitions|Event & comms|0|Live, human-readable Linear-state + phase transition log (tails the event stream — bare runs forever).

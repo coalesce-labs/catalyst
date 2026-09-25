@@ -33,7 +33,7 @@ no build step for the plugins themselves; the orchestration runtime under
   read replica — use for reads, not linearis), `ui/` (React app), `__tests__/` (contract suites)
 - `lib/` — shared bash libs: `worktree-rebase.sh`, `phase-sequence.sh`, `draft-pr.sh`, `emit-reap-intent.sh`, …
 - `phase-agent-dispatch` — dispatches one `claude --bg` job per pipeline phase
-- `catalyst-*.sh` — CLIs: `catalyst-state.sh`, `catalyst-db.sh`, `catalyst-session.sh`, `catalyst-comms`, `catalyst-events`
+- `catalyst-*.sh` — CLIs: `catalyst-state.sh`, `catalyst-db.sh`, `catalyst-session.sh`, `catalyst-events`
 
 ## Key concepts (see `thoughts/shared/CONCEPTS.md`)
 - **Unified event log** `~/catalyst/events/YYYY-MM.jsonl` — append-only backbone; all processes read/write it (NOT in repo)

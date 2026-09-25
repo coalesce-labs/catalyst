@@ -161,6 +161,19 @@ comms_post() {
     --as "$TICKET_ID" --type "$type" >/dev/null 2>&1 || true
 }
 
+# CTC-2981: an attention-only blocker (the worker has not stalled) is recorded in
+# the worker's signal file without changing its status, because the comms_post
+# above is a no-op on current installs. The orchestrator's wake-up scan raises
+# each request once, by its sequence number, as a NEEDS ATTENTION item.
+request_attention() {
+  local reason="$1"
+  comms_post attention "$reason"
+  { [ -n "${SIGNAL_FILE:-}" ] && [ -f "$SIGNAL_FILE" ]; } || return 0
+  jq --arg reason "$reason" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '.attentionRequest = $reason | .attentionRequestedAt = $ts | .attentionRequestSeq = ((.attentionRequestSeq // 0) + 1)' \
+    "$SIGNAL_FILE" > "$SIGNAL_FILE.tmp" && mv "$SIGNAL_FILE.tmp" "$SIGNAL_FILE" || true
+}
+
 # Inbound comms — read messages directed to this worker at each phase boundary.
 # COMMS_LAST_READ tracks the channel file line offset so we skip historical messages.
 # Initialized after join (below) to the current end-of-file.
@@ -445,7 +458,7 @@ that stalled or crashed before completing their own merge.
 
 **When worker reaches terminal state** (done or failed):
 
-**Mandatory `attention` on block** (per the Worker comms discipline below; the `catalyst-comms` skill was removed with the daemon, CTL-2240): in addition to the failure path below, the worker MUST also `comms_post attention "<reason>"` when it hits any of the following mid-flight, even if it is not yet writing `status: "failed"`:
+**Mandatory `attention` on block** (per the Worker comms discipline below): in addition to the failure path below, the worker MUST call `request_attention "<reason>"` when it hits any of the following mid-flight, even if it is not yet writing `status: "failed"`. It records the reason in the signal file (`attentionRequest`), which is how the orchestrator hears about it now that the `catalyst-comms` channel is gone (CTC-2981):
 
 - scope conflict with a sibling worker
 - missing required access (CLI / credential / API)
@@ -453,9 +466,7 @@ that stalled or crashed before completing their own merge.
 - same test/CI failure 3+ times after distinct fix attempts
 - writing `status: "stalled"` (any phase)
 
-Use a single `attention` per blocker (do not retry). Continue with whatever work is still possible,
-or exit if the blocker is total. The orchestrator's poll loop will promote the message to a
-state-level NEEDS ATTENTION item.
+Use a single `request_attention` per blocker (do not retry). Continue with whatever work is still possible, or exit if the blocker is total. The orchestrator's wake-up scan promotes each request to a state-level NEEDS ATTENTION item, once. A worker that writes `status: "stalled"` records `stallReason` instead, and the same scan raises that.
 
 ```bash
 if [ -n "$ORCH_ID" ] && [ -f "$STATE_SCRIPT" ]; then
@@ -864,8 +875,8 @@ while [ "$PR_DONE" = "false" ]; do
   if [ -n "$LAST_CR" ]; then
     ERROR_MSG="Changes requested by human reviewer ${LAST_CR} — operator action required"
     NEW_STATUS="stalled"; PHASE_NUM=5
-    jq --arg status "stalled" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-      '.status = $status | .updatedAt = $ts' \
+    jq --arg status "stalled" --arg reason "$ERROR_MSG" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      '.status = $status | .stallReason = $reason | .updatedAt = $ts' \
       "$SIGNAL_FILE" > "$SIGNAL_FILE.tmp" && mv "$SIGNAL_FILE.tmp" "$SIGNAL_FILE"
     comms_post attention "stalled: ${ERROR_MSG}"
     if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
@@ -900,8 +911,8 @@ while [ "$PR_DONE" = "false" ]; do
       else
         ERROR_MSG="CI blocked after ${MAX_CI_FIX_ATTEMPTS} fix attempts — escalating"
         NEW_STATUS="stalled"; PHASE_NUM=5
-        jq --arg status "stalled" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-          '.status = $status | .updatedAt = $ts' \
+        jq --arg status "stalled" --arg reason "$ERROR_MSG" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          '.status = $status | .stallReason = $reason | .updatedAt = $ts' \
           "$SIGNAL_FILE" > "$SIGNAL_FILE.tmp" && mv "$SIGNAL_FILE.tmp" "$SIGNAL_FILE"
         comms_post attention "stalled: ${ERROR_MSG}"
         if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
@@ -920,8 +931,8 @@ while [ "$PR_DONE" = "false" ]; do
     dirty)
       ERROR_MSG="Merge conflicts (DIRTY) — cannot auto-resolve"
       NEW_STATUS="stalled"; PHASE_NUM=5
-      jq --arg status "stalled" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        '.status = $status | .updatedAt = $ts' \
+      jq --arg status "stalled" --arg reason "$ERROR_MSG" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '.status = $status | .stallReason = $reason | .updatedAt = $ts' \
         "$SIGNAL_FILE" > "$SIGNAL_FILE.tmp" && mv "$SIGNAL_FILE.tmp" "$SIGNAL_FILE"
       comms_post attention "stalled: ${ERROR_MSG}"
       if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
@@ -961,8 +972,8 @@ MERGED_OK=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.merged' 2>/dev/null
 if [ "$MERGED_OK" != "true" ]; then
   ERROR_MSG="gh pr merge succeeded but REST confirms PR not merged — escalating"
   comms_post attention "stalled: ${ERROR_MSG}"
-  jq --arg status "stalled" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    '.status = $status | .updatedAt = $ts' \
+  jq --arg status "stalled" --arg reason "$ERROR_MSG" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '.status = $status | .stallReason = $reason | .updatedAt = $ts' \
     "$SIGNAL_FILE" > "$SIGNAL_FILE.tmp" && mv "$SIGNAL_FILE.tmp" "$SIGNAL_FILE"
   if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
     "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status failed --reason "merge not confirmed via REST"
@@ -1018,7 +1029,7 @@ if [ "$SKIP_DEPLOY" != "true" ] && [ -n "$MERGE_COMMIT_SHA" ]; then
       jq --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         '.status = "deploy-failed" | .updatedAt = $ts' \
         "$SIGNAL_FILE" > "$SIGNAL_FILE.tmp" && mv "$SIGNAL_FILE.tmp" "$SIGNAL_FILE"
-      comms_post attention "deploy-failed: ${PROD_ENV} deploy failed for PR #${PR_NUMBER}"
+      request_attention "deploy-failed: ${PROD_ENV} deploy failed for PR #${PR_NUMBER}"
       if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
         "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status failed --reason "deployment failed in ${PROD_ENV}"
       fi
@@ -1360,7 +1371,7 @@ fi
   `mergeable_state`
 - Worker attempts automated fix (up to 3 times) — analyzes CI failure, pushes fix commit, continues
   loop
-- After 3 failed fix attempts, worker writes `status: "stalled"` and posts `attention` to comms
+- After 3 failed fix attempts, worker writes `status: "stalled"` with a `stallReason`, which the orchestrator surfaces as a NEEDS ATTENTION item
 - The orchestrator's Phase 4 then dispatches a fix-up worker via `orchestrate-auto-fixup` (CTL-64)
 
 **Automatic handoff on stop:** When the workflow stops at any phase (user choice, unrecoverable
@@ -1394,7 +1405,7 @@ error, context exhaustion):
   Step 3. The orchestrator's Phase 4 handles this only for workers that stalled before completing
 - **Worker exits cleanly after writing `status: "done"`** — this is the expected success path. The
   orchestrator distinguishes this from stalls (no PR, no progress for 15+ minutes)
-- **Worker comms discipline** — when posting to the shared comms channel, follow the rules in the `catalyst-comms` CLI's posting discipline (`plugins/dev/scripts/catalyst-comms`; the skill documenting it was removed with the daemon, CTL-2240): `info` is the default heartbeat (phase transitions only, ~5–7 per session), `attention` is reserved for orchestrator action (0–2 per session, MANDATORY on the escalation triggers listed there — scope conflict, missing access, ambiguous spec, 3+ repeated CI failures, `status="stalled"`), `done` fires once at terminal success via the `done` subcommand. The existing `comms_post` helper in this skill already routes correctly — these rules govern _when_ you call it.
+- **Worker comms discipline** — the `catalyst-comms` CLI was removed in CTC-2981, so `comms_post` is a no-op on current installs and never the way to reach the orchestrator. A blocker reaches it only through the signal file: `request_attention "<reason>"` (sets `attentionRequest`) for an attention-only blocker, `status: "stalled"` + `stallReason` for a stall. Where an older install still ships the CLI, `comms_post` also follows its posting discipline: `info` is the default heartbeat (phase transitions only, ~5–7 per session), `attention` is reserved for orchestrator action (0–2 per session, MANDATORY on the escalation triggers listed there — scope conflict, missing access, ambiguous spec, 3+ repeated CI failures, `status="stalled"`), `done` fires once at terminal success via the `done` subcommand. The existing `comms_post` helper in this skill already routes correctly — these rules govern _when_ you call it.
 - **Worker inbound reads (CTL-249)** — `comms_check` is called after each phase transition via the signal-file update block. It polls for messages directed to `$TICKET_ID` (skipping pre-worker history via `$COMMS_LAST_READ`), logs all inbound messages, and exits on `abort`. `catalyst-comms send` already emits `comms.message.posted` events to the global event log (CTL-210), so Option B event emission is complete — extending `catalyst-events wait-for` to include `comms.message` filters is tracked in CTL-247 (the wait-for-github skill that carried it was removed with the daemon, CTL-2240).
 
 **IMPORTANT: Document Storage Rules**

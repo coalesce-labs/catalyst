@@ -37,7 +37,6 @@ describe("chrome.js pure helpers — SYSTEMS/THEMES/GNAV constants", () => {
       h: "index.html",
       d: "orch.html",
       w: "worker.html",
-      c: "comms.html",
       b: "briefing.html",
       v: "agent-graph.html",
       r: "brand.html",
@@ -236,12 +235,13 @@ describe("chrome.js pure helpers — isMacPlatform", () => {
 });
 
 describe("chrome.js pure helpers — paletteActions", () => {
-  it("returns 10 actions (7 nav + 2 appearance + 1 help)", () => {
+  it("returns 9 actions (6 nav + 2 appearance + 1 help)", () => {
     // CTL-178 removed the cycle-system appearance action alongside the
     // precision-instrument system, leaving toggle-theme and cycle-palette.
-    // CTL-171 removed the todos.html nav entry, dropping the nav count to 7.
+    // CTL-171 removed the todos.html nav entry, dropping the nav count to 7;
+    // CTC-2981 removed comms.html, dropping it to 6.
     const actions = chrome.paletteActions(chrome.GNAV);
-    expect(actions.length).toBe(10);
+    expect(actions.length).toBe(9);
   });
 
   it("covers every GNAV key with a nav action", () => {

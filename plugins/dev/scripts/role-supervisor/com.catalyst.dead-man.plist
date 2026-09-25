@@ -12,8 +12,8 @@
 
   "You cannot be the thing that notices you are dead." This unit is separate
   from every fleet role on purpose: it fires when the concierge has no heartbeat
-  AND no channel turn for 30 minutes, pushes the human ONCE, and posts on the
-  channel — the one alarm a 529 wave that took stewards and concierge together
+  AND no turn for 30 minutes and raises ONE catalyst.alert.raised on the shared
+  event log — the one alarm a 529 wave that took stewards and concierge together
   cannot silence.
 -->
 <plist version="1.0">

@@ -92,6 +92,8 @@ Remove `gh pr merge --auto` from all worker skills. After opening a PR the worke
 
 ## ADR-015: Bidirectional catalyst-comms (CTL-249)
 
+**Superseded (CTC-2981):** the `catalyst-comms` CLI and its channels were removed because nothing read them. Agents coordinate through the shared event log instead.
+
 Add inbound reads to workers: poll the shared comms channel at each phase boundary for `--filter-to <ticket-id>` messages, using a `COMMS_LAST_READ` cursor (initialized to line count at join) to skip pre-join history. Recognized inbound: `abort` (immediate exit); others TBD. **ACK gap**: no delivery guarantee (CTL-253 tracks ACK). `catalyst-comms send` emits `comms.message.posted` (v2 envelope) so tools observe traffic without reading the channel file. ~5 poll calls/run added.
 
 ## ADR-016: Claude Code metadata on the canonical envelope (CTL-374)

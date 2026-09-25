@@ -12,16 +12,15 @@
 // prior-page counts, latch state) is injected. The looping/launchd shell that
 // wires the real reads lives in cli.mjs's `quiet-fleet` verb.
 import { existsSync, readFileSync, writeFileSync, renameSync, rmSync, mkdirSync } from "node:fs";
-import { spawnSync } from "node:child_process";
 import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
 import { LIVENESS, classifyHeartbeat } from "../lib/agent-liveness.mjs";
 // resolveSteward is renamed to resolveStewardCore so it does not shadow the
 // `resolveSteward` DEP name quietFleetScan takes (CTL-2129).
-import { nextEscalationTarget, resolveSteward as resolveStewardCore } from "../execution-core/escalation-router.mjs";
+import { nextEscalationTarget, resolveSteward as resolveStewardCore, TARGET } from "../execution-core/escalation-router.mjs";
 import { roleDir } from "./paths.mjs";
 import { readHeartbeat, readManifest } from "./state.mjs";
 import { listRoles } from "./doctor.mjs";
+import { emitRoleAlarm, ROLE_ALARM_KIND, alarmRaiseDue, raiseLogged } from "./alarm.mjs";
 
 /**
  * Scan `roles` and return the pages that SHOULD be sent this tick.
@@ -42,7 +41,7 @@ import { listRoles } from "./doctor.mjs";
  *   alreadyLatched?: (role: string) => boolean,
  *   resolveSteward?: (scope: string) => object|null,
  * }} deps
- * @returns {{pages: Array<{role: string, liveness: string, target: string, tag: string}>, checked_at: number}}
+ * @returns {{pages: Array<{role: string, liveness: string, target: string, tag: string, steward: string|null}>, checked_at: number}}
  */
 export function quietFleetScan(roles, { now, readHeartbeat, scopeActive, priorPages, alreadyLatched = () => false, resolveSteward = () => null } = {}) {
   const pages = [];
@@ -57,14 +56,14 @@ export function quietFleetScan(roles, { now, readHeartbeat, scopeActive, priorPa
       instrument: "quiet-fleet",
       resolveSteward,
     });
-    pages.push({ role, liveness: state, target: t.target, tag: t.tag });
+    pages.push({ role, liveness: state, target: t.target, tag: t.tag, steward: t.steward?.role ?? null });
   }
   return { pages, checked_at: now };
 }
 
 // ── The looping/launchd shell (NOT unit-tested; exercised via --once --dry-run) ──
 // Everything below wires the real reads to the pure scan above. It is fail-open:
-// a broken heartbeat read, a missing manifest, or a failed comms post must never
+// a broken heartbeat read, a missing manifest, or a failed alert append must never
 // crash the alarm — a silenced alarm is worse than a noisy one.
 
 const LATCH_NAME = ".quiet-fleet-latch.json";
@@ -95,46 +94,85 @@ function clearLatch(role, env) {
   }
 }
 
-// The concierge is a FIXED identity — a role going quiet pages the concierge on
-// the shared channel, never a human. Channel + identity are overridable so a
-// deployment can point them at its coordination channel.
-function defaultPostPage(page, { env = process.env } = {}) {
-  const channel = env.CATALYST_CONCIERGE_CHANNEL || "concierge";
-  const to = env.CATALYST_CONCIERGE_ID || "concierge";
-  const comms = fileURLToPath(new URL("../catalyst-comms", import.meta.url));
-  const body = `${page.tag}: role \`${page.role}\` is ${page.liveness} while its scope is active — page the steward/relaunch. (quiet-fleet alarm)`;
-  const res = spawnSync(comms, ["send", channel, body, "--as", "quiet-fleet", "--to", to, "--type", "attention"], {
-    encoding: "utf8",
-    timeout: 15_000,
-  });
-  return res.status === 0;
+// The page goes to the rung the router selected: the steward that owns the silent
+// role's scope, else the concierge (a fixed identity), never a human.
+//
+// ⚠️ CTC-2981: there is NO path that delivers this page INTO a running steward or
+// concierge session. The old delivery was a `catalyst-comms --to <role>` post on
+// the channel those skills read on resume; the channel is gone, the supervisor
+// injects nothing into a live session (sdk-session.mjs sends one prompt per
+// session boundary), and no event name carries a role identity for a session to
+// wake on. So the page is a catalyst.alert.raised on the shared event log, for
+// the board, Loki and the cloud, and it names the selected role (`target` plus
+// "→ steward <role>" / "→ concierge" in the reason) so whoever reads it knows who
+// must act. One fleet-scoped kind: the board folds alerts per kind, so the
+// silent role travels in `source` and the reason.
+function defaultPostPage(page, { env = process.env, now = Date.now() } = {}) {
+  const to = page.target === TARGET.STEWARD && page.steward ? `steward ${page.steward}` : env.CATALYST_CONCIERGE_ID || "concierge";
+  const reason = `${page.tag} → ${to}: role \`${page.role}\` is ${page.liveness} while its scope is active — relaunch it, or raise an ask if the work is ambiguous.`;
+  return emitRoleAlarm(
+    { action: "raised", kind: ROLE_ALARM_KIND.ROLE_SILENT, instrument: "quiet-fleet", reason, source: page.role, target: page.target },
+    { env, now },
+  );
+}
+
+// Clear the fleet-scoped alert once no role is still latched.
+function defaultClearPages({ env = process.env, now = Date.now() } = {}) {
+  return emitRoleAlarm({ action: "cleared", kind: ROLE_ALARM_KIND.ROLE_SILENT, instrument: "quiet-fleet" }, { env, now });
 }
 
 /**
  * Run one quiet-fleet tick against the real fleet. Pure scan + fail-open I/O.
  *
  * Behavior per role:
- *   - LIVE again → clear any latch (edge re-arm), no page.
+ *   - LIVE again, or scope no longer active → clear its latch (edge re-arm), no
+ *     page. The LAST latched role
+ *     to recover clears the fleet alert first, and its latch goes only once that
+ *     clear is on the log, so a failed append retries next tick.
  *   - unhealthy + scope-active + not latched → post one concierge page + latch.
- *   - unhealthy but already latched → nothing (edge-triggered).
+ *   - unhealthy but already latched → nothing (edge-triggered), unless
+ *     alarmRaiseDue says the board may no longer see its raise: then raise it
+ *     again, without counting a new page.
  *
  * `--dry-run` prints the pages it WOULD send and mutates nothing (no latch, no post).
  *
- * @param {{now?: number, dryRun?: boolean, env?: object, postPage?: Function, roles?: string[]}} [opts]
+ * @param {{now?: number, dryRun?: boolean, env?: object, postPage?: Function, clearPages?: Function, roles?: string[]}} [opts]
  */
-export function runQuietFleetOnce({ now = Date.now(), dryRun = false, env = process.env, postPage = defaultPostPage, roles } = {}) {
+export function runQuietFleetOnce({ now = Date.now(), dryRun = false, env = process.env, postPage = defaultPostPage, clearPages = defaultClearPages, roles } = {}) {
   const all = roles ?? listRoles(env);
 
-  // First, re-arm: any role that recovered to LIVE has its latch cleared so the
-  // NEXT episode pages again (edge-triggered, not level-triggered).
+  const resolveSteward = (scope) =>
+    resolveStewardCore(scope, { listRoles: () => listRoles(env), readManifest: (r) => readManifest(r, env) });
+
+  // Re-arm: the clear is the exact complement of the page rule (unhealthy AND
+  // scope active), so a latched role that is LIVE again, or whose scope went
+  // quiet, has recovered. Its latch is removed below, after the fleet alert's
+  // clear (when one is due) is durable.
   const recovered = [];
+  const stillLatched = [];
   for (const role of all) {
     if (!existsSync(latchPath(role, env))) continue;
     const { state } = classifyHeartbeat(safeHeartbeat(role, env), { now });
-    if (state === LIVENESS.LIVE) {
-      if (!dryRun) clearLatch(role, env);
-      recovered.push(role);
+    if (state === LIVENESS.LIVE || !scopeActiveOf(role, env)) recovered.push(role);
+    else stillLatched.push({ role, liveness: state });
+  }
+
+  // Refresh: a still-unhealthy role whose raise the board may no longer see
+  // (alarmRaiseDue) is raised again. This does not advance the escalation count.
+  const reraised = [];
+  for (const { role, liveness } of stillLatched) {
+    const latch = readLatch(role, env);
+    if (!alarmRaiseDue(latch, now)) continue;
+    if (dryRun) {
+      reraised.push({ role, would: "re-raise" });
+      continue;
     }
+    const t = latch?.target && latch?.tag
+      ? { target: latch.target, tag: latch.tag, steward: latch.steward ? { role: latch.steward } : null }
+      : nextEscalationTarget({ scope: role, priorPages: Math.max(0, (latch?.count ?? 1) - 1), instrument: "quiet-fleet", resolveSteward });
+    const ok = postPage({ role, liveness, target: t.target, tag: t.tag, steward: t.steward?.role ?? null }, { env, now });
+    if (ok) writeLatchAtomic(role, { ...latch, posted: true, ...raiseLogged(true, now) }, env);
+    reraised.push({ role, posted: ok });
   }
 
   const scan = quietFleetScan(all, {
@@ -147,14 +185,13 @@ export function runQuietFleetOnce({ now = Date.now(), dryRun = false, env = proc
     // project scope key, so today this still resolves null → the concierge (the
     // correct role-liveness backstop); it lights up the steward tier the moment a
     // manifest's scopeKeys contains the scanned scope.
-    resolveSteward: (scope) =>
-      resolveStewardCore(scope, { listRoles: () => listRoles(env), readManifest: (r) => readManifest(r, env) }),
+    resolveSteward,
   });
 
   const posted = [];
   for (const page of scan.pages) {
     if (dryRun) continue;
-    const ok = postPage(page, { env });
+    const ok = postPage(page, { env, now });
     const prior = readLatch(page.role, env);
     writeLatchAtomic(page.role, {
       role: page.role,
@@ -163,11 +200,25 @@ export function runQuietFleetOnce({ now = Date.now(), dryRun = false, env = proc
       first_paged_at: prior?.first_paged_at ?? now,
       last_paged_at: now,
       posted: ok,
+      target: page.target,
+      tag: page.tag,
+      steward: page.steward,
+      ...raiseLogged(ok, now),
     }, env);
     posted.push({ role: page.role, posted: ok });
   }
 
-  return { pages: scan.pages, posted, recovered, dry_run: dryRun, checked_at: now };
+  // Clear the fleet alert only when no other role is still latched, and drop the
+  // recovered latches only once that clear is durable. While another role is
+  // still latched the alert stands, so the recovered latches go right away.
+  let cleared = false;
+  if (!dryRun && recovered.length > 0) {
+    const othersLatched = all.some((r) => !recovered.includes(r) && existsSync(latchPath(r, env)));
+    if (!othersLatched) cleared = clearPages({ env, now });
+    if (othersLatched || cleared) for (const r of recovered) clearLatch(r, env);
+  }
+
+  return { pages: scan.pages, posted, reraised, recovered, cleared, dry_run: dryRun, checked_at: now };
 }
 
 function safeHeartbeat(role, env) {

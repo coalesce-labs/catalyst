@@ -40,13 +40,18 @@ export function buildQueryOptions({ cwd, env, resumeSessionId, maxTurns = null }
 
 /**
  * Run one session to completion. Returns the shape `superviseRole` expects:
- * {exitCode, sessionId, overloaded, quotaExhausted, lastArtifact}.
+ * {exitCode, sessionId, overloaded, quotaExhausted, lastArtifact, lastTurnTs}.
+ *
+ * `onTurn` is called each time the model completes a turn (an `assistant`
+ * message), so the supervisor can record the role's
+ * last turn in its heartbeat while the session is still running. It is the
+ * turn signal the dead-man alarm reads (CTC-2981).
  *
  * `query` is injectable so this file can be exercised without the SDK; the
  * default resolves `@anthropic-ai/claude-agent-sdk` lazily, so importing this
  * module never requires node_modules to be present.
  */
-export async function runSdkSession({ prompt, cwd, env, resumeSessionId, maxTurns = null, query = null, log = console.log }) {
+export async function runSdkSession({ prompt, cwd, env, resumeSessionId, maxTurns = null, query = null, log = console.log, onTurn = null, now = () => Date.now() }) {
   let q = query;
   if (!q) {
     // Assembled rather than written as a literal, matching execution-core's
@@ -58,6 +63,7 @@ export async function runSdkSession({ prompt, cwd, env, resumeSessionId, maxTurn
   const options = buildQueryOptions({ cwd, env, resumeSessionId, maxTurns });
   let sessionId = resumeSessionId ?? null;
   let lastArtifact = null;
+  let lastTurnTs = null;
   let result = null;
 
   try {
@@ -72,20 +78,30 @@ export async function runSdkSession({ prompt, cwd, env, resumeSessionId, maxTurn
       const toolName = message?.tool_use?.name ?? message?.name;
       if (toolName && /write|edit|reply|create|update/i.test(String(toolName))) lastArtifact = String(toolName);
       if (message?.type === "result") result = message;
+      // An `assistant` message is a completed model turn. The closing `result`
+      // is not: an overloaded or failed session ends with one too.
+      if (message?.type === "assistant") {
+        lastTurnTs = now();
+        try {
+          onTurn?.(lastTurnTs);
+        } catch {
+          /* a failed turn record must never end the session */
+        }
+      }
     }
   } catch (err) {
-    if (isOverloadedError(err)) return { exitCode: 1, sessionId, overloaded: true, lastArtifact };
-    if (isQuotaExhausted(err)) return { exitCode: 1, sessionId, quotaExhausted: true, lastArtifact };
+    if (isOverloadedError(err)) return { exitCode: 1, sessionId, overloaded: true, lastArtifact, lastTurnTs };
+    if (isQuotaExhausted(err)) return { exitCode: 1, sessionId, quotaExhausted: true, lastArtifact, lastTurnTs };
     throw err;
   }
 
-  if (isOverloadedResult(result)) return { exitCode: 1, sessionId, overloaded: true, lastArtifact };
-  if (isQuotaExhausted(result)) return { exitCode: 1, sessionId, quotaExhausted: true, lastArtifact };
+  if (isOverloadedResult(result)) return { exitCode: 1, sessionId, overloaded: true, lastArtifact, lastTurnTs };
+  if (isQuotaExhausted(result)) return { exitCode: 1, sessionId, quotaExhausted: true, lastArtifact, lastTurnTs };
 
   // `error_max_turns` is a cap, not a failure: hand off and start fresh rather
   // than resuming a session that has already run out of room.
-  if (result?.subtype === "error_max_turns") return { exitCode: 0, sessionId, lastArtifact, turnCapExhausted: true };
+  if (result?.subtype === "error_max_turns") return { exitCode: 0, sessionId, lastArtifact, lastTurnTs, turnCapExhausted: true };
 
   const isError = result?.is_error === true || (result?.subtype && result.subtype !== "success");
-  return { exitCode: isError ? 1 : 0, sessionId, lastArtifact };
+  return { exitCode: isError ? 1 : 0, sessionId, lastArtifact, lastTurnTs };
 }
