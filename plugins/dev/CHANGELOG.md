@@ -1,5 +1,12 @@
 # Changelog
 
+## [15.0.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v15.0.0...catalyst-dev-v15.0.1) (2026-09-25)
+
+
+### Bug Fixes
+
+* **dev:** CTC-2981 — watchdogs alarm on catalyst.alert events and the unread catalyst-comms channel system is removed ([#4156](https://github.com/coalesce-labs/catalyst/issues/4156)) ([e196150](https://github.com/coalesce-labs/catalyst/commit/e1961505bcfb98345d301dbf140dd87ec8a82263))
+
 ## [15.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v14.0.0...catalyst-dev-v15.0.0) (2026-09-24)
 
 
