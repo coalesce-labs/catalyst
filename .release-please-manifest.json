@@ -1,7 +1,7 @@
 {
-  "plugins/dev": "15.0.0",
+  "plugins/dev": "15.0.1",
   "plugins/meta": "6.0.0",
   "plugins/playground/pm-ops": "3.0.0",
-  "plugins/legacy": "3.0.0",
+  "plugins/legacy": "3.0.1",
   "plugins/foundry": "3.0.0"
 }
