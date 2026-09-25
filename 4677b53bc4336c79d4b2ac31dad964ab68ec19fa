@@ -1,6 +1,1 @@
-Revision history for #4156:
-
-rev 2 (content) 2026-09-25 13:00 UTC — Codex round 1: alarm re-emit across month rotation, durable clear before dropping the latch, retire the channel-watcher LaunchAgent.
-rev 1 (initial) 2026-09-25 13:00 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":4156,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"8ec0712ee6f6fa2a47fbf558de10dd4f6ad15075","timestamp_iso":"2026-09-25T13:00:22Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"8ec0712ee6f6fa2a47fbf558de10dd4f6ad15075","new_sha":"6d4018047e428e62d4c75275460056f8ea5978c2","timestamp_iso":"2026-09-25T13:00:22Z","reason":"Codex round 1: alarm re-emit across month rotation, durable clear before dropping the latch, retire the channel-watcher LaunchAgent.","replay_sha":null,"compare_url":"https://github.com/coalesce-labs/catalyst/compare/8ec0712ee6f6fa2a47fbf558de10dd4f6ad15075...6d4018047e428e62d4c75275460056f8ea5978c2"}]} -->
+The event-log read guard's allowlist drops role-supervisor/dead-man.mjs: this PR removed that whole-file channel read (the test requires fixed sites to leave the allowlist).
