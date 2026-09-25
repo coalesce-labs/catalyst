@@ -1,0 +1,1 @@
+Codex round 1: alarm re-emit across month rotation, durable clear before dropping the latch, retire the channel-watcher LaunchAgent.
