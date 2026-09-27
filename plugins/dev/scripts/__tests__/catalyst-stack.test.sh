@@ -52,6 +52,41 @@ run_stack() {
   PATH="${stub_dir}:${REAL_PATH}" "${STACK}" "$@"
 }
 
+# install_crontab_shim DIR STATE LOG (CTC-3276) — installs a `crontab` shim at
+# DIR/crontab. `uninstall-services` runs install-health-responder.sh
+# --uninstall, which shells out to `crontab -l` / `crontab -`
+# UNCONDITIONALLY whenever a crontab binary is on PATH (_remove_cron_backstop),
+# regardless of HOME. Neither uninstall-services test below stubbed it, so on
+# a laptop with a real user crontab this read/rewrote (or hung 44 minutes
+# reading, per CTC-3276) the operator's actual crontab. The shim redirects
+# -l/-r/write to STATE and records every invocation's args to LOG (the
+# positive-control evidence that the code path was actually exercised, not
+# silently skipped) — and refuses loudly (exit 99), rather than acting, if
+# STATE is not under this suite's own SCRATCH dir, since that is exactly the
+# shape of mistake that would otherwise fall through to a real path.
+install_crontab_shim() {
+  local dir="$1" state="$2" log="$3"
+  mkdir -p "$dir"
+  cat > "${dir}/crontab" <<SHIM
+#!/usr/bin/env bash
+echo "\$@" >> '${log}'
+case '${state}' in
+  '${SCRATCH}'/*) ;;
+  *)
+    echo 'crontab shim: refusing — state path is outside the test scratch dir; the real crontab would have been reached' >&2
+    exit 99
+    ;;
+esac
+case "\${1:-}" in
+  -l) [[ -f '${state}' ]] && cat '${state}'; exit 0 ;;
+  -r) rm -f '${state}'; exit 0 ;;
+  *)  cat > '${state}'; exit 0 ;;
+esac
+SHIM
+  chmod +x "${dir}/crontab"
+}
+export -f install_crontab_shim
+
 # ── Stub dirs ────────────────────────────────────────────────────────────────
 make_stubs() {
   local dir="$1"
@@ -530,6 +565,10 @@ run "services-status reports the thoughts-sync plist line" bash -c "
   HOME=\"\$fh\" '${STACK}' services-status 2>&1 | grep -q 'thoughts-sync'
 "
 
+UNINST_CRONTAB_STATE="${SCRATCH}/uninst_bin_crontab.state"
+UNINST_CRONTAB_LOG="${SCRATCH}/uninst_bin_crontab.log"
+install_crontab_shim "${SCRATCH}/uninst_bin" "$UNINST_CRONTAB_STATE" "$UNINST_CRONTAB_LOG"
+
 run "uninstall-services removes all three plists" bash -c "
   if [[ \"\$(uname -s)\" != \"Darwin\" ]]; then true; else
     fh='${SCRATCH}/uninst_home'
@@ -537,8 +576,9 @@ run "uninstall-services removes all three plists" bash -c "
     printf '<plist/>' > \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-stack.plist\"
     printf '<plist/>' > \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-thoughts-sync.plist\"
     printf '<plist/>' > \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-log-shipper.plist\"
-    # Run uninstall with a fake launchctl that always exits 0
-    mkdir -p '${SCRATCH}/uninst_bin'
+    # Run uninstall with a fake launchctl that always exits 0, plus the
+    # crontab shim installed above (CTC-3276) so install-health-responder.sh
+    # --uninstall's cron-backstop removal never reaches a real crontab.
     printf '#!/usr/bin/env bash\nexit 0\n' > '${SCRATCH}/uninst_bin/launchctl'
     chmod +x '${SCRATCH}/uninst_bin/launchctl'
     # CTL-1968: launchctl is stubbed one line above and HOME is a scratch dir, so
@@ -547,20 +587,57 @@ run "uninstall-services removes all three plists" bash -c "
     CATALYST_ALLOW_FOREIGN_HOME_LAUNCHD=1 PATH='${SCRATCH}/uninst_bin:${REAL_PATH}' HOME=\"\$fh\" '${STACK}' uninstall-services >/dev/null 2>&1 || true
     [[ ! -e \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-stack.plist\" ]] && \
     [[ ! -e \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-thoughts-sync.plist\" ]] && \
-    [[ ! -e \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-log-shipper.plist\" ]]
+    [[ ! -e \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-log-shipper.plist\" ]] && \
+    [[ -s '${UNINST_CRONTAB_LOG}' ]]
   fi
 "
+
+UNINST_CU_CRONTAB_STATE="${SCRATCH}/uninst_cu_bin_crontab.state"
+UNINST_CU_CRONTAB_LOG="${SCRATCH}/uninst_cu_bin_crontab.log"
+install_crontab_shim "${SCRATCH}/uninst_cu_bin" "$UNINST_CU_CRONTAB_STATE" "$UNINST_CU_CRONTAB_LOG"
 
 run "uninstall-services removes the claude-update plist" bash -c "
   if [[ \"\$(uname -s)\" != \"Darwin\" ]]; then true; else
     fh='${SCRATCH}/uninst_cu_home'
     mkdir -p \"\$fh/Library/LaunchAgents\"
     printf '<plist/>' > \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-claude-update.plist\"
-    mkdir -p '${SCRATCH}/uninst_cu_bin'
     printf '#!/usr/bin/env bash\nexit 0\n' > '${SCRATCH}/uninst_cu_bin/launchctl'
     chmod +x '${SCRATCH}/uninst_cu_bin/launchctl'
     CATALYST_ALLOW_FOREIGN_HOME_LAUNCHD=1 PATH='${SCRATCH}/uninst_cu_bin:${REAL_PATH}' HOME=\"\$fh\" '${STACK}' uninstall-services >/dev/null 2>&1 || true
-    [[ ! -e \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-claude-update.plist\" ]]
+    [[ ! -e \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-claude-update.plist\" ]] && \
+    [[ -s '${UNINST_CU_CRONTAB_LOG}' ]]
+  fi
+"
+
+# CTC-3276: the shim fails loudly rather than acting when its state path
+# escapes this suite's scratch dir — the guard against a caller silently
+# falling through to state (and, unshimmed, a binary) outside the sandbox.
+LOUD_DIR="${SCRATCH}/crontab_loud_refusal_bin"
+install_crontab_shim "$LOUD_DIR" "/tmp/ctc-3276-outside-scratch.state" "${SCRATCH}/crontab_loud_refusal.log"
+run "crontab shim refuses loudly when its state path escapes scratch" bash -c "
+  ! PATH='${LOUD_DIR}:${REAL_PATH}' crontab -l 2>'${SCRATCH}/crontab_loud_refusal.err' && \
+  grep -q 'real crontab would have been reached' '${SCRATCH}/crontab_loud_refusal.err'
+"
+
+# CTC-3276 positive control: prove that WITHOUT the shim, uninstall-services
+# really does reach a `crontab` binary further down PATH — not just "nothing
+# was called". A throwaway stand-in crontab (never the operator's real one)
+# stands in for it, so this is safe to run even in a sandbox with no crontab
+# of its own. Only meaningful on Darwin, where uninstall-services runs at all.
+PC_BIN="${SCRATCH}/uninst_pc_bin"
+PC_REALBIN="${SCRATCH}/uninst_pc_realbin"
+PC_REACHED_LOG="${SCRATCH}/uninst_pc_real.log"
+mkdir -p "$PC_BIN" "$PC_REALBIN"
+printf '#!/usr/bin/env bash\nexit 0\n' > "${PC_BIN}/launchctl"
+chmod +x "${PC_BIN}/launchctl"
+printf '#!/usr/bin/env bash\necho "REACHED $*" >> %q\nexit 0\n' "$PC_REACHED_LOG" > "${PC_REALBIN}/crontab"
+chmod +x "${PC_REALBIN}/crontab"
+run "uninstall-services reaches crontab on PATH when unshimmed (positive control)" bash -c "
+  if [[ \"\$(uname -s)\" != \"Darwin\" ]]; then true; else
+    fh='${SCRATCH}/uninst_pc_home'
+    mkdir -p \"\$fh/Library/LaunchAgents\"
+    CATALYST_ALLOW_FOREIGN_HOME_LAUNCHD=1 PATH='${PC_BIN}:${PC_REALBIN}:${REAL_PATH}' HOME=\"\$fh\" '${STACK}' uninstall-services >/dev/null 2>&1 || true
+    [[ -s '${PC_REACHED_LOG}' ]]
   fi
 "
 

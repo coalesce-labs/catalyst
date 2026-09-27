@@ -28,6 +28,10 @@ export HOME="${SCRATCH}/home"
 mkdir -p "$HOME"
 MOCKBIN="${SCRATCH}/bin"
 mkdir -p "$MOCKBIN"
+# Saved before MOCKBIN goes on PATH (CTC-3276 positive control, Phase 11 below)
+# — the pre-mock PATH is what a downstream `crontab` on this host would
+# actually be resolved from if the mock were absent.
+REAL_PATH="$PATH"
 export PATH="${MOCKBIN}:${PATH}"
 
 # CTL-1968: launchctl above is a PATH-shadowed mock and HOME is a scratch dir, so
@@ -127,6 +131,39 @@ fi
 exit 0
 EOF
 chmod +x "$MOCKBIN/launchctl"
+
+# crontab (CTC-3276): install-health-responder.sh's --uninstall path (and the
+# CTL-1510 cron-backstop install path) shell out to `crontab` UNCONDITIONALLY
+# whenever one is on PATH, regardless of HOME or OS — T27c below runs
+# `--uninstall` before this suite is even into its installer phase, so this
+# mock must exist from the very first test, not just from the cron-backstop
+# tests (Phase 12) that used to be the only place it was defined. Reads/writes
+# go to MOCK_CRONTAB_FILE instead of the operator's real crontab, every
+# invocation is recorded to CRONTAB_CALL_LOG (the positive-control evidence
+# that this code path was actually exercised, not silently skipped), and the
+# mock refuses loudly — rather than acting — if MOCK_CRONTAB_FILE ever points
+# outside this suite's own scratch dir, since that is exactly the shape of
+# mistake that would otherwise fall through to a real path.
+export MOCK_CRONTAB_FILE="${SCRATCH}/crontab.mock"
+export CRONTAB_CALL_LOG="${SCRATCH}/crontab.calls.log"
+export CATALYST_TEST_SCRATCH_ROOT="$SCRATCH"
+cat > "$MOCKBIN/crontab" <<'EOF'
+#!/usr/bin/env bash
+echo "$@" >> "${CRONTAB_CALL_LOG:-/tmp/crontab.calls.log}"
+case "${MOCK_CRONTAB_FILE:-}" in
+  "${CATALYST_TEST_SCRATCH_ROOT:-/nonexistent-root}"/*) ;;
+  *)
+    echo "crontab mock: refusing — MOCK_CRONTAB_FILE ('${MOCK_CRONTAB_FILE:-unset}') is outside the test scratch dir; the real crontab would have been reached" >&2
+    exit 99
+    ;;
+esac
+case "${1:-}" in
+  -l) [[ -f "${MOCK_CRONTAB_FILE:-/nonexistent}" ]] && cat "$MOCK_CRONTAB_FILE"; exit 0 ;;
+  -r) rm -f "${MOCK_CRONTAB_FILE:-/nonexistent}"; exit 0 ;;
+  *)  cat > "${MOCK_CRONTAB_FILE:-/tmp/crontab.mock}"; exit 0 ;;
+esac
+EOF
+chmod +x "$MOCKBIN/crontab"
 
 # otel recorder (fail-open contract asserted via presence/absence in the log)
 cat > "$MOCKBIN/emit-otel-event.sh" <<'EOF'
@@ -427,6 +464,42 @@ run "T27b: non-Darwin early-exits 0" \
 # T27c: --uninstall is safe when not installed (and never needs a bake dir)
 run "T27c: --uninstall from anywhere exits 0" \
   bash -c "cd /tmp && bash '$INSTALLER' --uninstall"
+
+# T27d (CTC-3276): T27c's --uninstall runs _remove_cron_backstop unconditionally
+# whenever a `crontab` is on PATH. A log entry here is the positive evidence
+# that the call actually happened and landed on the mock — a suite that merely
+# asserted "no real crontab was touched" would pass just as well if the mock
+# were never reached at all (the exact failure mode CTC-3276 is about).
+run "T27d: --uninstall's cron-backstop removal reached the crontab mock" \
+  test -s "$CRONTAB_CALL_LOG"
+
+# T27e (CTC-3276): the crontab mock refuses loudly — rather than silently
+# acting — when MOCK_CRONTAB_FILE points outside this suite's own scratch dir.
+# This is the "fails loudly" guard: a caller that forgot to scope its state
+# path is exactly the shape of mistake that would otherwise fall through to
+# whatever real crontab happens to be on PATH.
+run_fail "T27e: crontab mock refuses when its state file escapes scratch" \
+  bash -c "MOCK_CRONTAB_FILE=/tmp/ctc-3276-outside-scratch.mock crontab -l"
+run "T27e2: the refusal names the real-crontab risk" \
+  bash -c "MOCK_CRONTAB_FILE=/tmp/ctc-3276-outside-scratch.mock crontab -l 2>&1 | grep -q 'real crontab would have been reached'"
+
+# T27f (CTC-3276 positive control): prove --uninstall really does shell out to
+# WHATEVER `crontab` sits on PATH when the mock isn't first in line — i.e. that
+# removing the shim exposes a real binary call, not just "nothing happens". A
+# throwaway stand-in crontab (never the operator's real one, and never invoked
+# for any other test in this file) sits behind REAL_PATH so this is safe to run
+# here even though this sandbox has no real crontab of its own.
+PC_DIR="${SCRATCH}/pc-realcrontab"
+mkdir -p "${PC_DIR}/bin"
+PC_REACHED_LOG="${PC_DIR}/reached.log"
+cat > "${PC_DIR}/bin/crontab" <<EOF
+#!/usr/bin/env bash
+echo "REACHED \$*" >> '${PC_REACHED_LOG}'
+exit 0
+EOF
+chmod +x "${PC_DIR}/bin/crontab"
+run "T27f: with the mock off PATH, --uninstall reaches a downstream crontab binary" \
+  bash -c "cd /tmp && PATH='${PC_DIR}/bin:${REAL_PATH}' bash '$INSTALLER' --uninstall >/dev/null 2>&1; test -s '${PC_REACHED_LOG}'"
 
 # ─── Phase 9: adversarial-verify caveat fixes (T28–T30) ─────────────────────
 
@@ -797,18 +870,10 @@ run "T52c: escaping survives /bin/bash 3.2 semantics" \
   bash -c "CATALYST_FORCE_BAKE_DIR='${BAKE_AMP}' /bin/bash '$INSTALLER' --print-only | grep -qF 'amp &amp; dir/scripts/health-responder.sh'"
 
 # T53 (item 6): the cron backstop — installed tagged + idempotent, preserves
-# foreign lines, removed on uninstall. crontab is a PATH-shadowed mock; the
-# install path is forced to Darwin so it runs anywhere (launchctl is mocked).
-export MOCK_CRONTAB_FILE="${SCRATCH}/crontab.mock"
-cat > "$MOCKBIN/crontab" <<'EOF'
-#!/usr/bin/env bash
-case "${1:-}" in
-  -l) [[ -f "${MOCK_CRONTAB_FILE:-/nonexistent}" ]] && cat "$MOCK_CRONTAB_FILE"; exit 0 ;;
-  -r) rm -f "${MOCK_CRONTAB_FILE:-/nonexistent}"; exit 0 ;;
-  *)  cat > "${MOCK_CRONTAB_FILE:-/tmp/crontab.mock}"; exit 0 ;;
-esac
-EOF
-chmod +x "$MOCKBIN/crontab"
+# foreign lines, removed on uninstall. crontab is the PATH-shadowed mock
+# installed near the top of this file (CTC-3276); the install path is forced
+# to Darwin so it runs anywhere (launchctl is mocked).
+rm -f "$MOCK_CRONTAB_FILE"
 CRON_INSTALL="CATALYST_FORCE_OS=Darwin CATALYST_FORCE_BAKE_DIR='${BAKE}' bash '$INSTALLER'"
 run "T53: install writes the tagged cron backstop line" \
   bash -c "rm -f '$MOCK_CRONTAB_FILE'; eval $CRON_INSTALL >/dev/null && grep -q 'health-responder backstop CTL-1510' '$MOCK_CRONTAB_FILE' && grep -q '^\*/3 ' '$MOCK_CRONTAB_FILE'"
