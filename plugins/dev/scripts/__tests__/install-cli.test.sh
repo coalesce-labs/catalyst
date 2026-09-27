@@ -528,6 +528,26 @@ run "a second install is a no-op: no plist, no launchctl call" bash -c "
   [[ ! -s '$SCRATCH/launchctl24e.log' ]]
 "
 
+# ── 24f. CTC-3308: retiring the LaunchAgent clears its own system_down alert ──
+# The channel-watcher's heartbeat was a RECENCY_SOURCES entry (broker/router.mjs),
+# so it could have already raised catalyst.alert.raised(system_down) this month.
+# Once retired, nothing is left to ever emit the paired clear — the installer
+# must append it itself, once, at the same moment the plist actually goes.
+run "install appends catalyst.alert.cleared(system_down) naming the retired watcher" bash -c "
+  evlog=\$(ls $HOME24E/catalyst/events/*.jsonl 2>/dev/null | head -n1)
+  [[ -n \"\$evlog\" ]] || { echo \"no event log under $HOME24E/catalyst/events\"; exit 1; }
+  jq -e '
+    .attributes[\"event.name\"] == \"catalyst.alert.cleared\"
+    and .attributes[\"event.label\"] == \"system_down\"
+    and .body.payload.kind == \"system_down\"
+    and .body.payload.source == \"ai.coalesce.catalyst-channel-watcher\"
+  ' \"\$evlog\" > /dev/null
+"
+run "a second (no-op) install does not append a second cleared event" bash -c "
+  evlog=\$(ls $HOME24E/catalyst/events/*.jsonl 2>/dev/null | head -n1)
+  [[ \"\$(wc -l < \"\$evlog\" | tr -d ' ')\" == 1 ]]
+"
+
 # ── 25. CTL-339: preserves cache-path symlinks at target dir ────────────────
 HOME25="$SCRATCH/home25"
 BIN25="$HOME25/.catalyst/bin"

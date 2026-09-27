@@ -113,11 +113,37 @@ test("quiet-fleet raises for a silent role, and clears only once no role is latc
   const mid = runQuietFleetOnce({ now, env: s.env, roles: ["a", "b"], postPage, clearPages });
   expect(mid.recovered).toEqual(["a"]);
   expect(mid.cleared).toBe(false);
+  // CTC-3308: the kind is fleet-scoped, so the board would otherwise still show
+  // "a"'s reason after it recovered. Recovering while "b" stays latched must
+  // force a re-raise naming "b", even though nothing made "b"'s own refresh due.
+  expect(mid.reraised).toEqual([{ role: "b", posted: true }]);
+  expect(calls.at(-1)).toEqual(["raised", "b"]);
 
   seedRole(s.env, "b", 1 * M); // b recovers too → clear
   const done = runQuietFleetOnce({ now, env: s.env, roles: ["a", "b"], postPage, clearPages });
   expect(done.cleared).toBe(true);
   expect(calls.at(-1)).toEqual(["cleared"]);
+  s.cleanup();
+});
+
+test("CTC-3308: a still-latched role's own alert is refreshed on the log when a sibling recovers", () => {
+  // Reproduces the bug directly against the real (non-mocked) postPage/clearPages:
+  // the fleet-scoped kind means the board shows only the MOST RECENT raise's
+  // reason, so after "a" recovers the log's last role_silent entry must name "b",
+  // never "a" — otherwise the board keeps naming a role that is no longer silent
+  // and drops the one that still is.
+  const s = scratch();
+  seedRole(s.env, "a", 12 * M);
+  seedRole(s.env, "b", 12 * M);
+  runQuietFleetOnce({ now, env: s.env, roles: ["a", "b"] });
+
+  seedRole(s.env, "a", 1 * M); // a recovers, b still silent
+  const mid = runQuietFleetOnce({ now, env: s.env, roles: ["a", "b"] });
+  expect(mid.recovered).toEqual(["a"]);
+  expect(mid.cleared).toBe(false);
+
+  const raises = readLog(s.env).filter((e) => e.attributes["event.label"] === "role_silent");
+  expect(raises.at(-1).body.payload.source).toBe("b");
   s.cleanup();
 });
 

@@ -262,6 +262,15 @@ _ab_version_ge() {
 # shellcheck disable=SC1091
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/direnv-provision.sh"
 
+# CTC-3308: canonical-event helpers so retire_removed_launch_agents can clear a
+# retired watcher's own catalyst.alert.raised(system_down). Best-effort — a
+# missing file leaves build_canonical_line undefined and the declare -f guard
+# there skips emitting, same posture as catalyst-monitor.sh's own sourcing.
+# shellcheck source=lib/canonical-event.sh
+# shellcheck disable=SC1091
+_CATALYST_INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[[ -f "$_CATALYST_INSTALL_DIR/lib/canonical-event.sh" ]] && source "$_CATALYST_INSTALL_DIR/lib/canonical-event.sh" || true
+
 # ensure_agent_browser — install/upgrade agent-browser to >= AGENT_BROWSER_MIN_VERSION
 # and provision its Chrome-for-Testing browser (CTL-1500). agent-browser is a
 # homebrew-core formula (`brew install agent-browser` — no tap); after install/
@@ -358,6 +367,37 @@ retire_removed_clis() {
 # plist. macOS-only, and idempotent: with no plist left there is nothing to do.
 # CATALYST_LAUNCH_AGENTS_DIR lets tests keep this off the operator's real dir.
 RETIRED_LAUNCH_AGENT_LABELS=(ai.coalesce.catalyst-channel-watcher)
+
+# CTC-3308: a retired label's watcher may have already raised a fleet-scoped
+# catalyst.alert.raised(system_down) this month — broker/router.mjs's
+# RECENCY_SOURCES watched its heartbeat, and the board titles that row "The
+# monitor went quiet" (orch-monitor/lib/fleet-alerts.mjs, folded by KIND alone,
+# never by source). Once the LaunchAgent is gone nothing is left to ever emit
+# the paired recovered/cleared edge, so the row would stand forever with no
+# producer left to close it. Append the matching cleared event here — mirrors
+# router.mjs's own recovered payload shape (reason + source, no count/target).
+# Best-effort: a missing jq/build_canonical_line or an unwritable log must never
+# fail the retirement itself; fleet-alerts.mjs already treats an absent clear
+# conservatively (the alert simply keeps standing, no worse than today).
+retire_alert_clear_system_down() {
+	local source_label="$1"
+	declare -f build_canonical_line >/dev/null 2>&1 || return 0
+	local payload line
+	payload="$(jq -cn --arg src "$source_label" --arg r "${source_label} retired — no producer remains to clear its system_down raise" \
+		'{kind:"system_down", reason:$r, source:$src}' 2>/dev/null || echo '{}')"
+	line="$(build_canonical_line \
+		--ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+		--severity INFO \
+		--service catalyst.installer \
+		--event-name catalyst.alert.cleared \
+		--entity alert --action cleared \
+		--label system_down \
+		--payload-json "$payload" \
+		2>/dev/null)" || return 0
+	[[ -n "$line" ]] && canonical_jsonl_append "${CATALYST_EVENTS_DIR:-${CATALYST_DIR:-$HOME/catalyst}/events}" "$line"
+	return 0
+}
+
 retire_removed_launch_agents() {
 	[[ "$(uname -s 2>/dev/null)" == "Darwin" ]] || return 0
 	local dir="${CATALYST_LAUNCH_AGENTS_DIR:-${HOME}/Library/LaunchAgents}"
@@ -367,6 +407,7 @@ retire_removed_launch_agents() {
 		[[ -f $plist ]] || continue
 		launchctl bootout "gui/$(id -u)/${label}" >/dev/null 2>&1 || true
 		rm -f "$plist"
+		retire_alert_clear_system_down "$label"
 		echo "  Retired LaunchAgent: ${label}"
 	done
 	return 0

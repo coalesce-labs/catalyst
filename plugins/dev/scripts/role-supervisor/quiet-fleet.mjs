@@ -159,12 +159,19 @@ export function runQuietFleetOnce({ now = Date.now(), dryRun = false, env = proc
 
   // Refresh: a still-unhealthy role whose raise the board may no longer see
   // (alarmRaiseDue) is raised again. This does not advance the escalation count.
+  // CTC-3308: kinds are fleet-scoped, so the board shows only the MOST RECENT
+  // raise's reason. When a role recovers this tick while another stays latched,
+  // that reason would otherwise keep naming the recovered role until this one's
+  // own refresh window comes due — so a recovery forces one re-raise among the
+  // roles that remain latched, even if none was independently due.
   const reraised = [];
+  let displayRefreshPending = recovered.length > 0 && stillLatched.length > 0;
   for (const { role, liveness } of stillLatched) {
     const latch = readLatch(role, env);
-    if (!alarmRaiseDue(latch, now)) continue;
+    if (!alarmRaiseDue(latch, now) && !displayRefreshPending) continue;
     if (dryRun) {
       reraised.push({ role, would: "re-raise" });
+      displayRefreshPending = false;
       continue;
     }
     const t = latch?.target && latch?.tag
@@ -173,6 +180,7 @@ export function runQuietFleetOnce({ now = Date.now(), dryRun = false, env = proc
     const ok = postPage({ role, liveness, target: t.target, tag: t.tag, steward: t.steward?.role ?? null }, { env, now });
     if (ok) writeLatchAtomic(role, { ...latch, posted: true, ...raiseLogged(true, now) }, env);
     reraised.push({ role, posted: ok });
+    displayRefreshPending = false;
   }
 
   const scan = quietFleetScan(all, {
