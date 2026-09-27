@@ -19,7 +19,7 @@ paths: ["plugins/**"]
 
 ## Testing
 1. Edit files in `plugins/*/`
-2. Restart Claude Code (symlinks make changes immediate)
+2. Restart your agent session (symlinks make changes immediate)
 3. Invoke skill/agent to verify
 
 ## Versioning

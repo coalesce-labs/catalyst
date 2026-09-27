@@ -8,6 +8,8 @@ This is the Claude Code bridge file. All portable project guidance lives in `AGE
 
 - Plugins are surfaced via `.claude/` symlinks; restart Claude Code to reload after editing `plugins/*/`. Changes are distributed via the Claude Code plugin marketplace.
 - Invoke skills with the slash prefix: `/plugin-name:skill-name` (e.g. `/catalyst-dev:create-plan`).
+- `.claude/rules` is a symlink to `.agents/rules`, so Claude Code loads the same path-scoped rules every other agent reads (CTC-3642); edit the files under `.agents/rules/`.
+- There is deliberately no `.claude/skills` link. `.agents/skills/` is the generated Codex / open-spec bundle, and its emitter drops `disable-model-invocation`, so linking it would let Claude auto-invoke explicit-only skills such as `catalyst-foundry-setup-catalyst`. Claude gets these skills from the plugins, with their own frontmatter.
 
 ### Orchestration runtime
 

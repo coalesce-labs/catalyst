@@ -42,7 +42,7 @@ The meta plugin treats Catalyst as its own first-class target. Every skill in it
 
 ## Documentation
 
-- [Plugin Editing Rules](../../.claude/rules/plugin-editing.md)
+- [Plugin Editing Rules](../../.agents/rules/plugin-editing.md)
 - [Architecture](../../docs/architecture.md)
 - [Documentation Site](https://catalyst.coalescelabs.ai)
 
