@@ -1,6 +1,6 @@
 ---
 name: validate-frontmatter
-description: "Validates YAML frontmatter on plugins/*/skills/*/SKILL.md and plugins/*/agents/*.md against docs/frontmatter-standard.md and .claude/rules/plugin-editing.md: required fields, the disable-model-invocation/user-invocable polarity, allowed-tools vs tools, and skill-only fields that must not leak (model, category). Use when adding or editing a skill or agent, before opening a PR that touches plugins/**, or paired with audit-references to confirm a plugin cleanup's frontmatter didn't drift."
+description: "Validates YAML frontmatter on plugins/*/skills/*/SKILL.md and plugins/*/agents/*.md against docs/frontmatter-standard.md and .agents/rules/plugin-editing.md: required fields, the disable-model-invocation/user-invocable polarity, allowed-tools vs tools, and skill-only fields that must not leak (model, category). Use when adding or editing a skill or agent, before opening a PR that touches plugins/**, or paired with audit-references to confirm a plugin cleanup's frontmatter didn't drift."
 disable-model-invocation: true
 allowed-tools: Read, Edit, Glob, Grep
 version: 1.0.0
@@ -12,7 +12,7 @@ Checks every skill and agent in the repo against the current frontmatter standar
 
 ## The standard
 
-Field tables are the single source in [`docs/frontmatter-standard.md`](../../../../docs/frontmatter-standard.md) — don't restate them here. The skills-only shape rule (`no commands/ directories — skills only`) is in [`.claude/rules/plugin-editing.md`](../../../../.claude/rules/plugin-editing.md).
+Field tables are the single source in [`docs/frontmatter-standard.md`](../../../../docs/frontmatter-standard.md) — don't restate them here. The skills-only shape rule (`no commands/ directories — skills only`) is in [`.agents/rules/plugin-editing.md`](../../../../.agents/rules/plugin-editing.md).
 
 ## The rule everyone gets backwards
 

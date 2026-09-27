@@ -90,7 +90,7 @@ Check every one of these. Not all will have a hit for every plugin; report which
 | `website/src/content/docs/reference/plugins.md` | The plugin table row + install command |
 | `website/src/content/docs/getting-started/index.md` | The optional-plugins install block |
 | `website/src/content/docs/reference/configuration.md` | Any "Used by" integration table row naming the plugin |
-| `.claude/rules/skill-references.md` | The per-plugin invocation-prefix bullet list |
+| `.agents/rules/skill-references.md` | The per-plugin invocation-prefix bullet list |
 | `scripts/packaging/core/inventory-guard.mjs` | `REAL_PLUGIN_IDS` — a hardcoded roster this guard explicitly expects to be updated on a real deletion |
 | `scripts/check-plugin-version.sh` | Only if it still hardcodes a `PLUGINS=(...)` array (it reads `release-please-config.json` dynamically as of CTL-2220 — verify it hasn't regressed before assuming you need to touch it) |
 | `plugins/dev/scripts/setup-plugin-source.sh` | The `retire_catalyst_marketplace` empty-manifest fallback (`plugin_ids=(...)`) |

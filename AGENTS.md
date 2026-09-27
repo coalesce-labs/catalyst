@@ -168,3 +168,13 @@ Read these on demand:
 - **smee retirement + rollback** — `docs/runbooks/cloud-feed-cutover.md` (CTL-1928 retired the Linear half 2026-08-17; CTL-1929 retired the **GitHub** half 2026-08-18 — both ingestion legs are now the cloud feed, all 15 webhooks are disabled-not-deleted, and the runbook holds the four per-host verify-by-content checks and both rollback lever pairs)
 - **Release process** — `docs/releases.md`
 - **Observability signal catalog** — `catalyst-otel/docs/data-dictionary.md` (sister repo: every metric, log/event, trace, and alert; see the Observability section above)
+
+## Skills and rules
+
+`.agents/skills/` holds the generated portable skill bundle (source: `plugins/*/skills/`, rendered by `scripts/packaging/cli.mjs`). Area rules live in `.agents/rules/`: read the matching rule before you change files in its scope.
+
+| before changing | read |
+| -- | -- |
+| anything under `plugins/` | `.agents/rules/plugin-editing.md` |
+| anything under `website/` | `.agents/rules/website-docs.md` |
+| any text that tells a user how to invoke a skill | `.agents/rules/skill-references.md` |
