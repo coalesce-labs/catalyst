@@ -1,0 +1,6 @@
+Revision history for #4163:
+
+rev 2 (content) 2026-09-27 13:49 UTC — agents-md-gate: AGENTS.md pointer made vendor-neutral; the Claude-specific symlink note moved to the CLAUDE.md bridge
+rev 1 (initial) 2026-09-27 13:49 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":4163,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"792a219541cb3ec450702c991359ace49126f0eb","timestamp_iso":"2026-09-27T13:49:32Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"792a219541cb3ec450702c991359ace49126f0eb","new_sha":"013fbcab4c7e7885e36d505eb224f1f5885d3dd8","timestamp_iso":"2026-09-27T13:49:32Z","reason":"agents-md-gate: AGENTS.md pointer made vendor-neutral; the Claude-specific symlink note moved to the CLAUDE.md bridge","replay_sha":null,"compare_url":"https://github.com/coalesce-labs/catalyst/compare/792a219541cb3ec450702c991359ace49126f0eb...013fbcab4c7e7885e36d505eb224f1f5885d3dd8"}]} -->
