@@ -1,3 +1,5 @@
+> **Archived (2026-09-29).** This repository is read-only. Use [catalyst-dev-skills](https://github.com/coalesce-labs/catalyst-dev-skills) and [catalyst-cloud-skills](https://github.com/coalesce-labs/catalyst-cloud-skills).
+
 # Catalyst local runtime is deprecated
 
 This repository is kept for history and migration work. It is no longer the supported way to install Catalyst skills or run Catalyst locally. Catalyst Cloud is the supported runtime.
